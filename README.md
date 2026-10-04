@@ -22,3 +22,9 @@ PyInstaller. Voice reuses the jarvis-phone stack (whisper.cpp, Kokoro, openWakeW
 `hey_jarvis`).
 
 No cloud. No paid APIs. Not for distribution.
+
+## Remote screen
+
+- open the screen: `https://<ts-host>:8790/screen` (from the app or any Bearer-capable client; session cookie lasts 12 h)
+- disable: set `SCREEN_CONTROL=0` and restart the gateway
+- smoke: `.venv/bin/python -m mac.screen.smoke`

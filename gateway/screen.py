@@ -18,7 +18,9 @@ import base64
 import collections
 import hashlib
 import hmac
+import json
 import logging
+import os
 import secrets
 import subprocess
 import time
@@ -33,7 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 from common import config
 from gateway.agents import WINDOWS_ROLE, agent_roundtrip
-from gateway.registry import roles
+from gateway.registry import roles, send_to_role
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +217,67 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
             samesite="strict", path="/screen/",
         )
     return response
+
+
+class LaunchBody(BaseModel):
+    target: Target
+
+
+# Tailscale serve base URL, computed once on first use (SCREEN_PUBLIC_BASE wins
+# per call) — restart the gateway to re-derive after a tailnet rename.
+_public_base_cache: str | None = None
+
+
+def _tailscale_dns_name() -> str:
+    """Self.DNSName off `tailscale status --json` — the derivation serve.sh prints."""
+    out = subprocess.run(
+        ["tailscale", "status", "--json"], capture_output=True, check=True
+    ).stdout
+    return json.loads(out)["Self"]["DNSName"].rstrip(".")
+
+
+async def _public_base() -> str:
+    env_base = os.environ.get("SCREEN_PUBLIC_BASE")
+    if env_base:
+        return env_base.rstrip("/")
+    global _public_base_cache
+    if _public_base_cache is None:
+        _public_base_cache = f"https://{await run_in_threadpool(_tailscale_dns_name)}:8790"
+    return _public_base_cache
+
+
+def _authorized_or_shared(request: Request) -> str | None:
+    """Launch-only auth: cookie, ios Bearer, or the shared Bearer (design's one
+    screen-route exception — `_authorized` tags the shared token "shared" and
+    every session route 403s it; this route lets it mint a nonce, never a session)."""
+    return _authorized(request)
+
+
+async def launch_screen(target: Target) -> dict:
+    """Mint a single-use 60 s boot nonce and push a navigate to the ios app (SC7).
+
+    Returns {"url": ..., "pushed": bool} — pushed is False when no ios WS is
+    connected (caller opens the url itself). Never sets a session cookie and
+    never logs the nonce.
+    """
+    _sweep(_BOOTSTRAPS)
+    nonce = secrets.token_urlsafe(24)
+    _BOOTSTRAPS[nonce] = time.time() + BOOTSTRAP_TTL_S
+    url = f"{await _public_base()}/screen?boot={nonce}&target={target}"
+    pushed = False
+    if "ios" in roles():
+        # Same navigate shape handle_handoff_open pushes (flight.py:155).
+        pushed = await send_to_role(
+            "ios", {"id": uuid.uuid4().hex, "type": "navigate", "payload": {"url": url}}
+        )
+    return {"url": url, "pushed": pushed}
+
+
+@router.post("/launch")
+async def screen_launch(request: Request, body: LaunchBody) -> dict:
+    if _authorized_or_shared(request) is None:
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
+    return await launch_screen(body.target)
 
 
 @router.get("/{target}/status")

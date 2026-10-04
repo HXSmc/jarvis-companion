@@ -17,9 +17,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from gateway import screen
 from gateway.auth import require_bearer
 from gateway.registry import roles
 from mac.voice import brain
+from mac.voice import router as voice_router
 
 router = APIRouter()
 
@@ -103,6 +105,12 @@ async def siri_hey(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=400, detail='expected JSON body {"text": "..."}')
     if text.strip().lower() in _STATUS_PHRASES:
         return {"reply": _status_reply()}
+    # Screen intents (SC7): launch the control page instead of a brain call —
+    # the same launch_screen POST /screen/launch uses, never an HTTP self-call.
+    cmd = voice_router.route(text)
+    if cmd in ("screen_mac", "screen_windows"):
+        await screen.launch_screen(cmd[len("screen_"):])
+        return {"reply": "Opening your Mac screen" if cmd == "screen_mac" else "Opening your PC screen"}
     if _brain_semaphore.locked() or not _brain_slot_available():
         return {"reply": _BUSY_REPLY}
     async with _brain_semaphore:
