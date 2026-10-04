@@ -25,6 +25,31 @@ router = APIRouter()
 UNKNOWN_ROLE_CLOSE = 4008
 
 
+async def _handle_handoff_open(message: dict) -> dict | None:
+    """Route a handoff_open envelope into the flight flow.
+
+    Returns None when the flow replied on the socket itself (it owns both the
+    {id, ok, data} reply and the navigate push via send_to_role), or an error
+    envelope to send when dispatch itself failed (flow absent / malformed
+    payload).
+    """
+    try:
+        from gateway.flows import flight
+    except ImportError:
+        return {"id": message.get("id"), "ok": False, "data": "flight flow unavailable"}
+    payload = message.get("payload")
+    handoff_id = payload.get("id") if isinstance(payload, dict) else None
+    if not handoff_id:
+        return {"id": message.get("id"), "ok": False, "data": "missing handoff id"}
+    await flight.handle_handoff_open(message.get("id"), handoff_id)
+    return None
+
+
+# type -> handler. A handler returns the envelope to send, or None when it has
+# already replied on the socket itself. Types not listed keep the generic ack.
+_HANDLERS = {"handoff_open": _handle_handoff_open}
+
+
 def _authorized(websocket: WebSocket, token: str | None) -> bool:
     """True when the query-param or Bearer token matches the vault token."""
     expected = config.get_token()
@@ -70,9 +95,19 @@ async def ws_endpoint(
                     {"id": None, "ok": False, "data": {"error": "invalid envelope"}}
                 )
                 continue
-            await websocket.send_json(
-                {"id": message.get("id"), "ok": True, "data": message.get("payload")}
-            )
+            handler = _HANDLERS.get(message.get("type"))
+            if handler is None:  # unknown type keeps the generic ack
+                await websocket.send_json(
+                    {"id": message.get("id"), "ok": True, "data": message.get("payload")}
+                )
+                continue
+            try:
+                reply = await handler(message)
+            except Exception:
+                logger.exception("ws: %s handler failed", message.get("type"))
+                reply = {"id": message.get("id"), "ok": False, "data": "handler error"}
+            if reply is not None:  # flow handlers may reply on the socket themselves
+                await websocket.send_json(reply)
     except WebSocketDisconnect:
         pass
     finally:
