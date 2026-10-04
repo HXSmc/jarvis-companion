@@ -5,13 +5,12 @@ windows agent's live WS connection and awaits the matching `{id, ok, data}`
 reply (pending-futures map). `mac.voice.brain.reply` routes an allowlisted
 transcript through that endpoint and formats the data; on gateway failure it
 returns `router.OFFLINE_REPLY` instead of ever asking the claude bridge about
-PC state. Real app in-process on port 0, same approach as test_ws_registry.py.
+PC state. Uses the shared gateway_server fixture from conftest.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 import warnings
@@ -21,62 +20,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 import pytest
-import uvicorn
 import websockets
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
 
-from common import config
+from conftest import AUTH_HEADER, TOKEN, WS_HEADERS_KWARG
 from gateway import agents
 from mac.voice import brain, router
 
-TOKEN = "jarvis_test_token_123"
-AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 
-
-@contextlib.asynccontextmanager
-async def gateway_server():
-    """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
-    # Restored on exit — this file sorts before test_config.py, which reads the
-    # real get_token, so a leaked stub breaks it.
-    original_get_token = config.get_token
-    config.get_token = lambda path=None, name="token": (
-        "jarvis_ios_test_token_456" if name == "ios_token" else TOKEN
-    )
-    from gateway.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        config.get_token = original_get_token
-        server.should_exit = True
-        await serve_task
-
-
-def test_command_round_trip_to_fake_windows_agent():
+def test_command_round_trip_to_fake_windows_agent(gateway_server):
     """A live role=windows WS client answers the forwarded envelope; the POST
     returns its {ok, data} verbatim."""
 
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(
-                f"ws://{base}/ws?role=windows", **{_WS_HEADERS_KWARG: AUTH_HEADER}
+                f"ws://{base}/ws?role=windows", **{WS_HEADERS_KWARG: AUTH_HEADER}
             ) as agent_ws:
                 async def answer_one() -> None:
                     envelope = json.loads(await asyncio.wait_for(agent_ws.recv(), timeout=10))
@@ -100,7 +61,7 @@ def test_command_round_trip_to_fake_windows_agent():
     asyncio.run(run())
 
 
-def test_command_without_windows_connected_is_503():
+def test_command_without_windows_connected_is_503(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -112,13 +73,13 @@ def test_command_without_windows_connected_is_503():
     asyncio.run(run())
 
 
-def test_command_timeout_when_agent_silent_is_504(monkeypatch):
+def test_command_timeout_when_agent_silent_is_504(monkeypatch, gateway_server):
     monkeypatch.setattr(agents, "REPLY_TIMEOUT_S", 0.3)
 
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(
-                f"ws://{base}/ws?role=windows", **{_WS_HEADERS_KWARG: AUTH_HEADER}
+                f"ws://{base}/ws?role=windows", **{WS_HEADERS_KWARG: AUTH_HEADER}
             ) as agent_ws:  # connected but never replies
                 async with httpx.AsyncClient(base_url=f"http://{base}") as http:
                     resp = await http.post(
