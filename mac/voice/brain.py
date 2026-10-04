@@ -2,11 +2,14 @@
 
   python3 -m mac.voice.brain "<transcript>"   (also usable as a module: reply())
 
-DESIGN.md flow 1: the command goes to the gateway
-(POST /agents/windows/command, bearer from common.config.get_token()); when no
-gateway route matches (404 — the route isn't implemented yet) the transcript
-falls through to `claude -p`, the local brain. The token is read at runtime and
-never printed or logged.
+DESIGN.md flow 1: `mac.voice.router` first tries to route the transcript to an
+allowlisted windows-agent command; a match is POSTed to the gateway
+(/agents/windows/command, bearer from common.config.get_token()) and the reply
+data is formatted for speech by `router.format_reply`. A gateway that is down
+or times out (URLError / 503 / 504 — the agent isn't connected) short-circuits
+to `router.OFFLINE_REPLY` without touching the local brain; only an unrouted
+transcript (or a 404) falls through to `claude -p`, the sandboxed local brain.
+The token is read at runtime and never printed or logged.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import urllib.request
 from pathlib import Path
 
 from common import config
+from mac.voice import router as voice_router
 
 logger = logging.getLogger(__name__)
 
@@ -47,29 +51,36 @@ _BRAIN_ENV_KEYS = ("PATH", "HOME", "LANG", "TERM")
 _MAX_REPLY_CHARS = 600
 
 
-def _gateway_command(transcript: str) -> str | None:
-    """Send the transcript as a command to the gateway; None = no route matched."""
+def _gateway_command(cmd: str) -> dict | None:
+    """POST one allowlisted command to the gateway; None = unrouted (404).
+
+    Raises ConnectionError when the gateway is unreachable or the windows
+    agent isn't connected (503) / didn't reply in time (504) — the caller
+    short-circuits to OFFLINE_REPLY instead of asking the local brain about
+    PC state it can't know.
+    """
     token = config.get_token()
     if token is None:
         logger.error("no bearer token: get_token() failed, skipping gateway")
         return None
     req = urllib.request.Request(
         f"{GATEWAY_URL}/agents/windows/command",
-        data=json.dumps({"cmd": transcript}).encode(),
+        data=json.dumps({"cmd": cmd}).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read().decode()
+            body = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         if exc.code in (404, 405):
             return None  # route not implemented (yet) — brain-bridge fallback
-        logger.error("gateway returned HTTP %s", exc.code)
-        return None
+        raise ConnectionError(f"gateway returned HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
-        logger.error("gateway unreachable: %s", exc.reason)
-        return None
+        raise ConnectionError(f"gateway unreachable: {exc.reason}") from exc
+    if not body.get("ok"):
+        raise ConnectionError("windows agent reported failure")
+    return body.get("data")
 
 
 def _brain_env() -> dict[str, str]:
@@ -123,8 +134,17 @@ def _claude_bridge(transcript: str, timeout_s: int) -> str | None:
 
 
 def reply(transcript: str, timeout_s: int = 60) -> str:
-    """Transcript → reply: gateway command first, claude -p when no route matches."""
-    return _gateway_command(transcript) or _claude_bridge(transcript, timeout_s) or "no reply"
+    """Transcript → reply: allowlisted gateway command first, claude -p otherwise."""
+    cmd = voice_router.route(transcript)
+    if cmd is not None:
+        try:
+            data = _gateway_command(cmd)
+        except ConnectionError as exc:
+            logger.error("gateway command %r failed: %s", cmd, exc)
+            return voice_router.OFFLINE_REPLY
+        if data is not None:
+            return voice_router.format_reply(cmd, data)
+    return _claude_bridge(transcript, timeout_s) or "no reply"
 
 
 def main(argv: list[str] | None = None) -> int:

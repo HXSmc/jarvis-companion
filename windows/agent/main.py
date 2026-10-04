@@ -1,9 +1,16 @@
 """Windows agent entrypoint: WebSocket client to the gateway.
 
-Connects to `ws://127.0.0.1:<PORT>/ws?role=windows` with the shared token in
-the `Authorization: Bearer` header (never a query param — those land in
-access logs), answers allowlisted commands, and reconnects with exponential
+Connects to the gateway's `/ws?role=windows` with the shared token in the
+`Authorization: Bearer` header (never a query param — those land in access
+logs), answers allowlisted commands, and reconnects with exponential
 backoff + jitter (DESIGN.md "Gateway down" row).
+
+The gateway address comes from the `JARVIS_GATEWAY_URL` env var, else the
+first line of the gateway-url file — `%APPDATA%\\jarvis\\gateway_url` on
+Windows, `~/.jarvis/gateway_url` elsewhere. It may be an http(s) base URL
+(the gateway's tailscale-serve address), a bare ws(s) URL, or host:port;
+`ws://127.0.0.1` is NOT hardcoded (C-HIGH-4: that is the PC's own loopback,
+which is never where the Mac gateway lives).
 
 One-time setup: copy the shared `token:` value from the vault's
 `## Jarvis Companion` section (WITHOUT the `token: ` prefix) into the token
@@ -23,7 +30,6 @@ import sys
 
 import websockets
 
-from common import config
 from windows.agent import commands
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,54 @@ def load_token() -> str | None:
     return first_line
 
 
+def gateway_url_file_path() -> "os.PathLike[str]":
+    """OS-appropriate gateway-url file: %APPDATA%/jarvis/gateway_url on Windows,
+    ~/.jarvis/gateway_url elsewhere."""
+    if sys.platform == "win32":
+        return os.path.join(os.environ["APPDATA"], "jarvis", "gateway_url")
+    return os.path.join(os.path.expanduser("~"), ".jarvis", "gateway_url")
+
+
+def load_gateway_url() -> str | None:
+    """The Mac gateway's address: `JARVIS_GATEWAY_URL` env var, else the url
+    file's first line (same resolution order and error handling as load_token)."""
+    env_url = os.environ.get("JARVIS_GATEWAY_URL")
+    if env_url:
+        return env_url.strip()
+    try:
+        with open(gateway_url_file_path(), "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+    except OSError:
+        logger.error(
+            "no JARVIS_GATEWAY_URL env var and gateway-url file not readable: %s",
+            gateway_url_file_path(),
+        )
+        return None
+    if not first_line:
+        logger.error("gateway-url file is empty: %s", gateway_url_file_path())
+        return None
+    return first_line
+
+
+def _ws_url(base: str) -> str:
+    """Normalize a configured gateway base URL into the role=windows WS URL.
+
+    Accepts https://host[:port]/, http://host:port, ws://host:port, or a bare
+    host:port — anything after the authority (a path) is dropped and replaced
+    with the gateway's /ws route.
+    """
+    base = base.strip().rstrip("/")
+    if "://" not in base:
+        base = "ws://" + base
+    scheme, _, rest = base.partition("://")
+    authority = rest.split("/", 1)[0]
+    if scheme == "https":
+        scheme = "wss"
+    elif scheme == "http":
+        scheme = "ws"
+    return f"{scheme}://{authority}/ws?role=windows"
+
+
 def handle_message(raw: str) -> dict | None:
     """Turn an incoming `{id, type, payload}` envelope into a `{id, ok, data}` reply.
 
@@ -84,13 +138,19 @@ def handle_message(raw: str) -> dict | None:
     return {"id": msg.get("id"), "ok": ok, "data": data}
 
 
-async def run(host: str = "127.0.0.1", port: int | None = None, token: str | None = None) -> None:
-    port = config.PORT if port is None else port
+async def run(url: str | None = None, token: str | None = None) -> None:
+    url = load_gateway_url() if url is None else url
     token = load_token() if token is None else token
+    if url is None:
+        logger.error(
+            "no gateway URL available (env JARVIS_GATEWAY_URL or gateway-url file); "
+            "agent cannot start"
+        )
+        raise SystemExit(1)
     if token is None:
         logger.error("no bearer token available (env JARVIS_TOKEN or token file); agent cannot start")
         raise SystemExit(1)
-    url = f"ws://{host}:{port}/ws?role=windows"
+    url = _ws_url(url)
     headers = {"Authorization": f"Bearer {token}"}
     connect_kwargs = (
         {"additional_headers": headers}
@@ -100,7 +160,7 @@ async def run(host: str = "127.0.0.1", port: int | None = None, token: str | Non
     backoff = INITIAL_BACKOFF_S
     while True:
         try:
-            logger.info("connecting to gateway at %s:%s", host, port)
+            logger.info("connecting to gateway at %s", url)
             async with websockets.connect(url, **connect_kwargs) as ws:
                 logger.info("connected")
                 backoff = INITIAL_BACKOFF_S

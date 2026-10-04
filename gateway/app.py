@@ -36,6 +36,12 @@ for _module in ("gateway.ws", "gateway.siri", "gateway.flows.flight", "gateway.f
         continue
     app.include_router(_mod.router)
 
+# agents.py must always be present (gateway.ws imports it for reply routing) —
+# direct import, not the guarded seam above.
+from gateway import agents  # noqa: E402
+
+app.include_router(agents.router)
+
 
 if __name__ == "__main__":
     # LOW-4: the HOST env guard above can't see `uvicorn --host 0.0.0.0`, so

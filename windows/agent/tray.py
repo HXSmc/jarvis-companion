@@ -4,15 +4,20 @@ Runs the agent loop (`windows.agent.main.run`) in a background thread and
 reflects its state in the tray: green = online (agent thread alive, gateway
 reachable), grey = offline (starting / retrying / stopped). Quit lives in the
 menu (DESIGN.md "Components", windows row: tray agent, one .exe).
+
+The gateway address is resolved by the agent itself (JARVIS_GATEWAY_URL env
+or the gateway-url file — C-HIGH-4); the probe here uses the same resolution.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import threading
 import time
+from urllib.parse import urlsplit
 
 import pystray
 from PIL import Image, ImageDraw
@@ -35,20 +40,35 @@ def _disc(color: tuple[int, int, int]) -> Image.Image:
     return img
 
 
+def _gateway_address() -> tuple[str, int]:
+    """Host/port to probe: the configured gateway URL's authority, else the default port."""
+    base = agent_main.load_gateway_url()
+    if base:
+        parts = urlsplit(base if "://" in base else "ws://" + base)
+        host = parts.hostname or "127.0.0.1"
+        port = parts.port or (443 if parts.scheme in ("https", "wss") else 80)
+        return host, port
+    return "127.0.0.1", config.PORT
+
+
 def _gateway_reachable() -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", config.PORT), timeout=PROBE_TIMEOUT_S):
+        with socket.create_connection(_gateway_address(), timeout=PROBE_TIMEOUT_S):
             return True
     except OSError:
         return False
 
 
 def _run_agent() -> None:
-    """Run the agent loop from windows.agent.main on its own event loop."""
+    """Run the agent loop from windows.agent.main on its own event loop.
+
+    Passes JARVIS_GATEWAY_URL through so an env-configured URL wins even when
+    a stale gateway-url file exists; resolution details stay in agent_main.
+    """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(agent_main.run())
+        loop.run_until_complete(agent_main.run(url=os.environ.get("JARVIS_GATEWAY_URL")))
     except SystemExit as exc:
         logger.error("agent exited: %s", exc)
     finally:

@@ -179,12 +179,16 @@ final class WebBridge: NSObject, ObservableObject {
         let id = "ios-\(nextID)"
         if let onReply = onReply { pending[id] = onReply }
         let envelope: [String: Any] = ["id": id, "type": type, "payload": payload]
-        guard let data = try? JSONSerialization.data(withJSONObject: envelope) else {
+        guard let data = try? JSONSerialization.data(withJSONObject: envelope),
+              let text = String(data: data, encoding: .utf8) else {
             lastError = "payload not JSON-serializable"
             pending[id] = nil
             return id
         }
-        task.send(.data(data)) { [weak self] _ in
+        // Send a TEXT frame (.string): .data would send a BINARY frame, which
+        // the gateway's receive() loop would still decode, but TEXT is the
+        // envelope's natural wire form and what every other client sends.
+        task.send(.string(text)) { [weak self] _ in
             DispatchQueue.main.async {
                 if self?.task == nil { self?.handleDrop() }
             }
