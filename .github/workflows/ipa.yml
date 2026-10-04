@@ -1,0 +1,52 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ci-ipa]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Xcode version (diagnostic)
+        run: xcodebuild -version
+
+      - name: List project schemes (diagnostic, fail fast on project file issues)
+        run: xcodebuild -list -project ios/JarvisCompanion/JarvisCompanion.xcodeproj
+
+      - name: Build unsigned .app for iphoneos
+        run: |
+          xcodebuild \
+            -project ios/JarvisCompanion/JarvisCompanion.xcodeproj \
+            -scheme JarvisCompanion \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            -derivedDataPath build \
+            build
+
+      - name: Package Payload/JarvisCompanion.app into an unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="build/Build/Products/Release-iphoneos/JarvisCompanion.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Build product not found at $APP_PATH -- searching build/ for any .app:"
+            find build -maxdepth 6 -iname "*.app" || true
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r JarvisCompanion-unsigned.ipa Payload
+          ls -la JarvisCompanion-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisCompanion-unsigned-ipa
+          path: JarvisCompanion-unsigned.ipa
+          retention-days: 14
