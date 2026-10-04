@@ -44,9 +44,12 @@ def route(transcript: str) -> str | None:
     return None
 
 
-def request_envelope(cmd: str) -> dict:
+def request_envelope(cmd: str, args: dict | None = None) -> dict:
     """The wire shape sent to the windows agent, with a fresh unique id."""
-    return {"id": uuid.uuid4().hex, "type": "command", "payload": {"cmd": cmd}}
+    payload = {"cmd": cmd}
+    if args is not None:
+        payload["args"] = args
+    return {"id": uuid.uuid4().hex, "type": "command", "payload": payload}
 
 
 def _ram_value(data: dict) -> str | None:

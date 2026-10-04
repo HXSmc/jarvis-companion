@@ -209,7 +209,7 @@ textEl.addEventListener("keydown", function (e) {
 // --- gestures on the canvas --------------------------------------------------
 var ptrs = new Map();      // pointerId -> {x, y} normalized
 var gesture = null;        // active single-pointer drag/tap candidate
-var lastTap = { t: 0, x: 0, timer: null };
+var lastTap = { t: 0, timer: null };
 var pinchPrev = null;      // two-finger centroid for scroll
 var hoverAt = 0;
 // ponytail: tap waits 300 ms so a second tap upgrades to dblclick in the same
@@ -279,12 +279,12 @@ canvas.addEventListener("pointerup", function (e) {
   var now = Date.now();
   if (now - lastTap.t < TAP_MS) {
     if (lastTap.timer) clearTimeout(lastTap.timer);
-    lastTap = { t: 0, x: 0, timer: null };
+    lastTap = { t: 0, timer: null };
     sendEvents([{ type: "dblclick", x: g.x0, y: g.y0 }]);
   } else {
     var x0 = g.x0, y0 = g.y0;
     lastTap = {
-      t: now, x: x0, timer: setTimeout(function () {
+      t: now, timer: setTimeout(function () {
         sendEvents([{ type: "tap", x: x0, y: y0 }]);
       }, TAP_MS)
     };

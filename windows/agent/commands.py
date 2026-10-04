@@ -59,11 +59,11 @@ ABS_SCALE = 0xFFFF  # SendInput absolute coords are 0..65535 across the display
 WHEEL_NOTCH = 120  # one Windows wheel notch
 
 VK = {
-    "return": 0x0D, "esc": 0x1B, "backspace": 0x08, "delete": 0x2E,
+    "return": 0x0D, "esc": 0x1B, "delete": 0x2E,
     "tab": 0x09, "space": 0x20,
     "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
     "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
-    **{f"f{i}": 0x70 + i - 1 for i in range(1, 25)},
+    **{f"f{i}": 0x70 + i - 1 for i in range(1, 13)},  # f1-f12 = gateway's key set
 }
 VK_MODS = {"cmd": 0x5B, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}  # cmd = Win key
 
@@ -177,8 +177,6 @@ def _processes(payload) -> dict:
 
 def _send_wake_key() -> None:
     """Nudge the display awake on Windows with a harmless Ctrl press."""
-    import ctypes
-
     ctypes.windll.user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
     ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)  # Ctrl up
 

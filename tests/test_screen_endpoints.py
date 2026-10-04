@@ -9,7 +9,6 @@ The mac capture/sender are monkeypatched on whichever driver module resolved.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import importlib
 import sys

@@ -29,13 +29,14 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from common import config
 from gateway.agents import WINDOWS_ROLE, agent_roundtrip
 from gateway.registry import roles, send_to_role
+from mac.voice import router as voice_router
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,6 @@ router = APIRouter(prefix="/screen")
 Target = Literal["mac", "windows"]
 
 SCREEN_HTML = Path(__file__).resolve().parent / "static" / "screen.html"
-# ponytail: placeholder page until SC4 lands gateway/static/screen.html — the
-# handshake (the part SC2 owns) is testable without the real UI.
-_PAGE_PLACEHOLDER = "<!doctype html><html><title>Jarvis Screen</title><body>screen page pending (SC4)</body></html>"
 
 NOT_AUTHENTICATED = "not authenticated"
 SHARED_TOKEN_DETAIL = "shared token not valid for screen"
@@ -118,17 +116,6 @@ def _require(request: Request) -> str:
     if kind is None:
         raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     return kind
-
-
-def _page_response() -> Response:
-    if SCREEN_HTML.exists():
-        return FileResponse(SCREEN_HTML)
-    return HTMLResponse(_PAGE_PLACEHOLDER)
-
-
-def _envelope(cmd: str, args: dict) -> dict:
-    """Command envelope in the mac.voice.router request_envelope shape + args."""
-    return {"id": uuid.uuid4().hex, "type": "command", "payload": {"cmd": cmd, "args": args}}
 
 
 def _windows_online() -> None:
@@ -209,7 +196,7 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
         kind = "boot"
     else:
         kind = _require(request)
-    response = _page_response()
+    response = FileResponse(SCREEN_HTML)
     if kind in ("bearer", "boot"):
         response.set_cookie(
             SESSION_COOKIE, _mint_session(),
@@ -246,13 +233,6 @@ async def _public_base() -> str:
     return _public_base_cache
 
 
-def _authorized_or_shared(request: Request) -> str | None:
-    """Launch-only auth: cookie, ios Bearer, or the shared Bearer (design's one
-    screen-route exception — `_authorized` tags the shared token "shared" and
-    every session route 403s it; this route lets it mint a nonce, never a session)."""
-    return _authorized(request)
-
-
 async def launch_screen(target: Target) -> dict:
     """Mint a single-use 60 s boot nonce and push a navigate to the ios app (SC7).
 
@@ -275,7 +255,9 @@ async def launch_screen(target: Target) -> dict:
 
 @router.post("/launch")
 async def screen_launch(request: Request, body: LaunchBody) -> dict:
-    if _authorized_or_shared(request) is None:
+    # Launch-only exception to the shared-token 403: any valid auth (cookie,
+    # ios Bearer, or the shared Bearer) may mint a boot nonce — never a session.
+    if _authorized(request) is None:
         raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     return await launch_screen(body.target)
 
@@ -306,7 +288,7 @@ async def screen_frame(
             jpeg, _, _ = await run_in_threadpool(driver.capture_jpeg, w, q)
         else:
             _windows_online()
-            reply = await agent_roundtrip(_envelope("screen_frame", {"w": w, "q": q}))
+            reply = await agent_roundtrip(voice_router.request_envelope("screen_frame", {"w": w, "q": q}))
             if not reply.get("ok"):
                 raise HTTPException(status_code=503, detail=str(reply.get("data") or PC_OFFLINE_DETAIL))
             jpeg = base64.b64decode(reply["data"]["jpeg"])
@@ -329,7 +311,7 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
         await run_in_threadpool(driver.send_events, events)
     else:
         _windows_online()
-        reply = await agent_roundtrip(_envelope("screen_input", {"events": events}))
+        reply = await agent_roundtrip(voice_router.request_envelope("screen_input", {"events": events}))
         if not reply.get("ok"):
             raise HTTPException(status_code=503, detail=str(reply.get("data") or PC_OFFLINE_DETAIL))
     return {"ok": True}
@@ -344,7 +326,7 @@ async def screen_open(request: Request, target: Target, body: OpenBody) -> dict:
             raise HTTPException(status_code=422, detail="app not found")
     else:
         _windows_online()
-        reply = await agent_roundtrip(_envelope("open", {"name": body.name}))
+        reply = await agent_roundtrip(voice_router.request_envelope("open", {"name": body.name}))
         if not reply.get("ok"):
             raise HTTPException(status_code=422, detail=str(reply.get("data") or "app not found"))
     return {"ok": True}
