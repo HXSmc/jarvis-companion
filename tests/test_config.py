@@ -72,3 +72,24 @@ def test_other_sections_token_lines_are_ignored(tmp_path):
         tmp_path,
         f"ios_token: outsider\ntoken: outsider\n\n## Jarvis Companion\ntoken: {SHARED_TOKEN}\nios_token: {IOS_TOKEN}\n",
     ), name="ios_token") == IOS_TOKEN
+
+
+def test_duplicate_token_lines_are_first_wins(tmp_path):
+    # T0.1 semantics: the FIRST `token:` line in the section wins; a later
+    # duplicate (e.g. from a hand-edited vault) must not overwrite it.
+    assert config.get_token(path=_vault(
+        tmp_path,
+        f"## Jarvis Companion\ntoken: {SHARED_TOKEN}\ntoken: later-duplicate\n",
+    )) == SHARED_TOKEN
+
+
+def test_ios_token_and_token_do_not_shadow_each_other(tmp_path):
+    # Distinct key names are distinct entries: a duplicate `token:` line
+    # first-wins on `token` alone and leaves the `ios_token` line untouched
+    # (and vice versa).
+    path = _vault(
+        tmp_path,
+        f"## Jarvis Companion\ntoken: {SHARED_TOKEN}\ntoken: dup\nios_token: {IOS_TOKEN}\n",
+    )
+    assert config.get_token(path=path) == SHARED_TOKEN
+    assert config.get_token(path=path, name="ios_token") == IOS_TOKEN

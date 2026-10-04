@@ -1,0 +1,64 @@
+"""Shared gateway test harness: fixture tokens + an in-process uvicorn server factory."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+import uvicorn
+import websockets
+
+from common import config
+
+TOKEN = "jarvis_test_token_123"
+IOS_TOKEN = "jarvis_ios_test_token_456"
+AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
+IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
+# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
+WS_HEADERS_KWARG = (
+    "additional_headers"
+    if int(websockets.version.version.split(".")[0]) >= 14
+    else "extra_headers"
+)
+
+
+@pytest.fixture
+def gateway_server(monkeypatch):
+    """Async-CM factory running the real app in-process on port 0.
+
+    The server runs as an asyncio task in the caller's own event loop — the
+    registry's sockets are loop-bound, so `registry.send_to_role` and the
+    flow handlers must share the loop the test's `asyncio.run` created.
+    `config.get_token` is patched name-aware (S2): ios -> ios_token, else the
+    shared token. Usage inside a test's asyncio.run():
+    `async with gateway_server() as base:`.
+    """
+    monkeypatch.setattr(
+        config, "get_token",
+        lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN,
+    )
+
+    @contextlib.asynccontextmanager
+    async def _server():
+        from gateway.app import app
+
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+        serve_task = asyncio.create_task(server.serve())
+        for _ in range(200):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+        assert server.started, "uvicorn did not start"
+        port = server.servers[0].sockets[0].getsockname()[1]
+        try:
+            yield f"127.0.0.1:{port}"
+        finally:
+            server.should_exit = True
+            await serve_task
+
+    return _server

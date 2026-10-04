@@ -22,9 +22,9 @@ import subprocess
 import sys
 import tempfile
 
-logger = logging.getLogger(__name__)
+from common import config
 
-DEFAULT_VAULT_PATH = "~/Desktop/ObsidianVault/Secrets/Projects.md"
+logger = logging.getLogger(__name__)
 
 CSV_HEADER = ["Title", "URL", "Username", "Password", "Notes", "OAuth Secret"]
 
@@ -68,7 +68,7 @@ def parse_vault(text: str) -> list[dict[str, str]]:
 
 def load_vault_text(path: str | None) -> str:
     """Read the fixture file, or the real vault when path is None."""
-    vault = os.path.expanduser(path) if path is not None else os.path.expanduser(DEFAULT_VAULT_PATH)
+    vault = os.path.expanduser(path) if path is not None else os.path.expanduser(config.DEFAULT_VAULT_PATH)
     try:
         with open(vault, "r", encoding="utf-8") as f:
             return f.read()
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> None:
     if not rows:
         logger.error(
             "export_csv: no password entries found in %s",
-            args.fixture or DEFAULT_VAULT_PATH,
+            args.fixture or config.DEFAULT_VAULT_PATH,
         )
         sys.exit(1)
 

@@ -1,9 +1,9 @@
 """T5.1 check: flight handoff flow — link format, pending->accepted->driving, TTL expiry.
 
-Starts `gateway.app` in-process under uvicorn (as an asyncio task, port 0, same
-event loop as the test) with `common.config.get_token` monkeypatched to a fixture
-token — same approach as tests/test_ws_registry.py, so this passes regardless of
-vault state. A fake app connects over WS as role=ios; the `handoff_open`
+Starts `gateway.app` via the shared tests/conftest.py `gateway_server` fixture
+(in-process uvicorn as an asyncio task in the test's own loop, fixture tokens),
+so this passes regardless of vault state. A fake app connects over WS as
+role=ios; the `handoff_open`
 dispatch is driven through `gateway.flights.flight.handle_handoff_open` (the
 importable WS-handling seam) so the fake app really receives the reply and the
 navigate push through the live registry. The fake notify channel replaces
@@ -13,42 +13,22 @@ navigate push through the live registry. The fake notify channel replaces
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 import time
-import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 import pytest
-import uvicorn
 import websockets
-from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    try:  # InvalidStatusCode is deprecated in websockets >=14 but raised pre-13
-        from websockets.exceptions import InvalidStatusCode
-    except ImportError:  # pragma: no cover
-        InvalidStatusCode = InvalidStatus
-
-from common import config
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from gateway.flows import flight
 
-TOKEN = "jarvis_test_token_123"
-IOS_TOKEN = "jarvis_ios_test_token_456"
-AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
-IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
 CHECKOUT_URL = "https://booking.example.com/checkout?flight=RUH-9AM"
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -62,29 +42,7 @@ def clean_flight_state():
     flight.notify = flight._default_notify
 
 
-@contextlib.asynccontextmanager
-async def gateway_server():
-    """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
-    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
-    from gateway.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await serve_task
-
-
-def test_link_format_and_pending_state():
+def test_link_format_and_pending_state(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -106,7 +64,7 @@ def test_link_format_and_pending_state():
     asyncio.run(run())
 
 
-def test_handoff_open_state_machine_and_navigate_push():
+def test_handoff_open_state_machine_and_navigate_push(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -142,7 +100,7 @@ def test_handoff_open_state_machine_and_navigate_push():
     asyncio.run(run())
 
 
-def test_second_handoff_open_is_rejected_as_used():
+def test_second_handoff_open_is_rejected_as_used(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -230,7 +188,7 @@ def test_untouched_handoff_expires_via_sweeper_without_get_handoff(monkeypatch):
     asyncio.run(run())
 
 
-def test_get_handoff_endpoint_returns_state_and_404_unknown():
+def test_get_handoff_endpoint_returns_state_and_404_unknown(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(

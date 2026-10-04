@@ -6,42 +6,29 @@ the old `receive_text()` raised KeyError on them and the socket dropped
 kind. This test drives the exact regression: a binary `handoff_open` gets the
 normal `{id, ok, data}` reply (socket alive), and a binary unknown-type
 message still gets the generic ack afterwards — proving the connection was
-never dropped. Mirrors tests/test_ws_flows_dispatch.py's setup.
+never dropped. Same setup as tests/test_ws_flows_dispatch.py: the shared
+tests/conftest.py `gateway_server` fixture (in-process uvicorn, port 0,
+fixture tokens).
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
-import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 import pytest
-import uvicorn
 import websockets
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-from common import config
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from gateway.flows import flight
 
-TOKEN = "jarvis_test_token_123"
-IOS_TOKEN = "jarvis_ios_test_token_456"
-AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
-IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
 CHECKOUT_URL = "https://booking.example.com/checkout?flight=RUH-9AM"
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -55,29 +42,7 @@ def clean_flight_state():
     flight.notify = flight._default_notify
 
 
-@contextlib.asynccontextmanager
-async def gateway_server():
-    """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
-    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
-    from gateway.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await serve_task
-
-
-def test_binary_frame_handoff_open_replies_and_keeps_socket_open():
+def test_binary_frame_handoff_open_replies_and_keeps_socket_open(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -110,7 +75,7 @@ def test_binary_frame_handoff_open_replies_and_keeps_socket_open():
     asyncio.run(run())
 
 
-def test_binary_garbage_gets_error_reply_socket_stays_open():
+def test_binary_garbage_gets_error_reply_socket_stays_open(gateway_server):
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(

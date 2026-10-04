@@ -1,6 +1,6 @@
 """Siri Shortcut endpoint: POST /siri/hey — transcript in, brain reply out.
 
-Included by gateway/app.py's guarded router seam (this module defines `router`).
+Included by gateway/app.py (this module defines `router`).
 The iPhone Shortcut POSTs {"text": "<transcript>"} and speaks the returned
 {"reply": "..."} value (docs/DESIGN.md "Feature data flows" #5, iPhone row).
 A Shortcut call must answer in seconds: status phrases are answered straight
@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from gateway.auth import require_bearer
+from gateway.registry import roles
 from mac.voice import brain
 
 router = APIRouter()
@@ -61,17 +62,8 @@ _STATUS_PHRASES = frozenset({"status", "health", "ping", "are you there"})
 
 
 def _status_reply() -> str:
-    """"Gateway online" answer built from the live agent registry.
-
-    The registry ships with T1.2 (not on this branch yet — resolves at merge);
-    until then, report no connected roles rather than failing the endpoint.
-    """
-    try:
-        from gateway.registry import roles
-    except ImportError:
-        connected: list[str] = []
-    else:
-        connected = roles()
+    """"Gateway online" answer built from the live agent registry."""
+    connected = roles()
     if connected:
         return f"Jarvis gateway online. Connected: {', '.join(connected)}"
     return "Jarvis gateway online. Connected: none"

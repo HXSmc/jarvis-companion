@@ -1,9 +1,8 @@
 """S2/T5.2 check: sign-in handoff flow — prefill JS, origin binding, credential never leaks.
 
-Same harness as tests/test_flight_flow.py: `gateway.app` in-process under
-uvicorn (asyncio task, port 0) with `common.config.get_token` monkeypatched to
-name-aware fixture tokens, a fake app connected over WS as role=ios (Bearer
-header), and the `handoff_open` dispatch driven through
+Uses the shared tests/conftest.py `gateway_server` fixture (in-process uvicorn
+in the test's own loop, name-aware fixture tokens), a fake app connected over
+WS as role=ios (Bearer header), and the `handoff_open` dispatch driven through
 `signin.handle_handoff_open` (the importable seam — it delegates to flight's
 machine, then pushes the prefill). The fixture vault lives below as a
 module-level string with ONLY fake credentials, written to a tmp_path file;
@@ -18,41 +17,21 @@ never in another WS frame, an HTTP response body, or a log record.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import sys
-import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 import pytest
-import uvicorn
 import websockets
-from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    try:  # InvalidStatusCode is deprecated in websockets >=14 but raised pre-13
-        from websockets.exceptions import InvalidStatusCode
-    except ImportError:  # pragma: no cover
-        InvalidStatusCode = InvalidStatus
-
-from common import config
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER, TOKEN, IOS_TOKEN
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from gateway.flows import flight, signin
 
-TOKEN = "jarvis_test_token_123"
-IOS_TOKEN = "jarvis_ios_test_token_456"
-AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
-IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 SIGNIN_URL = "https://login.example.com/signin"
 VAULT_KEY = "Example Site"
 FAKE_USERNAME = "user@example.com"
@@ -97,29 +76,7 @@ def clean_state(tmp_path, monkeypatch):
     flight.notify = flight._default_notify
 
 
-@contextlib.asynccontextmanager
-async def gateway_server():
-    """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
-    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
-    from gateway.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await serve_task
-
-
-def test_signin_creates_pending_handoff_and_prefills():
+def test_signin_creates_pending_handoff_and_prefills(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -175,7 +132,7 @@ def test_signin_creates_pending_handoff_and_prefills():
     asyncio.run(run())
 
 
-def test_invalid_requests_get_generic_400():
+def test_invalid_requests_get_generic_400(gateway_server):
     """S2 HIGH-2: every violation is a 400 with the SAME generic detail.
 
     Covers: a vault_key whose section exists but is not under `## Signin/`;
@@ -212,7 +169,7 @@ def test_invalid_requests_get_generic_400():
     asyncio.run(run())
 
 
-def test_password_appears_only_in_the_evaluateJS_push(caplog):
+def test_password_appears_only_in_the_evaluateJS_push(gateway_server, caplog):
     async def run():
         with caplog.at_level(logging.DEBUG):
             async with gateway_server() as base, httpx.AsyncClient(
@@ -249,7 +206,7 @@ def test_password_appears_only_in_the_evaluateJS_push(caplog):
     asyncio.run(run())
 
 
-def test_second_handoff_open_pushes_prefill_only_once():
+def test_second_handoff_open_pushes_prefill_only_once(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.post(
@@ -279,7 +236,31 @@ def test_second_handoff_open_pushes_prefill_only_once():
     asyncio.run(run())
 
 
-def test_ttl_expiry_uses_flight_notify_seam():
+def test_unreadable_vault_fails_loudly_not_as_generic_400(gateway_server, monkeypatch, caplog):
+    """F1 (D1 pass 2): a missing/unreadable vault must NOT read as an empty
+    section. The POST fails the pre-deslop way — an unhandled OSError -> 500
+    with the generic detail — and NEVER the generic 400 (which would imply the
+    section was evaluated) and never a credential value in the response or logs.
+    """
+    monkeypatch.setattr(signin, "VAULT_PATH", Path("/nonexistent/vault/Projects.md"))
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            with caplog.at_level(logging.ERROR):
+                resp = await http.post(
+                    "/handoff/signin",
+                    headers=AUTH_HEADER,
+                    json={"url": SIGNIN_URL, "vault_key": VAULT_KEY},
+                )
+            assert resp.status_code == 500, (resp.status_code, resp.text)
+            assert "Internal Server Error" in resp.text, resp.text
+            # The failure was logged naming the path only — no credential values.
+            assert FAKE_PASSWORD not in resp.text and FAKE_PASSWORD not in caplog.text, caplog.text
+            assert "vault file not readable" in caplog.text, caplog.text
+
+    asyncio.run(run())
+
+
+def test_ttl_expiry_uses_flight_notify_seam(gateway_server):
     async def run():
         recorded: list[dict] = []
 

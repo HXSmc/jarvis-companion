@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from common import config
 from gateway import registry
 from gateway.auth import require_bearer
 from gateway.flows import flight
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Secrets vault the credentials are read from at runtime; module-level so tests
 # can point it at a fixture file (no config knob).
-VAULT_PATH = Path("~/Desktop/ObsidianVault/Secrets/Projects.md").expanduser()
+VAULT_PATH = Path(config.DEFAULT_VAULT_PATH).expanduser()
 
 router = APIRouter()
 
@@ -61,19 +62,14 @@ def _read_vault_section(vault_key: str) -> dict[str, str]:
 
     Only `## Signin/...` headings are eligible (HIGH-2); `vault_key` must equal
     the text after `Signin/` exactly. Returns {} when no such section exists.
+    An UNREADABLE vault raises OSError instead — the request fails loudly (500
+    on the HTTP path, logged-and-no-reply on the WS path), never as a silent
+    "no eligible section". `read_section` has already logged the path by then;
+    the error text carries the path only, never credential values.
     """
-    section: dict[str, str] = {}
-    in_section = False
-    wanted = SIGNIN_PREFIX + vault_key
-    for line in VAULT_PATH.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("## "):
-            heading = stripped[3:].strip()
-            in_section = heading == wanted
-            continue
-        if in_section and stripped and not stripped.startswith("#") and ":" in stripped:
-            key, _, value = stripped.partition(":")
-            section[key.strip()] = value.strip()
+    section = config.read_section(VAULT_PATH, SIGNIN_PREFIX + vault_key)
+    if section is None:  # unreadable vault must not read as "no eligible section"
+        raise OSError(f"vault file not readable: {VAULT_PATH}")
     return section
 
 

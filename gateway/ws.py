@@ -1,6 +1,6 @@
 """WebSocket endpoint: role-based agent connections with token auth and echo-ack routing.
 
-Mounted automatically by `gateway.app`'s router seam. Auth is HEADER-ONLY:
+Mounted by `gateway.app`. Auth is HEADER-ONLY:
 `Authorization: Bearer <token>` (MED-2 — the token must never ride the URL
 string). Tokens are role-bound — role `ios` must present the vault's
 `ios_token:` value, role `windows` the shared `token:` value — so a holder of
@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from common import config
 from gateway import agents, registry
 from gateway.auth import require_bearer
+from gateway.flows import flight, signin
 
 logger = logging.getLogger(__name__)
 
@@ -43,28 +44,18 @@ async def _handle_handoff_open(message: dict, role: str) -> dict | None:
 
     Returns None when the flow replied on the socket itself (it owns both the
     {id, ok, data} reply and the navigate push via send_to_role), or an error
-    envelope to send when dispatch itself failed (flow absent / malformed
-    payload / forbidden role). Unknown or expired handoffs are replied with
+    envelope to send when dispatch itself failed (malformed payload /
+    forbidden role). Unknown or expired handoffs are replied with
     ok: False by the flight flow itself; the socket stays open either way.
     """
     if role != IOS_ROLE:
         return {"id": message.get("id"), "ok": False, "data": "forbidden"}
-    try:
-        from gateway.flows import flight
-    except ImportError:
-        return {"id": message.get("id"), "ok": False, "data": "flight flow unavailable"}
-    try:
-        from gateway.flows import signin
-    except ImportError:
-        signin = None
     payload = message.get("payload")
     handoff_id = payload.get("id") if isinstance(payload, dict) else None
     if not handoff_id:
         return {"id": message.get("id"), "ok": False, "data": "missing handoff id"}
     handoff = await flight.get_handoff(handoff_id)
     if handoff is not None and handoff.get("kind") == "signin":
-        if signin is None:
-            return {"id": message.get("id"), "ok": False, "data": "signin flow unavailable"}
         await signin.handle_handoff_open(message.get("id"), handoff_id)
     else:
         await flight.handle_handoff_open(message.get("id"), handoff_id)

@@ -1,9 +1,10 @@
 """T6.2 check: gateway.ws routes a real WS handoff_open to the sign-in flow by kind.
 
-Same harness as tests/test_ws_flows_dispatch.py (real app in-process under
-uvicorn, port 0, `common.config.get_token` monkeypatched) plus the fixture
-vault from tests/test_signin_flow.py (tmp_path file, `signin.VAULT_PATH`
-monkeypatched, fake credentials only). A sign-in handoff is created via POST
+Same harness as tests/test_ws_flows_dispatch.py (shared tests/conftest.py
+`gateway_server` fixture: real app in-process under uvicorn, port 0, fixture
+tokens) plus the fixture vault from tests/test_signin_flow.py (tmp_path file,
+`signin.VAULT_PATH` monkeypatched, fake credentials only). A sign-in handoff
+is created via POST
 /handoff/signin (bearer), a fake ios client sends the handoff_open envelope
 over the socket, and the full WS round-trip is asserted: the {id, ok, data}
 reply, the navigate push, and the credential prefill evaluateJS push carrying
@@ -15,42 +16,21 @@ navigate push (no T6.1 regression).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import sys
-import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 import pytest
-import uvicorn
 import websockets
-from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    try:  # InvalidStatusCode is deprecated in websockets >=14 but raised pre-13
-        from websockets.exceptions import InvalidStatusCode
-    except ImportError:  # pragma: no cover
-        InvalidStatusCode = InvalidStatus
-
-from common import config
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER, TOKEN, IOS_TOKEN
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from gateway.flows import flight, signin
 
-TOKEN = "jarvis_test_token_123"
-IOS_TOKEN = "jarvis_ios_test_token_456"
-AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
-IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
-WIN_AUTH_HEADER = AUTH_HEADER
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 SIGNIN_URL = "https://login.example.com/signin"
 CHECKOUT_URL = "https://booking.example.com/checkout?flight=RUH-9AM"
 VAULT_KEY = "Example Site"
@@ -92,29 +72,7 @@ def clean_state(tmp_path, monkeypatch):
     flight.notify = flight._default_notify
 
 
-@contextlib.asynccontextmanager
-async def gateway_server():
-    """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
-    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
-    from gateway.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await serve_task
-
-
-def test_signin_handoff_open_reaches_signin_flow_over_real_ws(caplog):
+def test_signin_handoff_open_reaches_signin_flow_over_real_ws(gateway_server, caplog):
     async def run():
         with caplog.at_level(logging.DEBUG):
             async with gateway_server() as base, httpx.AsyncClient(
@@ -162,7 +120,7 @@ def test_signin_handoff_open_reaches_signin_flow_over_real_ws(caplog):
     asyncio.run(run())
 
 
-def test_flight_handoff_open_still_navigates_no_regression():
+def test_flight_handoff_open_still_navigates_no_regression(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             # (d) a flight handoff opened the same way keeps flight behavior.
