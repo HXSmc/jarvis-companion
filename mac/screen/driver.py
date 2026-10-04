@@ -160,15 +160,22 @@ def _jpeg_bytes(img, q: int) -> tuple[bytes, int, int]:
         None, ctypes.byref(qual_key), ctypes.byref(qual_val), 1, None, None)
     dest = IIO.CGImageDestinationCreateWithData(
         data, _cfstr("public.jpeg"), 1, opts)
-    if not dest:
-        raise OSError("CGImageDestinationCreateWithData failed")
-    IIO.CGImageDestinationAddImage(dest, img, None)
-    if not IIO.CGImageDestinationFinalize(dest):
-        raise OSError("CGImageDestinationFinalize failed")
-    n = CF.CFDataGetLength(data)
-    buf = CF.CFDataGetBytePtr(data)
-    return (ctypes.string_at(buf, n),
-            CG.CGImageGetWidth(img), CG.CGImageGetHeight(img))
+    try:
+        if not dest:
+            raise OSError("CGImageDestinationCreateWithData failed")
+        IIO.CGImageDestinationAddImage(dest, img, None)
+        if not IIO.CGImageDestinationFinalize(dest):
+            raise OSError("CGImageDestinationFinalize failed")
+        n = CF.CFDataGetLength(data)
+        buf = CF.CFDataGetBytePtr(data)
+        return (ctypes.string_at(buf, n),
+                CG.CGImageGetWidth(img), CG.CGImageGetHeight(img))
+    finally:
+        if dest:
+            CF.CFRelease(dest)
+        CF.CFRelease(opts)
+        CF.CFRelease(qual_val)
+        CF.CFRelease(data)  # bytes copied out via string_at above first
 
 
 def capture_jpeg(w: int, q: int) -> tuple[bytes, int, int]:
@@ -235,8 +242,9 @@ def _post(ev: dict, bounds: CGRect) -> None:
 
 
 def _move(p: CGPoint) -> None:
-    AX.CGEventPost(kCGHIDEventTap,
-                   AX.CGEventCreateMouseEvent(None, kCGEventMouseMoved, p, 0))
+    ev = AX.CGEventCreateMouseEvent(None, kCGEventMouseMoved, p, 0)
+    AX.CGEventPost(kCGHIDEventTap, ev)
+    CF.CFRelease(ev)
 
 
 def _click(p: CGPoint, double: bool = False, right: bool = False) -> None:
@@ -251,28 +259,33 @@ def _click(p: CGPoint, double: bool = False, right: bool = False) -> None:
     if double:
         AX.CGEventSetIntegerValueField(down, kCGMouseEventClickState, 2)
     AX.CGEventPost(kCGHIDEventTap, down)
+    CF.CFRelease(down)
     time.sleep(0.05)
-    AX.CGEventPost(kCGHIDEventTap,
-                   AX.CGEventCreateMouseEvent(None, up_t, p, btn))
+    up = AX.CGEventCreateMouseEvent(None, up_t, p, btn)
+    AX.CGEventPost(kCGHIDEventTap, up)
+    CF.CFRelease(up)
 
 
 def _drag(p1: CGPoint, p2: CGPoint) -> None:
     _move(p1)
     time.sleep(0.1)
-    AX.CGEventPost(kCGHIDEventTap,
-                   AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, p1, 0))
+    down = AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, p1, 0)
+    AX.CGEventPost(kCGHIDEventTap, down)
+    CF.CFRelease(down)
     for i in range(1, 11):  # <= 10 intermediate moves, 0.03s apart
         f = i / 11
         _move(CGPoint(p1.x + (p2.x - p1.x) * f, p1.y + (p2.y - p1.y) * f))
         time.sleep(0.03)
-    AX.CGEventPost(kCGHIDEventTap,
-                   AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, p2, 0))
+    up = AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, p2, 0)
+    AX.CGEventPost(kCGHIDEventTap, up)
+    CF.CFRelease(up)
 
 
 def _scroll(dy: float, dx: float = 0.0) -> None:
-    ev = AX.CGEventCreateScrollWheelEvent2(None, kCGScrollEventUnitLine, 1,
+    ev = AX.CGEventCreateScrollWheelEvent2(None, kCGScrollEventUnitLine, 2,
                                            int(dy * 10), int(dx * 10), 0)
     AX.CGEventPost(kCGHIDEventTap, ev)
+    CF.CFRelease(ev)
 
 
 def _type_text(text: str) -> None:
@@ -287,6 +300,7 @@ def _type_text(text: str) -> None:
             ev = AX.CGEventCreateKeyboardEvent(None, 0, down)
             AX.CGEventKeyboardSetUnicodeString(ev, n, buf)
             AX.CGEventPost(kCGHIDEventTap, ev)
+            CF.CFRelease(ev)
             time.sleep(0.02)
 
 
@@ -299,4 +313,5 @@ def _key(key: str, mods: list[str]) -> None:
         if down and mask:
             AX.CGEventSetFlags(ev, mask)
         AX.CGEventPost(kCGHIDEventTap, ev)
+        CF.CFRelease(ev)
         time.sleep(0.02)
