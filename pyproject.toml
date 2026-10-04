@@ -9,6 +9,7 @@ dependencies = [
     "websockets>=12.0",
     "httpx>=0.27",
     "pystray>=0.19; sys_platform == 'win32'",
+    "Pillow>=10.0; sys_platform == 'win32'",
     "psutil>=5.9",
     "WMI>=1.2; sys_platform == 'win32'",
     "openwakeword>=0.6",
@@ -16,7 +17,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["common", "gateway", "mac", "mac.voice", "mac.mirroring", "windows", "windows.agent", "passwords"]
+packages = ["common", "gateway", "mac", "mac.voice", "mac.mirroring", "mac.screen", "windows", "windows.agent", "passwords"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
