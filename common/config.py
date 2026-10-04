@@ -13,11 +13,12 @@ DEFAULT_VAULT_PATH = "~/Desktop/ObsidianVault/Secrets/Projects.md"
 SECTION_HEADING = "## Jarvis Companion"
 
 
-def get_token(path: str | None = None) -> str | None:
-    """Read the shared bearer token from the vault markdown file at runtime.
+def get_token(path: str | None = None, name: str = "token") -> str | None:
+    """Read a bearer token from the vault markdown file at runtime.
 
     Finds the `## Jarvis Companion` section and returns the value of its
-    `token: <value>` line. Returns None on failure, logging which part was
+    `<name>: <value>` line (`token:` by default — the shared token; `ios_token:`
+    for the phone-only token). Returns None on failure, logging which part was
     missing (file, section, or token line) — never the value itself.
     """
     vault = os.path.expanduser(path) if path is not None else os.path.expanduser(DEFAULT_VAULT_PATH)
@@ -28,6 +29,7 @@ def get_token(path: str | None = None) -> str | None:
         logger.error("get_token: vault file not readable: %s", vault)
         return None
 
+    prefix = f"{name}:"
     in_section = False
     section_seen = False
     for line in lines:
@@ -36,17 +38,17 @@ def get_token(path: str | None = None) -> str | None:
             in_section = stripped == SECTION_HEADING
             section_seen = section_seen or in_section
             continue
-        if in_section and stripped.startswith("token:"):
-            value = stripped[len("token:"):].strip()
+        if in_section and stripped.startswith(prefix):
+            value = stripped[len(prefix):].strip()
             if value:
                 return value
             logger.error(
-                "get_token: `token:` line is empty in the %s section of %s",
-                SECTION_HEADING, vault,
+                "get_token: `%s:` line is empty in the %s section of %s",
+                name, SECTION_HEADING, vault,
             )
             return None
     if section_seen:
-        logger.error("get_token: no `token:` line in the %s section of %s", SECTION_HEADING, vault)
+        logger.error("get_token: no `%s:` line in the %s section of %s", name, SECTION_HEADING, vault)
     else:
         logger.error("get_token: %s section not found in %s", SECTION_HEADING, vault)
     return None

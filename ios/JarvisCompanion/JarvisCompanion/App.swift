@@ -97,17 +97,25 @@ final class AppModel: ObservableObject {
             reportResult(id: id, ok: true, data: ["url": urlString])
         case "evaluateJS":
             // Covers the T5.2 credential-prefill JS: the gateway injects the
-            // prefill script as an ordinary `js` payload at runtime.
+            // prefill script as a `js` payload whose `expected_host` (HIGH-3)
+            // binds it to the sign-in origin — the WebController holds it until
+            // that host finishes loading and runs it in the .defaultClient
+            // world; any other host drops it with a bare "host mismatch" data.
             guard let js = payload["js"] as? String else {
                 reportResult(id: id, ok: false, data: ["error": "evaluateJS: missing js"])
                 return
             }
-            web.evaluateJS(js) { [weak self] result in
+            let expectedHost = payload["expected_host"] as? String
+            web.evaluateJS(js, expectedHost: expectedHost) { [weak self] result in
                 switch result {
                 case .success(let value):
                     self?.reportResult(id: id, ok: true, data: ["value": "\(value)"])
                 case .failure(let error):
-                    self?.reportResult(id: id, ok: false, data: ["error": error.localizedDescription])
+                    if case JarvisError.hostMismatch = error {
+                        self?.reportResult(id: id, ok: false, data: "host mismatch")
+                    } else {
+                        self?.reportResult(id: id, ok: false, data: ["error": error.localizedDescription])
+                    }
                 }
             }
         case "screenshot":
@@ -145,7 +153,7 @@ struct ContentView: View {
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                SecureField("Bearer token", text: $model.tokenField)
+                SecureField("iOS token", text: $model.tokenField)
                     .textFieldStyle(.roundedBorder)
                 Button("Reconnect") {
                     model.bridge.disconnect()

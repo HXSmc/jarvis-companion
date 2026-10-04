@@ -23,6 +23,13 @@ from common import config
 from mac.voice.router import OFFLINE_REPLY, request_envelope, route, speak
 
 TOKEN = "jarvis_test_token_123"
+IOS_TOKEN = "jarvis_ios_test_token_456"
+# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
+_WS_HEADERS_KWARG = (
+    "additional_headers"
+    if int(websockets.version.version.split(".")[0]) >= 14
+    else "extra_headers"
+)
 SPECS_TRANSCRIPT = "hey jarvis, what's the PC's RAM"
 UNRELATED_TRANSCRIPT = "hey jarvis, what's the weather tomorrow"
 # Fixture agent-reply data dict: a specs dict with a RAM value in it.
@@ -114,7 +121,10 @@ async def _wire_run() -> None:
     port = server.servers[0].sockets[0].getsockname()[1]
 
     # Fake windows agent: a real WS client through the real app.
-    async with websockets.connect(f"ws://127.0.0.1:{port}/ws?role=windows&token={TOKEN}") as agent:
+    async with websockets.connect(
+        f"ws://127.0.0.1:{port}/ws?role=windows",
+        **{_WS_HEADERS_KWARG: {"Authorization": f"Bearer {TOKEN}"}},
+    ) as agent:
         for _ in range(100):
             if "windows" in registry.roles():
                 break
@@ -138,5 +148,9 @@ async def _wire_run() -> None:
 
 
 def test_wire_envelope_reaches_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "get_token", lambda path=None: TOKEN)
+    # Name-aware (S2): the WS endpoint calls get_token(name=...) per role.
+    monkeypatch.setattr(
+        config, "get_token",
+        lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN,
+    )
     asyncio.run(_wire_run())

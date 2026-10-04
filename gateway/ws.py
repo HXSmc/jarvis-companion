@@ -1,9 +1,12 @@
 """WebSocket endpoint: role-based agent connections with token auth and echo-ack routing.
 
-Mounted automatically by `gateway.app`'s router seam. Auth mirrors `gateway.auth`:
-the vault token is read via `common.config.get_token()` at connect time (fail-closed,
-monkeypatchable in tests), accepted from the `token` query param (WS clients can't
-always set headers) or the Bearer header.
+Mounted automatically by `gateway.app`'s router seam. Auth is HEADER-ONLY:
+`Authorization: Bearer <token>` (MED-2 — the token must never ride the URL
+string). Tokens are role-bound — role `ios` must present the vault's
+`ios_token:` value, role `windows` the shared `token:` value — so a holder of
+one token cannot claim the other role. The authenticated role is remembered by
+the connection (and the registry, which keys sockets by it) and gates
+message dispatch: `handoff_open` is accepted only from role `ios`.
 """
 
 from __future__ import annotations
@@ -23,10 +26,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 UNKNOWN_ROLE_CLOSE = 4008
+IOS_ROLE = "ios"
 
 
-async def _handle_handoff_open(message: dict) -> dict | None:
+async def _handle_handoff_open(message: dict, role: str) -> dict | None:
     """Route a handoff_open envelope into the owning flow, chosen by handoff kind.
+
+    Sign-in handoffs carry credentials, so `handoff_open` is accepted ONLY
+    from a connection authenticated as role `ios`; any other role gets an
+    ok:False "forbidden" reply on the same socket.
 
     The handoff record is looked up first; a sign-in handoff (kind="signin",
     set by gateway.flows.signin) goes to signin.handle_handoff_open (which adds
@@ -36,9 +44,11 @@ async def _handle_handoff_open(message: dict) -> dict | None:
     Returns None when the flow replied on the socket itself (it owns both the
     {id, ok, data} reply and the navigate push via send_to_role), or an error
     envelope to send when dispatch itself failed (flow absent / malformed
-    payload). Unknown or expired handoffs are replied with ok: False by the
-    flight flow itself; the socket stays open either way.
+    payload / forbidden role). Unknown or expired handoffs are replied with
+    ok: False by the flight flow itself; the socket stays open either way.
     """
+    if role != IOS_ROLE:
+        return {"id": message.get("id"), "ok": False, "data": "forbidden"}
     try:
         from gateway.flows import flight
     except ImportError:
@@ -61,23 +71,28 @@ async def _handle_handoff_open(message: dict) -> dict | None:
     return None
 
 
-# type -> handler. A handler returns the envelope to send, or None when it has
+# type -> handler. A handler gets (message, role) — the connection's
+# authenticated role — and returns the envelope to send, or None when it has
 # already replied on the socket itself. Types not listed keep the generic ack.
 _HANDLERS = {"handoff_open": _handle_handoff_open}
 
 
-def _authorized(websocket: WebSocket, token: str | None) -> bool:
-    """True when the query-param or Bearer token matches the vault token."""
-    expected = config.get_token()
-    provided = token
-    if provided is None:
-        authorization = websocket.headers.get("authorization", "")
-        if authorization.startswith("Bearer "):
-            provided = authorization[len("Bearer "):]
+def _expected_token(role: str) -> str | None:
+    """The vault token bound to `role`: ios_token for ios, shared token otherwise."""
+    if role == IOS_ROLE:
+        return config.get_token(name="ios_token")
+    return config.get_token()
+
+
+def _authorized(websocket: WebSocket, role: str) -> bool:
+    """True when the Bearer header matches the token bound to `role`."""
+    expected = _expected_token(role)
+    authorization = websocket.headers.get("authorization", "")
+    provided = authorization[len("Bearer "):] if authorization.startswith("Bearer ") else None
     return bool(
         expected
         and provided
-        and hmac.compare_digest(provided, expected)
+        and hmac.compare_digest(provided.encode(), expected.encode())
     )
 
 
@@ -85,15 +100,14 @@ def _authorized(websocket: WebSocket, token: str | None) -> bool:
 async def ws_endpoint(
     websocket: WebSocket,
     role: str = Query(default=""),
-    token: str | None = Query(default=None),
 ) -> None:
-    if not _authorized(websocket, token):
-        # Before accept() the close is delivered as a rejected handshake (HTTP 403).
-        await websocket.close(code=1008)
-        return
     if role not in registry.ROLES:
         await websocket.accept()
         await websocket.close(code=UNKNOWN_ROLE_CLOSE, reason="unknown role")
+        return
+    if not _authorized(websocket, role):
+        # Before accept() the close is delivered as a rejected handshake (HTTP 403).
+        await websocket.close(code=1008)
         return
 
     await websocket.accept()
@@ -118,7 +132,7 @@ async def ws_endpoint(
                 )
                 continue
             try:
-                reply = await handler(message)
+                reply = await handler(message, role)
             except Exception:
                 logger.exception("ws: %s handler failed", message.get("type"))
                 reply = {"id": message.get("id"), "ok": False, "data": "handler error"}

@@ -85,15 +85,23 @@ def _set_state(handoff: dict, state: str) -> None:
 async def handle_handoff_open(message_id: str | None, handoff_id: str) -> dict | None:
     """Handle the app's {id, type: "handoff_open", payload: {id}} WS message (role=ios).
 
-    Replies {id, ok, data: {"url": ...}}, pushes {id, type: "navigate",
+    Single-use (MED-1): only a `pending` handoff can be opened. It replies
+    {id, ok, data: {"url": ...}}, pushes {id, type: "navigate",
     payload: {"url": ...}} to the ios role via send_to_role, then sets the
-    state accepted, then driving — in that order. Returns the reply data, or
-    None for an unknown/expired handoff (replied with ok: False).
+    state accepted, then driving — in that order. A handoff already opened
+    (accepted/driving) replies ok: False "handoff already used" with no
+    navigate push; unknown/expired keep their existing ok: False reply.
+    Returns the reply data, or None for any failure (replied on the socket).
     """
     handoff = await get_handoff(handoff_id)
     if handoff is None or handoff["state"] == "expired":
         await registry.send_to_role(
             IOS_ROLE, {"id": message_id, "ok": False, "data": {"error": "handoff unknown or expired"}}
+        )
+        return None
+    if handoff["state"] != "pending":
+        await registry.send_to_role(
+            IOS_ROLE, {"id": message_id, "ok": False, "data": "handoff already used"}
         )
         return None
     url = handoff["url"]

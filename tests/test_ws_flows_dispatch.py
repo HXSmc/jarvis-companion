@@ -3,7 +3,7 @@
 Same approach as tests/test_flight_flow.py: the real app runs in-process under
 uvicorn (port 0) with `common.config.get_token` monkeypatched to a fixture
 token. A handoff is created via POST /handoff/flight (bearer auth), a fake ios
-client connects to /ws?role=ios&token=... and sends a handoff_open envelope,
+client connects to /ws?role=ios (Bearer header) and sends a handoff_open envelope,
 and the full WS round-trip is asserted: the {id, ok, data:{url}} reply and the
 {type:"navigate"} push both arrive on the same socket, the handoff ends up
 driving, and an unknown handoff id is replied with ok: False without dropping
@@ -33,8 +33,16 @@ from common import config
 from gateway.flows import flight
 
 TOKEN = "jarvis_test_token_123"
+IOS_TOKEN = "jarvis_ios_test_token_456"
 AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
+IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
 CHECKOUT_URL = "https://booking.example.com/checkout?flight=RUH-9AM"
+# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
+_WS_HEADERS_KWARG = (
+    "additional_headers"
+    if int(websockets.version.version.split(".")[0]) >= 14
+    else "extra_headers"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +59,8 @@ def clean_flight_state():
 @contextlib.asynccontextmanager
 async def gateway_server():
     """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    config.get_token = lambda path=None: TOKEN  # monkeypatch, per tests/test_ws_registry.py
+    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
+    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
     from gateway.app import app
 
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
@@ -82,7 +91,9 @@ def test_handoff_open_dispatch_replies_pushes_and_drives():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             handoff_id = await _create_handoff(http)
 
-            async with websockets.connect(f"ws://{base}/ws?role=ios&token={TOKEN}") as app_ws:
+            async with websockets.connect(
+                f"ws://{base}/ws?role=ios", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}
+            ) as app_ws:
                 await app_ws.send(json.dumps(
                     {"id": "d1", "type": "handoff_open", "payload": {"id": handoff_id}}
                 ))
@@ -107,7 +118,9 @@ def test_handoff_open_dispatch_replies_pushes_and_drives():
 def test_unknown_handoff_id_replies_error_socket_stays_open():
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
-            async with websockets.connect(f"ws://{base}/ws?role=ios&token={TOKEN}") as app_ws:
+            async with websockets.connect(
+                f"ws://{base}/ws?role=ios", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}
+            ) as app_ws:
                 # (d) unknown handoff id -> ok: False, no dropped connection.
                 await app_ws.send(json.dumps(
                     {"id": "d2", "type": "handoff_open", "payload": {"id": "no-such-handoff"}}

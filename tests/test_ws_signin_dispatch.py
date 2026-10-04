@@ -41,7 +41,16 @@ from common import config
 from gateway.flows import flight, signin
 
 TOKEN = "jarvis_test_token_123"
+IOS_TOKEN = "jarvis_ios_test_token_456"
 AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
+IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
+WIN_AUTH_HEADER = AUTH_HEADER
+# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
+_WS_HEADERS_KWARG = (
+    "additional_headers"
+    if int(websockets.version.version.split(".")[0]) >= 14
+    else "extra_headers"
+)
 SIGNIN_URL = "https://login.example.com/signin"
 CHECKOUT_URL = "https://booking.example.com/checkout?flight=RUH-9AM"
 VAULT_KEY = "Example Site"
@@ -50,18 +59,22 @@ FAKE_PASSWORD = "not-a-real-password"
 
 # Fixture vault: same markdown shape as the real Secrets vault (T0.1) —
 # `## <Section>` headings with `key: value` lines. Fake credentials only.
+# S2 HIGH-2: only `## Signin/...` sections carrying url/username/password
+# lines are eligible sign-in sections.
 VAULT_FIXTURE = f"""\
 # Secrets
 
 ## Some Other Project
 api_key: sk-not-a-real-key
 
-## {VAULT_KEY}
+## Signin/{VAULT_KEY}
+url: {SIGNIN_URL}
 username: {FAKE_USERNAME}
 password: {FAKE_PASSWORD}
 
 ## Jarvis Companion
 token: {TOKEN}
+ios_token: {IOS_TOKEN}
 """
 
 
@@ -82,7 +95,8 @@ def clean_state(tmp_path, monkeypatch):
 @contextlib.asynccontextmanager
 async def gateway_server():
     """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    config.get_token = lambda path=None: TOKEN  # monkeypatch, per tests/test_ws_registry.py
+    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
+    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
     from gateway.app import app
 
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
@@ -118,7 +132,7 @@ def test_signin_handoff_open_reaches_signin_flow_over_real_ws(caplog):
                 # envelope a real iPhone would — the T6.2 bug was that this
                 # always landed in the flight flow.
                 async with websockets.connect(
-                    f"ws://{base}/ws?role=ios&token={TOKEN}"
+                    f"ws://{base}/ws?role=ios", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}
                 ) as app_ws:
                     await app_ws.send(json.dumps(
                         {"id": "s1", "type": "handoff_open", "payload": {"id": handoff_id}}
@@ -160,7 +174,9 @@ def test_flight_handoff_open_still_navigates_no_regression():
             assert resp.status_code == 200, resp.text
             handoff_id = resp.json()["id"]
 
-            async with websockets.connect(f"ws://{base}/ws?role=ios&token={TOKEN}") as app_ws:
+            async with websockets.connect(
+                f"ws://{base}/ws?role=ios", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}
+            ) as app_ws:
                 await app_ws.send(json.dumps(
                     {"id": "f1", "type": "handoff_open", "payload": {"id": handoff_id}}
                 ))

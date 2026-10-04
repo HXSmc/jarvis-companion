@@ -1,11 +1,13 @@
 """Standalone T1.2 check: WS endpoint + agent registry. Exit 0 = pass.
 
 Starts `gateway.app` in-process under uvicorn (background thread, port 0) with
-`common.config.get_token` monkeypatched to a fixture token — same approach as
+`common.config.get_token` monkeypatched to fixture tokens (name-aware: the
+shared `token` and the role-bound `ios_token`) — same approach as
 tests/test_gateway_auth.py, so this passes regardless of vault state. Uses the
-installed `websockets` client to exercise auth rejection, unknown-role close 4008,
-/roles listing, the {id, type, payload} -> {id, ok, data} envelope, and the
-replace-on-reconnect rule.
+installed `websockets` client to exercise S2 header auth (`Authorization:
+Bearer`, role-bound), unknown-role close 4008, /roles listing, the {id, type,
+payload} -> {id, ok, data} envelope, handoff_open forbidden for the windows
+role, and the replace-on-reconnect rule.
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ with warnings.catch_warnings():
 from common import config
 
 TOKEN = "jarvis_test_token_123"
+IOS_TOKEN = "jarvis_ios_test_token_456"
 AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
+IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
 # websockets 14.0 renamed connect()'s extra_headers to additional_headers.
 _WS_HEADERS_KWARG = (
     "additional_headers"
@@ -43,9 +47,8 @@ _WS_HEADERS_KWARG = (
 )
 
 
-def ws_url(base: str, role: str, token: str | None = TOKEN) -> str:
-    query = f"role={role}" + (f"&token={token}" if token is not None else "")
-    return f"ws://{base}/ws?{query}"
+def ws_url(base: str, role: str) -> str:
+    return f"ws://{base}/ws?role={role}"
 
 
 def handshake_status(exc: Exception) -> int | None:
@@ -58,10 +61,10 @@ def close_code(exc: ConnectionClosed, ws: websockets.ClientConnection) -> int | 
     return rcvd.code if rcvd is not None else getattr(exc, "code", None) or ws.close_code
 
 
-async def expect_connect_rejected(url: str, expected_status: int) -> None:
+async def expect_connect_rejected(url: str, headers: dict | None, expected_status: int) -> None:
     try:
-        async with websockets.connect(url):
-            raise AssertionError(f"handshake accepted: {url}")
+        async with websockets.connect(url, **{_WS_HEADERS_KWARG: headers or {}}):
+            raise AssertionError(f"handshake accepted: {url} {headers}")
     except (InvalidStatus, InvalidStatusCode) as exc:
         status = handshake_status(exc)
         assert status == expected_status, f"handshake status {status!r} != {expected_status}"
@@ -70,7 +73,8 @@ async def expect_connect_rejected(url: str, expected_status: int) -> None:
 async def run_all() -> None:
     from gateway.app import app
 
-    config.get_token = lambda path=None: TOKEN  # monkeypatch, per spec
+    # Name-aware monkeypatch: role-bound tokens (ios -> ios_token, else shared).
+    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
 
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -84,10 +88,14 @@ async def run_all() -> None:
     print(f"[1] server up on {base}")
 
     async with httpx.AsyncClient(base_url=f"http://{base}") as http:
-        # Bad/missing token -> rejected handshake.
-        await expect_connect_rejected(ws_url(base, "ios", token=None), 403)
-        await expect_connect_rejected(ws_url(base, "ios", token="wrong"), 403)
-        print("[2] missing/wrong token rejected (403)")
+        # Missing / wrong header, and role-binding: the shared token must not
+        # authenticate role ios, the ios token must not authenticate role windows.
+        await expect_connect_rejected(ws_url(base, "ios"), None, 403)
+        await expect_connect_rejected(ws_url(base, "ios"), {"Authorization": "Bearer wrong"}, 403)
+        await expect_connect_rejected(ws_url(base, "ios"), AUTH_HEADER, 403)  # shared token
+        await expect_connect_rejected(ws_url(base, "windows"), None, 403)
+        await expect_connect_rejected(ws_url(base, "windows"), IOS_AUTH_HEADER, 403)  # ios token
+        print("[2] header auth: missing/wrong/cross-role tokens rejected (403)")
 
         # Unknown role -> accepted then closed with 4008.
         async with websockets.connect(ws_url(base, "router")) as ws:
@@ -99,10 +107,12 @@ async def run_all() -> None:
                 assert code == 4008, f"close code {code!r} != 4008"
         print("[3] unknown role closed with 4008")
 
-        # Connect one socket per role; ios rides the Bearer header (no query token).
-        windows_ws = await websockets.connect(ws_url(base, "windows"))
+        # Connect one socket per role; each rides its own Bearer header.
+        windows_ws = await websockets.connect(
+            ws_url(base, "windows"), **{_WS_HEADERS_KWARG: AUTH_HEADER}
+        )
         ios_ws = await websockets.connect(
-            ws_url(base, "ios", token=None), **{_WS_HEADERS_KWARG: AUTH_HEADER}
+            ws_url(base, "ios"), **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}
         )
 
         roles_no_auth = await http.get("/roles")
@@ -120,8 +130,18 @@ async def run_all() -> None:
             assert reply["data"] == {"cmd": "specs"}, f"reply: {reply}"
         print("[5] envelope routed both ways: {id, ok, data} acks received")
 
+        # S2 decision C: handoff_open from the windows role -> forbidden.
+        await windows_ws.send(json.dumps(
+            {"id": "f1", "type": "handoff_open", "payload": {"id": "whatever"}}
+        ))
+        reply = json.loads(await asyncio.wait_for(windows_ws.recv(), timeout=10))
+        assert reply == {"id": "f1", "ok": False, "data": "forbidden"}, f"reply: {reply}"
+        print("[6] handoff_open from windows role -> forbidden reply, socket stays open")
+
         # Replace: a second windows connection closes the first; registry keeps one.
-        windows_ws2 = await websockets.connect(ws_url(base, "windows"))
+        windows_ws2 = await websockets.connect(
+            ws_url(base, "windows"), **{_WS_HEADERS_KWARG: AUTH_HEADER}
+        )
         try:
             await asyncio.wait_for(windows_ws.recv(), timeout=10)
             raise AssertionError("old windows socket was not closed after replacement")
@@ -132,7 +152,7 @@ async def run_all() -> None:
         await windows_ws2.send(json.dumps({"id": "m3", "type": "ping", "payload": {}}))
         reply = json.loads(await asyncio.wait_for(windows_ws2.recv(), timeout=10))
         assert reply == {"id": "m3", "ok": True, "data": {}}, f"reply: {reply}"
-        print("[6] reconnect replaced: old socket closed, one windows connection, new one live")
+        print("[7] reconnect replaced: old socket closed, one windows connection, new one live")
 
         await windows_ws2.close()
         await ios_ws.close()
