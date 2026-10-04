@@ -112,7 +112,7 @@ final class AppModel: ObservableObject {
                     self?.reportResult(id: id, ok: true, data: ["value": "\(value)"])
                 case .failure(let error):
                     if case JarvisError.hostMismatch = error {
-                        self?.reportResult(id: id, ok: false, data: "host mismatch")
+                        self?.reportResult(id: id, ok: false, data: ["error": "host mismatch"])
                     } else {
                         self?.reportResult(id: id, ok: false, data: ["error": error.localizedDescription])
                     }
