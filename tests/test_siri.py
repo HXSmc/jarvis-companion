@@ -84,8 +84,9 @@ def test_hung_brain_times_out(stubbed_token: str, monkeypatch: pytest.MonkeyPatc
 
     release = threading.Event()
     # Blocks the worker thread like a hung `claude -p`; released right after the
-    # response so pytest exit doesn't join a 30 s sleeper.
-    monkeypatch.setattr(brain, "reply", lambda transcript: release.wait(30))
+    # response so pytest exit doesn't join a 30 s sleeper. siri passes the
+    # subprocess timeout as a second arg (brain.reply(text, timeout_s)).
+    monkeypatch.setattr(brain, "reply", lambda *args: release.wait(30))
     monkeypatch.setattr(siri, "BRAIN_TIMEOUT_SECONDS", 1)
 
     resp, elapsed = _post(stubbed_token, "tell me a joke")
@@ -94,3 +95,68 @@ def test_hung_brain_times_out(stubbed_token: str, monkeypatch: pytest.MonkeyPatc
     assert resp.status_code == 200
     assert resp.json() == {"reply": "Jarvis is taking too long, try again."}
     assert elapsed < 16.0
+
+
+@pytest.fixture
+def fresh_brain_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset the module-level rate-limit window and semaphore between tests."""
+    import collections
+
+    from gateway import siri
+
+    monkeypatch.setattr(siri, "_brain_call_times", collections.deque())
+    monkeypatch.setattr(siri, "_brain_semaphore", asyncio.Semaphore(2))
+
+
+def test_third_concurrent_call_gets_busy(
+    stubbed_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+) -> None:
+    """Semaphore(2) full → immediate busy reply, no queueing."""
+    from gateway.app import app
+    from mac.voice import brain
+
+    release = threading.Event()
+    monkeypatch.setattr(brain, "reply", lambda *args: release.wait(30))
+
+    async def run() -> list[httpx.Response]:
+        headers = {"Authorization": f"Bearer {stubbed_token}"}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r1 = asyncio.create_task(client.post("/siri/hey", json={"text": "a"}, headers=headers))
+            r2 = asyncio.create_task(client.post("/siri/hey", json={"text": "b"}, headers=headers))
+            await asyncio.sleep(0.2)  # let both land in the executor
+            third = await client.post("/siri/hey", json={"text": "c"}, headers=headers)
+            done = await asyncio.gather(r1, r2)
+            release.set()
+            return [third, *done]
+
+    third, *done = asyncio.run(run())
+    assert third.status_code == 200
+    assert third.json() == {"reply": "Jarvis is busy, try again in a moment."}
+
+
+def test_rate_limit_at_20_per_60s(
+    stubbed_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+) -> None:
+    """21st brain call inside the 60 s window → busy reply."""
+    from gateway import siri
+    from mac.voice import brain
+
+    monkeypatch.setattr(brain, "reply", lambda *args: "sure")
+
+    async def run() -> httpx.Response:
+        from gateway.app import app
+
+        headers = {"Authorization": f"Bearer {stubbed_token}"}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            for _ in range(siri._BRAIN_MAX_CALLS):
+                resp = await client.post("/siri/hey", json={"text": "hi"}, headers=headers)
+                assert resp.json() == {"reply": "sure"}
+            return await client.post("/siri/hey", json={"text": "hi"}, headers=headers)
+
+    resp = asyncio.run(run())
+    assert resp.status_code == 200
+    assert resp.json() == {"reply": "Jarvis is busy, try again in a moment."}
