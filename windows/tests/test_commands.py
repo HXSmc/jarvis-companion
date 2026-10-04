@@ -6,6 +6,7 @@ paths (PowerShell CIM, wake key, suspend) are mocked.
 
 from __future__ import annotations
 
+import os
 import time
 
 import psutil
@@ -122,19 +123,64 @@ def test_sleep_happy_path_windows_mocked(monkeypatch):
     assert fired == ["sleep"]
 
 
-def test_list_dir_happy_path_default_home(monkeypatch, tmp_path):
-    (tmp_path / "b.txt").write_text("x")
-    (tmp_path / "a.txt").write_text("x")
-    monkeypatch.setattr(commands, "_home", lambda: str(tmp_path))
-    ok, data = commands.run_command("list_dir")
+def test_list_dir_happy_path_default_root(monkeypatch, tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    (desktop / "b.txt").write_text("x")
+    (desktop / "a.txt").write_text("x")
+    monkeypatch.setattr(commands, "LIST_DIR_ROOTS", (str(desktop),))
+    ok, data = commands.run_command("list_dir")  # no payload -> first root
     assert ok is True
-    assert data["path"] == str(tmp_path)
+    assert data["path"] == os.path.normcase(os.path.realpath(str(desktop)))
     assert data["entries"] == ["a.txt", "b.txt"]
 
 
-def test_list_dir_rejects_paths_outside_home(monkeypatch):
-    monkeypatch.setattr(commands, "_home", lambda: "/Users/someone")
+def test_list_dir_allows_subdir_of_a_root(monkeypatch, tmp_path):
+    desktop = tmp_path / "Desktop"
+    docs = desktop / "Docs"
+    docs.mkdir(parents=True)
+    (docs / "a.txt").write_text("x")
+    monkeypatch.setattr(commands, "LIST_DIR_ROOTS", (str(desktop),))
+    ok, data = commands.run_command("list_dir", str(docs))
+    assert ok is True
+    assert data["entries"] == ["a.txt"]
+
+
+def test_list_dir_rejects_paths_outside_roots(monkeypatch, tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    monkeypatch.setattr(commands, "LIST_DIR_ROOTS", (str(desktop),))
     ok, data = commands.run_command("list_dir", "/etc")
+    assert ok is False
+    assert data.startswith("error:")
+
+
+def test_list_dir_rejects_dotdot_escape(monkeypatch, tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    (desktop / "visible.txt").write_text("x")
+    outside = tmp_path / "Elsewhere"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x")
+    monkeypatch.setattr(commands, "LIST_DIR_ROOTS", (str(desktop),))
+    ok, data = commands.run_command("list_dir", str(desktop / ".." / "Elsewhere"))
+    assert ok is False
+    assert data.startswith("error:")
+
+
+def test_list_dir_rejects_symlink_escape(monkeypatch, tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    outside = tmp_path / "Elsewhere"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x")
+    link = desktop / "innocent"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this platform")
+    monkeypatch.setattr(commands, "LIST_DIR_ROOTS", (str(desktop),))
+    ok, data = commands.run_command("list_dir", str(link))
     assert ok is False
     assert data.startswith("error:")
 

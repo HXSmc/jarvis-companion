@@ -7,6 +7,7 @@ import sys
 
 from fastapi import Depends, FastAPI
 
+from common import config
 from gateway.auth import require_bearer
 
 HOST = "127.0.0.1"
@@ -34,3 +35,12 @@ for _module in ("gateway.ws", "gateway.siri", "gateway.flows.flight", "gateway.f
     except ImportError:
         continue
     app.include_router(_mod.router)
+
+
+if __name__ == "__main__":
+    # LOW-4: the HOST env guard above can't see `uvicorn --host 0.0.0.0`, so
+    # `python -m gateway.app` pins the bind here — the launchd plist also pins
+    # `--host 127.0.0.1`, loopback no matter which path starts the gateway.
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=config.PORT)

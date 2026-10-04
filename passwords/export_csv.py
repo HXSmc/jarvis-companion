@@ -5,10 +5,11 @@ Reads vault-format markdown at runtime (same convention as common/config.py:
 `### Name` block) and emits the Apple Passwords CSV columns
 `Title,URL,Username,Password,Notes,OAuth Secret`.
 
---dry-run prints the CSV to stdout (pair with --fixture for testing);
-otherwise the CSV goes to a 0600 temp file, which --ttl minutes later is
-deleted by a detached cleanup process. Credential values are never printed
-or logged — the CSV content itself and the temp file path are the only output.
+--dry-run prints the CSV to stdout and is refused (exit 2) without --fixture —
+stdout is exactly where real credentials must never land; otherwise the CSV
+goes to a 0600 temp file, which --ttl minutes later (default 10) is deleted
+by a detached cleanup process. Credential values are never printed or logged —
+the CSV content itself and the temp file path are the only output.
 """
 
 from __future__ import annotations
@@ -106,13 +107,21 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="print the CSV to stdout instead of writing a temp file",
+        help="print the CSV to stdout instead of writing a temp file "
+             "(requires --fixture)",
     )
     parser.add_argument(
-        "--ttl", type=int, metavar="MINUTES",
-        help="auto-delete the temp file after this many minutes",
+        "--ttl", type=int, metavar="MINUTES", default=10,
+        help="auto-delete the temp file after this many minutes (default: 10)",
     )
     args = parser.parse_args(argv)
+
+    if args.dry_run and args.fixture is None:
+        # LOW-2: --dry-run prints every credential to stdout — refuse before
+        # the real vault is even read.
+        print("refusing --dry-run against the real vault; use --fixture or drop --dry-run",
+              file=sys.stderr)
+        sys.exit(2)
 
     text = load_vault_text(args.fixture)
     rows = parse_vault(text)
@@ -132,8 +141,7 @@ def main(argv: list[str] | None = None) -> None:
         write_csv(rows, f)
     logger.info("export_csv: %d entries written", len(rows))
     print(path)
-    if args.ttl is not None:
-        schedule_delete(path, args.ttl)
+    schedule_delete(path, args.ttl)
 
 
 if __name__ == "__main__":

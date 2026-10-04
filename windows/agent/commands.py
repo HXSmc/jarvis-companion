@@ -23,6 +23,13 @@ LIST_DIR_LIMIT = 200
 PROCESS_LIMIT = 25
 POWERSHELL_TIMEOUT_S = 15
 
+# list_dir scope (LOW-3): these three trees and nothing else — the whole-home
+# scope let a junction/symlink resolve anywhere the user could read.
+LIST_DIR_ROOTS = tuple(
+    os.path.join(os.path.expanduser("~"), name)
+    for name in ("Desktop", "Documents", "Downloads")
+)
+
 
 def run_command(name: str | None, payload=None) -> tuple[bool, object]:
     """Dispatch an allowlisted command. Returns the (ok, data) for the reply envelope."""
@@ -130,16 +137,20 @@ def _sleep(_payload) -> str:
     return "sleep requested"
 
 
-def _home() -> str:
-    return os.path.expanduser("~")
-
-
 def _list_dir(payload) -> dict:
-    home = _home()
-    raw = payload if isinstance(payload, str) and payload.strip() else home
-    target = os.path.abspath(os.path.expanduser(raw))
-    if target != home and not target.startswith(home + os.sep):
-        raise ValueError("path outside the user home tree is not allowed")
+    raw = payload if isinstance(payload, str) and payload.strip() else LIST_DIR_ROOTS[0]
+    # realpath collapses symlinks/junctions, normcase neutralises Windows case
+    # and slash differences — startswith tricks don't survive either.
+    target = os.path.normcase(os.path.realpath(os.path.expanduser(raw)))
+    for root in LIST_DIR_ROOTS:
+        root = os.path.normcase(os.path.realpath(root))
+        try:
+            if os.path.commonpath([root, target]) == root:
+                break
+        except ValueError:  # e.g. different Windows drives (C: vs D:)
+            continue
+    else:
+        raise ValueError("path outside the allowed Desktop/Documents/Downloads roots is not allowed")
     if not os.path.isdir(target):
         raise ValueError(f"not a directory: {target}")
     return {"path": target, "entries": sorted(os.listdir(target))[:LIST_DIR_LIMIT]}

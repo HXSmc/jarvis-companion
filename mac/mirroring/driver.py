@@ -8,9 +8,12 @@ Mirroring window.
 Probe-vs-actuate split (jarvis-phone daemon/dialer.py pattern): window.py
 probes read-only (CGWindowList + AX); this module actuates via CGEvent
 synthetic input (jarvis-phone scripts/banner_click.py click engine) and ONLY
-after a successful find — a missing window is reported, never clicked blind.
+after a successful find — a missing window is reported, never clicked blind —
+and only while the Mirroring window's owner is the frontmost app, because
+synthetic events land wherever focus is (otherwise exit 3, nothing posted).
 --dry-run resolves against the built-in fake window so it works with Mirroring
-closed and never posts events.
+closed and never posts events; `--type -` reads the text from stdin so it
+never appears in `ps`.
 
 Pure ctypes against macOS system frameworks — no pyobjc, no new deps.
 """
@@ -183,6 +186,25 @@ def _check_trusted() -> int | None:
     return None
 
 
+def _frontmost_pid() -> int | None:
+    """PID owning the first on-screen layer-0 window: CGWindowList is
+    front-to-back, so that window belongs to the frontmost application."""
+    for w in window._enum_windows():
+        if w.get("layer") == 0:
+            return w["pid"]
+    return None
+
+
+def _check_frontmost(win: MirrorWindow) -> int | None:
+    """LOW-6 focus guard: CGEvents land wherever focus is, so posting while
+    another app is frontmost would type/click into it. Nonzero exit code,
+    nothing posted, unless the Mirroring window's owner IS frontmost."""
+    if _frontmost_pid() != win.pid:
+        print("mirroring window not frontmost")
+        return 3
+    return None
+
+
 def _parse_coords(s: str, n: int, what: str) -> list[float]:
     parts = [p for p in s.split(",")]
     if len(parts) != n or not all(p.strip().lstrip("-").replace(".", "", 1).isdigit()
@@ -237,7 +259,7 @@ def main(argv=None) -> int:
     ap.add_argument("--swipe", metavar="X1,Y1,X2,Y2",
                     help="swipe between two window-relative points")
     ap.add_argument("--type", dest="type_text_arg", metavar="TEXT",
-                    help="type text into the Mirroring window")
+                    help="type text into the Mirroring window ('-' reads stdin)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the action instead of clicking; never requires "
                          "the real window")
@@ -245,6 +267,10 @@ def main(argv=None) -> int:
                     help="probe logic against the built-in fake window + "
                          "fixture PNG; no real window needed")
     args = ap.parse_args(argv)
+
+    if args.type_text_arg == "-":
+        # stdin, never argv: the text must not show up in `ps` (LOW-6).
+        args.type_text_arg = sys.stdin.read()
 
     if args.self_test:
         return self_test()
@@ -271,6 +297,9 @@ def main(argv=None) -> int:
         if args.dry_run:
             print(f"TAP {x:g} {y:g} (window {win.window_id})")
         else:
+            rc = _check_frontmost(win)
+            if rc is not None:
+                return rc
             rc = _check_trusted()
             if rc is not None:
                 return rc
@@ -281,6 +310,9 @@ def main(argv=None) -> int:
         if args.dry_run:
             print(f"SWIPE {x1:g} {y1:g} {x2:g} {y2:g} (window {win.window_id})")
         else:
+            rc = _check_frontmost(win)
+            if rc is not None:
+                return rc
             rc = _check_trusted()
             if rc is not None:
                 return rc
@@ -291,6 +323,9 @@ def main(argv=None) -> int:
         if args.dry_run:
             print(f"TYPE {args.type_text_arg} (window {win.window_id})")
         else:
+            rc = _check_frontmost(win)
+            if rc is not None:
+                return rc
             rc = _check_trusted()
             if rc is not None:
                 return rc

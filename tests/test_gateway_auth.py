@@ -44,3 +44,24 @@ def test_health_with_token_is_200_ok(stubbed_token: str) -> None:
     resp = _get(stubbed_token)
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+
+
+def test_require_bearer_non_ascii_token_is_401_not_500(stubbed_token: str) -> None:
+    # LOW-5: hmac.compare_digest(str, str) raised TypeError on non-ASCII (a
+    # 500); the byte compare must yield a plain 401 instead. Direct dependency
+    # call — httpx refuses to SEND non-ASCII header values client-side, but
+    # uvicorn delivers them to the app as latin-1-decoded strings.
+    from fastapi import HTTPException
+
+    from gateway.auth import require_bearer
+
+    async def run() -> HTTPException | None:
+        try:
+            await require_bearer(authorization="Bearer járvïs-tökén")
+        except HTTPException as exc:
+            return exc
+        return None
+
+    exc = asyncio.run(run())
+    assert exc is not None
+    assert exc.status_code == 401

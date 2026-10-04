@@ -16,7 +16,9 @@ async def require_bearer(authorization: str | None = Header(default=None)) -> No
     fails closed (None never matches) and tests can monkeypatch it.
     """
     token = config.get_token()
+    # Compare .encode() bytes: compare_digest(str, str) raises TypeError on
+    # non-ASCII (a 500), while bytes compare never does (LOW-5).
     if not token or not authorization or not hmac.compare_digest(
-        authorization, f"Bearer {token}"
+        authorization.encode(), f"Bearer {token}".encode()
     ):
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
