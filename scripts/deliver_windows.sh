@@ -1,24 +1,37 @@
 #!/usr/bin/env bash
-# Deliver the built Jarvis Windows agent .exe to the PC "<user>" over Taildrop
-# (DESIGN.md "Delivery / install paths"). The build happens ON the Windows PC
-# (PyInstaller cannot cross-compile — PLAN.md T3.2); this copies the .exe once
-# one exists locally and prints the install command to paste on the PC.
+# Deliver the Jarvis Windows agent bundle to the PC "<user>" over Taildrop
+# (DESIGN.md "Delivery / install paths"). Default is the one-click source zip
+# from scripts/build_release.sh (windows/install.ps1 sets everything up on the
+# PC); the legacy self-built .exe still works when passed explicitly.
 set -euo pipefail
 
-EXE="${1:-dist/jarvis-agent.exe}"
+ZIP="${1:-dist/jarvis-windows-agent.zip}"
 
-if [[ ! -f "$EXE" ]]; then
-    echo "error: $EXE not found." >&2
-    echo "Build it on the Windows PC first: pip install pyinstaller && pyinstaller windows\\jarvis-agent.spec" >&2
+if [[ ! -f "$ZIP" ]]; then
+    echo "error: $ZIP not found." >&2
+    echo "Build it on the Mac first: bash scripts/build_release.sh" >&2
+    echo "(legacy .exe path: build on the PC with pip install pyinstaller && pyinstaller windows\\\\jarvis-agent.spec, then pass dist/jarvis-agent.exe)" >&2
     exit 1
 fi
 
 command -v tailscale >/dev/null 2>&1 || { echo "error: tailscale CLI not found in PATH" >&2; exit 1; }
 
-echo "Sending $(basename "$EXE") to <user> ..."
-tailscale file cp "$EXE" <user>:
+echo "Sending $(basename "$ZIP") to <user> ..."
+tailscale file cp "$ZIP" <user>:
 
-cat <<'EOF'
+if [[ "$ZIP" == *.zip ]]; then
+    cat <<'EOF'
+
+Paste this on the Windows PC (PowerShell) to install and start the agent:
+
+  Expand-Archive "$env:USERPROFILE\Downloads\jarvis-windows-agent.zip" -DestinationPath "$env:LOCALAPPDATA\jarvis\src"; cd "$env:LOCALAPPDATA\jarvis\src"; powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
+
+(Installer: ensures Python, creates the venv, prompts for the gateway URL +
+token (masked), adds a Startup shortcut, starts the tray agent. Re-running
+updates the code and restarts. See windows/README.md.)
+EOF
+else
+    cat <<'EOF'
 
 Paste this on the Windows PC (PowerShell) to install and start the agent:
 
@@ -44,3 +57,4 @@ startup with "no gateway URL available" / "no bearer token available":
 
      (or set a JARVIS_TOKEN env var to the same value)
 EOF
+fi
