@@ -116,4 +116,5 @@ async def create_signin_handoff(body: SigninHandoffBody) -> dict:
     """Create a pending handoff; the caller sends the returned link to the owner itself."""
     handoff = flight.create_handoff(body.url)
     handoff["vault_key"] = body.vault_key
+    handoff["kind"] = "signin"  # gateway.ws dispatches handoff_open on this marker
     return {"id": handoff["id"], "link": LINK_PREFIX + handoff["id"]}
