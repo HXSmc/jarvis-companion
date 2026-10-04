@@ -94,7 +94,11 @@ def test_handshake_mints_cookie_and_sixth_session_evicts(gateway_server, fake_ca
                 resp = await http.get("/screen", headers=IOS_AUTH_HEADER)
                 assert resp.status_code == 200, resp.text
                 set_cookie = resp.headers["set-cookie"]
-                for flag in ("HttpOnly", "Secure", "SameSite=strict", "Path=/screen/", "Max-Age=43200"):
+                # Exact attribute: /screen (no trailing slash) so the bare /screen
+                # route path-matches too (RFC 6265 — /screen is not a prefix of
+                # itself under Path=/screen/).
+                assert "Path=/screen;" in set_cookie or set_cookie.endswith("Path=/screen"), set_cookie
+                for flag in ("HttpOnly", "Secure", "SameSite=strict", "Max-Age=43200"):
                     assert flag in set_cookie, set_cookie
                 cookies.append(resp.cookies.get("screen_session"))
             # 6th mint evicted the 1st of the 5 live sessions.
@@ -190,6 +194,40 @@ def test_boot_nonce_mints_cookie_and_is_consumed(gateway_server, fake_capture):
     asyncio.run(run())
 
 
+def test_session_cookie_path_is_screen_exact(gateway_server):
+    """Set-Cookie must carry Path=/screen (no trailing slash) as its own attribute."""
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.get("/screen", headers=IOS_AUTH_HEADER)
+            assert resp.status_code == 200, resp.text
+            set_cookie = resp.headers["set-cookie"]
+            assert "Path=/screen;" in set_cookie or set_cookie.endswith("Path=/screen"), set_cookie
+            assert "Path=/screen/" not in set_cookie, set_cookie
+
+    asyncio.run(run())
+
+
+def test_consumed_or_bogus_nonce_with_valid_cookie_serves_page(gateway_server):
+    """Reload of a once-used boot link stays 200 when the session cookie is valid."""
+    async def run():
+        screen._BOOTSTRAPS.clear()
+        nonce = "nonce-sc2-reload"
+        screen._BOOTSTRAPS[nonce] = time.time() + 60
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.get("/screen", params={"boot": nonce})
+            assert resp.status_code == 200, resp.text
+            cookie = resp.cookies.get("screen_session")
+            assert cookie, resp.headers
+            # Secure cookie — httpx won't jar it over http, so send it explicitly.
+            cookie_header = {"Cookie": f"screen_session={cookie}"}
+            resp = await http.get("/screen", params={"boot": nonce}, headers=cookie_header)
+            assert resp.status_code == 200, resp.text
+            resp = await http.get("/screen", params={"boot": "bogus"}, headers=cookie_header)
+            assert resp.status_code == 200, resp.text
+
+    asyncio.run(run())
+
+
 def test_boot_nonce_reuse_and_bogus_are_401(gateway_server):
     async def run():
         screen._BOOTSTRAPS.clear()
@@ -198,9 +236,11 @@ def test_boot_nonce_reuse_and_bogus_are_401(gateway_server):
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             resp = await http.get("/screen", params={"boot": nonce})
             assert resp.status_code == 200, resp.text
-            resp = await http.get("/screen", params={"boot": nonce})  # reused
+        # Bad nonces with NO valid cookie -> 401 as before.
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as bare:
+            resp = await bare.get("/screen", params={"boot": nonce})  # reused
             assert resp.status_code == 401, resp.text
-            resp = await http.get("/screen", params={"boot": "bogus"})
+            resp = await bare.get("/screen", params={"boot": "bogus"})
             assert resp.status_code == 401, resp.text
 
     asyncio.run(run())

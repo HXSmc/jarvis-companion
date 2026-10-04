@@ -186,22 +186,24 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
 
     `boot` is a single-use 60 s nonce (minted by SC7's launch route): valid +
     unexpired -> consumed here and exchanged for a session cookie; bogus,
-    expired, or reused -> 401. The boot value is never logged.
+    expired, or reused -> 401 unless the request already carries a valid
+    session cookie (page reload of a once-used boot link stays 200). The boot
+    value is never logged.
     """
+    kind = None
     if boot is not None:
         _sweep(_BOOTSTRAPS)
         expiry = _BOOTSTRAPS.pop(boot, None)
-        if expiry is None or expiry <= time.time():
-            raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-        kind = "boot"
-    else:
+        if expiry is not None and expiry > time.time():
+            kind = "boot"
+    if kind is None:
         kind = _require(request)
     response = FileResponse(SCREEN_HTML)
     if kind in ("bearer", "boot"):
         response.set_cookie(
             SESSION_COOKIE, _mint_session(),
             max_age=SESSION_TTL_S, httponly=True, secure=True,
-            samesite="strict", path="/screen/",
+            samesite="strict", path="/screen",
         )
     return response
 

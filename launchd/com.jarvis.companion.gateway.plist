@@ -12,6 +12,7 @@
 		<string>127.0.0.1</string>
 		<string>--port</string>
 		<string>8788</string>
+		<string>--no-access-log</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>/Users/<user>/Desktop/personal/jarvis-companion</string>
