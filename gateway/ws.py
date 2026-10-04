@@ -18,7 +18,7 @@ import logging
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from common import config
-from gateway import registry
+from gateway import agents, registry
 from gateway.auth import require_bearer
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,17 @@ async def ws_endpoint(
     await registry.register(role, websocket)
     try:
         while True:
-            raw = await websocket.receive_text()
+            # receive() (not receive_text()): the iOS URLSessionWebSocketTask sends
+            # BINARY frames, so both text and bytes must decode into envelopes.
+            frame = await websocket.receive()
+            if frame["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(code=frame.get("code", 1000))
+            if isinstance(frame.get("text"), str):
+                raw: str | None = frame["text"]
+            elif isinstance(frame.get("bytes"), (bytes, bytearray)):
+                raw = frame["bytes"].decode("utf-8", errors="replace")
+            else:  # e.g. websocket.accept repeats — nothing to parse
+                continue
             try:
                 message = json.loads(raw)
                 if not isinstance(message, dict):
@@ -124,6 +134,10 @@ async def ws_endpoint(
                 await websocket.send_json(
                     {"id": None, "ok": False, "data": {"error": "invalid envelope"}}
                 )
+                continue
+            # A reply to a pending /agents/*/command resolves its future and is
+            # consumed — the generic ack would only confuse the agent.
+            if agents.resolve_reply(message):
                 continue
             handler = _HANDLERS.get(message.get("type"))
             if handler is None:  # unknown type keeps the generic ack

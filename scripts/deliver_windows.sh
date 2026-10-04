@@ -26,4 +26,21 @@ Paste this on the Windows PC (PowerShell) to install and start the agent:
 
 (Moves the Taildrop file from Downloads to %LOCALAPPDATA%\Jarvis, adds a Startup
 shortcut so it relaunches on login, then starts it.)
+
+ONE-TIME SETUP on the PC — the agent needs exactly two values, or it exits at
+startup with "no gateway URL available" / "no bearer token available":
+
+  1. Gateway URL (where to reach the Mac gateway over Tailscale — NOT the PC's
+     own 127.0.0.1). Create this file containing the Mac's serve URL on its
+     first line, e.g. https://mac-name.<tailnet>.<tld> :
+
+       New-Item -ItemType Directory -Force "$env:APPDATA\jarvis" | Out-Null; Set-Content -Path "$env:APPDATA\jarvis\gateway_url" -Value "https://<MAC-SERVE-URL>"
+
+     (or set a JARVIS_GATEWAY_URL env var to the same value)
+
+  2. Bearer token (the vault's shared `token:` value). Copy it into:
+
+       Set-Content -Path "$env:APPDATA\jarvis\token" -Value "<TOKEN-VALUE>"
+
+     (or set a JARVIS_TOKEN env var to the same value)
 EOF

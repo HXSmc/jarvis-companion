@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -191,5 +192,62 @@ def test_ttl_expiry_notifies_once():
         assert second["state"] == "expired", second
 
         assert recorded == [{"id": handoff["id"], "event": "expired"}], recorded
+
+    asyncio.run(run())
+
+
+def test_untouched_handoff_expires_via_sweeper_without_get_handoff(monkeypatch):
+    """C-MED-2: an ignored link expires through the background sweeper alone.
+
+    The handoff is read straight from the module store — get_handoff is never
+    called (that path had its own expiry) — and the notify channel fires
+    exactly once.
+    """
+    async def run():
+        recorded: list[dict] = []
+
+        async def fake_notify(event: dict) -> None:
+            recorded.append(event)
+
+        flight.notify = fake_notify
+        monkeypatch.setattr(flight, "SWEEP_INTERVAL_S", 0.05)
+        handoff = flight.create_handoff(CHECKOUT_URL, "ctx", ttl=0.15)
+
+        deadline = time.monotonic() + 5
+        while (
+            flight._handoffs[handoff["id"]]["state"] != "expired"
+            and time.monotonic() < deadline
+        ):
+            await asyncio.sleep(0.05)
+
+        stored = flight._handoffs[handoff["id"]]  # direct store read — no get_handoff
+        assert stored["state"] == "expired", stored
+        assert stored["history"][-1] == "expired", stored["history"]
+        # Give any (wrong) second notify a chance to fire before asserting once-ness.
+        await asyncio.sleep(0.2)
+        assert recorded == [{"id": handoff["id"], "event": "expired"}], recorded
+
+    asyncio.run(run())
+
+
+def test_get_handoff_endpoint_returns_state_and_404_unknown():
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/handoff/flight",
+                headers=AUTH_HEADER,
+                json={"url": CHECKOUT_URL, "context": "checkout"},
+            )
+            handoff_id = resp.json()["id"]
+
+            # Poll endpoint: {id, state, kind} for a live handoff (C-MED-2).
+            state = await http.get(f"/handoff/{handoff_id}", headers=AUTH_HEADER)
+            assert state.status_code == 200, state.text
+            assert state.json() == {"id": handoff_id, "state": "pending", "kind": "flight"}
+
+            # Unknown id -> 404, not 500/200.
+            missing = await http.get("/handoff/no-such-handoff", headers=AUTH_HEADER)
+            assert missing.status_code == 404, missing.text
+            assert "not found" in missing.json()["detail"]
 
     asyncio.run(run())

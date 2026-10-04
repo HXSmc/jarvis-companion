@@ -84,16 +84,20 @@ def write_csv(rows: list[dict[str, str]], out) -> None:
         writer.writerow([row.get(column, "") for column in CSV_HEADER])
 
 
-def schedule_delete(path: str, ttl_minutes: int) -> None:
+def schedule_delete(path: str, ttl_seconds: float) -> None:
     """Delete the temp file after the TTL via a detached process that
-    survives this script exiting (owner needs the file alive to import it)."""
+    survives this script exiting (owner needs the file alive to import it).
+
+    Seconds (not minutes) so short TTLs are testable; sh passes ttl and path
+    as $1/$2 — the rm targets $2, the path, never the TTL itself (C-HIGH-2).
+    """
     subprocess.Popen(
-        ["/bin/sh", "-c", 'sleep "$1"; rm -f "$1"', "sh", str(ttl_minutes * 60), path],
+        ["/bin/sh", "-c", 'sleep "$1"; rm -f "$2"', "sh", str(ttl_seconds), path],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    logger.info("export_csv: %s auto-deletes in %d minute(s)", path, ttl_minutes)
+    logger.info("export_csv: %s auto-deletes in %g second(s)", path, ttl_seconds)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -111,8 +115,9 @@ def main(argv: list[str] | None = None) -> None:
              "(requires --fixture)",
     )
     parser.add_argument(
-        "--ttl", type=int, metavar="MINUTES", default=10,
-        help="auto-delete the temp file after this many minutes (default: 10)",
+        "--ttl", type=float, metavar="MINUTES", default=10,
+        help="auto-delete the temp file after this many minutes (default: 10; "
+             "fractional values allowed for tests)",
     )
     args = parser.parse_args(argv)
 
@@ -141,7 +146,7 @@ def main(argv: list[str] | None = None) -> None:
         write_csv(rows, f)
     logger.info("export_csv: %d entries written", len(rows))
     print(path)
-    schedule_delete(path, args.ttl)
+    schedule_delete(path, args.ttl * 60)
 
 
 if __name__ == "__main__":
