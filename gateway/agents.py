@@ -56,18 +56,21 @@ class CommandBody(BaseModel):
     cmd: str
 
 
-@router.post("/agents/windows/command", dependencies=[Depends(require_bearer)])
-async def windows_command(body: CommandBody) -> dict:
-    """Forward one allowlisted command to the windows agent and await its reply."""
+async def agent_roundtrip(envelope: dict) -> dict:
+    """Send one command envelope to the windows agent and await its reply.
+
+    No connection -> 503; no reply within REPLY_TIMEOUT_S -> 504. Shared by the
+    /agents POST (voice-routed commands) and gateway.screen's frame/input/open
+    round-trips — SC2 spec extraction.
+    """
     if WINDOWS_ROLE not in registry.roles():
         raise HTTPException(status_code=503, detail=NOT_CONNECTED_DETAIL)
-    envelope = voice_router.request_envelope(body.cmd)
     future: asyncio.Future = asyncio.get_running_loop().create_future()
     _pending_replies[envelope["id"]] = future
     try:
         if not await registry.send_to_role(WINDOWS_ROLE, envelope):
             raise HTTPException(status_code=503, detail=NOT_CONNECTED_DETAIL)
-        logger.info("agents: sent %r to %s as %s", body.cmd, WINDOWS_ROLE, envelope["id"])
+        logger.info("agents: sent %r to %s as %s", envelope["payload"].get("cmd"), WINDOWS_ROLE, envelope["id"])
         try:
             reply = await asyncio.wait_for(future, timeout=REPLY_TIMEOUT_S)
         except asyncio.TimeoutError:
@@ -75,4 +78,11 @@ async def windows_command(body: CommandBody) -> dict:
             raise HTTPException(status_code=504, detail=TIMEOUT_DETAIL)
     finally:
         _pending_replies.pop(envelope["id"], None)
+    return reply
+
+
+@router.post("/agents/windows/command", dependencies=[Depends(require_bearer)])
+async def windows_command(body: CommandBody) -> dict:
+    """Forward one allowlisted command to the windows agent and await its reply."""
+    reply = await agent_roundtrip(voice_router.request_envelope(body.cmd))
     return {"ok": bool(reply.get("ok")), "data": reply.get("data")}

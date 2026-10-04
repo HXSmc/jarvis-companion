@@ -26,7 +26,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents
+from gateway import agents, screen
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
@@ -36,6 +36,9 @@ app.include_router(siri_router)
 app.include_router(flight.router)
 app.include_router(signin.router)
 app.include_router(agents.router)
+# SCREEN_CONTROL=0 unmounts /screen/* (kill switch); default on.
+if os.environ.get("SCREEN_CONTROL", "1") != "0":
+    app.include_router(screen.router)
 
 
 if __name__ == "__main__":
