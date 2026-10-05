@@ -83,6 +83,16 @@ final class DictationController: NSObject, ObservableObject {
     /// Set when release() lands while `starting` (async permission hops):
     /// pending start completions check this and abort to idle.
     private var releaseRequested = false
+    /// Mirrors the physical hold (true from press to release/cancel) so the
+    /// 60 s cap can tell a live hold from a gesture that was CANCELLED (F2).
+    private var isHeld = false
+    /// Set when either permission was .notDetermined at press time (F2): the
+    /// permission alert cancels the gesture, so after the grant the start
+    /// aborts to idle — the owner must press again.
+    private var repressAfterGrant = false
+    /// Set by cancelDiscard() so straggler recognition callbacks (the
+    /// cancelled task's final error) don't deliver anything afterwards.
+    private var discarding = false
 
     override init() {
         if let current = SFSpeechRecognizer(locale: Locale.current), current.isAvailable {
@@ -91,6 +101,18 @@ final class DictationController: NSObject, ObservableObject {
             recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         }
         super.init()
+        // F2: an audio-session interruption (incoming call, Siri…) kills the
+        // capture mid-hold; discard it rather than send a truncated take.
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            if (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                == AVAudioSession.InterruptionType.began.rawValue {
+                self?.cancelDiscard()
+            }
+        }
     }
 
     /// True between press start and the listening state actually engaging
@@ -101,12 +123,17 @@ final class DictationController: NSObject, ObservableObject {
     /// determined (behavior item 5), then start engine + recognition.
     func pressStarted() {
         guard !isPressed else { return }
+        releaseRequested = false
+        discarding = false
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
         if speechStatus == .denied || speechStatus == .restricted {
             onPermissionDenied?()
             return
         }
         starting = true
+        isHeld = true
+        repressAfterGrant = speechStatus == .notDetermined
+            || AVAudioSession.sharedInstance().recordPermission == .undetermined
         if speechStatus == .notDetermined {
             SFSpeechRecognizer.requestAuthorization { [weak self] status in
                 DispatchQueue.main.async {
@@ -145,6 +172,14 @@ final class DictationController: NSObject, ObservableObject {
                     self.releaseRequested = false
                     return
                 }
+                if self.repressAfterGrant {
+                    // F2: the permission alert cancelled the gesture — both
+                    // permissions now granted, but return to idle without
+                    // starting; the owner presses again.
+                    self.starting = false
+                    self.repressAfterGrant = false
+                    return
+                }
                 self.startListening()
             }
         }
@@ -180,9 +215,17 @@ final class DictationController: NSObject, ObservableObject {
             }
             isListening = true
             // 60 s cap (behavior item 2): Apple's recognizer limit; auto-stop
-            // and auto-send rather than stranding the hold.
+            // and auto-send while still held, otherwise discard (F2: a
+            // cancelled gesture must not auto-send unheld).
             capTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { [weak self] _ in
-                DispatchQueue.main.async { self?.release() }
+                DispatchQueue.main.async {
+                    guard let self = self, self.isListening else { return }
+                    if self.isHeld {
+                        self.release()
+                    } else {
+                        self.cancelDiscard()
+                    }
+                }
             }
         } catch {
             teardownAudio()
@@ -194,9 +237,10 @@ final class DictationController: NSObject, ObservableObject {
     /// KeepAlive session, wait up to 1.5 s for isFinal, then send the best
     /// transcript (behavior item 2 / criterion 5).
     func release() {
+        isHeld = false
         guard isListening else {
-            // Release during the async start path: flag it so the pending
-            // start aborts instead of running unheld.
+            // Release (or gesture CANCEL, F2) during the async start path:
+            // flag it so the pending start aborts instead of running unheld.
             if starting { releaseRequested = true }
             return
         }
@@ -212,6 +256,32 @@ final class DictationController: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
+    /// F2: stop dictation and DISCARD the transcript (scene leaving active,
+    /// audio-session interruption, 60 s cap with no hold). Same teardown as
+    /// release() — tap removed, engine stopped, KeepAlive session restored —
+    /// but nothing is sent.
+    func cancelDiscard() {
+        isHeld = false
+        repressAfterGrant = false
+        discarding = true
+        // Abort any pending async start (same mechanism as a release while
+        // starting); a fresh press resets the flag.
+        releaseRequested = true
+        finalizeWork?.cancel()
+        finalizeWork = nil
+        if isListening {
+            isListening = false
+            capTimer?.invalidate()
+            capTimer = nil
+            teardownAudio()
+        }
+        starting = false
+        task?.cancel()
+        task = nil
+        bestTranscript = ""
+        partialTranscript = ""
+    }
+
     private func teardownAudio() {
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
@@ -221,6 +291,7 @@ final class DictationController: NSObject, ObservableObject {
     }
 
     private func handleResult(_ result: SFSpeechRecognitionResult?, _ error: Error?) {
+        if discarding { return }
         if let result = result {
             bestTranscript = result.bestTranscription.formattedString
             partialTranscript = bestTranscript
@@ -356,14 +427,11 @@ final class AppModel: ObservableObject {
         replyText = nil
         replyIsError = false
         isSending = true
-        var base = AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
-        while base.hasSuffix("/") { base.removeLast() }
-        guard let url = URL(string: base + "/siri/hey") else {
+        // F3: URLComponents-built endpoint — https enforced, no query or
+        // fragment leaking into the path.
+        guard let url = Self.heyEndpoint() else {
             isSending = false
-            fail(NSError(
-                domain: "ask", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "invalid gateway URL"]
-            ))
+            fail("gateway URL must be https")
             return
         }
         var request = URLRequest(url: url)
@@ -372,12 +440,23 @@ final class AppModel: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.isSending = false
                 if let error = error {
                     self.fail(error)
+                    return
+                }
+                // F1: surface the real HTTP status instead of letting a 401
+                // show up as "malformed reply".
+                if let http = response as? HTTPURLResponse,
+                   !(200...299).contains(http.statusCode) {
+                    if http.statusCode == 401 || http.statusCode == 403 {
+                        self.fail("unauthorized, check the token in Settings")
+                    } else {
+                        self.fail("HTTP \(http.statusCode)")
+                    }
                     return
                 }
                 guard let data = data,
@@ -397,10 +476,32 @@ final class AppModel: ObservableObject {
         }.resume()
     }
 
-    private func fail(_ error: Error) {
-        replyText = "ask failed: \(error.localizedDescription)"
+    /// F3: <gateway>/siri/hey from the saved setting via URLComponents —
+    /// scheme must be https, the existing path is kept with no double slash,
+    /// any query/fragment is dropped. Every ask entry point (chips, typed
+    /// send, mic release) funnels through ask(), so all share this helper.
+    private static func heyEndpoint() -> URL? {
+        guard var comps = URLComponents(
+            string: AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
+        ), comps.scheme?.lowercased() == "https", comps.host != nil else {
+            return nil
+        }
+        var path = comps.path
+        while path.hasSuffix("/") { path.removeLast() }
+        comps.path = path + "/siri/hey"
+        comps.query = nil
+        comps.fragment = nil
+        return comps.url
+    }
+
+    private func fail(_ message: String) {
+        replyText = "ask failed: \(message)"
         replyIsError = true
         Haptics.error()
+    }
+
+    private func fail(_ error: Error) {
+        fail(error.localizedDescription)
     }
 
     /// DESIGN.md "Feature data flows" #2: a `jarvis://handoff/<id>` link
@@ -430,6 +531,9 @@ final class AppModel: ObservableObject {
         // DESIGN.md "Failure handling": JS is unreliable in background, so the
         // app only acts while foregrounded.
         web.isForeground = phase == .active
+        // F2: leaving the active scene cancels the hold — discard the
+        // capture instead of sending it.
+        if phase != .active { dictation.cancelDiscard() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {
@@ -495,6 +599,10 @@ struct ContentView: View {
 
     @ScaledMetric(relativeTo: .body) private var replySize: CGFloat = 21
     @ScaledMetric(relativeTo: .caption) private var markSize: CGFloat = 13
+    /// F2: press tracking — SwiftUI resets this to false when the gesture
+    /// ends OR is CANCELLED (system alert under the finger, incoming call,
+    /// backgrounding), so a cancel runs the exact same path as a release.
+    @GestureState private var micHeld = false
 
     var body: some View {
         ZStack {
@@ -658,8 +766,14 @@ struct ContentView: View {
                             dictation.pressStarted()
                         }
                     }
-                    .onEnded { _ in dictation.release() }
+                    .updating($micHeld) { _, state, _ in state = true }
             )
+            // F2: fires on both a normal lift and a CANCELLED gesture (the
+            // @GestureState auto-reset); release() aborts a pending start or
+            // stops + sends a live one.
+            .onChange(of: micHeld) { held in
+                if !held { dictation.release() }
+            }
             .accessibilityLabel("Hold to talk")
             .accessibilityAddTraits(.isButton)
     }

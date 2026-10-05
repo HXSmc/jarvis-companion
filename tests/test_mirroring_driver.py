@@ -54,6 +54,29 @@ def test_alpha_only_image():
     assert _alpha_bytes_zero(b"\x00" * (W * H - 1) + b"\x01", W, H, W, 8, 0) is False
 
 
+def test_null_provider_or_data_is_unreadable(monkeypatch):
+    # NULL CGImageGetDataProvider / NULL CGDataProviderCopyData must read as
+    # unreadable, never dereferenced in CF (NULL data segfaulted, rc=139).
+    # CG/CF stubbed — no real capture, no real image.
+    from mac.mirroring import driver
+
+    seen = []
+    for name, ret in (("CGImageGetWidth", W), ("CGImageGetHeight", H),
+                      ("CGImageGetBitsPerPixel", 32),
+                      ("CGImageGetAlphaInfo", 1), ("CGImageGetBitmapInfo", 0)):
+        monkeypatch.setattr(driver.CG, name, lambda img, _ret=ret: _ret)
+    monkeypatch.setattr(driver.CG, "CGImageGetDataProvider", lambda img: 0)
+    monkeypatch.setattr(driver.CG, "CGDataProviderCopyData", lambda p: 0)
+    for name in ("CFDataGetBytePtr", "CFDataGetLength", "CFRelease"):
+        monkeypatch.setattr(driver.CF, name,
+                            lambda *a, _n=name: seen.append(_n))
+    assert driver._capture_is_unreadable(object()) is True  # NULL provider
+    monkeypatch.setattr(driver.CG, "CGImageGetDataProvider",
+                        lambda img: object())
+    assert driver._capture_is_unreadable(object()) is True  # NULL copied data
+    assert seen == []  # neither NULL reached the CF layer
+
+
 def test_sentinel_geometry_like_live_capture():
     # the observed failure: 624x1374 capture, every pixel (0, 0, 0, 0)
     w, h, stride = 624, 1374, 624 * 4

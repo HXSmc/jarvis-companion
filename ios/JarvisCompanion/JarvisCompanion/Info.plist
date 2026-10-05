@@ -43,7 +43,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Holding the mic button records your voice so Jarvis can hear your request.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Your dictated request is converted to text and sent to your Jarvis gateway.</string>
+	<string>Your dictated request is converted to text, which may be processed by Apple's speech recognition service, and sent to your Jarvis gateway.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

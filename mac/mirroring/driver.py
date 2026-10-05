@@ -161,7 +161,12 @@ def _capture_is_unreadable(img) -> bool:
         # order: a little-endian layout flips "last component" to byte 0
         little = (CG.CGImageGetBitmapInfo(img) & 0xF000) == 0x2000  # 32Little
         alpha_offset = bits // 8 - 1 if (alpha_info in _ALPHA_LAST_INFO) != little else 0
-    cf_data = CG.CGDataProviderCopyData(CG.CGImageGetDataProvider(img))
+    provider = CG.CGImageGetDataProvider(img)
+    if not provider:  # NULL provider — nothing to copy, nothing to release
+        return True
+    cf_data = CG.CGDataProviderCopyData(provider)
+    if not cf_data:  # NULL data — same unreadable capture, never dereferenced
+        return True
     try:
         buf = ctypes.string_at(CF.CFDataGetBytePtr(cf_data),
                                CF.CFDataGetLength(cf_data))
