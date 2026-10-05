@@ -22,6 +22,7 @@ BUNDLE_ID="personal.jarvis.JarvisCompanion"
 IPA_NAME="JarvisCompanion.ipa"
 TAILNET_HOST="<mac-host>.<tailnet>.<tld>"
 SERVE_PORT="8445"
+HTTP_LOOPBACK_PORT="8446"  # must match launchd/com.jarvis.companion.altstore-http.plist
 
 SERVE_DIR="${SERVE_DIR:-$HOME/Library/Application Support/jarvis-companion/altstore}"
 LOG="$HOME/Library/Logs/jarvis-altstore-publish.log"
@@ -32,6 +33,18 @@ mkdir -p "$(dirname "$LOG")"
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$LOG"
 }
+
+# Self-heal the :8445 serve mapping (RunAtLoad covers reboot/login; this
+# covers a tailscaled restart in between). Scoped to this one port only --
+# never "serve reset", never touches 8790/8443/443. Non-fatal: a tailscale
+# hiccup here should not block the publish.
+if command -v tailscale >/dev/null 2>&1; then
+  if ! tailscale serve status 2>/dev/null | grep -q ":$SERVE_PORT"; then
+    tailscale serve --bg --https="$SERVE_PORT" "http://127.0.0.1:$HTTP_LOOPBACK_PORT" >/dev/null 2>&1 \
+      && log "re-asserted tailscale serve :$SERVE_PORT (was missing)" \
+      || log "warn: tailscale serve re-assert for :$SERVE_PORT failed (non-fatal)"
+  fi
+fi
 
 fail() {
   log "ERROR: $1"
