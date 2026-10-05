@@ -113,6 +113,7 @@ final class DictationController: NSObject, ObservableObject {
                     guard let self = self else { return }
                     guard status == .authorized else {
                         self.starting = false
+                        self.releaseRequested = false
                         self.onPermissionDenied?()
                         return
                     }
@@ -135,6 +136,7 @@ final class DictationController: NSObject, ObservableObject {
                 guard let self = self else { return }
                 guard granted else {
                     self.starting = false
+                    self.releaseRequested = false
                     self.onPermissionDenied?()
                     return
                 }
@@ -167,7 +169,7 @@ final class DictationController: NSObject, ObservableObject {
             let input = audioEngine.inputNode
             let format = input.outputFormat(forBus: 0)
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                request.appendAudioPCMBuffer(buffer)
+                request.append(buffer)
             }
             audioEngine.prepare()
             try audioEngine.start()
