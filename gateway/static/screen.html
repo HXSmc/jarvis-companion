@@ -371,6 +371,7 @@ function applyCursorMode(on) {
   cursorBtn.classList.toggle("on", on);
   cursorBtn.setAttribute("aria-pressed", on ? "true" : "false");
   cancelCursorGesture();
+  ptrs.clear(); pinchPrev = null; endGesture(); // no stale direct-mode state across a mid-gesture toggle
 }
 
 function setCursorMode(on) {
@@ -408,7 +409,12 @@ function cursorMove(e) {
   if (!g || e.pointerId !== g.id) return;
   var dx = e.clientX - g.lastX, dy = e.clientY - g.lastY;
   g.lastX = e.clientX; g.lastY = e.clientY;
-  if (Math.hypot(e.clientX - g.x0, e.clientY - g.y0) > TAP_DIST_CSS) {
+  if (!g.moved) {
+    // sub-threshold jitter moves nothing — a tap/long-press clicks where the
+    // POINTER sat at pointerdown; crossing the threshold applies the whole
+    // travel from x0 in one step so no drag travel is lost
+    dx = e.clientX - g.x0; dy = e.clientY - g.y0;
+    if (Math.hypot(dx, dy) <= TAP_DIST_CSS) return;
     g.moved = true;
     if (g.timer) { clearTimeout(g.timer); g.timer = null; }
   }
