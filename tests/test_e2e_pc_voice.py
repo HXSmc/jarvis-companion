@@ -6,30 +6,21 @@ Fakes the edges, keeps the gateway real (PLAN T5.3 binding acceptance):
 - The Windows agent is a fake: FakeAsk for the speak() checks, and a real WS
   client connected through the live app for the wire-shape check, which pushes
   via gateway.registry.send_to_role (PLAN's "WS loop").
-Token monkeypatched per tests/test_gateway_auth.py, so no vault dependency.
+Token comes from the shared tests/conftest.py `gateway_server` fixture, so no
+vault dependency.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import threading
 
-import pytest
-import uvicorn
 import websockets
 
-from common import config
+from conftest import AUTH_HEADER
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from mac.voice.router import OFFLINE_REPLY, request_envelope, route, speak
 
-TOKEN = "jarvis_test_token_123"
-IOS_TOKEN = "jarvis_ios_test_token_456"
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 SPECS_TRANSCRIPT = "hey jarvis, what's the PC's RAM"
 UNRELATED_TRANSCRIPT = "hey jarvis, what's the weather tomorrow"
 # Fixture agent-reply data dict: a specs dict with a RAM value in it.
@@ -107,50 +98,34 @@ def test_request_envelope_shape_and_fresh_ids() -> None:
     assert env["id"] != request_envelope("specs")["id"]
 
 
-async def _wire_run() -> None:
+async def _wire_run(server_factory) -> None:
     from gateway import registry
-    from gateway.app import app
 
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    threading.Thread(target=server.run, daemon=True).start()
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
+    async with server_factory() as base:
+        # Fake windows agent: a real WS client through the real app.
+        async with websockets.connect(
+            f"ws://{base}/ws?role=windows", **{_WS_HEADERS_KWARG: AUTH_HEADER}
+        ) as agent:
+            for _ in range(100):
+                if "windows" in registry.roles():
+                    break
+                await asyncio.sleep(0.05)
+            assert "windows" in registry.roles(), "agent never registered"
 
-    # Fake windows agent: a real WS client through the real app.
-    async with websockets.connect(
-        f"ws://127.0.0.1:{port}/ws?role=windows",
-        **{_WS_HEADERS_KWARG: {"Authorization": f"Bearer {TOKEN}"}},
-    ) as agent:
-        for _ in range(100):
-            if "windows" in registry.roles():
+            envelope = request_envelope("specs")
+            assert await registry.send_to_role("windows", envelope) is True
+            received = json.loads(await asyncio.wait_for(agent.recv(), timeout=10))
+            assert set(received) == {"id", "type", "payload"}, f"wire shape: {received}"
+            assert received["type"] == "command"
+            assert received["payload"] == {"cmd": "specs"}
+            assert received == envelope, f"agent did not receive exactly the envelope: {received}"
+
+        for _ in range(100):  # endpoint's finally-unregister must land before we exit
+            if "windows" not in registry.roles():
                 break
             await asyncio.sleep(0.05)
-        assert "windows" in registry.roles(), "agent never registered"
-
-        envelope = request_envelope("specs")
-        assert await registry.send_to_role("windows", envelope) is True
-        received = json.loads(await asyncio.wait_for(agent.recv(), timeout=10))
-        assert set(received) == {"id", "type", "payload"}, f"wire shape: {received}"
-        assert received["type"] == "command"
-        assert received["payload"] == {"cmd": "specs"}
-        assert received == envelope, f"agent did not receive exactly the envelope: {received}"
-
-    for _ in range(100):  # endpoint's finally-unregister must land before we exit
-        if "windows" not in registry.roles():
-            break
-        await asyncio.sleep(0.05)
-    assert "windows" not in registry.roles(), "stale windows registration leaked"
-    server.should_exit = True
+        assert "windows" not in registry.roles(), "stale windows registration leaked"
 
 
-def test_wire_envelope_reaches_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Name-aware (S2): the WS endpoint calls get_token(name=...) per role.
-    monkeypatch.setattr(
-        config, "get_token",
-        lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN,
-    )
-    asyncio.run(_wire_run())
+def test_wire_envelope_reaches_agent(gateway_server) -> None:
+    asyncio.run(_wire_run(gateway_server))

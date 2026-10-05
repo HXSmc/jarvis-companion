@@ -4,5 +4,6 @@ resume.md
 __pycache__/
 *.pyc
 .venv/
+dist/
 .pytest_cache/
 *.egg-info/

@@ -26,17 +26,30 @@ _INTENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def route(transcript: str) -> str | None:
-    """Keyword intents -> allowlisted command name; None = no match (brain fallback)."""
+    """Keyword intents -> allowlisted command name; None = no match (brain fallback).
+
+    The screen intents ("screen_mac"/"screen_windows") never reach the agent
+    path — gateway/siri.py intercepts them and launches the control page (SC7);
+    they're checked before _INTENTS so no existing keyword can shadow them.
+    """
     text = transcript.lower()
+    if "screen" in text:
+        if "mac" in text:
+            return "screen_mac"
+        if any(word in text for word in ("pc", "windows", "computer")):
+            return "screen_windows"
     for cmd, keywords in _INTENTS:
         if any(keyword in text for keyword in keywords):
             return cmd
     return None
 
 
-def request_envelope(cmd: str) -> dict:
+def request_envelope(cmd: str, args: dict | None = None) -> dict:
     """The wire shape sent to the windows agent, with a fresh unique id."""
-    return {"id": uuid.uuid4().hex, "type": "command", "payload": {"cmd": cmd}}
+    payload = {"cmd": cmd}
+    if args is not None:
+        payload["args"] = args
+    return {"id": uuid.uuid4().hex, "type": "command", "payload": payload}
 
 
 def _ram_value(data: dict) -> str | None:

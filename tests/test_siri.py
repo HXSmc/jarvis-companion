@@ -9,10 +9,8 @@ T4.2 fix criteria: bearer 401; `status` answered from the registry in under 2 s
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 import time
-import types
 
 import httpx
 import pytest
@@ -52,9 +50,9 @@ def test_siri_without_token_is_401(stubbed_token: str) -> None:
 def test_status_reply_built_from_registry(
     stubbed_token: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = types.ModuleType("gateway.registry")
-    fake.roles = lambda: ["ios", "windows"]
-    monkeypatch.setitem(sys.modules, "gateway.registry", fake)
+    from gateway import siri
+
+    monkeypatch.setattr(siri, "roles", lambda: ["ios", "windows"])
 
     resp, elapsed = _post(stubbed_token, "status")
 
@@ -70,7 +68,9 @@ def test_status_reply_built_from_registry(
 def test_status_without_registry_says_none(
     stubbed_token: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delitem(sys.modules, "gateway.registry", raising=False)
+    from gateway import siri
+
+    monkeypatch.setattr(siri, "roles", lambda: [])
 
     resp, _ = _post(stubbed_token, "ping")
 

@@ -148,6 +148,8 @@ def reply(transcript: str, timeout_s: int = 60) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First line so launchd (stdout/stderr to the void) still surfaces log records.
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s: %(message)s")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("transcript", help="transcript to answer")
     args = ap.parse_args(argv)

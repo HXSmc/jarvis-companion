@@ -120,6 +120,8 @@ def run_live() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First line so launchd (stdout/stderr to the void) still surfaces log records.
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s: %(message)s")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--test-audio", type=Path, help="offline: score this 16 kHz mono wav")
     ap.add_argument("--dry-run", action="store_true", help="never POST to the gateway")

@@ -40,9 +40,10 @@ def test_refuses_none_and_empty_command_names():
     assert commands.run_command("") == (False, "refused")
 
 
-def test_allowlist_is_exactly_the_seven_commands():
+def test_allowlist_is_exactly_the_ten_commands():
     assert commands.ALLOWED == (
         "specs", "uptime", "disk", "processes", "wake", "sleep", "list_dir",
+        "screen_frame", "screen_input", "open",
     )
     assert set(commands._HANDLERS) == set(commands.ALLOWED)
 

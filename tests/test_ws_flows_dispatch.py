@@ -1,8 +1,8 @@
 """T6.1 check: gateway.ws dispatches {id, type, payload} envelopes by type.
 
-Same approach as tests/test_flight_flow.py: the real app runs in-process under
-uvicorn (port 0) with `common.config.get_token` monkeypatched to a fixture
-token. A handoff is created via POST /handoff/flight (bearer auth), a fake ios
+Same approach as tests/test_flight_flow.py: the shared tests/conftest.py
+`gateway_server` fixture runs the real app in-process (port 0, fixture
+tokens). A handoff is created via POST /handoff/flight (bearer auth), a fake ios
 client connects to /ws?role=ios (Bearer header) and sends a handoff_open envelope,
 and the full WS round-trip is asserted: the {id, ok, data:{url}} reply and the
 {type:"navigate"} push both arrive on the same socket, the handoff ends up
@@ -13,36 +13,21 @@ the connection.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
-import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 import pytest
-import uvicorn
 import websockets
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-
-from common import config
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from gateway.flows import flight
 
-TOKEN = "jarvis_test_token_123"
-IOS_TOKEN = "jarvis_ios_test_token_456"
-AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
-IOS_AUTH_HEADER = {"Authorization": f"Bearer {IOS_TOKEN}"}
 CHECKOUT_URL = "https://booking.example.com/checkout?flight=RUH-9AM"
-# websockets 14.0 renamed connect()'s extra_headers to additional_headers.
-_WS_HEADERS_KWARG = (
-    "additional_headers"
-    if int(websockets.version.version.split(".")[0]) >= 14
-    else "extra_headers"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -56,28 +41,6 @@ def clean_flight_state():
     flight.notify = flight._default_notify
 
 
-@contextlib.asynccontextmanager
-async def gateway_server():
-    """Run the app in-process on port 0 in the caller's event loop; yields host:port."""
-    # Name-aware monkeypatch (S2): ios -> ios_token, else the shared token.
-    config.get_token = lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else TOKEN
-    from gateway.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn did not start"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await serve_task
-
-
 async def _create_handoff(http: httpx.AsyncClient) -> str:
     resp = await http.post(
         "/handoff/flight", headers=AUTH_HEADER, json={"url": CHECKOUT_URL, "context": "checkout"}
@@ -86,7 +49,7 @@ async def _create_handoff(http: httpx.AsyncClient) -> str:
     return resp.json()["id"]
 
 
-def test_handoff_open_dispatch_replies_pushes_and_drives():
+def test_handoff_open_dispatch_replies_pushes_and_drives(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             handoff_id = await _create_handoff(http)
@@ -115,7 +78,7 @@ def test_handoff_open_dispatch_replies_pushes_and_drives():
     asyncio.run(run())
 
 
-def test_unknown_handoff_id_replies_error_socket_stays_open():
+def test_unknown_handoff_id_replies_error_socket_stays_open(gateway_server):
     async def run():
         async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
             async with websockets.connect(

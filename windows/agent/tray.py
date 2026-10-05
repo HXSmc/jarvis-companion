@@ -12,6 +12,7 @@ or the gateway-url file — C-HIGH-4); the probe here uses the same resolution.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
 import socket
@@ -92,6 +93,10 @@ def _watch(icon: pystray.Icon, agent_thread: threading.Thread) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    # Before anything else touches pixels: without DPI awareness the process
+    # is DPI-virtualized and both ImageGrab.grab() and absolute SendInput
+    # coordinates are scaled wrong on displays above 100% scaling (SC3).
+    ctypes.windll.user32.SetProcessDPIAware()
     agent_thread = threading.Thread(target=_run_agent, name="agent", daemon=True)
     agent_thread.start()
     icon = pystray.Icon(

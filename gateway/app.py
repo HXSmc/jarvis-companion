@@ -1,4 +1,4 @@
-"""Gateway FastAPI app: loopback-only bind, bearer auth, /health, router seam."""
+"""Gateway FastAPI app: loopback-only bind, bearer auth, /health, routers."""
 
 from __future__ import annotations
 
@@ -26,21 +26,19 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-# --- Router seam: later tasks register by dropping in gateway/ws.py, gateway/siri.py,
-# gateway/flows/flight.py, gateway/flows/signin.py. Guarded imports so their absence
-# (they don't exist yet) never crashes startup.
-for _module in ("gateway.ws", "gateway.siri", "gateway.flows.flight", "gateway.flows.signin"):
-    try:
-        _mod = __import__(_module, fromlist=["router"])
-    except ImportError:
-        continue
-    app.include_router(_mod.router)
+from gateway import agents, screen
+from gateway.flows import flight, signin
+from gateway.siri import router as siri_router
+from gateway.ws import router as ws_router
 
-# agents.py must always be present (gateway.ws imports it for reply routing) —
-# direct import, not the guarded seam above.
-from gateway import agents  # noqa: E402
-
+app.include_router(ws_router)
+app.include_router(siri_router)
+app.include_router(flight.router)
+app.include_router(signin.router)
 app.include_router(agents.router)
+# SCREEN_CONTROL=0 unmounts /screen/* (kill switch); default on.
+if os.environ.get("SCREEN_CONTROL", "1") != "0":
+    app.include_router(screen.router)
 
 
 if __name__ == "__main__":

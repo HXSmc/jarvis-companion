@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Screen</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #111; color: #eee;
+    font-family: -apple-system, system-ui, sans-serif;
+    touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+  #wrap {
+    position: fixed; inset: 0 0 96px 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  canvas { max-width: 100%; max-height: 100%; touch-action: manipulation; }
+  #banner {
+    display: none; position: fixed; top: 52px; left: 8px; right: 8px; z-index: 10;
+    background: #b3261e; color: #fff; padding: 10px 12px;
+    border-radius: 8px; font-size: 14px; line-height: 1.35;
+  }
+  #seg {
+    position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
+    display: flex; z-index: 10; border-radius: 8px; overflow: hidden;
+    background: #2c2c2e; font-size: 14px;
+  }
+  #seg button {
+    display: flex; align-items: center; gap: 6px;
+    border: 0; background: transparent; color: #eee;
+    padding: 7px 16px; font-size: 14px;
+  }
+  #seg button.on { background: #48484a; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #808080; /* grey = offline */
+  }
+  .dot.on { background: #30d158; } /* green = online */
+  #bar {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 96px;
+    background: #1c1c1e; box-sizing: border-box; padding: 6px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #bar .row { display: flex; gap: 6px; height: 38px; }
+  #bar input[type=text] {
+    flex: 1; min-width: 0; border-radius: 8px; border: 1px solid #3a3a3c;
+    background: #2c2c2e; color: #eee; padding: 0 10px; font-size: 16px;
+  }
+  #bar button {
+    border: 0; border-radius: 8px; background: #2c2c2e; color: #eee;
+    min-width: 40px; padding: 0 10px; font-size: 14px;
+    touch-action: manipulation;
+  }
+  #bar button.mod.on { background: #0a84ff; }
+</style>
+</head>
+<body>
+<div id="seg">
+  <button type="button" data-t="mac"><span class="dot on" id="dot-mac"></span>Mac</button>
+  <button type="button" data-t="windows"><span class="dot" id="dot-windows"></span>PC</button>
+</div>
+<div id="banner"></div>
+<div id="wrap"><canvas id="view" width="320" height="240"></canvas></div>
+<div id="bar">
+  <div class="row">
+    <input id="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type…">
+  </div>
+  <div class="row">
+    <button type="button" class="key" data-k="esc">esc</button>
+    <button type="button" class="key" data-k="delete">del</button>
+    <button type="button" class="key" data-k="tab">tab</button>
+    <button type="button" class="key" data-k="left">&#8592;</button>
+    <button type="button" class="key" data-k="up">&#8593;</button>
+    <button type="button" class="key" data-k="down">&#8595;</button>
+    <button type="button" class="key" data-k="right">&#8594;</button>
+    <button type="button" class="mod" data-m="cmd">cmd</button>
+    <button type="button" class="mod" data-m="ctrl">ctrl</button>
+    <button type="button" class="mod" data-m="alt">alt</button>
+    <button type="button" class="mod" data-m="shift">shift</button>
+  </div>
+</div>
+<script>
+"use strict";
+// Auth rides the HttpOnly screen_session cookie (or Bearer); nothing sensitive
+// is ever put in a URL, a log line, or the console.
+
+var BANNER_EXPIRED = "Session expired — re-open from the app.";
+var BANNER_TCC = "Screen permission missing on the Mac. System Settings -> Privacy & Security -> Screen & Audio Recording -> enable for the python binary in jarvis-companion/.venv (the launchd gateway), then restart the gateway.";
+var BANNER_PC = "PC offline";
+
+var canvas = document.getElementById("view");
+var ctx = canvas.getContext("2d");
+var bannerEl = document.getElementById("banner");
+
+var target = new URLSearchParams(location.search).get("target") === "windows" ? "windows" : "mac";
+var etag = null;          // last frame's ETag -> If-None-Match
+var objUrl = null;        // current frame's blob URL
+var stopped = false;      // set on 401: freeze the whole page
+var lastInput = 0;        // ms timestamp of last input POST -> fps boost
+var state = { mac: null, windows: null };
+var mods = [];            // sticky modifiers, consumed by the next key event
+
+function frameDelay() { return Date.now() - lastInput < 3000 ? 200 : 1000; }
+
+function norm(e) {
+  var r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+
+// --- banners ---------------------------------------------------------------
+function showBanner(text, fatal) {
+  bannerEl.textContent = text;
+  bannerEl.style.display = "block";
+  if (fatal) stopped = true;
+}
+function hideBanner() { bannerEl.style.display = "none"; }
+function refreshBanner() {
+  if (stopped) return; // expired banner stays
+  if (state.mac && state.mac.tcc_ok === false) return showBanner(BANNER_TCC, false);
+  if (state.windows && state.windows.online === false) return showBanner(BANNER_PC, false);
+  hideBanner();
+}
+function expired() { showBanner(BANNER_EXPIRED, true); }
+
+// --- frame loop ------------------------------------------------------------
+function pullFrame() {
+  var dpr = window.devicePixelRatio || 1;
+  var w = Math.min(1600, Math.max(320, Math.round(canvas.clientWidth * dpr)));
+  var headers = {};
+  if (etag) headers["If-None-Match"] = etag;
+  return fetch("/screen/" + target + "/frame?w=" + w + "&q=55", { headers: headers, cache: "no-store" })
+    .then(function (res) {
+      if (res.status === 401) return expired();
+      if (res.status === 304 || !res.ok) return; // 304: reuse last blob
+      var et = res.headers.get("ETag");
+      return res.blob().then(function (blob) {
+        if (et) etag = et;
+        var u = URL.createObjectURL(blob);
+        var img = new Image();
+        img.onload = function () {
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          ctx.drawImage(img, 0, 0);
+          if (objUrl) URL.revokeObjectURL(objUrl);
+          objUrl = u;
+        };
+        img.src = u;
+      });
+    })
+    .catch(function () {});
+}
+
+function frameLoop() {
+  if (stopped) return;
+  pullFrame().then(function () {
+    setTimeout(frameLoop, frameDelay());
+  });
+}
+
+// --- input -----------------------------------------------------------------
+function sendEvents(events) {
+  lastInput = Date.now();
+  return fetch("/screen/" + target + "/input", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events: events })
+  }).then(function (res) { if (res.status === 401) expired(); }).catch(function () {});
+}
+
+function takeMods() {
+  var m = mods.slice();
+  setMods([]);
+  return m;
+}
+function setMods(m) {
+  mods = m;
+  var btns = document.querySelectorAll("#bar button.mod");
+  for (var i = 0; i < btns.length; i++)
+    btns[i].classList.toggle("on", mods.indexOf(btns[i].dataset.m) !== -1);
+}
+
+document.querySelectorAll("#bar button.key").forEach(function (b) {
+  b.addEventListener("click", function () {
+    sendEvents([{ type: "key", key: b.dataset.k, mods: takeMods() }]);
+  });
+});
+document.querySelectorAll("#bar button.mod").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var i = mods.indexOf(b.dataset.m);
+    var m = mods.slice();
+    if (i === -1) m.push(b.dataset.m); else m.splice(i, 1);
+    setMods(m);
+  });
+});
+
+var textEl = document.getElementById("text");
+textEl.addEventListener("keydown", function (e) {
+  if (e.key !== "Enter" || !textEl.value) return;
+  var events = [{ type: "text", text: textEl.value.slice(0, 100) }];
+  events.push({ type: "key", key: "return", mods: takeMods() });
+  textEl.value = "";
+  sendEvents(events);
+});
+
+// --- gestures on the canvas --------------------------------------------------
+var ptrs = new Map();      // pointerId -> {x, y} normalized
+var gesture = null;        // active single-pointer drag/tap candidate
+var lastTap = { t: 0, timer: null };
+var pinchPrev = null;      // two-finger centroid for scroll
+var hoverAt = 0;
+// ponytail: tap waits 300 ms so a second tap upgrades to dblclick in the same
+// POST — adds 300 ms tap latency instead of streaming provisional taps.
+var TAP_MS = 300, LONGPRESS_MS = 500, MOVE_THRESH = 0.01;
+
+function endGesture() {
+  if (gesture && gesture.timer) clearTimeout(gesture.timer);
+  gesture = null;
+}
+
+canvas.addEventListener("pointerdown", function (e) {
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  var p = norm(e);
+  ptrs.set(e.pointerId, p);
+  pinchPrev = null;
+  if (ptrs.size === 1) {
+    endGesture();
+    gesture = { x0: p.x, y0: p.y, moved: false, long: false };
+    gesture.timer = setTimeout(function () {
+      if (gesture && !gesture.moved) {
+        gesture.long = true;
+        sendEvents([{ type: "right", x: gesture.x0, y: gesture.y0 }]);
+      }
+    }, LONGPRESS_MS);
+  }
+});
+
+canvas.addEventListener("pointermove", function (e) {
+  if (!ptrs.has(e.pointerId)) return;
+  var p = norm(e);
+  ptrs.set(e.pointerId, p);
+  if (ptrs.size >= 2) {
+    var ids = Array.from(ptrs.keys());
+    var a = ptrs.get(ids[0]), b = ptrs.get(ids[1]);
+    var c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    if (pinchPrev) {
+      var dy = c.y - pinchPrev.y;
+      if (Math.abs(dy) > 0.01) sendEvents([{ type: "scroll", x: c.x, y: c.y, dy: dy }]);
+    }
+    pinchPrev = c;
+    endGesture();
+    return;
+  }
+  if (gesture) {
+    if (Math.abs(p.x - gesture.x0) > MOVE_THRESH || Math.abs(p.y - gesture.y0) > MOVE_THRESH)
+      gesture.moved = true;
+  } else if (e.pointerType === "mouse" && Date.now() - hoverAt > 150) {
+    // hover move, mouse only, throttled to the rate-limit budget
+    hoverAt = Date.now();
+    sendEvents([{ type: "move", x: p.x, y: p.y }]);
+  }
+});
+
+canvas.addEventListener("pointerup", function (e) {
+  ptrs.delete(e.pointerId);
+  pinchPrev = null;
+  if (!gesture) return;
+  var g = gesture;
+  endGesture();
+  if (g.long || ptrs.size > 0) return;
+  if (g.moved) {
+    sendEvents([{ type: "drag", x: g.x0, y: g.y0, dx: g.x - g.x0, dy: g.y - g.y0 }]);
+    return;
+  }
+  var now = Date.now();
+  if (now - lastTap.t < TAP_MS) {
+    if (lastTap.timer) clearTimeout(lastTap.timer);
+    lastTap = { t: 0, timer: null };
+    sendEvents([{ type: "dblclick", x: g.x0, y: g.y0 }]);
+  } else {
+    var x0 = g.x0, y0 = g.y0;
+    lastTap = {
+      t: now, timer: setTimeout(function () {
+        sendEvents([{ type: "tap", x: x0, y: y0 }]);
+      }, TAP_MS)
+    };
+  }
+});
+
+canvas.addEventListener("pointercancel", function () { ptrs.clear(); pinchPrev = null; endGesture(); });
+canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+canvas.addEventListener("wheel", function (e) {
+  e.preventDefault();
+  var p = norm(e);
+  var dy = Math.max(-1, Math.min(1, e.deltaY / 400));
+  sendEvents([{ type: "scroll", x: p.x, y: p.y, dy: dy }]);
+}, { passive: false });
+
+// --- status poll + target switch --------------------------------------------
+function renderSeg() {
+  document.querySelectorAll("#seg button").forEach(function (b) {
+    b.classList.toggle("on", b.dataset.t === target);
+  });
+  document.getElementById("dot-mac").classList.toggle("on", !state.mac || !!state.mac.online);
+  var pcDot = document.getElementById("dot-windows");
+  pcDot.classList.toggle("on", !!(state.windows && state.windows.online));
+}
+
+function pollStatus() {
+  if (stopped) return;
+  ["mac", "windows"].forEach(function (t) {
+    fetch("/screen/" + t + "/status")
+      .then(function (res) {
+        if (res.status === 401) return expired();
+        if (!res.ok) return;
+        return res.json().then(function (s) { state[t] = s; });
+      })
+      .then(refreshBanner)
+      .catch(function () {});
+  });
+}
+
+document.querySelectorAll("#seg button").forEach(function (b) {
+  b.addEventListener("click", function () {
+    target = b.dataset.t;
+    etag = null; // frames are per-target; force a full 200 pull
+    renderSeg();
+    pollStatus();
+    pullFrame();
+  });
+});
+
+renderSeg();
+pollStatus();
+setInterval(pollStatus, 10000);
+frameLoop();
+</script>
+</body>
+</html>

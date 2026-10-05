@@ -35,6 +35,25 @@ enum KeepAlive {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
+    /// Dictation coordination (Phase 0 spec, behavior item 10): while the mic
+    /// is held the shared session must record AND keep playing (the keepalive
+    /// player must not die mid-hold), so it flips to playAndRecord routed to
+    /// the speaker. The silent player keeps running through the switch.
+    static func beginListening() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+        try? session.setActive(true)
+    }
+
+    /// Restore exactly what start() configured above: playback category,
+    /// default mode, no options, active. The silent player is never stopped,
+    /// so the background WS keepalive survives a listen/stop cycle intact.
+    static func endListening() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [])
+        try? session.setActive(true)
+    }
+
     /// Fire-and-forget permission ask (called once on first foreground launch).
     static func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }

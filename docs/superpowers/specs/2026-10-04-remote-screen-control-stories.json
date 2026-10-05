@@ -1,0 +1,100 @@
+[
+  {
+    "id": "SC1",
+    "title": "Mac screen driver (mac/screen/driver.py) + smoke",
+    "acceptance": [
+      "Owns: mac/screen/__init__.py (new), mac/screen/driver.py (new), mac/screen/smoke.py (new). Touches nothing else.",
+      "driver.py imports CG/CF/AX handles + CGPoint from mac.mirroring.window (window.py:23-36), event constants + UNICODE_CHUNK from mac.mirroring.driver (driver.py:57-60); declares CGEventCreateScrollWheelEvent2 (non-variadic) — never plain CGEventCreateScrollWheelEvent; one module-level threading.Lock; to_points(nx,ny,bounds), capture_jpeg(w,q)->(bytes,w,h), send_events(events), open not here (gateway runs `open -a` directly), tcc_ok(), display_asleep(); NO frontmost guard.",
+      "Runnable check: `.venv/bin/python -m mac.screen.smoke` exits 0 and prints `tcc_ok True` (after owner grants Screen Recording + Accessibility to the venv python), a frame byte count > 10000, and writes /tmp/jarvis_screen_smoke.jpg; without TCC it exits 0 printing `tcc_ok False` and skips the capture (no crash, no traceback).",
+      "Runnable check: `.venv/bin/python -m pytest tests windows/tests -q` still `86 passed` (driver adds no test files).",
+      "Budget: <=45 min. No TBDs; keycode table for return/esc/delete/tab/space/arrows/home/end/pageup/pagedown/f1-f12 written out in KEYCODES."
+    ],
+    "priority": 28,
+    "passes": false,
+    "attempts": 0
+  },
+  {
+    "id": "SC2",
+    "title": "gateway/screen.py router + cookie handshake + frame/input/open endpoints + tests",
+    "acceptance": [
+      "Owns: gateway/screen.py (new), gateway/app.py (edit: conditional mount after agents include at app.py:38), gateway/agents.py (edit: extract windows_command body app.py-lines 60-78 into async agent_roundtrip(envelope), windows_command becomes a wrapper), tests/test_screen_endpoints.py (new).",
+      "Endpoints per design doc: GET /screen (Bearer ios_token -> HTML + Set-Cookie screen_session HttpOnly/Secure/SameSite=Strict/Path=/screen//Max-Age=43200; in-memory dict, max 5, swept on access; nonce-aware: GET /screen?boot=<nonce> with a valid+unexpired single-use nonce -> consume it + mint Set-Cookie + serve the page, bogus/expired/reused -> 401; nonce store _BOOTSTRAPS dict[nonce]->expiry 60 s TTL swept like _SESSIONS; boot value never logged; tests seed _BOOTSTRAPS directly — the minting route is SC7); GET /screen/{mac|windows}/status; GET /screen/{target}/frame?w=320..1600 default 1170&q=20..90 default 55 (JPEG, sha1 ETag, If-None-Match -> 304, asyncio.Lock per target, run_in_threadpool for mac capture, windows via agent_roundtrip, offline -> 503 {\"detail\": \"pc offline\"}); POST /screen/{target}/input (1..20 events pydantic-validated, per-target deque 60 events/2s -> 429, audit log without text payload); POST /screen/{target}/open (regex ^[\\w .+-]{1,64}$ -> 422; mac `open -a` list-args). Shared token -> 403; SCREEN_CONTROL=0 -> router not mounted -> 404.",
+      "Runnable check: `.venv/bin/python -m pytest tests/test_screen_endpoints.py -q` -> `10 passed`; tests use the shared gateway_server fixture (tests/conftest.py:30) with monkeypatched mac.screen.driver.capture_jpeg and cover: 401 no-auth, 403 shared-token, handshake+cookie+6th-session-evicts, 200/ETag/304, windows-offline 503, input 422 (>20 events) + 429 (>60/2s), open regex 422, SCREEN_CONTROL=0 -> 404, nonce ok (?boot= seeds the cookie, nonce consumed), nonce reused -> 401.",
+      "Runnable check: with gateway running and SCREEN_CONTROL unset: `curl -s -o /dev/null -w '%{http_code}' https://<ts-host>:8790/screen` (no auth) -> 401; same with `-H \"Authorization: Bearer $TOKEN\"` (shared) -> 403; with `-H \"Authorization: Bearer $IOS_TOKEN\"` -> 200 and `screen_session=` present in `--dump-header -`; then `curl -s -o /dev/null -w '%{http_code}' -b 'screen_session=<minted>' '.../screen/mac/frame?w=400&q=30'` -> 200; repeat with `-H 'If-None-Match: <etag>'` -> 304; `curl -s -o /dev/null -w '%{http_code}' .../screen/windows/frame` -> 503.",
+      "Budget: <=45 min. Regression within the story: `.venv/bin/python -m pytest tests windows/tests -q` -> `96 passed` (86 + 10)."
+    ],
+    "priority": 29,
+    "passes": false,
+    "attempts": 0
+  },
+  {
+    "id": "SC3",
+    "title": "Windows agent: screen_frame/screen_input/open handlers + DPI awareness + tests + pyproject",
+    "acceptance": [
+      "Owns: windows/agent/commands.py (edit), windows/agent/tray.py (edit), windows/tests/test_screen_commands.py (new), windows/tests/test_commands.py (edit: allowlist test at lines 43-47 updated to the ten names — kept, not deleted), pyproject.toml (edit: packages += \"mac.screen\"; win32 dep `Pillow>=10.0; sys_platform == 'win32'`).",
+      "commands.py: ALLOWED += (\"screen_frame\", \"screen_input\", \"open\"); _screen_frame uses PIL.ImageGrab.grab -> thumbnail -> JPEG -> base64 + {w,h}; _screen_input builds SendInput INPUT/MOUSEINPUT/KEYBDINPUT structs via one _send_inputs seam (absolute int(nx*65535), MOUSEEVENTF_WHEEL int(dy*120), KEYEVENTF_UNICODE, VK map, mods); _open re-validates ^[\\w .+-]{1,64}$ then os.startfile ONLY — no shell fallback anywhere (D3: shell start is a needless injection surface); OSError -> return f\"error: cannot open {name}\" so the gateway surfaces the failure. tray.py main() calls SetProcessDPIAware() before starting the agent thread.",
+      "Runnable check: `.venv/bin/python -m pytest windows/tests -q` -> `33 passed` (28 existing, baseline verified 2026-10-04, incl. the in-place-updated allowlist test + 5 new: screen_frame base64+dims with mocked ImageGrab; _send_inputs called with scaled/wheel/unicode structs with mocked _send_inputs; open -> mocked os.startfile; open rejects ';|../\\\\' names; ALLOWED contains the three new names).",
+      "Runnable check (live, optional on a Mac dev box): `python -c \"from windows.agent import main; print(main.handle_message('{\\\"id\\\": 1, \\\"type\\\": \\\"command\\\", \\\"payload\\\": {\\\"cmd\\\": \\\"open\\\", \\\"args\\\": {\\\"name\\\": \\\"x; rm -rf\\\"}}}'))\"` -> `{'id': 1, 'ok': False, 'data': 'error: invalid app name'}` (agent-side regex refusal).",
+      "Budget: <=45 min."
+    ],
+    "priority": 30,
+    "passes": false,
+    "attempts": 0
+  },
+  {
+    "id": "SC4",
+    "title": "gateway/static/screen.html — live view + input UI (no CDN) + chrome-devtools smoke",
+    "acceptance": [
+      "Owns: gateway/static/screen.html (new). Touches nothing else.",
+      "Single file, inline CSS+JS, zero external requests. Frame loop: fetch with If-None-Match + createObjectURL, w=min(1600, clientWidth*dpr), q=55, 5 fps for 3 s after input else 1 fps. Touch: getBoundingClientRect normalization, tap/dblclick/right(long-press)/drag/scroll, touch-action: manipulation. Bottom bar: text input, special keys, sticky mods. Target segmented control Mac/PC with online dot (status poll 10 s). 401 -> banner 'Session expired — re-open from the app.'; tcc_ok false -> banner 'Screen permission missing on the Mac. System Settings -> Privacy & Security -> Screen & Audio Recording -> enable for the python binary in jarvis-companion/.venv (the launchd gateway), then restart the gateway.'; windows offline -> 'PC offline'.",
+      "Runnable check (chrome-devtools, live gateway): (1) `curl -s -X POST -H \"Authorization: Bearer $IOS_TOKEN\" -H 'Content-Type: application/json' -d '{\"target\":\"mac\"}' http://127.0.0.1:8788/screen/launch` -> `{\"url\": \"...\", \"pushed\": false}`; (2) navigate chrome-devtools to that url (swap the public base for http://127.0.0.1:8788 when testing locally) -> page renders with canvas; (3) navigating to the same url again -> 401 (nonce consumed); (4) after >= 2 s the <img>/<canvas> has non-zero natural content and the network log shows frame requests with a 304 among them; (5) JS `await fetch('/screen/mac/input', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({events: [{type: 'move', x: 0.5, y: 0.5}]})})` -> `{\"ok\": true}`; (6) `await fetch('/screen/mac/open', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{\"name\": \"Calculator\"}'})` -> `{\"ok\": true}` and Calculator launches; (7) no Authorization header, cookie value, or boot nonce appears in any URL or console line.",
+      "Budget: <=45 min."
+    ],
+    "priority": 31,
+    "passes": false,
+    "attempts": 0
+  },
+  {
+    "id": "SC7",
+    "title": "Launch bootstrap + voice intent",
+    "acceptance": [
+      "Depends on SC2 (gateway/screen.py must already exist with the _BOOTSTRAPS nonce store and the GET /screen?boot= consumption path) — build only after SC2 merges.",
+      "Owns: gateway/screen.py (edit: launch side only — async launch_screen(target: str) -> dict mints secrets.token_urlsafe(24) with 60 s TTL into _BOOTSTRAPS, builds url = f\"{public_base}/screen?boot={nonce}&target={target}\" where public_base = env SCREEN_PUBLIC_BASE else the tailscale serve URL https://<Self.DNSName>:8790 derived exactly as scripts/serve.sh:11-12 does, pushes {\"id\": <uuid4 hex>, \"type\": \"navigate\", \"payload\": {\"url\": url}} via registry.send_to_role(\"ios\", ...) only when the ios role is connected (same payload shape as gateway/flows/flight.py:155), returns {\"url\": url, \"pushed\": bool}; POST /screen/launch body {\"target\": \"mac\"|\"windows\"} is a thin wrapper, auth = Bearer ios_token OR the shared token via _authorized_or_shared(request) — never returns a session cookie), gateway/siri.py (edit: siri_hey intercepts router.route(text) results \"screen_mac\"/\"screen_windows\" after the status-phrase check, calls await screen.launch_screen(...) — the same function, not an HTTP self-call — and replies {\"reply\": \"Opening your Mac screen\"} / {\"reply\": \"Opening your PC screen\"}), mac/voice/router.py (edit: route() returns \"screen_mac\"/\"screen_windows\" for transcripts containing case-insensitive \"screen\" plus (\"mac\" -> mac | \"pc\"/\"windows\"/\"computer\" -> windows), e.g. \"show my mac screen\", \"open my pc screen\"), tests/test_screen_launch.py (new).",
+      "Runnable check: `.venv/bin/python -m pytest tests/test_screen_launch.py -q` -> `3 passed`: (1) POST /screen/launch with the shared token (no ios WS connected) -> {\"url\": ..., \"pushed\": false}; (2) POST /screen/launch with Bearer ios_token -> same shape; (3) router maps \"show my mac screen\" -> \"screen_mac\".",
+      "Budget: <=45 min. Regression within the story: `.venv/bin/python -m pytest tests windows/tests -q` -> `104 passed` (96 + 5 + 3)."
+    ],
+    "priority": 32,
+    "passes": false,
+    "attempts": 0
+  },
+  {
+    "id": "SC5",
+    "title": "HANDOFF section + vault Blockers + README usage",
+    "acceptance": [
+      "Owns: docs/HANDOFF.md (edit: new `## Remote Screen Control` section only), README.md (edit: 3-line usage block), Obsidian vault note ~/Desktop/ObsidianVault/Projects/jarvis-companion.md (edit: add two unchecked items under `## Blockers`). No other file.",
+      "HANDOFF section contains: endpoint table (/screen, /status, /frame, /input, /open with auth column 'cookie or ios_token, never shared token'), TCC grant steps (System Settings -> Privacy & Security -> Screen & Audio Recording AND Accessibility, both for the .venv python behind launchd), kill switch line (SCREEN_CONTROL=0 in launchd plist EnvironmentVariables + restart), smoke commands (`.venv/bin/python -m mac.screen.smoke`, chrome-devtools recipe from SC4).",
+      "HANDOFF section additionally contains the launch flow: `curl -X POST -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' -d '{\"target\":\"mac\"}' https://<ts-host>:8790/screen/launch` -> `{\"url\", \"pushed\"}`; when the app is WS-connected the phone auto-navigates (or say \"Hey Jarvis, show my Mac screen\" to /siri/hey — same launch path); the shared token may call /screen/launch but never any other /screen/* route.",
+      "Vault Blockers text (exact): `- [ ] Grant macOS Screen & Audio Recording + Accessibility to jarvis-companion/.venv python (TCC moved after venv change) #soon` and `- [ ] Say \"Hey Jarvis, show my Mac screen\" once with the app open to confirm the screen page pushes to the phone (needs app WS connected) #soon`.",
+      "README block (exact): open the screen: `https://<ts-host>:8790/screen` (from the app or any Bearer-capable client; session cookie lasts 12 h) / disable: set `SCREEN_CONTROL=0` and restart the gateway / smoke: `.venv/bin/python -m mac.screen.smoke`.",
+      "Runnable check: `grep -c 'Remote Screen Control' docs/HANDOFF.md` -> >=1; `git diff --stat` shows only the three owned files; `.venv/bin/python -m pytest tests windows/tests -q` -> `104 passed` (unchanged by docs).",
+      "Budget: <=30 min."
+    ],
+    "priority": 33,
+    "passes": false,
+    "attempts": 0
+  },
+  {
+    "id": "SC6",
+    "title": "Full regression + security checklist",
+    "acceptance": [
+      "Owns: nothing new — verification story; may not edit any file (a failure routes back to the owning story).",
+      "Runnable check: `.venv/bin/python -m pytest tests windows/tests -q` -> exactly `104 passed` (baseline 86 verified 2026-10-04 on HEAD 6ecdbd6 + 10 from SC2 + 5 from SC3 + 3 from SC7 = 18 new tests, 0 skipped-upgraded, allowlist test updated in place so count-neutral). Note: the task spec's earlier '102 passed' (16 new) figure was a mis-add — 86 + 10 + 5 + 3 = 104.",
+      "Security checklist (each verified with real output pasted in the story report): (1) `curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer $TOKEN\" https://<ts-host>:8790/screen` -> 403, and same for /screen/mac/status, /screen/mac/frame, /screen/mac/input (POST), /screen/mac/open (POST); (2) `curl -s -o /dev/null -w '%{http_code}' https://<ts-host>:8790/screen/mac/frame` (no auth, no cookie) -> 401; (3) `grep -riE 'screen_session=|Bearer [A-Za-z0-9_-]{20,}' ~/Library/Logs/jarvis-gateway.log` (or the launchd stderr log) -> no matches; (4) POST /screen/mac/open with names `a;b`, `a|b`, `../x`, `a\"b`, `a\\\\b` -> 422 each; (5) `SCREEN_CONTROL=0` gateway restart -> all /screen/* -> 404; unset + restart -> 200; (6) `curl -s -o /dev/null -w '%{http_code}' 'https://<ts-host>:8790/screen?boot=bogus'` -> 401, and re-fetching an already-consumed boot URL -> 401.",
+      "Runnable check: chrome-devtools recipe from SC4 re-run end-to-end (frame renders, move event ok, Calculator opens, 304 observed) after all stories merged — proves no cross-story regression.",
+      "Budget: <=45 min."
+    ],
+    "priority": 34,
+    "passes": false,
+    "attempts": 0
+  }
+]
