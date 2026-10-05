@@ -229,7 +229,7 @@ var pinchPrev = null;      // two-finger centroid for scroll
 var hoverAt = 0;
 // ponytail: tap waits 300 ms so a second tap upgrades to dblclick in the same
 // POST — adds 300 ms tap latency instead of streaming provisional taps.
-var TAP_MS = 300, LONGPRESS_MS = 500, MOVE_THRESH = 0.01;
+var MOVE_THRESH = 0.01; // TAP_MS/LONGPRESS_MS: single source, inlined cursor.js above
 
 function endGesture() {
   if (gesture && gesture.timer) clearTimeout(gesture.timer);
@@ -363,17 +363,29 @@ function syncCursorToFrame() {
   positionCursor();
 }
 
-function setCursorMode(on) {
+// applyCursorMode: UI + state only, no persist — page load must not re-write
+// the stored preference. setCursorMode = apply + persist (the toggle button).
+function applyCursorMode(on) {
   cursorMode = on;
   cursorWrap.classList.toggle("cur", on);
   cursorBtn.classList.toggle("on", on);
   cursorBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  cancelCursorGesture();
+}
+
+function setCursorMode(on) {
+  applyCursorMode(on);
   try { localStorage.setItem("screen.cursorMode", on ? "1" : "0"); } catch (err) {}
 }
 
 cursorBtn.addEventListener("click", function () { setCursorMode(!cursorMode); });
 
 var cGesture = null; // active cursor-mode gesture (first pointer only)
+
+function cancelCursorGesture() {
+  if (cGesture && cGesture.timer) clearTimeout(cGesture.timer);
+  cGesture = null;
+}
 
 function cursorDown(e) {
   e.preventDefault();
@@ -409,26 +421,39 @@ function cursorUp(e) {
   if (!g || e.pointerId !== g.id) return;
   cGesture = null;
   if (g.timer) clearTimeout(g.timer);
+  saveCursorPos(); // persist even when a long-press consumed the gesture
   if (g.consumed) return; // long-press already sent the right-click
   var dist = Math.hypot(e.clientX - g.x0, e.clientY - g.y0);
   var kind = classifyGesture(Date.now() - g.t0, dist) === "tap" ? "tap" : "move";
   // a drag just parks the host pointer under the overlay (one move, no click)
   sendEvents([clickPayload(kind, cursor, canvas.width, canvas.height)]);
-  saveCursorPos();
 }
 
 function cursorCancel(e) {
   var g = cGesture;
-  if (!g || (e && e.pointerId !== g.id)) return;
-  if (g.timer) clearTimeout(g.timer);
-  cGesture = null;
+  if (!g || e.pointerId !== g.id) return;
+  cancelCursorGesture();
 }
+
+// A stale cGesture wedges cursor mode (cursorDown's `if (cGesture) return`)
+// until reload — cancel it when the page hides or pointer capture is lost.
+// Direct mode's pending long-press timer dies alongside (endGesture).
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) return;
+  cancelCursorGesture();
+  endGesture();
+});
+window.addEventListener("pagehide", function () {
+  cancelCursorGesture();
+  endGesture();
+});
+canvas.addEventListener("lostpointercapture", cancelCursorGesture);
 
 try {
   cursorMode = localStorage.getItem("screen.cursorMode") === "1";
 } catch (err) {} // private mode can throw
 syncCursorToFrame();
-setCursorMode(cursorMode);
+applyCursorMode(cursorMode);
 
 // --- status poll + target switch --------------------------------------------
 function renderSeg() {

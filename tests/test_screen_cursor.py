@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,9 @@ def test_page_has_cursor_toggle_and_inlined_module(gateway_server):
             assert resp.status_code == 200, resp.text
             body = resp.text
             assert ">Cursor<" in body
-            assert 'aria-pressed="' in body
+            btn = re.search(r'<button[^>]*\bid="cursor-toggle"[^>]*>', body)
+            assert btn is not None, "cursor-toggle button tag not found"
+            assert 'aria-pressed="false"' in btn.group(0)  # on that same tag
             assert "function nextCursor" in body  # cursor.js was inlined
             assert "/*CURSOR_JS*/" not in body     # placeholder fully replaced
 
@@ -66,9 +69,13 @@ def test_cursor_math_and_gestures():
         "c.nextCursor({x:398,y:0},100,-100,1.5,1,400,300)",      # clamps x
         "c.nextCursor({x:0,y:0},20,10,1.5,1,400,300)",           # gain applies
         "c.nextCursor({x:0,y:0},49,0,1.5,0.6,400,300)",          # scale divides
+        "c.nextCursor({x:100,y:100},30,0,1.5,2,400,300).x",      # pinned scale vector
         "c.classifyGesture(300,8)",                               # edge: still a tap
         "c.classifyGesture(301,8)",                               # just too slow
         "c.classifyGesture(100,9)",                               # just too far
+        "c.classifyGesture(300,8) === 'tap'",                     # pinned boundary
+        "c.classifyGesture(301,8) === 'drag'",                    # pinned boundary
+        "c.classifyGesture(300,8.0001) === 'drag'",               # pinned: dist just past 8
         "c.clickPayload('right',{x:200,y:300},400,600)",
         "c.initialCursor(401,301)",                               # rounds half up
         "c.GAIN===1.5&&c.TAP_MS===300&&c.TAP_DIST_CSS===8&&c.LONGPRESS_MS===500",
@@ -80,11 +87,14 @@ def test_cursor_math_and_gestures():
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
     lines = out.stdout.strip().splitlines()
     assert len(lines) == len(checks), out.stderr
-    clamp, gain, scale, tap, slow, far, right, init, consts = (json.loads(x) for x in lines)
+    (clamp, gain, scale, pinned_x, tap, slow, far, pin_tap, pin_slow, pin_far,
+     right, init, consts) = (json.loads(x) for x in lines)
     assert clamp == {"x": 399, "y": 0, "frameW": 400, "frameH": 300}
     assert gain == {"x": 30, "y": 15, "frameW": 400, "frameH": 300}
-    assert scale["x"] in (122, 123)  # 49*1.5 = 73.5 -> either rounding side
+    assert scale["x"] in (122, 123)  # 49*1.5/0.6 = 122.5 -> Math.round, accept 122 or 123
+    assert pinned_x in (122, 123)    # 30*1.5/2 = 22.5 -> 100+22.5 = 122.5 -> Math.round
     assert tap == "tap" and slow == "drag" and far == "drag"
+    assert pin_tap is True and pin_slow is True and pin_far is True
     assert right == {"type": "right", "x": 0.5, "y": 0.5}
     assert init == {"x": 201, "y": 151, "frameW": 401, "frameH": 301}
     assert consts is True
