@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/<user>/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
 	<key>Label</key>
 	<string>com.jarvis.companion.gateway</string>
 	<key>ProgramArguments</key>
@@ -14,11 +21,9 @@
 		<string>8788</string>
 		<string>--no-access-log</string>
 	</array>
-	<key>WorkingDirectory</key>
-	<string>/Users/<user>/Desktop/personal/jarvis-companion</string>
 	<key>RunAtLoad</key>
 	<true/>
-	<key>KeepAlive</key>
-	<true/>
+	<key>WorkingDirectory</key>
+	<string>/Users/<user>/Desktop/personal/jarvis-companion</string>
 </dict>
 </plist>
