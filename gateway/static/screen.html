@@ -56,6 +56,17 @@
     touch-action: manipulation;
   }
   #bar button.mod.on { background: #0a84ff; }
+  /* cursor mode: shrink-fit wrapper around the canvas; the aspect-ratio +
+     max constraints keep the wrapper exactly the canvas's rendered size
+     (ratio is re-synced from the frame in JS). */
+  #cwrap { position: relative; max-width: 100%; max-height: 100%; aspect-ratio: 4 / 3; }
+  #cwrap canvas { display: block; width: 100%; height: 100%; }
+  #cwrap.cur, #cwrap.cur canvas { touch-action: none; }
+  #cursor {
+    display: none; position: absolute; left: 0; top: 0;
+    width: 24px; height: 24px; pointer-events: none; z-index: 5;
+  }
+  #cwrap.cur #cursor { display: block; }
 </style>
 </head>
 <body>
@@ -64,7 +75,7 @@
   <button type="button" data-t="windows"><span class="dot" id="dot-windows"></span>PC</button>
 </div>
 <div id="banner"></div>
-<div id="wrap"><canvas id="view" width="320" height="240"></canvas></div>
+<div id="wrap"><div id="cwrap"><canvas id="view" width="320" height="240"></canvas><div id="cursor" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="#111" stroke-width="5" stroke-linecap="round"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg></div></div></div>
 <div id="bar">
   <div class="row">
     <input id="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type…">
@@ -81,8 +92,10 @@
     <button type="button" class="mod" data-m="ctrl">ctrl</button>
     <button type="button" class="mod" data-m="alt">alt</button>
     <button type="button" class="mod" data-m="shift">shift</button>
+    <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
   </div>
 </div>
+<script>/*CURSOR_JS*/</script>
 <script>
 "use strict";
 // Auth rides the HttpOnly screen_session cookie (or Bearer); nothing sensitive
@@ -142,9 +155,11 @@ function pullFrame() {
         var u = URL.createObjectURL(blob);
         var img = new Image();
         img.onload = function () {
+          var dimsChanged = canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight;
           canvas.width = img.naturalWidth;
           canvas.height = img.naturalHeight;
           ctx.drawImage(img, 0, 0);
+          if (dimsChanged) syncCursorToFrame();
           if (objUrl) URL.revokeObjectURL(objUrl);
           objUrl = u;
         };
@@ -178,7 +193,7 @@ function takeMods() {
 }
 function setMods(m) {
   mods = m;
-  var btns = document.querySelectorAll("#bar button.mod");
+  var btns = document.querySelectorAll("#bar button.mod[data-m]"); // [data-m]: skip the Cursor toggle
   for (var i = 0; i < btns.length; i++)
     btns[i].classList.toggle("on", mods.indexOf(btns[i].dataset.m) !== -1);
 }
@@ -188,7 +203,7 @@ document.querySelectorAll("#bar button.key").forEach(function (b) {
     sendEvents([{ type: "key", key: b.dataset.k, mods: takeMods() }]);
   });
 });
-document.querySelectorAll("#bar button.mod").forEach(function (b) {
+document.querySelectorAll("#bar button.mod[data-m]").forEach(function (b) {
   b.addEventListener("click", function () {
     var i = mods.indexOf(b.dataset.m);
     var m = mods.slice();
@@ -222,6 +237,7 @@ function endGesture() {
 }
 
 canvas.addEventListener("pointerdown", function (e) {
+  if (cursorMode) return cursorDown(e);
   e.preventDefault();
   canvas.setPointerCapture(e.pointerId);
   var p = norm(e);
@@ -240,6 +256,7 @@ canvas.addEventListener("pointerdown", function (e) {
 });
 
 canvas.addEventListener("pointermove", function (e) {
+  if (cursorMode) return cursorMove(e);
   if (!ptrs.has(e.pointerId)) return;
   var p = norm(e);
   ptrs.set(e.pointerId, p);
@@ -266,6 +283,7 @@ canvas.addEventListener("pointermove", function (e) {
 });
 
 canvas.addEventListener("pointerup", function (e) {
+  if (cursorMode) return cursorUp(e);
   ptrs.delete(e.pointerId);
   pinchPrev = null;
   if (!gesture) return;
@@ -291,15 +309,126 @@ canvas.addEventListener("pointerup", function (e) {
   }
 });
 
-canvas.addEventListener("pointercancel", function () { ptrs.clear(); pinchPrev = null; endGesture(); });
+canvas.addEventListener("pointercancel", function (e) {
+  if (cursorMode) return cursorCancel(e);
+  ptrs.clear(); pinchPrev = null; endGesture();
+});
 canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
 canvas.addEventListener("wheel", function (e) {
   e.preventDefault();
+  if (cursorMode) return; // no scroll in cursor mode — toggle OFF to scroll
   var p = norm(e);
   var dy = Math.max(-1, Math.min(1, e.deltaY / 400));
   sendEvents([{ type: "scroll", x: p.x, y: p.y, dy: dy }]);
 }, { passive: false });
+
+// --- cursor mode (Cursor toggle in #bar) -------------------------------------
+// Drag moves a virtual pointer (cursor.js math), taps/long-press click where
+// the POINTER is, never where the finger is. First pointer only; no dblclick,
+// no scroll while ON. Mode is a localStorage preference; position is per-tab
+// (sessionStorage). Shared across targets — a frame-size mismatch re-centres.
+var cursorMode = false;
+var cursorWrap = document.getElementById("cwrap");
+var cursorEl = document.getElementById("cursor");
+var cursorBtn = document.getElementById("cursor-toggle");
+var cursor = initialCursor(canvas.width, canvas.height);
+
+function cursorScale() { return canvas.getBoundingClientRect().width / canvas.width; }
+
+function positionCursor() {
+  var s = cursorScale();
+  // -12 = half the 24 px overlay, so the crosshair's centre sits on the point
+  cursorEl.style.transform =
+    "translate(" + Math.round(cursor.x * s - 12) + "px," + Math.round(cursor.y * s - 12) + "px)";
+}
+
+function saveCursorPos() {
+  try {
+    sessionStorage.setItem("screen.cursorPos",
+      JSON.stringify({ x: cursor.x, y: cursor.y, frameW: canvas.width, frameH: canvas.height }));
+  } catch (err) {} // private mode can throw
+}
+
+function syncCursorToFrame() {
+  cursorWrap.style.aspectRatio = canvas.width + " / " + canvas.height;
+  var p = null;
+  try {
+    p = JSON.parse(sessionStorage.getItem("screen.cursorPos") || "null");
+  } catch (err) {} // private mode can throw
+  cursor = p && p.frameW === canvas.width && p.frameH === canvas.height
+    ? p : initialCursor(canvas.width, canvas.height);
+  cursor.x = Math.min(Math.max(cursor.x, 0), canvas.width - 1);
+  cursor.y = Math.min(Math.max(cursor.y, 0), canvas.height - 1);
+  positionCursor();
+}
+
+function setCursorMode(on) {
+  cursorMode = on;
+  cursorWrap.classList.toggle("cur", on);
+  cursorBtn.classList.toggle("on", on);
+  cursorBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  try { localStorage.setItem("screen.cursorMode", on ? "1" : "0"); } catch (err) {}
+}
+
+cursorBtn.addEventListener("click", function () { setCursorMode(!cursorMode); });
+
+var cGesture = null; // active cursor-mode gesture (first pointer only)
+
+function cursorDown(e) {
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  if (cGesture) return; // secondary pointers are ignored while ON
+  cGesture = {
+    id: e.pointerId, t0: Date.now(), x0: e.clientX, y0: e.clientY,
+    lastX: e.clientX, lastY: e.clientY, moved: false, consumed: false,
+    timer: setTimeout(function () {
+      if (cGesture && !cGesture.moved) {
+        cGesture.consumed = true;
+        sendEvents([clickPayload("right", cursor, canvas.width, canvas.height)]);
+      }
+    }, LONGPRESS_MS)
+  };
+}
+
+function cursorMove(e) {
+  var g = cGesture;
+  if (!g || e.pointerId !== g.id) return;
+  var dx = e.clientX - g.lastX, dy = e.clientY - g.lastY;
+  g.lastX = e.clientX; g.lastY = e.clientY;
+  if (Math.hypot(e.clientX - g.x0, e.clientY - g.y0) > TAP_DIST_CSS) {
+    g.moved = true;
+    if (g.timer) { clearTimeout(g.timer); g.timer = null; }
+  }
+  cursor = nextCursor(cursor, dx, dy, GAIN, cursorScale(), canvas.width, canvas.height);
+  positionCursor();
+}
+
+function cursorUp(e) {
+  var g = cGesture;
+  if (!g || e.pointerId !== g.id) return;
+  cGesture = null;
+  if (g.timer) clearTimeout(g.timer);
+  if (g.consumed) return; // long-press already sent the right-click
+  var dist = Math.hypot(e.clientX - g.x0, e.clientY - g.y0);
+  var kind = classifyGesture(Date.now() - g.t0, dist) === "tap" ? "tap" : "move";
+  // a drag just parks the host pointer under the overlay (one move, no click)
+  sendEvents([clickPayload(kind, cursor, canvas.width, canvas.height)]);
+  saveCursorPos();
+}
+
+function cursorCancel(e) {
+  var g = cGesture;
+  if (!g || (e && e.pointerId !== g.id)) return;
+  if (g.timer) clearTimeout(g.timer);
+  cGesture = null;
+}
+
+try {
+  cursorMode = localStorage.getItem("screen.cursorMode") === "1";
+} catch (err) {} // private mode can throw
+syncCursorToFrame();
+setCursorMode(cursorMode);
 
 // --- status poll + target switch --------------------------------------------
 function renderSeg() {

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -45,6 +45,7 @@ router = APIRouter(prefix="/screen")
 Target = Literal["mac", "windows"]
 
 SCREEN_HTML = Path(__file__).resolve().parent / "static" / "screen.html"
+CURSOR_JS = SCREEN_HTML.parent / "cursor.js"
 
 NOT_AUTHENTICATED = "not authenticated"
 SHARED_TOKEN_DETAIL = "shared token not valid for screen"
@@ -198,7 +199,9 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
             kind = "boot"
     if kind is None:
         kind = _require(request)
-    response = FileResponse(SCREEN_HTML)
+    # Serve-time inline: cursor.js is spliced into the page's placeholder
+    # script tag — one request, no extra route, no separate cacheable fetch.
+    response = HTMLResponse(SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text()))
     if kind in ("bearer", "boot"):
         response.set_cookie(
             SESSION_COOKIE, _mint_session(),
