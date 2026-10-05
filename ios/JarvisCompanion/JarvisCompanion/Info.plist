@@ -39,6 +39,11 @@
 	</array>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>Notifies you when a handoff arrives from the Mac.</string>
+	<!-- hold-to-talk dictation: mic capture + speech recognition (Phase 0 spec) -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Holding the mic button records your voice so Jarvis can hear your request.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Your dictated request is converted to text and sent to your Jarvis gateway.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

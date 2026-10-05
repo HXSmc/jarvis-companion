@@ -133,11 +133,18 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate {
     }
 }
 
-/// SwiftUI wrapper exposing the shared WebController's WKWebView.
+/// SwiftUI wrapper exposing the shared WebController's WKWebView. The
+/// controller owns the single instance for the app's whole lifetime: the first
+/// host creates it via `attach`, and every later `makeUIView` (the pushed
+/// fullScreenCover's host, or Home's hidden 1 pt host that re-claims it after
+/// the cover dismisses) returns that SAME instance. Presenting or dismissing
+/// never recreates or deallocates it, so gateway commands keep working while
+/// the cover is closed (Phase 0 spec "Pushed page" lifetime rule).
 struct JarvisWebView: UIViewRepresentable {
     let controller: WebController
 
     func makeUIView(context: Context) -> WKWebView {
+        if let existing = controller.webView { return existing }
         let view = WKWebView()
         controller.attach(view)
         return view
