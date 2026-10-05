@@ -80,6 +80,9 @@ final class DictationController: NSObject, ObservableObject {
     private var capTimer: Timer?
     private var finalizeWork: DispatchWorkItem?
     private var starting = false
+    /// Set when release() lands while `starting` (async permission hops):
+    /// pending start completions check this and abort to idle.
+    private var releaseRequested = false
 
     override init() {
         if let current = SFSpeechRecognizer(locale: Locale.current), current.isAvailable {
@@ -113,6 +116,11 @@ final class DictationController: NSObject, ObservableObject {
                         self.onPermissionDenied?()
                         return
                     }
+                    guard !self.releaseRequested else {
+                        self.starting = false
+                        self.releaseRequested = false
+                        return
+                    }
                     self.requestMicThenStart()
                 }
             }
@@ -128,6 +136,11 @@ final class DictationController: NSObject, ObservableObject {
                 guard granted else {
                     self.starting = false
                     self.onPermissionDenied?()
+                    return
+                }
+                guard !self.releaseRequested else {
+                    self.starting = false
+                    self.releaseRequested = false
                     return
                 }
                 self.startListening()
@@ -179,7 +192,12 @@ final class DictationController: NSObject, ObservableObject {
     /// KeepAlive session, wait up to 1.5 s for isFinal, then send the best
     /// transcript (behavior item 2 / criterion 5).
     func release() {
-        guard isListening else { return }
+        guard isListening else {
+            // Release during the async start path: flag it so the pending
+            // start aborts instead of running unheld.
+            if starting { releaseRequested = true }
+            return
+        }
         isListening = false
         capTimer?.invalidate()
         capTimer = nil
@@ -492,7 +510,7 @@ struct ContentView: View {
         // Keeps the shared WKWebView on-window while no push is presented,
         // so off-cover screenshot/evaluateJS commands still run against a
         // windowed view (see JarvisWebView).
-        .background(hiddenWebHost)
+        .background { hiddenWebHost }
         .sheet(isPresented: $model.showSettings) { SettingsSheet(model: model) }
         .fullScreenCover(isPresented: $model.showPushedPage) {
             PushedPageView(model: model)
