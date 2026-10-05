@@ -18,6 +18,18 @@ jobs:
       - name: List project schemes (diagnostic, fail fast on project file issues)
         run: xcodebuild -list -project ios/JarvisCompanion/JarvisCompanion.xcodeproj
 
+      - name: Bump per-build version for AltStore updates
+        run: |
+          set -euo pipefail
+          PLIST="ios/JarvisCompanion/JarvisCompanion/Info.plist"
+          # GENERATE_INFOPLIST_FILE=NO and this Info.plist has literal "1.0"/"1" values
+          # (no $(MARKETING_VERSION) substitution), so the build-settings lever is a
+          # no-op here -- PlistBuddy on the physical file is the correct lever.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.${{ github.run_number }}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST"
+
       - name: Build unsigned .app for iphoneos
         run: |
           xcodebuild \
