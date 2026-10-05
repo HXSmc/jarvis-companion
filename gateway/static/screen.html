@@ -447,13 +447,15 @@ function cursorCancel(e) {
 document.addEventListener("visibilitychange", function () {
   if (!document.hidden) return;
   cancelCursorGesture();
+  ptrs.clear(); pinchPrev = null;
   endGesture();
 });
 window.addEventListener("pagehide", function () {
   cancelCursorGesture();
+  ptrs.clear(); pinchPrev = null;
   endGesture();
 });
-canvas.addEventListener("lostpointercapture", cancelCursorGesture);
+canvas.addEventListener("lostpointercapture", cursorCancel);
 
 try {
   cursorMode = localStorage.getItem("screen.cursorMode") === "1";

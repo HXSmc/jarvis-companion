@@ -73,8 +73,6 @@ def test_cursor_math_and_gestures():
         "c.classifyGesture(300,8)",                               # edge: still a tap
         "c.classifyGesture(301,8)",                               # just too slow
         "c.classifyGesture(100,9)",                               # just too far
-        "c.classifyGesture(300,8) === 'tap'",                     # pinned boundary
-        "c.classifyGesture(301,8) === 'drag'",                    # pinned boundary
         "c.classifyGesture(300,8.0001) === 'drag'",               # pinned: dist just past 8
         "c.clickPayload('right',{x:200,y:300},400,600)",
         "c.initialCursor(401,301)",                               # rounds half up
@@ -87,14 +85,14 @@ def test_cursor_math_and_gestures():
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
     lines = out.stdout.strip().splitlines()
     assert len(lines) == len(checks), out.stderr
-    (clamp, gain, scale, pinned_x, tap, slow, far, pin_tap, pin_slow, pin_far,
+    (clamp, gain, scale, pinned_x, tap, slow, far, pin_far,
      right, init, consts) = (json.loads(x) for x in lines)
     assert clamp == {"x": 399, "y": 0, "frameW": 400, "frameH": 300}
     assert gain == {"x": 30, "y": 15, "frameW": 400, "frameH": 300}
     assert scale["x"] in (122, 123)  # 49*1.5/0.6 = 122.5 -> Math.round, accept 122 or 123
-    assert pinned_x in (122, 123)    # 30*1.5/2 = 22.5 -> 100+22.5 = 122.5 -> Math.round
+    assert pinned_x == 123           # 30*1.5/2 = 22.5; 100+22.5 = 122.5; Math.round is half-up
     assert tap == "tap" and slow == "drag" and far == "drag"
-    assert pin_tap is True and pin_slow is True and pin_far is True
+    assert pin_far is True
     assert right == {"type": "right", "x": 0.5, "y": 0.5}
     assert init == {"x": 201, "y": 151, "frameW": 401, "frameH": 301}
     assert consts is True
