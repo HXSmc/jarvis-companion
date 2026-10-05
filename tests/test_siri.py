@@ -21,7 +21,8 @@ from common import config
 @pytest.fixture
 def stubbed_token(monkeypatch: pytest.MonkeyPatch) -> str:
     token = "jarvis_test_token_123"
-    monkeypatch.setattr(config, "get_token", lambda path=None: token)
+    # Name-aware like conftest's gateway_server; ios_token unset here (None).
+    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": token if name == "token" else None)
     return token
 
 
