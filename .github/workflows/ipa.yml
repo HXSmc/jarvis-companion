@@ -62,3 +62,36 @@ jobs:
           name: JarvisCompanion-unsigned-ipa
           path: JarvisCompanion-unsigned.ipa
           retention-days: 14
+
+      - name: Build unsigned .app for iphonesimulator (Home screenshot)
+        continue-on-error: true
+        run: |
+          xcodebuild \
+            -project ios/JarvisCompanion/JarvisCompanion.xcodeproj \
+            -scheme JarvisCompanion \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            -derivedDataPath build-sim \
+            build
+
+      - name: Boot simulator, install, launch, and capture Home screenshot
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(dev["udid"] for devs in d["devices"].values() for dev in devs if dev["name"].startswith("iPhone")))')
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build-sim/Build/Products/Debug-iphonesimulator/JarvisCompanion.app
+          xcrun simctl launch "$UDID" personal.jarvis.JarvisCompanion
+          sleep 8
+          xcrun simctl io "$UDID" screenshot home.png
+
+      - name: Upload Home screenshot artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: home-screenshot
+          path: home.png
+          retention-days: 14
