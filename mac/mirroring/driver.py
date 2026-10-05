@@ -152,8 +152,8 @@ def _capture_is_unreadable(img) -> bool:
     width, height = CG.CGImageGetWidth(img), CG.CGImageGetHeight(img)
     bits = CG.CGImageGetBitsPerPixel(img)
     alpha_info = CG.CGImageGetAlphaInfo(img)
-    if alpha_info == 0:  # kCGImageAlphaNone — no alpha byte to sample
-        return False
+    if alpha_info in (0, 5, 6):  # None/SkipLast/SkipFirst — no real alpha, the
+        return False             # "alpha" byte is undefined padding, not data
     if alpha_info == 7:  # kCGImageAlphaOnly — the single byte per pixel IS alpha
         alpha_offset = 0
     else:

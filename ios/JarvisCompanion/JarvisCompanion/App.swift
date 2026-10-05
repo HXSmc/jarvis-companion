@@ -36,6 +36,9 @@ extension Color {
     static let jarvisDanger = Color(red: 255 / 255, green: 92 / 255, blue: 92 / 255) // #FF5C5C
 }
 
+/// Radius token (same spec section): every rounded surface uses radius 16.
+let jarvisRadius: CGFloat = 16
+
 /// Motion line, and nothing else: light impact on press start, success
 /// notification on reply, error notification on failure.
 enum Haptics {
@@ -93,6 +96,11 @@ final class DictationController: NSObject, ObservableObject {
     /// Set by cancelDiscard() so straggler recognition callbacks (the
     /// cancelled task's final error) don't deliver anything afterwards.
     private var discarding = false
+    /// Per-hold generation: bumped on every press and when a hold's result
+    /// is delivered. Recognizer callbacks and the cap timer capture it at
+    /// start and are ignored once stale — so `task?.cancel()` re-firing the
+    /// result closure during the 1.5 s grace wait cannot double-deliver.
+    private var generation = 0
 
     override init() {
         if let current = SFSpeechRecognizer(locale: Locale.current), current.isAvailable {
@@ -123,6 +131,7 @@ final class DictationController: NSObject, ObservableObject {
     /// determined (behavior item 5), then start engine + recognition.
     func pressStarted() {
         guard !isPressed else { return }
+        generation += 1
         releaseRequested = false
         discarding = false
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
@@ -210,8 +219,12 @@ final class DictationController: NSObject, ObservableObject {
             try audioEngine.start()
             bestTranscript = ""
             partialTranscript = ""
+            let gen = generation
             task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                DispatchQueue.main.async { self?.handleResult(result, error) }
+                DispatchQueue.main.async {
+                    guard let self = self, self.generation == gen else { return }
+                    self.handleResult(result, error)
+                }
             }
             isListening = true
             // 60 s cap (behavior item 2): Apple's recognizer limit; auto-stop
@@ -219,7 +232,7 @@ final class DictationController: NSObject, ObservableObject {
             // cancelled gesture must not auto-send unheld).
             capTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { [weak self] _ in
                 DispatchQueue.main.async {
-                    guard let self = self, self.isListening else { return }
+                    guard let self = self, self.isListening, self.generation == gen else { return }
                     if self.isHeld {
                         self.release()
                     } else {
@@ -233,6 +246,15 @@ final class DictationController: NSObject, ObservableObject {
         }
     }
 
+    /// Shared stop sequence (release, isFinal, error and cancel paths):
+    /// stop listening, kill the cap timer, tear the tap/engine down.
+    private func stopCapture() {
+        isListening = false
+        capTimer?.invalidate()
+        capTimer = nil
+        teardownAudio()
+    }
+
     /// Release: endAudio on the request, stop the tap/engine, restore the
     /// KeepAlive session, wait up to 1.5 s for isFinal, then send the best
     /// transcript (behavior item 2 / criterion 5).
@@ -244,13 +266,12 @@ final class DictationController: NSObject, ObservableObject {
             if starting { releaseRequested = true }
             return
         }
-        isListening = false
-        capTimer?.invalidate()
-        capTimer = nil
-        teardownAudio()
+        stopCapture()
+        let gen = generation
         let work = DispatchWorkItem { [weak self] in
-            self?.finalizeWork = nil
-            self?.deliver()
+            guard let self = self, self.generation == gen else { return }
+            self.finalizeWork = nil
+            self.deliver()
         }
         finalizeWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
@@ -270,10 +291,7 @@ final class DictationController: NSObject, ObservableObject {
         finalizeWork?.cancel()
         finalizeWork = nil
         if isListening {
-            isListening = false
-            capTimer?.invalidate()
-            capTimer = nil
-            teardownAudio()
+            stopCapture()
         }
         starting = false
         task?.cancel()
@@ -302,10 +320,7 @@ final class DictationController: NSObject, ObservableObject {
                 finalizeWork = nil
                 task = nil
                 if isListening {
-                    isListening = false
-                    capTimer?.invalidate()
-                    capTimer = nil
-                    teardownAudio()
+                    stopCapture()
                 }
                 deliver()
             }
@@ -317,16 +332,16 @@ final class DictationController: NSObject, ObservableObject {
             finalizeWork?.cancel()
             finalizeWork = nil
             if isListening {
-                isListening = false
-                capTimer?.invalidate()
-                capTimer = nil
-                teardownAudio()
+                stopCapture()
             }
             deliver()
         }
     }
 
     private func deliver() {
+        // Invalidate this hold's stragglers BEFORE cancelling, so the result
+        // closure `task?.cancel()` re-fires into is dropped (no double send).
+        generation += 1
         task?.cancel()
         task = nil
         let text = bestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -389,19 +404,16 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             if text.isEmpty {
                 // Empty/whitespace transcript: NO network request (criterion 5).
-                self.replyText = "didn't catch that"
-                self.replyIsError = true
+                self.setFailure("didn't catch that")
             } else {
                 self.ask(text)
             }
         }
         dictation.onPermissionDenied = { [weak self] in
-            self?.replyText = "mic or speech permission denied, enable in Settings"
-            self?.replyIsError = true
+            self?.setFailure("mic or speech permission denied, enable in Settings")
         }
         dictation.onEngineError = { [weak self] error in
-            self?.replyText = "ask failed: \(error.localizedDescription)"
-            self?.replyIsError = true
+            self?.fail(error)
         }
     }
 
@@ -494,10 +506,17 @@ final class AppModel: ObservableObject {
         return comps.url
     }
 
-    private func fail(_ message: String) {
-        replyText = "ask failed: \(message)"
+    /// Shared failure surface: every failure path (HTTP/URL/parse errors,
+    /// permission denial, engine errors, empty transcript) funnels here so
+    /// the error haptic always fires; only one place sets the reply state.
+    private func setFailure(_ message: String) {
+        replyText = message
         replyIsError = true
         Haptics.error()
+    }
+
+    private func fail(_ message: String) {
+        setFailure("ask failed: \(message)")
     }
 
     private func fail(_ error: Error) {
@@ -603,6 +622,7 @@ struct ContentView: View {
     /// ends OR is CANCELLED (system alert under the finger, incoming call,
     /// backgrounding), so a cancel runs the exact same path as a release.
     @GestureState private var micHeld = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -674,12 +694,13 @@ struct ContentView: View {
         }
     }
 
+    /// Dot color derives from bridge state, not the free-text pill copy:
+    /// accent while connected, danger on the last error, muted otherwise —
+    /// so a `handoff …: opening/driving` status never shows red.
     private var pillDot: Color {
-        switch model.statusText {
-        case "connected": return .jarvisAccent
-        case "disconnected", "starting": return .jarvisMuted
-        default: return .jarvisDanger
-        }
+        if model.bridge.connected { return .jarvisAccent }
+        if model.bridge.lastError != nil { return .jarvisDanger }
+        return .jarvisMuted
     }
 
     private var conversation: some View {
@@ -713,18 +734,25 @@ struct ContentView: View {
 
     private var chips: some View {
         HStack(spacing: 8) {
-            ForEach(["Show Mac screen", "Show PC screen", "Status"], id: \.self) { title in
+            ForEach([
+                Chip(label: "Mac screen", payload: "Show Mac screen"),
+                Chip(label: "PC screen", payload: "Show PC screen"),
+                Chip(label: "Status", payload: "Status"),
+            ]) { chip in
                 Button {
-                    model.ask(title)
+                    model.ask(chip.payload)
                 } label: {
-                    Text(title)
+                    Text(chip.label)
                         .font(.subheadline)
                         .foregroundColor(.jarvisText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                         .padding(.horizontal, 16)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                        .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 }
-                .disabled(!model.askReady || model.isSending)
+                .disabled(!model.askReady || model.isSending || dictation.isListening)
+                .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
             }
         }
     }
@@ -748,7 +776,7 @@ struct ContentView: View {
         Circle()
             .fill(Color.jarvisAccent)
             .frame(width: 88, height: 88)
-            .scaleEffect(dictation.isListening ? 1.06 : 1.0)
+            .scaleEffect(dictation.isListening && !reduceMotion ? 1.06 : 1.0)
             .animation(.easeInOut(duration: 0.2), value: dictation.isListening)
             .overlay(
                 Image(systemName: "mic.fill")
@@ -780,17 +808,25 @@ struct ContentView: View {
 
     private var typedRow: some View {
         HStack(spacing: 8) {
-            TextField("or type…", text: typedBinding)
+            TextField(
+                "or type…",
+                text: typedBinding,
+                prompt: Text("or type…").foregroundColor(.jarvisMuted)
+            )
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
                 .frame(minHeight: 44)
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 .keyboardType(.default)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.sentences)
                 .submitLabel(.send)
-                .onSubmit { model.ask(model.typedText) }
+                .onSubmit {
+                    // Manual send only while idle: the recognizer owns the
+                    // field during a hold (criterion 7).
+                    if !dictation.isListening { model.ask(model.typedText) }
+                }
             sendButton
         }
     }
@@ -825,13 +861,13 @@ struct ContentView: View {
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
         }
-        .disabled(!model.askReady || model.isSending)
+        .disabled(!model.askReady || model.isSending || dictation.isListening)
+        .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
         .accessibilityLabel("Send")
     }
 
     private var hiddenWebHost: some View {
         JarvisWebView(controller: model.web)
-            .frame(width: 1, height: 1)
             .opacity(0.01)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
@@ -839,9 +875,18 @@ struct ContentView: View {
     }
 }
 
+/// Quick chip (Home "quick chips"): short display label, full command payload.
+private struct Chip: Identifiable {
+    let label: String
+    let payload: String
+    var id: String { payload }
+}
+
 /// Listening ring (Motion line): 1.2 s ease pulse in accent while held.
+/// Reduce Motion renders it static (no repeating animation).
 private struct PulsingRing: View {
     @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Circle()
@@ -849,7 +894,7 @@ private struct PulsingRing: View {
             .frame(width: 88, height: 88)
             .scaleEffect(pulse ? 1.3 : 1.0)
             .opacity(pulse ? 0.1 : 0.6)
-            .onAppear { pulse = true }
+            .onAppear { if !reduceMotion { pulse = true } }
             .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
     }
 }
@@ -874,21 +919,29 @@ struct SettingsSheet: View {
                     .foregroundColor(.jarvisAccent)
                     .frame(minHeight: 44)
             }
-            TextField("Gateway URL (https://…:8790)", text: $model.gatewayURLField)
+            TextField(
+                "Gateway URL (https://…:8790)",
+                text: $model.gatewayURLField,
+                prompt: Text("Gateway URL (https://…:8790)").foregroundColor(.jarvisMuted)
+            )
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
                 .frame(minHeight: 44)
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            SecureField("iOS token", text: $model.tokenField)
+            SecureField(
+                "iOS token",
+                text: $model.tokenField,
+                prompt: Text("iOS token").foregroundColor(.jarvisMuted)
+            )
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
                 .frame(minHeight: 44)
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
             Button {
                 model.bridge.disconnect()
                 model.bridge.connect()
@@ -898,7 +951,7 @@ struct SettingsSheet: View {
                     .foregroundColor(.jarvisAccent)
                     .frame(maxWidth: .infinity, minHeight: 44)
                     .background(
-                        RoundedRectangle(cornerRadius: 16).fill(Color.jarvisAccent.opacity(0.14))
+                        RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisAccent.opacity(0.14))
                     )
             }
             Text(model.statusText)

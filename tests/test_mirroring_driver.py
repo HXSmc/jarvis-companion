@@ -77,6 +77,27 @@ def test_null_provider_or_data_is_unreadable(monkeypatch):
     assert seen == []  # neither NULL reached the CF layer
 
 
+def test_none_skip_alpha_info_padding_is_readable(monkeypatch):
+    # alpha_info 5/6 (kCGImageAlphaNoneSkipLast/First) carry no real alpha —
+    # the "alpha" byte is undefined padding, so a capture of all-zero padding
+    # bytes is readable, not the transparent-black sentinel.
+    # CG/CF stubbed — no real capture, no real image.
+    from mac.mirroring import driver
+
+    for name, ret in (("CGImageGetWidth", W), ("CGImageGetHeight", H),
+                      ("CGImageGetBitsPerPixel", 32),
+                      ("CGImageGetBitmapInfo", 0)):
+        monkeypatch.setattr(driver.CG, name, lambda img, _ret=ret: _ret)
+    queried = []
+    monkeypatch.setattr(driver.CG, "CGImageGetDataProvider",
+                        lambda img: queried.append(img))
+    for alpha_info in (5, 6):
+        monkeypatch.setattr(driver.CG, "CGImageGetAlphaInfo",
+                            lambda img, _ai=alpha_info: _ai)
+        assert driver._capture_is_unreadable(object()) is False
+    assert queried == []  # padding byte never sampled
+
+
 def test_sentinel_geometry_like_live_capture():
     # the observed failure: 624x1374 capture, every pixel (0, 0, 0, 0)
     w, h, stride = 624, 1374, 624 * 4
