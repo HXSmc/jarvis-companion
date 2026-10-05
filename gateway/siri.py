@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from gateway import screen
-from gateway.auth import require_bearer
+from gateway.auth import require_bearer_any
 from gateway.registry import roles
 from mac.voice import brain
 from mac.voice import router as voice_router
@@ -91,7 +91,8 @@ async def _brain_reply(text: str) -> str:
         return _TIMEOUT_REPLY
 
 
-@router.post("/siri/hey", dependencies=[Depends(require_bearer)])
+# The Shortcut sends the shared token; the iPhone app sends `ios_token`.
+@router.post("/siri/hey", dependencies=[Depends(require_bearer_any("token", "ios_token"))])
 async def siri_hey(request: Request) -> dict[str, str]:
     """`{"text": "<transcript>"}` → registry/brain → `{"reply": "<reply>"}`.
 

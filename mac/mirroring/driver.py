@@ -54,8 +54,46 @@ AX.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctyp
 AX.CGEventKeyboardSetUnicodeString.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
                                                ctypes.c_void_p]
 
+# CGImage pixel access for the unreadable-capture check: same handles, same
+# restype/argtypes pattern as the CGEvent block above.
+CG.CGImageGetWidth.restype = ctypes.c_size_t
+CG.CGImageGetWidth.argtypes = [ctypes.c_void_p]
+CG.CGImageGetHeight.restype = ctypes.c_size_t
+CG.CGImageGetHeight.argtypes = [ctypes.c_void_p]
+CG.CGImageGetBytesPerRow.restype = ctypes.c_size_t
+CG.CGImageGetBytesPerRow.argtypes = [ctypes.c_void_p]
+CG.CGImageGetBitsPerPixel.restype = ctypes.c_size_t
+CG.CGImageGetBitsPerPixel.argtypes = [ctypes.c_void_p]
+CG.CGImageGetAlphaInfo.restype = ctypes.c_uint32
+CG.CGImageGetAlphaInfo.argtypes = [ctypes.c_void_p]
+CG.CGImageGetBitmapInfo.restype = ctypes.c_uint32
+CG.CGImageGetBitmapInfo.argtypes = [ctypes.c_void_p]
+CG.CGImageGetDataProvider.restype = ctypes.c_void_p
+CG.CGImageGetDataProvider.argtypes = [ctypes.c_void_p]
+CG.CGDataProviderCopyData.restype = ctypes.c_void_p
+CG.CGDataProviderCopyData.argtypes = [ctypes.c_void_p]
+CG.CGDataProviderCreateWithData.restype = ctypes.c_void_p
+CG.CGDataProviderCreateWithData.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                            ctypes.c_size_t, ctypes.c_void_p]
+CG.CGColorSpaceCreateDeviceRGB.restype = ctypes.c_void_p
+CG.CGImageCreate.restype = ctypes.c_void_p
+# CGImage.h: (width, height, bitsPerComponent, bitsPerPixel, bytesPerRow,
+# space, bitmapInfo, provider, decode, shouldInterpolate, intent)
+CG.CGImageCreate.argtypes = [ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t,
+                             ctypes.c_size_t, ctypes.c_size_t, ctypes.c_void_p,
+                             ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
+                             ctypes.c_bool, ctypes.c_int]
+CF.CFDataGetLength.restype = ctypes.c_long
+CF.CFDataGetLength.argtypes = [ctypes.c_void_p]
+CF.CFDataGetBytePtr.restype = ctypes.c_void_p
+CF.CFDataGetBytePtr.argtypes = [ctypes.c_void_p]
+CF.CFRelease.argtypes = [ctypes.c_void_p]
+
 kCGHIDEventTap = 0
 kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp = 5, 1, 2
+# CGWindowListCreateImage listOption: composite ONLY the window with the given
+# id — with 0 the whole screen region behind it gets composited (CGWindow.h).
+kCGWindowListOptionIncludingWindow = 1 << 3
 # CGEventKeyboardSetUnicodeString carries at most 20 UTF-16 code units per event
 UNICODE_CHUNK = 20
 
@@ -84,22 +122,98 @@ def resolve_window(dry_run: bool) -> MirrorWindow:
         raise
 
 
+# CGWindow.h on CGWindowListCreateImage: "If no windows meet the specified
+# criteria, or the windows can't be read, then a transparent black image will
+# be returned" — a capture whose every sampled alpha byte is 0 is therefore an
+# UNREADABLE capture (display locked/asleep), not a success.
+_TRANSPARENCY_GRID = 8  # 8x8 grid = 64 alpha samples spread over the image
+_ALPHA_LAST_INFO = (1, 3, 5)  # PremultipliedLast, Last, NoneSkipLast
+_SYNTHETIC_BUFS = []  # pins backing buffers of self-test's synthetic CGImages
+
+
+def _alpha_bytes_zero(data: bytes, width: int, height: int, bytes_per_row: int,
+                      bits_per_pixel: int, alpha_offset: int) -> bool:
+    """Grid-sample `data`'s alpha byte per pixel: True when every sampled
+    pixel is fully transparent. Pure-buffer so tests drive it without a live
+    capture; geometry comes from the image itself (rows may be padded)."""
+    stride = bits_per_pixel // 8
+    for gy in range(_TRANSPARENCY_GRID):
+        py = (height - 1) * gy // (_TRANSPARENCY_GRID - 1)
+        for gx in range(_TRANSPARENCY_GRID):
+            px = (width - 1) * gx // (_TRANSPARENCY_GRID - 1)
+            if data[py * bytes_per_row + px * stride + alpha_offset]:
+                return False
+    return True
+
+
+def _capture_is_unreadable(img) -> bool:
+    """True when CGImage `img` is the transparent-black sentinel CGWindow.h
+    documents for a window that can't be read."""
+    width, height = CG.CGImageGetWidth(img), CG.CGImageGetHeight(img)
+    bits = CG.CGImageGetBitsPerPixel(img)
+    alpha_info = CG.CGImageGetAlphaInfo(img)
+    if alpha_info in (0, 5, 6):  # None/SkipLast/SkipFirst — no real alpha, the
+        return False             # "alpha" byte is undefined padding, not data
+    if alpha_info == 7:  # kCGImageAlphaOnly — the single byte per pixel IS alpha
+        alpha_offset = 0
+    else:
+        # the component sequence maps to memory bytes per the bitmap's byte
+        # order: a little-endian layout flips "last component" to byte 0
+        little = (CG.CGImageGetBitmapInfo(img) & 0xF000) == 0x2000  # 32Little
+        alpha_offset = bits // 8 - 1 if (alpha_info in _ALPHA_LAST_INFO) != little else 0
+    provider = CG.CGImageGetDataProvider(img)
+    if not provider:  # NULL provider — nothing to copy, nothing to release
+        return True
+    cf_data = CG.CGDataProviderCopyData(provider)
+    if not cf_data:  # NULL data — same unreadable capture, never dereferenced
+        return True
+    try:
+        buf = ctypes.string_at(CF.CFDataGetBytePtr(cf_data),
+                               CF.CFDataGetLength(cf_data))
+    finally:
+        CF.CFRelease(cf_data)
+    return _alpha_bytes_zero(buf, width, height,
+                             CG.CGImageGetBytesPerRow(img), bits, alpha_offset)
+
+
+def _synthetic_cgimage(alpha: int, n: int = 16) -> int:
+    """n x n RGBA CGImage synthesized in memory (no capture, no permission):
+    stand-in for CGWindowListCreateImage output, alpha byte `alpha` everywhere."""
+    raw = bytearray(n * n * 4)
+    raw[3::4] = bytes([alpha]) * (n * n)
+    buf = ctypes.create_string_buffer(bytes(raw), n * n * 4)
+    provider = CG.CGDataProviderCreateWithData(None, buf, n * n * 4, None)
+    cs = CG.CGColorSpaceCreateDeviceRGB()
+    # bitmapInfo 1 = kCGImageAlphaPremultipliedLast, default (big-endian) byte
+    # order -> RGBA in memory, alpha at offset 3, matching the buffer above.
+    img = CG.CGImageCreate(n, n, 8, 32, n * 4, cs, 1, provider, None, False, 0)
+    CF.CFRelease(cs)
+    CF.CFRelease(provider)  # CGImage retains both; buf is pinned via _SYNTHETIC_BUFS
+    _SYNTHETIC_BUFS.append(buf)
+    return img
+
+
 def screenshot(win: MirrorWindow, path: str, dry_run: bool) -> int:
     """Quartz CGWindowListCreateImage of the window -> PNG at `path`.
 
     Dry-run writes the built-in fixture PNG instead — never captures, never
-    touches the real window."""
+    touches the real window. A fully transparent capture is CGWindow.h's
+    unreadable-window sentinel: nothing is written, exit 4."""
     if dry_run:
         Path(path).write_bytes(FIXTURE_PNG)
         print(f"screenshot (dry-run fixture) -> {path} (window {win.window_id})")
         return 0
     x, y, w, h = win.frame
     rect = CGRect(CGPoint(x, y), CGPoint(w, h))
-    img = CG.CGWindowListCreateImage(rect, 0, win.window_id, 0)
+    img = CG.CGWindowListCreateImage(
+        rect, kCGWindowListOptionIncludingWindow, win.window_id, 0)
     if not img:
         print("screenshot failed: CGWindowListCreateImage returned NULL "
               "(screen recording permission?)", file=sys.stderr)
         return 3
+    if _capture_is_unreadable(img):
+        print("screenshot unreadable: display locked/asleep or window not capturable (screen recording permission?)", file=sys.stderr)
+        return 4
     _write_png(img, path)
     print(f"screenshot -> {path} (window {win.window_id})")
     return 0
@@ -246,6 +360,12 @@ def self_test() -> int:
     w = int.from_bytes(FIXTURE_PNG[16:20], "big")
     h = int.from_bytes(FIXTURE_PNG[20:24], "big")
     assert (w, h) == (78, 156), f"fixture PNG is {w}x{h}, expected 78x156"
+    # unreadable-capture detector against synthetic images (no capture): the
+    # all-transparent sentinel must read as unreadable, live alpha must not
+    assert _capture_is_unreadable(_synthetic_cgimage(0)), \
+        "all-transparent CGImage not flagged unreadable"
+    assert not _capture_is_unreadable(_synthetic_cgimage(0xFF)), \
+        "opaque-alpha CGImage flagged unreadable"
     print("mac.mirroring self-test OK "
           f"(fake window id={FAKE_WINDOW.window_id}, fixture PNG {w}x{h})")
     return 0

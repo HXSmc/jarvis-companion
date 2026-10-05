@@ -36,6 +36,9 @@ extension Color {
     static let jarvisDanger = Color(red: 255 / 255, green: 92 / 255, blue: 92 / 255) // #FF5C5C
 }
 
+/// Radius token (same spec section): every rounded surface uses radius 16.
+let jarvisRadius: CGFloat = 16
+
 /// Motion line, and nothing else: light impact on press start, success
 /// notification on reply, error notification on failure.
 enum Haptics {
@@ -83,6 +86,21 @@ final class DictationController: NSObject, ObservableObject {
     /// Set when release() lands while `starting` (async permission hops):
     /// pending start completions check this and abort to idle.
     private var releaseRequested = false
+    /// Mirrors the physical hold (true from press to release/cancel) so the
+    /// 60 s cap can tell a live hold from a gesture that was CANCELLED (F2).
+    private var isHeld = false
+    /// Set when either permission was .notDetermined at press time (F2): the
+    /// permission alert cancels the gesture, so after the grant the start
+    /// aborts to idle — the owner must press again.
+    private var repressAfterGrant = false
+    /// Set by cancelDiscard() so straggler recognition callbacks (the
+    /// cancelled task's final error) don't deliver anything afterwards.
+    private var discarding = false
+    /// Per-hold generation: bumped on every press and when a hold's result
+    /// is delivered. Recognizer callbacks and the cap timer capture it at
+    /// start and are ignored once stale — so `task?.cancel()` re-firing the
+    /// result closure during the 1.5 s grace wait cannot double-deliver.
+    private var generation = 0
 
     override init() {
         if let current = SFSpeechRecognizer(locale: Locale.current), current.isAvailable {
@@ -91,6 +109,18 @@ final class DictationController: NSObject, ObservableObject {
             recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         }
         super.init()
+        // F2: an audio-session interruption (incoming call, Siri…) kills the
+        // capture mid-hold; discard it rather than send a truncated take.
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            if (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                == AVAudioSession.InterruptionType.began.rawValue {
+                self?.cancelDiscard()
+            }
+        }
     }
 
     /// True between press start and the listening state actually engaging
@@ -101,12 +131,18 @@ final class DictationController: NSObject, ObservableObject {
     /// determined (behavior item 5), then start engine + recognition.
     func pressStarted() {
         guard !isPressed else { return }
+        generation += 1
+        releaseRequested = false
+        discarding = false
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
         if speechStatus == .denied || speechStatus == .restricted {
             onPermissionDenied?()
             return
         }
         starting = true
+        isHeld = true
+        repressAfterGrant = speechStatus == .notDetermined
+            || AVAudioSession.sharedInstance().recordPermission == .undetermined
         if speechStatus == .notDetermined {
             SFSpeechRecognizer.requestAuthorization { [weak self] status in
                 DispatchQueue.main.async {
@@ -145,6 +181,14 @@ final class DictationController: NSObject, ObservableObject {
                     self.releaseRequested = false
                     return
                 }
+                if self.repressAfterGrant {
+                    // F2: the permission alert cancelled the gesture — both
+                    // permissions now granted, but return to idle without
+                    // starting; the owner presses again.
+                    self.starting = false
+                    self.repressAfterGrant = false
+                    return
+                }
                 self.startListening()
             }
         }
@@ -175,14 +219,26 @@ final class DictationController: NSObject, ObservableObject {
             try audioEngine.start()
             bestTranscript = ""
             partialTranscript = ""
+            let gen = generation
             task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                DispatchQueue.main.async { self?.handleResult(result, error) }
+                DispatchQueue.main.async {
+                    guard let self = self, self.generation == gen else { return }
+                    self.handleResult(result, error)
+                }
             }
             isListening = true
             // 60 s cap (behavior item 2): Apple's recognizer limit; auto-stop
-            // and auto-send rather than stranding the hold.
+            // and auto-send while still held, otherwise discard (F2: a
+            // cancelled gesture must not auto-send unheld).
             capTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { [weak self] _ in
-                DispatchQueue.main.async { self?.release() }
+                DispatchQueue.main.async {
+                    guard let self = self, self.isListening, self.generation == gen else { return }
+                    if self.isHeld {
+                        self.release()
+                    } else {
+                        self.cancelDiscard()
+                    }
+                }
             }
         } catch {
             teardownAudio()
@@ -190,26 +246,58 @@ final class DictationController: NSObject, ObservableObject {
         }
     }
 
-    /// Release: endAudio on the request, stop the tap/engine, restore the
-    /// KeepAlive session, wait up to 1.5 s for isFinal, then send the best
-    /// transcript (behavior item 2 / criterion 5).
-    func release() {
-        guard isListening else {
-            // Release during the async start path: flag it so the pending
-            // start aborts instead of running unheld.
-            if starting { releaseRequested = true }
-            return
-        }
+    /// Shared stop sequence (release, isFinal, error and cancel paths):
+    /// stop listening, kill the cap timer, tear the tap/engine down.
+    private func stopCapture() {
         isListening = false
         capTimer?.invalidate()
         capTimer = nil
         teardownAudio()
+    }
+
+    /// Release: endAudio on the request, stop the tap/engine, restore the
+    /// KeepAlive session, wait up to 1.5 s for isFinal, then send the best
+    /// transcript (behavior item 2 / criterion 5).
+    func release() {
+        isHeld = false
+        guard isListening else {
+            // Release (or gesture CANCEL, F2) during the async start path:
+            // flag it so the pending start aborts instead of running unheld.
+            if starting { releaseRequested = true }
+            return
+        }
+        stopCapture()
+        let gen = generation
         let work = DispatchWorkItem { [weak self] in
-            self?.finalizeWork = nil
-            self?.deliver()
+            guard let self = self, self.generation == gen else { return }
+            self.finalizeWork = nil
+            self.deliver()
         }
         finalizeWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+    }
+
+    /// F2: stop dictation and DISCARD the transcript (scene leaving active,
+    /// audio-session interruption, 60 s cap with no hold). Same teardown as
+    /// release() — tap removed, engine stopped, KeepAlive session restored —
+    /// but nothing is sent.
+    func cancelDiscard() {
+        isHeld = false
+        repressAfterGrant = false
+        discarding = true
+        // Abort any pending async start (same mechanism as a release while
+        // starting); a fresh press resets the flag.
+        releaseRequested = true
+        finalizeWork?.cancel()
+        finalizeWork = nil
+        if isListening {
+            stopCapture()
+        }
+        starting = false
+        task?.cancel()
+        task = nil
+        bestTranscript = ""
+        partialTranscript = ""
     }
 
     private func teardownAudio() {
@@ -221,6 +309,7 @@ final class DictationController: NSObject, ObservableObject {
     }
 
     private func handleResult(_ result: SFSpeechRecognitionResult?, _ error: Error?) {
+        if discarding { return }
         if let result = result {
             bestTranscript = result.bestTranscription.formattedString
             partialTranscript = bestTranscript
@@ -231,10 +320,7 @@ final class DictationController: NSObject, ObservableObject {
                 finalizeWork = nil
                 task = nil
                 if isListening {
-                    isListening = false
-                    capTimer?.invalidate()
-                    capTimer = nil
-                    teardownAudio()
+                    stopCapture()
                 }
                 deliver()
             }
@@ -246,16 +332,16 @@ final class DictationController: NSObject, ObservableObject {
             finalizeWork?.cancel()
             finalizeWork = nil
             if isListening {
-                isListening = false
-                capTimer?.invalidate()
-                capTimer = nil
-                teardownAudio()
+                stopCapture()
             }
             deliver()
         }
     }
 
     private func deliver() {
+        // Invalidate this hold's stragglers BEFORE cancelling, so the result
+        // closure `task?.cancel()` re-fires into is dropped (no double send).
+        generation += 1
         task?.cancel()
         task = nil
         let text = bestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -318,19 +404,16 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             if text.isEmpty {
                 // Empty/whitespace transcript: NO network request (criterion 5).
-                self.replyText = "didn't catch that"
-                self.replyIsError = true
+                self.setFailure("didn't catch that")
             } else {
                 self.ask(text)
             }
         }
         dictation.onPermissionDenied = { [weak self] in
-            self?.replyText = "mic or speech permission denied, enable in Settings"
-            self?.replyIsError = true
+            self?.setFailure("mic or speech permission denied, enable in Settings")
         }
         dictation.onEngineError = { [weak self] error in
-            self?.replyText = "ask failed: \(error.localizedDescription)"
-            self?.replyIsError = true
+            self?.fail(error)
         }
     }
 
@@ -356,14 +439,11 @@ final class AppModel: ObservableObject {
         replyText = nil
         replyIsError = false
         isSending = true
-        var base = AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
-        while base.hasSuffix("/") { base.removeLast() }
-        guard let url = URL(string: base + "/siri/hey") else {
+        // F3: URLComponents-built endpoint — https enforced, no query or
+        // fragment leaking into the path.
+        guard let url = Self.heyEndpoint() else {
             isSending = false
-            fail(NSError(
-                domain: "ask", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "invalid gateway URL"]
-            ))
+            fail("gateway URL must be https")
             return
         }
         var request = URLRequest(url: url)
@@ -372,12 +452,23 @@ final class AppModel: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.isSending = false
                 if let error = error {
                     self.fail(error)
+                    return
+                }
+                // F1: surface the real HTTP status instead of letting a 401
+                // show up as "malformed reply".
+                if let http = response as? HTTPURLResponse,
+                   !(200...299).contains(http.statusCode) {
+                    if http.statusCode == 401 || http.statusCode == 403 {
+                        self.fail("unauthorized, check the token in Settings")
+                    } else {
+                        self.fail("HTTP \(http.statusCode)")
+                    }
                     return
                 }
                 guard let data = data,
@@ -397,10 +488,39 @@ final class AppModel: ObservableObject {
         }.resume()
     }
 
-    private func fail(_ error: Error) {
-        replyText = "ask failed: \(error.localizedDescription)"
+    /// F3: <gateway>/siri/hey from the saved setting via URLComponents —
+    /// scheme must be https, the existing path is kept with no double slash,
+    /// any query/fragment is dropped. Every ask entry point (chips, typed
+    /// send, mic release) funnels through ask(), so all share this helper.
+    private static func heyEndpoint() -> URL? {
+        guard var comps = URLComponents(
+            string: AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
+        ), comps.scheme?.lowercased() == "https", comps.host != nil else {
+            return nil
+        }
+        var path = comps.path
+        while path.hasSuffix("/") { path.removeLast() }
+        comps.path = path + "/siri/hey"
+        comps.query = nil
+        comps.fragment = nil
+        return comps.url
+    }
+
+    /// Shared failure surface: every failure path (HTTP/URL/parse errors,
+    /// permission denial, engine errors, empty transcript) funnels here so
+    /// the error haptic always fires; only one place sets the reply state.
+    private func setFailure(_ message: String) {
+        replyText = message
         replyIsError = true
         Haptics.error()
+    }
+
+    private func fail(_ message: String) {
+        setFailure("ask failed: \(message)")
+    }
+
+    private func fail(_ error: Error) {
+        fail(error.localizedDescription)
     }
 
     /// DESIGN.md "Feature data flows" #2: a `jarvis://handoff/<id>` link
@@ -430,6 +550,9 @@ final class AppModel: ObservableObject {
         // DESIGN.md "Failure handling": JS is unreliable in background, so the
         // app only acts while foregrounded.
         web.isForeground = phase == .active
+        // F2: leaving the active scene cancels the hold — discard the
+        // capture instead of sending it.
+        if phase != .active { dictation.cancelDiscard() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {
@@ -495,6 +618,11 @@ struct ContentView: View {
 
     @ScaledMetric(relativeTo: .body) private var replySize: CGFloat = 21
     @ScaledMetric(relativeTo: .caption) private var markSize: CGFloat = 13
+    /// F2: press tracking — SwiftUI resets this to false when the gesture
+    /// ends OR is CANCELLED (system alert under the finger, incoming call,
+    /// backgrounding), so a cancel runs the exact same path as a release.
+    @GestureState private var micHeld = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -566,12 +694,13 @@ struct ContentView: View {
         }
     }
 
+    /// Dot color derives from bridge state, not the free-text pill copy:
+    /// accent while connected, danger on the last error, muted otherwise —
+    /// so a `handoff …: opening/driving` status never shows red.
     private var pillDot: Color {
-        switch model.statusText {
-        case "connected": return .jarvisAccent
-        case "disconnected", "starting": return .jarvisMuted
-        default: return .jarvisDanger
-        }
+        if model.bridge.connected { return .jarvisAccent }
+        if model.bridge.lastError != nil { return .jarvisDanger }
+        return .jarvisMuted
     }
 
     private var conversation: some View {
@@ -605,18 +734,25 @@ struct ContentView: View {
 
     private var chips: some View {
         HStack(spacing: 8) {
-            ForEach(["Show Mac screen", "Show PC screen", "Status"], id: \.self) { title in
+            ForEach([
+                Chip(label: "Mac screen", payload: "Show Mac screen"),
+                Chip(label: "PC screen", payload: "Show PC screen"),
+                Chip(label: "Status", payload: "Status"),
+            ]) { chip in
                 Button {
-                    model.ask(title)
+                    model.ask(chip.payload)
                 } label: {
-                    Text(title)
+                    Text(chip.label)
                         .font(.subheadline)
                         .foregroundColor(.jarvisText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                         .padding(.horizontal, 16)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                        .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 }
-                .disabled(!model.askReady || model.isSending)
+                .disabled(!model.askReady || model.isSending || dictation.isListening)
+                .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
             }
         }
     }
@@ -640,7 +776,7 @@ struct ContentView: View {
         Circle()
             .fill(Color.jarvisAccent)
             .frame(width: 88, height: 88)
-            .scaleEffect(dictation.isListening ? 1.06 : 1.0)
+            .scaleEffect(dictation.isListening && !reduceMotion ? 1.06 : 1.0)
             .animation(.easeInOut(duration: 0.2), value: dictation.isListening)
             .overlay(
                 Image(systemName: "mic.fill")
@@ -658,25 +794,39 @@ struct ContentView: View {
                             dictation.pressStarted()
                         }
                     }
-                    .onEnded { _ in dictation.release() }
+                    .updating($micHeld) { _, state, _ in state = true }
             )
+            // F2: fires on both a normal lift and a CANCELLED gesture (the
+            // @GestureState auto-reset); release() aborts a pending start or
+            // stops + sends a live one.
+            .onChange(of: micHeld) { held in
+                if !held { dictation.release() }
+            }
             .accessibilityLabel("Hold to talk")
             .accessibilityAddTraits(.isButton)
     }
 
     private var typedRow: some View {
         HStack(spacing: 8) {
-            TextField("or type…", text: typedBinding)
+            TextField(
+                "or type…",
+                text: typedBinding,
+                prompt: Text("or type…").foregroundColor(.jarvisMuted)
+            )
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
                 .frame(minHeight: 44)
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 .keyboardType(.default)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.sentences)
                 .submitLabel(.send)
-                .onSubmit { model.ask(model.typedText) }
+                .onSubmit {
+                    // Manual send only while idle: the recognizer owns the
+                    // field during a hold (criterion 7).
+                    if !dictation.isListening { model.ask(model.typedText) }
+                }
             sendButton
         }
     }
@@ -711,13 +861,13 @@ struct ContentView: View {
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
         }
-        .disabled(!model.askReady || model.isSending)
+        .disabled(!model.askReady || model.isSending || dictation.isListening)
+        .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
         .accessibilityLabel("Send")
     }
 
     private var hiddenWebHost: some View {
         JarvisWebView(controller: model.web)
-            .frame(width: 1, height: 1)
             .opacity(0.01)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
@@ -725,9 +875,18 @@ struct ContentView: View {
     }
 }
 
+/// Quick chip (Home "quick chips"): short display label, full command payload.
+private struct Chip: Identifiable {
+    let label: String
+    let payload: String
+    var id: String { payload }
+}
+
 /// Listening ring (Motion line): 1.2 s ease pulse in accent while held.
+/// Reduce Motion renders it static (no repeating animation).
 private struct PulsingRing: View {
     @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Circle()
@@ -735,7 +894,7 @@ private struct PulsingRing: View {
             .frame(width: 88, height: 88)
             .scaleEffect(pulse ? 1.3 : 1.0)
             .opacity(pulse ? 0.1 : 0.6)
-            .onAppear { pulse = true }
+            .onAppear { if !reduceMotion { pulse = true } }
             .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
     }
 }
@@ -760,21 +919,29 @@ struct SettingsSheet: View {
                     .foregroundColor(.jarvisAccent)
                     .frame(minHeight: 44)
             }
-            TextField("Gateway URL (https://…:8790)", text: $model.gatewayURLField)
+            TextField(
+                "Gateway URL (https://…:8790)",
+                text: $model.gatewayURLField,
+                prompt: Text("Gateway URL (https://…:8790)").foregroundColor(.jarvisMuted)
+            )
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
                 .frame(minHeight: 44)
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            SecureField("iOS token", text: $model.tokenField)
+            SecureField(
+                "iOS token",
+                text: $model.tokenField,
+                prompt: Text("iOS token").foregroundColor(.jarvisMuted)
+            )
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
                 .frame(minHeight: 44)
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color.jarvisSurface))
+                .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
             Button {
                 model.bridge.disconnect()
                 model.bridge.connect()
@@ -784,7 +951,7 @@ struct SettingsSheet: View {
                     .foregroundColor(.jarvisAccent)
                     .frame(maxWidth: .infinity, minHeight: 44)
                     .background(
-                        RoundedRectangle(cornerRadius: 16).fill(Color.jarvisAccent.opacity(0.14))
+                        RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisAccent.opacity(0.14))
                     )
             }
             Text(model.statusText)
