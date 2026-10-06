@@ -18,7 +18,7 @@ import logging
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from common import config
-from gateway import agents, registry
+from gateway import agents, registry, wake
 from gateway.auth import require_bearer
 from gateway.flows import flight, signin
 
@@ -65,7 +65,7 @@ async def _handle_handoff_open(message: dict, role: str) -> dict | None:
 # type -> handler. A handler gets (message, role) — the connection's
 # authenticated role — and returns the envelope to send, or None when it has
 # already replied on the socket itself. Types not listed keep the generic ack.
-_HANDLERS = {"handoff_open": _handle_handoff_open}
+_HANDLERS = {"handoff_open": _handle_handoff_open, "hello": wake.handle_hello}
 
 
 def _expected_token(role: str) -> str | None:

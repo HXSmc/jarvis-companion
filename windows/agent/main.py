@@ -27,6 +27,7 @@ import logging
 import os
 import random
 import sys
+import uuid
 
 import websockets
 
@@ -138,6 +139,13 @@ def handle_message(raw: str) -> dict | None:
     return {"id": msg.get("id"), "ok": ok, "data": data}
 
 
+def _hello_envelope() -> str:
+    """Connect-time `hello` (Q2): reports the NIC MAC; payload omits it when random."""
+    mac = uuid.getnode()
+    payload = {} if mac & 0x01 else {"mac": ":".join(f"{(mac >> s) & 0xFF:02x}" for s in range(40, -1, -8))}
+    return json.dumps({"id": f"{random.getrandbits(32):08x}", "type": "hello", "payload": payload})
+
+
 async def run(url: str | None = None, token: str | None = None) -> None:
     url = load_gateway_url() if url is None else url
     token = load_token() if token is None else token
@@ -164,6 +172,7 @@ async def run(url: str | None = None, token: str | None = None) -> None:
             async with websockets.connect(url, **connect_kwargs) as ws:
                 logger.info("connected")
                 backoff = INITIAL_BACKOFF_S
+                await ws.send(_hello_envelope())
                 async for raw in ws:
                     reply = handle_message(raw)
                     if reply is not None:
