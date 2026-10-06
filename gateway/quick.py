@@ -300,7 +300,7 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
     return await _brain_answer(q, skip, start)
 
 
-@router.post("/ask", dependencies=[Depends(require_bearer_any("token", "ios_token"))])
+@router.post("/ask", dependencies=[Depends(require_bearer_any("ios_token"))])
 async def ask_endpoint(request: Request) -> dict:
     """`{"q": "...", "brain": "auto"|"skip"}` → QuickAnswer.as_dict().
 

@@ -202,6 +202,7 @@ def test_remember_and_last_seen_roundtrip(monkeypatch, tmp_path) -> None:
 
     wake.remember_mac("AA-BB-CC-DD-EE-FF")
     assert wake.last_seen_mac() == "aa:bb:cc:dd:ee:ff"
+    assert (state.stat().st_mode & 0o777) == 0o600  # owner-only state file
 
     state.write_text("{not json", encoding="utf-8")  # corrupt
     assert wake.last_seen_mac() is None

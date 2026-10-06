@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -95,12 +96,20 @@ def _send_packet(packet: bytes, targets: list[tuple[str, int]]) -> None:
 
 
 def remember_mac(mac: str) -> None:
-    """Persist the agent-reported MAC (normalised) to the state file, creating the dir."""
+    """Persist the agent-reported MAC (normalised) to the state file, creating the dir.
+
+    Private by default: dir 0o700 when created, file 0o600 on create and on
+    every rewrite (chmod tightens files written by older, umask-permissive
+    versions).
+    """
     normalised = _normalise_mac(mac)
     if normalised is None:
         return
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps({"mac": normalised}), encoding="utf-8")
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(STATE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"mac": normalised}))
+    os.chmod(STATE_PATH, 0o600)
 
 
 def last_seen_mac() -> str | None:

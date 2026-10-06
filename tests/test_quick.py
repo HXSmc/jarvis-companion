@@ -14,8 +14,7 @@ import pytest
 from fastapi import FastAPI
 
 from common import config
-
-TOKEN = "jarvis_test_token_123"
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER, IOS_TOKEN
 
 TEST_SETTINGS = {
     "openrouter_key": "test-openrouter-key",
@@ -26,28 +25,35 @@ TEST_SETTINGS = {
 
 @pytest.fixture
 def quick_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stubbed auth token + settings seam: no vault read, no OpenRouter access."""
+    """Stubbed auth token + settings seam: no vault read, no OpenRouter access.
+
+    /ask is iOS-only, so only the ios_token name resolves a token here.
+    """
     from gateway import quick
 
     monkeypatch.setattr(
         config, "get_token",
-        lambda path=None, name="token": TOKEN if name == "token" else None,
+        lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else None,
     )
     monkeypatch.setattr(quick, "_settings", lambda: dict(TEST_SETTINGS))
 
 
-def _post(payload: dict, token: str | None = TOKEN) -> httpx.Response:
-    """POST /ask against a minimal app holding only the quick router."""
+def _post(
+    payload: dict, headers: dict[str, str] | None = IOS_AUTH_HEADER
+) -> httpx.Response:
+    """POST /ask against a minimal app holding only the quick router.
+
+    Defaults to the iOS header — /ask is phone-app-only by design.
+    """
     from gateway.quick import router
 
     async def run() -> httpx.Response:
         app = FastAPI()
         app.include_router(router)
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            return await client.post("/ask", json=payload, headers=headers)
+            return await client.post("/ask", json=payload, headers=headers or {})
 
     return asyncio.run(run())
 
@@ -180,7 +186,26 @@ def test_ask_vault_hit(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Answer with exactly the answer — one short sentence or phrase, no preamble." in system
     assert "NOVAULT" in system
     # Same surface without the header → 401.
-    assert _post({"q": "x"}, token=None).status_code == 401
+    assert _post({"q": "x"}, headers=None).status_code == 401
+
+
+def test_ask_rejects_shared_token(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared token (PC disk / Shortcut role) must not read the vault via /ask.
+
+    quick.ask stays reachable in-process for /siri/hey; over HTTP the endpoint
+    is ios_token-only, so the shared-token header gets no answer body.
+    """
+    from gateway import quick
+
+    monkeypatch.setattr(
+        quick, "retrieve", lambda q, vault_root=None: (["<project>: RESEND_API_KEY"], 4)
+    )
+    monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "vault")
+
+    resp = _post({"q": "what is the <project> resend key"}, headers=AUTH_HEADER)
+
+    assert resp.status_code in (401, 403)
+    assert "answer" not in resp.json()
 
 
 def test_ask_no_vault_answer_goes_web(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
