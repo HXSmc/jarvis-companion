@@ -36,11 +36,10 @@ def test_launch_with_shared_token(gateway_server):
             resp = await http.post("/screen/launch", headers=AUTH_HEADER, json={"target": "mac"})
             assert resp.status_code == 200, resp.text
             body = resp.json()
-            assert body["pushed"] is False, body  # no ios WS connected
-            assert body["url"].startswith(f"{PUBLIC_BASE}/screen?boot="), body
-            assert body["url"].endswith("&target=mac"), body
+            # Shared token gets pushed-only — no url/nonce key to trade for a session.
+            assert body == {"pushed": False}, body
             assert "set-cookie" not in resp.headers  # launch never mints a session
-            assert len(screen._BOOTSTRAPS) == 1  # nonce live for GET /screen?boot=
+            assert len(screen._BOOTSTRAPS) == 1  # nonce still minted for the WS push
             # The siri voice path uses the same launch (intercept, no brain call).
             resp = await http.post(
                 "/siri/hey", headers=AUTH_HEADER, json={"text": "show my mac screen"}
