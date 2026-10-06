@@ -375,6 +375,9 @@ final class AppModel: ObservableObject {
     @Published var ownerText: String?
     @Published var replyText: String?
     @Published var replyIsError = false
+    /// Muted `route · ms` tag under the reply — quick-ask only; the plain
+    /// brain path keeps it nil (spec §22).
+    @Published var routeTag: String?
     @Published var isSending = false
     @Published var showSettings = false
     @Published var showPushedPage = false
@@ -437,6 +440,7 @@ final class AppModel: ObservableObject {
         guard !text.isEmpty, !isSending, askReady else { return }
         ownerText = text
         replyText = nil
+        routeTag = nil
         replyIsError = false
         isSending = true
         // F3: URLComponents-built endpoint — https enforced, no query or
@@ -493,6 +497,12 @@ final class AppModel: ObservableObject {
     /// any query/fragment is dropped. Every ask entry point (chips, typed
     /// send, mic release) funnels through ask(), so all share this helper.
     private static func heyEndpoint() -> URL? {
+        gatewayEndpoint("/siri/hey")
+    }
+
+    /// Shared F3 builder behind heyEndpoint(): same https enforcement and
+    /// path appending, suffix picked per endpoint (/siri/hey, /ask, /pc/wake).
+    private static func gatewayEndpoint(_ suffix: String) -> URL? {
         guard var comps = URLComponents(
             string: AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
         ), comps.scheme?.lowercased() == "https", comps.host != nil else {
@@ -500,10 +510,152 @@ final class AppModel: ObservableObject {
         }
         var path = comps.path
         while path.hasSuffix("/") { path.removeLast() }
-        comps.path = path + "/siri/hey"
+        comps.path = path + suffix
         comps.query = nil
         comps.fragment = nil
         return comps.url
+    }
+
+    /// Typed-row dispatcher (spec §22): `?…` goes to the terse quick-ask
+    /// pipeline, anything else to the full brain via ask().
+    func sendTyped() {
+        let text = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("?") {
+            quickAsk(text)
+        } else {
+            ask(text)
+        }
+    }
+
+    /// Quick-ask (spec §22): POST <gateway>/ask {"q": <text minus ?>,
+    /// "brain": "auto"}; decodes {answer, route, ms, source}. A non-null
+    /// answer lands in the reply area with a `route · ms` tag; a null answer
+    /// (skip short-circuit / routed to the brain) shows the reroute hint.
+    /// Auth and failure surfaces reuse the ask() pattern verbatim.
+    func quickAsk(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let question = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
+        // F1: a bare `?` (question empty after strip) never sends, mirroring
+        // ask()'s `!text.isEmpty` guard.
+        guard text.hasPrefix("?"), !question.isEmpty, !isSending, askReady else { return }
+        ownerText = text
+        replyText = nil
+        routeTag = nil
+        replyIsError = false
+        isSending = true
+        guard let url = Self.gatewayEndpoint("/ask") else {
+            isSending = false
+            fail("gateway URL must be https")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["q": question, "brain": "auto"])
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isSending = false
+                if let error = error {
+                    self.fail(error)
+                    return
+                }
+                if let http = response as? HTTPURLResponse,
+                   !(200...299).contains(http.statusCode) {
+                    if http.statusCode == 401 || http.statusCode == 403 {
+                        self.fail("unauthorized, check the token in Settings")
+                    } else {
+                        self.fail("HTTP \(http.statusCode)")
+                    }
+                    return
+                }
+                guard let data = data,
+                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      obj["answer"] != nil,
+                      let route = obj["route"] as? String,
+                      let ms = obj["ms"] as? Int else {
+                    self.fail(NSError(
+                        domain: "ask", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "malformed reply"]
+                    ))
+                    return
+                }
+                if let answer = obj["answer"] as? String {
+                    self.replyText = answer
+                    self.routeTag = "\(route) · \(ms) ms"
+                } else {
+                    self.replyText = "routed to the full brain — ask without the ? or use the mic"
+                }
+                self.replyIsError = false
+                self.typedText = ""
+                Haptics.success()
+            }
+        }.resume()
+    }
+
+    /// Wake the PC (spec §23): POST <gateway>/pc/wake (no body). The reply
+    /// area shows "PC: waking…" immediately, then one of the outcome strings;
+    /// a 400 (no MAC configured) surfaces the endpoint's detail verbatim.
+    /// Timeout is 100 s — the gateway polls up to 90 s for the agent.
+    func wakePC() {
+        guard !isSending, askReady else { return }
+        ownerText = nil
+        replyText = "PC: waking…"
+        routeTag = nil
+        replyIsError = false
+        isSending = true
+        guard let url = Self.gatewayEndpoint("/pc/wake") else {
+            isSending = false
+            fail("gateway URL must be https")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 100
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isSending = false
+                if let error = error {
+                    self.fail(error)
+                    return
+                }
+                if let http = response as? HTTPURLResponse,
+                   !(200...299).contains(http.statusCode) {
+                    if http.statusCode == 400,
+                       let data = data,
+                       let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                       let detail = obj["detail"] as? String {
+                        self.setFailure(detail)
+                    } else if http.statusCode == 401 || http.statusCode == 403 {
+                        self.fail("unauthorized, check the token in Settings")
+                    } else {
+                        self.fail("HTTP \(http.statusCode)")
+                    }
+                    return
+                }
+                guard let data = data,
+                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let online = obj["online"] as? Bool,
+                      let waited = obj["waited_ms"] as? Int else {
+                    self.fail(NSError(
+                        domain: "ask", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "malformed reply"]
+                    ))
+                    return
+                }
+                if online {
+                    self.replyText = "PC online in \(Int((Double(waited) / 1000).rounded())) s"
+                    self.replyIsError = false
+                    Haptics.success()
+                } else {
+                    self.setFailure("PC not seen after 90 s")
+                }
+            }
+        }.resume()
     }
 
     /// Shared failure surface: every failure path (HTTP/URL/parse errors,
@@ -623,6 +775,9 @@ struct ContentView: View {
     /// backgrounding), so a cancel runs the exact same path as a release.
     @GestureState private var micHeld = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Ask-chip focus target (spec §23): tapping `Ask` puts `?` in the typed
+    /// row and raises the keyboard on it.
+    @FocusState private var typedFieldFocused: Bool
 
     var body: some View {
         ZStack {
@@ -718,6 +873,12 @@ struct ContentView: View {
                         .foregroundColor(model.replyIsError ? .jarvisDanger : .jarvisText)
                         .textSelection(.enabled)
                         .transition(.opacity)
+                    if let tag = model.routeTag {
+                        Text(tag)
+                            .font(.footnote)
+                            .foregroundColor(.jarvisMuted)
+                            .textSelection(.enabled)
+                    }
                 } else if model.ownerText == nil {
                     Text("Hold the mic. Ask for your Mac or PC screen.")
                         .font(.system(size: replySize))
@@ -732,29 +893,58 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// Chips, two rows (spec §23): the original three quick chips on top,
+    /// `Ask` (focus the typed row, `?` prefilled) + `Wake PC` below.
     private var chips: some View {
-        HStack(spacing: 8) {
-            ForEach([
-                Chip(label: "Mac screen", payload: "Show Mac screen"),
-                Chip(label: "PC screen", payload: "Show PC screen"),
-                Chip(label: "Status", payload: "Status"),
-            ]) { chip in
-                Button {
-                    model.ask(chip.payload)
-                } label: {
-                    Text(chip.label)
-                        .font(.subheadline)
-                        .foregroundColor(.jarvisText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                        .padding(.horizontal, 16)
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach([
+                    Chip(label: "Mac screen", payload: "Show Mac screen"),
+                    Chip(label: "PC screen", payload: "Show PC screen"),
+                    Chip(label: "Status", payload: "Status"),
+                ]) { chip in
+                    Button {
+                        model.ask(chip.payload)
+                    } label: {
+                        chipLabel(chip.label)
+                    }
+                    .disabled(chipDisabled)
+                    .opacity(chipDisabled ? 0.35 : 1.0)
                 }
-                .disabled(!model.askReady || model.isSending || dictation.isListening)
-                .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
+            }
+            HStack(spacing: 8) {
+                Button {
+                    model.typedText = "?"
+                    typedFieldFocused = true
+                } label: {
+                    chipLabel("Ask")
+                }
+                .disabled(chipDisabled)
+                .opacity(chipDisabled ? 0.35 : 1.0)
+                Button {
+                    model.wakePC()
+                } label: {
+                    chipLabel("Wake PC")
+                }
+                .disabled(chipDisabled)
+                .opacity(chipDisabled ? 0.35 : 1.0)
             }
         }
+    }
+
+    private var chipDisabled: Bool {
+        !model.askReady || model.isSending || dictation.isListening
+    }
+
+    private func chipLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundColor(.jarvisText)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
     }
 
     private var micSection: some View {
@@ -822,10 +1012,12 @@ struct ContentView: View {
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.sentences)
                 .submitLabel(.send)
+                .focused($typedFieldFocused)
                 .onSubmit {
                     // Manual send only while idle: the recognizer owns the
-                    // field during a hold (criterion 7).
-                    if !dictation.isListening { model.ask(model.typedText) }
+                    // field during a hold (criterion 7). `?…` dispatches to
+                    // quick-ask (spec §22), plain text to the full brain.
+                    if !dictation.isListening { model.sendTyped() }
                 }
             sendButton
         }
@@ -847,7 +1039,7 @@ struct ContentView: View {
 
     private var sendButton: some View {
         Button {
-            model.ask(model.typedText)
+            model.sendTyped()
         } label: {
             Group {
                 if model.isSending {
