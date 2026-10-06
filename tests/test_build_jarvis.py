@@ -128,7 +128,7 @@ def test_token_only_in_header_value(token_file, tmp_path, monkeypatch, capsys) -
 
 
 def test_sign_argv_absolute_paths(token_file, tmp_path, monkeypatch) -> None:
-    """`shortcuts sign --mode anyone` with exact argv and absolute paths."""
+    """`shortcuts sign --mode people-who-know-me` with exact argv and absolute paths."""
     mod = _load_module()
     calls: list[list[str]] = []
 
@@ -143,7 +143,7 @@ def test_sign_argv_absolute_paths(token_file, tmp_path, monkeypatch) -> None:
     built = (tmp_path / "build" / "Jarvis.shortcut").resolve()
     signed = (tmp_path / "build" / "Jarvis-signed.shortcut").resolve()
     assert calls == [
-        ["shortcuts", "sign", "--mode", "anyone", "--input", str(built), "--output", str(signed)]
+        ["shortcuts", "sign", "--mode", "people-who-know-me", "--input", str(built), "--output", str(signed)]
     ]
 
 

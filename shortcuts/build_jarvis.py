@@ -11,9 +11,11 @@ Token: read at BUILD time from the 0600 file named by env JARVIS_TOKEN_FILE.
 It is never hardcoded, printed, or written anywhere except the Authorization
 header value inside the generated .shortcut.
 
-Then signs via `shortcuts sign --mode anyone` (absolute paths — the note's
-gotcha: sign unreliably resolves relative ones). If the `shortcuts` CLI is
-missing, signing is skipped with one message and exit stays 0.
+Then signs locally via `shortcuts sign --mode people-who-know-me` (absolute
+paths — the note's gotcha: sign unreliably resolves relative ones); `anyone`
+would instead upload the shortcut, token included, to Apple for notarization.
+If the `shortcuts` CLI is missing, signing is skipped with one message and
+exit stays 0.
 
 stdout carries only the output path(s); everything else goes to stderr.
 """
@@ -193,7 +195,7 @@ def main(argv: list[str] | None = None) -> None:
             "shortcuts",
             "sign",
             "--mode",
-            "anyone",
+            "people-who-know-me",
             "--input",
             str(shortcut_path.resolve()),
             "--output",
