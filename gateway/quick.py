@@ -4,8 +4,9 @@ Routed vault → web → brain (autopilot-0 spec §Q1): one Jev classifier call 
 OpenRouter's Decisions API picks the route (keyword heuristic over the vault
 when OpenRouter is unreachable/unconfigured), the vault path answers from
 Obsidian snippets via one generative call (NOVAULT sentinel → web), the web
-path uses OpenRouter's `openrouter:web_search` server tool (UNKNOWN sentinel →
-brain), and every failure lands on the bounded `claude -p` brain. Empty,
+path runs a LOCAL CLI — `agy` (Antigravity) first, `claude -p` with WebSearch
+as fallback (UNKNOWN sentinel → brain; owner rule 2026-10-06: no separate
+search API) — and every failure lands on the bounded `claude -p` brain. Empty,
 sentinel, or question-echoing replies are treated as "no answer" so the model
 can never confabulate. `brain: "skip"` never calls the brain
 — the jarvis-phone hard requirement. Secrets are never read by this module:
@@ -15,7 +16,11 @@ config goes through common.config, and the vault walk prunes `Secrets/`.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -40,6 +45,7 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jarvis-quick")
 BRAIN_TIMEOUT_SECONDS = 15
 ROUTER_TIMEOUT_SECONDS = 5.0
 ANSWER_TIMEOUT_SECONDS = 20.0
+WEB_TIMEOUT_SECONDS = 25  # phone app waits 30 s — the CLI cap stays under it
 
 DEFAULT_QUICK_MODEL = "google/gemini-2.5-flash-lite"
 DEFAULT_ROUTER_MODEL = "typesafe/jev-1.13"
@@ -59,10 +65,6 @@ ACTION_VERBS = ("open", "close", "launch", "start", "stop", "run", "play", "paus
                 "click", "tap", "press", "scroll", "book", "buy", "order", "pay",
                 "install", "download", "set", "turn", "wake", "shut", "restart",
                 "reboot", "lock", "unlock", "show", "take")
-WEB_INSTRUCTION = (
-    "Answer ONLY from the web search results, in the fewest words possible. "
-    "If the search results do not contain the answer, reply with exactly UNKNOWN."
-)
 
 _VAULT_ROOT = Path("~/Desktop/ObsidianVault").expanduser()
 _EXCLUDED_DIRS = frozenset({"Secrets", ".obsidian", ".trash"})
@@ -270,21 +272,6 @@ def _is_answer(q: str, text: str | None) -> bool:
 _URL_RE = re.compile(r"https?://\S+")
 
 
-def _first_url(data: dict) -> str | None:
-    """First cited URL: annotations first, else the first URL in the content."""
-    try:
-        message = data["choices"][0]["message"]
-    except (KeyError, IndexError, TypeError):
-        return None
-    for annotation in message.get("annotations") or []:
-        if isinstance(annotation, dict) and annotation.get("url"):
-            return str(annotation["url"])
-    match = _URL_RE.search(_content_text(data))
-    if match:
-        return match.group(0).rstrip(".,)")
-    return None
-
-
 def _vault_answer(q: str, snippets: list[str], model: str, key: str) -> str | None:
     """Terse answer from vault snippets; None on NOVAULT (→ web path)."""
     payload = {
@@ -310,23 +297,106 @@ def _vault_answer(q: str, snippets: list[str], model: str, key: str) -> str | No
     return text
 
 
-def _web_answer(q: str, model: str, key: str) -> tuple[str, str | None]:
-    """One call with the `openrouter:web_search` server tool → (answer, source)."""
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": WEB_INSTRUCTION},
-            {"role": "user", "content": q},
-        ],
-        "tools": [{"type": "openrouter:web_search", "parameters": {"engine": "exa", "max_results": 3}}],
-    }
-    data = _openrouter(_CHAT_URL, payload, key=key, timeout_s=ANSWER_TIMEOUT_SECONDS)
-    return _content_text(data), _first_url(data)
+def _web_prompt(q: str) -> str:
+    """The pinned prompt both local web engines receive."""
+    return (
+        "Answer with exactly the answer and nothing else — no preamble, no "
+        "markdown, one short sentence or phrase. Search the web if you need "
+        "to. If you cannot find it, reply exactly UNKNOWN.\n\nQuestion: " + q
+    )
+
+
+def _parse_cli_stdout(stdout: str) -> tuple[str | None, str | None]:
+    """(last non-empty line, quotes/backticks stripped, URL in it or None)."""
+    for line in reversed(stdout.splitlines()):
+        text = line.strip().strip('"`').strip()
+        if text:
+            match = _URL_RE.search(text)
+            return text, match.group(0).rstrip(".,)") if match else None
+    return None, None
+
+
+def _agy_answer(q: str) -> tuple[str | None, str | None]:
+    """Local `agy` (Antigravity) CLI with its own web search → (answer, source).
+
+    Flag order is load-bearing: --dangerously-skip-permissions BEFORE
+    --print; --print-timeout is never passed (the subprocess timeout below
+    is the cap). AGY_KIND=quick tags the call for usage accounting.
+    """
+    try:
+        proc = subprocess.run(
+            ["agy", "--dangerously-skip-permissions", "--print", _web_prompt(q)],
+            capture_output=True,
+            text=True,
+            timeout=WEB_TIMEOUT_SECONDS,
+            env={**os.environ, "AGY_KIND": "quick"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if proc.returncode != 0:
+        return None, None
+    return _parse_cli_stdout(proc.stdout)
+
+
+def _claude_web_answer(q: str) -> tuple[str | None, str | None]:
+    """`claude -p` with WebSearch — brain.py's invocation style → (answer, source).
+
+    Same slim config dir as the brain (~/.claude-jarvis-brain, owner-gated
+    login), so until that one-time login this replies "Not logged in",
+    which the sentinel check below treats as no answer.
+    """
+    argv = [
+        "claude", "-p",
+        "--tools", "WebSearch",
+        "--mcp-config", '{"mcpServers":{}}',
+        "--strict-mcp-config",
+        "--setting-sources", "",
+        "--append-system-prompt", TERSE_INSTRUCTION,
+        "--max-turns", "3",
+    ]
+    env = {k: os.environ[k] for k in _brain._BRAIN_ENV_KEYS if k in os.environ}
+    env["CLAUDE_CONFIG_DIR"] = str(_brain.BRAIN_CONFIG_DIR)
+    scratch = tempfile.mkdtemp(prefix="jarvis-quick-web-")
+    try:
+        proc = subprocess.run(
+            argv,
+            input=_web_prompt(q),
+            capture_output=True,
+            text=True,
+            cwd=scratch,
+            env=env,
+            timeout=WEB_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if proc.returncode != 0:
+        return None, None
+    return _parse_cli_stdout(proc.stdout)
 
 
 async def _offload(fn, *args):
-    """Run a blocking helper (vault walk / OpenRouter POST) off the event loop."""
+    """Run a blocking helper (vault walk / CLI / OpenRouter POST) off the event loop."""
     return await asyncio.get_running_loop().run_in_executor(_executor, partial(fn, *args))
+
+
+async def _web_answer(q: str, engine: str) -> tuple[str | None, str | None]:
+    """Local-CLI web answer: agy first (unless engine=="claude"), claude fallback.
+
+    Any no-answer (CLI missing, non-zero exit, timeout, empty stdout,
+    UNKNOWN, refusal, question echo) falls through to the next engine and
+    finally to None → the caller's brain fallback. Stderr and progress
+    chatter never ship as an answer.
+    """
+    if engine != "claude":
+        answer, source = await _offload(_agy_answer, q)
+        if _is_answer(q, answer):
+            return answer, source
+    answer, source = await _offload(_claude_web_answer, q)
+    if _is_answer(q, answer):
+        return answer, source
+    return None, None
 
 
 async def _brain_answer(q: str, skip: bool, start: float) -> QuickAnswer:
@@ -367,21 +437,22 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
     settings = _settings()
     key = (settings.get("openrouter_key") or "").strip()
     model = (settings.get("quick_model") or "").strip() or DEFAULT_QUICK_MODEL
-    if key and route in ("vault", "web"):
+    web_engine = (settings.get("web_engine") or "").strip().lower() or "agy"
+    if route == "vault" and key:
         try:
-            if route == "vault":
-                answer = await _offload(_vault_answer, q, snippets, model, key)
-                if answer is not None:
-                    return QuickAnswer(answer, "vault", _ms(start), None)
-                # NOVAULT/echo — the notes lack the answer; fall through to web.
-            answer, source = await _offload(_web_answer, q, model, key)
-            if _is_answer(q, answer):
-                return QuickAnswer(answer, "web", _ms(start), source)
-            # Web no-answer: brain, unless skip pins the reply to a null web answer.
-            if skip:
-                return QuickAnswer(None, "web", _ms(start), None)
+            answer = await _offload(_vault_answer, q, snippets, model, key)
+            if answer is not None:
+                return QuickAnswer(answer, "vault", _ms(start), None)
+            # NOVAULT/echo — the notes lack the answer; fall through to web.
         except Exception:
-            pass  # any OpenRouter failure on vault/web → brain fallback
+            pass  # vault OpenRouter failure → web/brain below
+    if route in ("vault", "web") and web_engine != "off":
+        answer, source = await _web_answer(q, web_engine)
+        if answer is not None:
+            return QuickAnswer(answer, "web", _ms(start), source)
+        # Web no-answer: brain, unless skip pins the reply to a null web answer.
+        if skip:
+            return QuickAnswer(None, "web", _ms(start), None)
     return await _brain_answer(q, skip, start)
 
 
