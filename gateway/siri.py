@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from gateway import screen
+from gateway import quick, screen, wake
 from gateway.auth import require_bearer_any
 from gateway.registry import roles
 from mac.voice import brain
@@ -71,6 +72,21 @@ def _status_reply() -> str:
     return "Jarvis gateway online. Connected: none"
 
 
+# Quick-ask prefixes (spec §18): "quick what…", "question who…", "q: how…",
+# "? when…" → the terse gateway/quick.py pipeline. Matched case-insensitively
+# on the stripped transcript; the prefix and its whitespace are stripped and
+# the remainder goes to quick.ask. No brain slot is consumed — quick.py has
+# its own budget.
+_QUICK_PREFIX_RE = re.compile(r"^(?:(?:quick|question)\b|q:|\?)\s*", re.IGNORECASE)
+
+# Wake intents (spec §19), fullmatch on the stripped transcript: magic packet
+# out, then the reply reports the online-wait result.
+_WAKE_RE = re.compile(
+    r"wake (up )?(my |the )?pc|turn on (my |the )?pc|start (my |the )?pc",
+    re.IGNORECASE,
+)
+
+
 async def _brain_reply(text: str) -> str:
     """brain.reply off the event loop, hard-bounded; timeout/failure → canned reply.
 
@@ -106,12 +122,34 @@ async def siri_hey(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=400, detail='expected JSON body {"text": "..."}')
     if text.strip().lower() in _STATUS_PHRASES:
         return {"reply": _status_reply()}
+    # Quick-ask prefixes: delegate to the terse /ask pipeline (never a brain slot).
+    stripped = text.strip()
+    quick_match = _QUICK_PREFIX_RE.match(stripped)
+    if quick_match:
+        try:
+            answer = (await quick.ask(stripped[quick_match.end():])).answer
+        except Exception:
+            return {"reply": "quick ask failed, try again"}
+        return {"reply": answer or ""}
     # Screen intents (SC7): launch the control page instead of a brain call —
     # the same launch_screen POST /screen/launch uses, never an HTTP self-call.
     cmd = voice_router.route(text)
     if cmd in ("screen_mac", "screen_windows"):
         await screen.launch_screen(cmd[len("screen_"):])
         return {"reply": "Opening your Mac screen" if cmd == "screen_mac" else "Opening your PC screen"}
+    # Wake intents (§19): the online wait already happened inside wake_pc.
+    if _WAKE_RE.fullmatch(stripped):
+        try:
+            result = await wake.wake_pc()
+        except HTTPException as exc:
+            if exc.status_code != 400:
+                raise
+            return {"reply": "no PC MAC configured"}
+        if result["online"]:
+            return {"reply": f"PC online in {round(result['waited_ms'] / 1000)} seconds"}
+        if not result["sent"]:
+            return {"reply": "PC wake failed to send — check the Mac and PC are on the same network"}
+        return {"reply": "PC didn't come online after 90 seconds — check Wake-on-LAN is enabled"}
     if _brain_semaphore.locked() or not _brain_slot_available():
         return {"reply": _BUSY_REPLY}
     async with _brain_semaphore:
