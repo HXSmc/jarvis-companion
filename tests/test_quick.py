@@ -416,3 +416,122 @@ def test_retrieve_unrelated_vault_routes_web(tmp_path, quick_env, monkeypatch) -
     assert best is None
     monkeypatch.setattr(quick, "_openrouter", boom)
     assert quick.route_question("what is the capital of Chile?", best) == "web"
+
+
+def test_ask_strong_vault_match_skips_jev(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Best note ≥2 distinct keywords with a name hit → vault-first: Jev is
+    never called, the vault generative call answers."""
+    from gateway import quick
+
+    monkeypatch.setattr(
+        quick, "retrieve", lambda q, vault_root=None: (["karajy: the co-founder is Sara"], (3, 1))
+    )
+
+    def jev_spy(*args, **kwargs):
+        raise AssertionError("Jev must not be called on a strong vault match")
+
+    monkeypatch.setattr(quick, "route_question", jev_spy)
+    monkeypatch.setattr(
+        quick, "_openrouter",
+        lambda url, payload, *, key, timeout_s: {
+            "choices": [{"message": {"content": "Sara, the co-founder"}}]
+        },
+    )
+
+    resp = _post({"q": "who is the co-founder of Karajy?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Sara, the co-founder"
+    assert body["route"] == "vault"
+
+
+def test_ask_action_routes_brain_without_jev(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Imperative opener → brain with no Jev call; brain=skip → null/brain."""
+    from gateway import quick
+    from mac.voice import brain
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: (["safari tips"], None))
+
+    def jev_spy(*args, **kwargs):
+        raise AssertionError("Jev must not be called on an action intent")
+
+    monkeypatch.setattr(quick, "route_question", jev_spy)
+    monkeypatch.setattr(quick, "_openrouter", jev_spy)
+    monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: "stub brain answer")
+
+    resp = _post({"q": "open safari and search flights"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "stub brain answer"
+    assert body["route"] == "brain"
+
+    def brain_spy(*args, **kwargs):
+        raise AssertionError("brain.reply must not be called when brain=skip")
+
+    monkeypatch.setattr(brain, "reply", brain_spy)
+    resp = _post({"q": "open safari and search flights", "brain": "skip"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_ask_jev_called_without_override(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No strong match, not an action → Jev decides (Decisions API is hit)."""
+    from gateway import quick
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: ([], None))
+    seen: list[str] = []
+
+    def fake_openrouter(url, payload, *, key, timeout_s):
+        seen.append(url)
+        if url == quick._DECISIONS_URL:
+            return {"answers": {"route": {"type": "choice", "choice": "web"}}}
+        return {"choices": [{"message": {"content": "Santiago"}}]}
+
+    monkeypatch.setattr(quick, "_openrouter", fake_openrouter)
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Santiago"
+    assert body["route"] == "web"
+    assert quick._DECISIONS_URL in seen  # Jev was consulted
+
+
+@pytest.mark.parametrize("failure", ["the brain is unavailable", "brain unavailable"])
+def test_ask_brain_failure_sentinel(
+    failure: str, quick_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The brain's own failure text is not an answer → "I don't know."."""
+    from gateway import quick
+    from mac.voice import brain
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: ([], None))
+    monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "brain")
+    monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: failure)
+
+    resp = _post({"q": "tell me about the <project> ledger"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "I don't know."
+    assert body["route"] == "brain"
+
+
+def test_ask_web_refusal_falls_to_idontknow(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A web refusal ("Cannot fulfill request") is no answer → brain; brain
+    down → "I don't know." — never the refusal text itself."""
+    from mac.voice import brain
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("brain down")
+
+    q = "what is the tallest building in Riyadh?"
+    _web_route_env(monkeypatch, "Cannot fulfill request")
+    monkeypatch.setattr(brain, "reply", boom)
+
+    resp = _post({"q": q})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "I don't know."
+    assert body["route"] == "brain"

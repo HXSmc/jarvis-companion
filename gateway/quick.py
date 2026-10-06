@@ -50,6 +50,15 @@ _CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 TERSE_INSTRUCTION = "Answer with exactly the answer — one short sentence or phrase, no preamble."
 NOVAULT = "NOVAULT"
 UNKNOWN_REPLY = "I don't know."
+
+# Imperative openers: a command for the local assistant, never a lookup — the
+# brain gets it without spending a Jev call. Question words (what/who/…) never
+# lead, so they can't trip this.
+ACTION_VERBS = ("open", "close", "launch", "start", "stop", "run", "play", "pause",
+                "search", "google", "send", "email", "text", "message", "call", "type",
+                "click", "tap", "press", "scroll", "book", "buy", "order", "pay",
+                "install", "download", "set", "turn", "wake", "shut", "restart",
+                "reboot", "lock", "unlock", "show", "take")
 WEB_INSTRUCTION = (
     "Answer ONLY from the web search results, in the fewest words possible. "
     "If the search results do not contain the answer, reply with exactly UNKNOWN."
@@ -98,6 +107,12 @@ def _ms(start: float) -> int:
 def _keywords(q: str) -> list[str]:
     """Content words of the question: ≥4 letters, function words dropped."""
     return [t for t in re.findall(r"[a-z0-9]+", q.lower()) if len(t) >= 4 and t not in STOPWORDS]
+
+
+def _is_action(q: str) -> bool:
+    """True when the question opens with an imperative verb (ACTION_VERBS)."""
+    first = re.match(r"[a-z0-9]+", q.strip().lower())
+    return bool(first and first.group(0) in ACTION_VERBS)
 
 
 def retrieve(q: str, vault_root: Path | None = None) -> tuple[list[str], tuple[int, int] | None]:
@@ -222,12 +237,31 @@ def _content_text(data: dict) -> str:
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
+def _norm(text: str) -> str:
+    return " ".join(_NON_ALNUM.split(text.lower()))
+
+
+# No-answer markers: the brain's own failure strings (mac/voice/brain.py) plus
+# the terse refusals a web/vault model emits instead of an answer — normalised
+# the same way as the reply, so "can't" matches "can t".
+_FAILURE_PATTERNS = tuple(
+    _norm(p)
+    for p in (
+        "the brain is unavailable", "brain unavailable", "not logged in",
+        "cannot fulfill", "can't fulfill", "i cannot", "i can't", "as an ai",
+        "i'm unable", "i am unable",
+    )
+)
+
+
 def _is_answer(q: str, text: str | None) -> bool:
-    """False for empty/sentinel replies and for echoes of the question itself."""
+    """False for empty/sentinel/refusal replies and echoes of the question."""
     if not text:
         return False
     norm = _NON_ALNUM.sub(" ", text.lower()).strip()
     if not norm or norm in ("unknown", "novault"):
+        return False
+    if any(p in norm for p in _FAILURE_PATTERNS):
         return False
     qn = _NON_ALNUM.sub(" ", q.lower()).strip()
     return not (qn and (norm == qn or qn in norm))
@@ -314,11 +348,22 @@ async def _brain_answer(q: str, skip: bool, start: float) -> QuickAnswer:
 
 
 async def ask(q: str, brain: str = "auto") -> QuickAnswer:
-    """Route one question vault → web → brain and answer it tersely."""
+    """Route one question vault → web → brain and answer it tersely.
+
+    Two Jev-saving overrides run before the classifier: an imperative opener
+    (ACTION_VERBS) is a command for the brain, and a strong vault match (best
+    note ≥2 distinct keywords with ≥1 in its path/name) goes straight to the
+    vault — Jev misroutes those (a stranger's name for an owner-fact question).
+    """
     start = time.monotonic()
     skip = brain == "skip"
     snippets, best = await _offload(retrieve, q)
-    route = await _offload(route_question, q, best)
+    if _is_action(q):
+        return await _brain_answer(q, skip, start)
+    if isinstance(best, tuple) and best[0] >= 2 and best[1] >= 1:
+        route = "vault"  # strong note match — vault-first, no Jev call
+    else:
+        route = await _offload(route_question, q, best)
     settings = _settings()
     key = (settings.get("openrouter_key") or "").strip()
     model = (settings.get("quick_model") or "").strip() or DEFAULT_QUICK_MODEL
