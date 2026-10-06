@@ -25,7 +25,7 @@ import websockets
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
 
-from conftest import AUTH_HEADER, TOKEN, WS_HEADERS_KWARG
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER, TOKEN, WS_HEADERS_KWARG
 from gateway import agents
 from mac.voice import brain, router
 
@@ -87,6 +87,69 @@ def test_command_timeout_when_agent_silent_is_504(monkeypatch, gateway_server):
                     )
                     assert resp.status_code == 504, resp.text
                     assert resp.json()["detail"] == agents.TIMEOUT_DETAIL, resp.text
+
+    asyncio.run(run())
+
+
+def test_shared_token_allowlisted_cmd_is_forwarded(monkeypatch, gateway_server):
+    """Shared token + specs (read-only) reaches the forwarder and returns 200."""
+
+    async def fake_roundtrip(envelope):
+        fake_roundtrip.cmds.append(envelope["payload"]["cmd"])
+        return {"ok": True, "data": {"ram": "16 GB"}}
+
+    fake_roundtrip.cmds = []
+    monkeypatch.setattr(agents, "agent_roundtrip", fake_roundtrip)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/agents/windows/command", headers=AUTH_HEADER, json={"cmd": "specs"}
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json() == {"ok": True, "data": {"ram": "16 GB"}}, resp.text
+            assert fake_roundtrip.cmds == ["specs"]
+
+    asyncio.run(run())
+
+
+def test_shared_token_sensitive_cmd_is_403_not_forwarded(monkeypatch, gateway_server):
+    """Shared token + screen_frame -> 403 before anything is forwarded."""
+
+    def no_forward(envelope):
+        raise AssertionError("forwarder must not run for a shared-token screen_frame")
+
+    monkeypatch.setattr(agents, "agent_roundtrip", no_forward)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/agents/windows/command", headers=AUTH_HEADER, json={"cmd": "screen_frame"}
+            )
+            assert resp.status_code == 403, resp.text
+            assert resp.json()["detail"] == "cmd not allowed for shared token", resp.text
+
+    asyncio.run(run())
+
+
+def test_ios_token_sensitive_cmd_is_forwarded(monkeypatch, gateway_server):
+    """ios_token keeps full access: screen_frame is forwarded as-is."""
+
+    async def fake_roundtrip(envelope):
+        fake_roundtrip.cmds.append(envelope["payload"]["cmd"])
+        return {"ok": True, "data": {}}
+
+    fake_roundtrip.cmds = []
+    monkeypatch.setattr(agents, "agent_roundtrip", fake_roundtrip)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/agents/windows/command", headers=IOS_AUTH_HEADER, json={"cmd": "screen_frame"}
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json() == {"ok": True, "data": {}}, resp.text
+            assert fake_roundtrip.cmds == ["screen_frame"]
 
     asyncio.run(run())
 

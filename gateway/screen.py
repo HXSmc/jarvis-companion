@@ -262,9 +262,16 @@ async def launch_screen(target: Target) -> dict:
 async def screen_launch(request: Request, body: LaunchBody) -> dict:
     # Launch-only exception to the shared-token 403: any valid auth (cookie,
     # ios Bearer, or the shared Bearer) may mint a boot nonce — never a session.
-    if _authorized(request) is None:
+    kind = _authorized(request)
+    if kind is None:
         raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-    return await launch_screen(body.target)
+    result = await launch_screen(body.target)
+    # The shared Bearer gets no boot URL in the body (a leaked shared token
+    # must not trade a nonce for a session cookie); the phone receives it via
+    # the WS push, so every other caller keeps the full shape.
+    if kind == "shared":
+        return {"pushed": result["pushed"]}
+    return result
 
 
 @router.get("/{target}/status")

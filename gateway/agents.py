@@ -13,13 +13,15 @@ the generic ack. No windows connection -> 503; no reply within the timeout ->
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from common import config
 from gateway import registry
-from gateway.auth import require_bearer
+from gateway.auth import require_bearer_any
 from mac.voice import router as voice_router
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,11 @@ router = APIRouter()
 WINDOWS_ROLE = "windows"
 NOT_CONNECTED_DETAIL = "windows agent not connected"
 TIMEOUT_DETAIL = "windows agent did not reply within the timeout"
+
+# The shared token (windows agent, Shortcuts, Claude sessions) may only fetch
+# read-only status here; sensitive cmds (screen_frame, sleep, list_dir, ...)
+# need the ios token. Checked before anything is forwarded to the PC.
+SHARED_CMD_ALLOWLIST = frozenset({"specs", "uptime", "disk", "processes"})
 
 # How long the POST waits for the agent's WS reply before giving up (504).
 REPLY_TIMEOUT_S = 10.0
@@ -81,8 +88,28 @@ async def agent_roundtrip(envelope: dict) -> dict:
     return reply
 
 
-@router.post("/agents/windows/command", dependencies=[Depends(require_bearer)])
-async def windows_command(body: CommandBody) -> dict:
-    """Forward one allowlisted command to the windows agent and await its reply."""
+def _shared_bearer(request: Request) -> bool:
+    """True when the Authorization header is the shared vault token (not ios)."""
+    header = request.headers.get("authorization", "")
+    shared = config.get_token() or ""
+    return bool(
+        header.startswith("Bearer ")
+        and shared
+        and hmac.compare_digest(header[7:].encode(), shared.encode())
+    )
+
+
+@router.post(
+    "/agents/windows/command",
+    dependencies=[Depends(require_bearer_any("token", "ios_token"))],
+)
+async def windows_command(request: Request, body: CommandBody) -> dict:
+    """Forward one allowlisted command to the windows agent and await its reply.
+
+    Shared-token callers are limited to SHARED_CMD_ALLOWLIST (read-only status
+    cmds); the check runs before anything is forwarded to the PC.
+    """
+    if _shared_bearer(request) and body.cmd not in SHARED_CMD_ALLOWLIST:
+        raise HTTPException(status_code=403, detail="cmd not allowed for shared token")
     reply = await agent_roundtrip(voice_router.request_envelope(body.cmd))
     return {"ok": bool(reply.get("ok")), "data": reply.get("data")}
