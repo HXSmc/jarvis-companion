@@ -16,6 +16,7 @@ config goes through common.config, and the vault walk prunes `Secrets/`.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import os
 import re
 import shutil
@@ -45,7 +46,7 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jarvis-quick")
 BRAIN_TIMEOUT_SECONDS = 15
 ROUTER_TIMEOUT_SECONDS = 5.0
 ANSWER_TIMEOUT_SECONDS = 20.0
-WEB_TIMEOUT_SECONDS = 25  # phone app waits 30 s — the CLI cap stays under it
+WEB_TIMEOUT_SECONDS = 40  # the phone app's own timeout raise is a separate iOS change; this cap must sit under it
 
 DEFAULT_QUICK_MODEL = "google/gemini-2.5-flash-lite"
 DEFAULT_ROUTER_MODEL = "typesafe/jev-1.13"
@@ -55,7 +56,6 @@ _CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 TERSE_INSTRUCTION = "Answer with exactly the answer — one short sentence or phrase, no preamble."
 NOVAULT = "NOVAULT"
-UNKNOWN_REPLY = "I don't know."
 
 # Imperative openers: a command for the local assistant, never a lookup — the
 # brain gets it without spending a Jev call. Question words (what/who/…) never
@@ -115,6 +115,52 @@ def _is_action(q: str) -> bool:
     """True when the question opens with an imperative verb (ACTION_VERBS)."""
     first = re.match(r"[a-z0-9]+", q.strip().lower())
     return bool(first and first.group(0) in ACTION_VERBS)
+
+
+_QUESTION_WORDS = re.compile(r"\b(who|what|when|where|which|how|why|whose|whom)\b", re.IGNORECASE)
+
+
+def _extract_question(text: str) -> str:
+    """Text from the LAST question-word to the end — STT gives no punctuation, so a
+    long multi-intent utterance is answered by its trailing question. No question
+    word → the text unchanged."""
+    matches = list(_QUESTION_WORDS.finditer(text))
+    return text[matches[-1].start():].strip() if matches else text.strip()
+
+
+# ponytail: the owner's active company — one constant, no config, no list
+DEFAULT_PROJECT = "<project>"
+_DEFAULT_PROJECT_RE = re.compile(r"\b(?:my|the|our) project\b", re.IGNORECASE)
+_FUZZY_MIN_RATIO = 0.5
+
+
+def _project_tokens() -> set[str]:
+    """Lowercase ≥4-letter tokens from Projects/*.md basenames (the note-name vocab)."""
+    tokens: set[str] = set()
+    projects = _VAULT_ROOT / "Projects"
+    for path in projects.glob("*.md"):
+        for part in re.split(r"[^A-Za-z0-9]+", path.stem):
+            if len(part) >= 4:
+                tokens.add(part.lower())
+    return tokens
+
+
+def _resolve_project(q: str, tokens: set[str] | None = None) -> str:
+    """'my/the/our project' → DEFAULT_PROJECT; STT-variant tokens → the closest
+    project token (first-3-chars shared AND difflib ratio ≥ 0.5, so '<name>'/'tawid'
+    → '<project>' but 'towed' never does)."""
+    q = _DEFAULT_PROJECT_RE.sub(DEFAULT_PROJECT, q)
+    if tokens is None:
+        tokens = _project_tokens()
+    for token in {t for t in re.findall(r"[a-z0-9]+", q.lower())
+                  if len(t) >= 4 and t not in STOPWORDS and t not in tokens}:
+        candidates = [p for p in tokens if p[:3] == token[:3]]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda p: difflib.SequenceMatcher(None, token, p).ratio())
+        if difflib.SequenceMatcher(None, token, best).ratio() >= _FUZZY_MIN_RATIO:
+            q = re.sub(rf"\b{re.escape(token)}\b", best, q, flags=re.IGNORECASE)
+    return q
 
 
 def retrieve(q: str, vault_root: Path | None = None) -> tuple[list[str], tuple[int, int] | None]:
@@ -399,14 +445,23 @@ async def _web_answer(q: str, engine: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-async def _brain_answer(q: str, skip: bool, start: float) -> QuickAnswer:
-    """Bounded brain fallback (siri.py executor pattern). Skip → no brain call."""
+async def _brain_answer(
+    q: str, skip: bool, start: float, context: str | None = None
+) -> QuickAnswer:
+    """Bounded brain fallback (siri.py executor pattern). Skip → no brain call.
+
+    The toolless brain can never know vault facts by itself, so vault snippets
+    ride along as prompt context when available."""
     if skip:
         return QuickAnswer(None, "brain", _ms(start), None)
+    prompt = f"{TERSE_INSTRUCTION} {q}"
+    if context:
+        prompt = (f"{TERSE_INSTRUCTION} Answer from the notes when they contain the answer.\n"
+                  f"Notes:\n{context}\n\nQuestion: {q}")
     try:
         text = await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
-                _executor, _brain.reply, f"{TERSE_INSTRUCTION} {q}", BRAIN_TIMEOUT_SECONDS
+                _executor, _brain.reply, prompt, BRAIN_TIMEOUT_SECONDS
             ),
             timeout=BRAIN_TIMEOUT_SECONDS,
         )
@@ -414,7 +469,7 @@ async def _brain_answer(q: str, skip: bool, start: float) -> QuickAnswer:
             return QuickAnswer(str(text), "brain", _ms(start), None)
     except Exception:
         pass  # Timeout or any brain failure: the caller gets an answer, never a 500.
-    return QuickAnswer(UNKNOWN_REPLY, "brain", _ms(start), None)
+    return QuickAnswer(None, "brain", _ms(start), None)
 
 
 async def ask(q: str, brain: str = "auto") -> QuickAnswer:
@@ -426,6 +481,8 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
     vault — Jev misroutes those (a stranger's name for an owner-fact question).
     """
     start = time.monotonic()
+    q = _extract_question(q)
+    q = _resolve_project(q)
     skip = brain == "skip"
     snippets, best = await _offload(retrieve, q)
     if _is_action(q):
@@ -453,7 +510,9 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
         # Web no-answer: brain, unless skip pins the reply to a null web answer.
         if skip:
             return QuickAnswer(None, "web", _ms(start), None)
-    return await _brain_answer(q, skip, start)
+    return await _brain_answer(
+        q, skip, start, context="\n---\n".join(snippets) if snippets else None
+    )
 
 
 @router.post("/ask", dependencies=[Depends(require_bearer_any("ios_token"))])

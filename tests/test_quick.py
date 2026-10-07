@@ -283,7 +283,7 @@ def test_ask_no_vault_answer_goes_web(quick_env, monkeypatch: pytest.MonkeyPatch
 
 
 def test_ask_web_agy_argv_and_env(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """agy call shape: exact argv prefix, pinned prompt, AGY_KIND=quick, 25 s cap."""
+    """agy call shape: exact argv prefix, pinned prompt, AGY_KIND=quick, 40 s cap."""
     calls = _web_route_env(monkeypatch, agy_stdout="Santiago")
 
     resp = _post({"q": "what is the capital of Chile?"})
@@ -300,7 +300,7 @@ def test_ask_web_agy_argv_and_env(quick_env, monkeypatch: pytest.MonkeyPatch) ->
     assert prompt.endswith("Question: what is the capital of Chile?")
     assert "reply exactly UNKNOWN" in prompt
     assert call["env"]["AGY_KIND"] == "quick"
-    assert call["timeout"] == 25
+    assert call["timeout"] == 40
     assert call["capture_output"] is True and call["text"] is True
 
 
@@ -338,14 +338,14 @@ def test_ask_web_agy_timeout_claude_fallback(
     assert claude["argv"][i_turns + 1] == "3"
     assert claude["env"]["CLAUDE_CONFIG_DIR"].endswith(".claude-jarvis-brain")
     assert claude["input"].endswith("Question: what is the capital of Chile?")
-    assert claude["timeout"] == 25
+    assert claude["timeout"] == 40
 
 
 def test_ask_web_claude_not_logged_in_brain_down(
     quick_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """agy fails, claude says "Not logged in" (owner gate not open yet) → no
-    answer → brain; brain down → "I don't know."."""
+    answer → brain; brain down → null."""
     from mac.voice import brain
 
     def boom(*args, **kwargs):
@@ -357,7 +357,7 @@ def test_ask_web_claude_not_logged_in_brain_down(
     resp = _post({"q": "what is the capital of Chile?"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["answer"] == "I don't know."
+    assert body["answer"] is None
     assert body["route"] == "brain"
 
 
@@ -499,7 +499,7 @@ def test_ask_web_echo_skip_returns_null(quick_env, monkeypatch: pytest.MonkeyPat
 
 
 def test_ask_web_unknown_brain_down(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Web UNKNOWN + brain failure → "I don't know.", route brain."""
+    """Web UNKNOWN + brain failure → null, route brain."""
     from mac.voice import brain
 
     def boom(*args, **kwargs):
@@ -512,7 +512,7 @@ def test_ask_web_unknown_brain_down(quick_env, monkeypatch: pytest.MonkeyPatch) 
     resp = _post({"q": q})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["answer"] == "I don't know."
+    assert body["answer"] is None
     assert body["route"] == "brain"
 
 
@@ -651,7 +651,7 @@ def test_ask_jev_called_without_override(quick_env, monkeypatch: pytest.MonkeyPa
 def test_ask_brain_failure_sentinel(
     failure: str, quick_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The brain's own failure text is not an answer → "I don't know."."""
+    """The brain's own failure text is not an answer → null."""
     from gateway import quick
     from mac.voice import brain
 
@@ -662,13 +662,13 @@ def test_ask_brain_failure_sentinel(
     resp = _post({"q": "tell me about the <project> ledger"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["answer"] == "I don't know."
+    assert body["answer"] is None
     assert body["route"] == "brain"
 
 
 def test_ask_web_refusal_falls_to_idontknow(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
     """A web refusal ("Cannot fulfill request") is no answer → brain; brain
-    down → "I don't know." — never the refusal text itself."""
+    down → null — never the refusal text itself."""
     from mac.voice import brain
 
     def boom(*args, **kwargs):
@@ -681,5 +681,89 @@ def test_ask_web_refusal_falls_to_idontknow(quick_env, monkeypatch: pytest.Monke
     resp = _post({"q": q})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["answer"] == "I don't know."
+    assert body["answer"] is None
     assert body["route"] == "brain"
+
+
+def test_extract_question_trailing_clause() -> None:
+    """STT gives no punctuation — a multi-intent utterance is answered by its
+    trailing question clause; a plain question returns itself."""
+    from gateway.quick import _extract_question
+
+    utterance = (
+        "doing well just keep on doing what you're doing make sure that you fix "
+        "the brain issue and also check that you Jarvis phone do have brain now "
+        "and can answer me questions for example can you answer me who are the "
+        "co-founders of <name>"
+    )
+    assert _extract_question(utterance) == "who are the co-founders of <name>"
+    assert _extract_question("who are the co-founders of <name>") == "who are the co-founders of <name>"
+
+
+def test_resolve_project_aliases() -> None:
+    """STT variants sharing the first 3 chars + ratio ≥0.5 resolve to the project
+    token; 'towed' never does; my/the/our project → the default project."""
+    from gateway.quick import _resolve_project
+
+    tokens = {"<project>", "notekit"}
+    assert "<project>" in _resolve_project("who are the co-founders of <name>", tokens).lower()
+    towed = _resolve_project("who are the co-founders of towed", tokens).lower()
+    assert "towed" in towed and "<project>" not in towed
+    for phrase in ("my project", "the project", "our project"):
+        assert "<project>" in _resolve_project(
+            f"who are the co-founders of {phrase}", tokens
+        ).lower()
+
+
+def test_brain_failure_returns_null(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Brain stub raising + web stub no-answer → {"answer": None} — never a
+    canned miss string the phone would speak verbatim."""
+    from mac.voice import brain
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("brain down")
+
+    _web_route_env(monkeypatch, web_content="UNKNOWN")
+    monkeypatch.setattr(brain, "reply", boom)
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_brain_fallback_gets_vault_snippets(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vault NOVAULT + web no-answer → the brain fallback prompt carries the
+    vault snippets and the question — the toolless brain cannot read the vault
+    itself, so the context rides along (R6)."""
+    from gateway import quick
+    from mac.voice import brain
+
+    captured: list[str] = []
+
+    def fake_reply(transcript, timeout_s=60):
+        captured.append(transcript)
+        return "stub brain answer"
+
+    monkeypatch.setattr(
+        quick, "retrieve",
+        lambda q, vault_root=None: (["the <project> founders are Ali, <name> and <name>"], (3, 1)),
+    )
+    monkeypatch.setattr(
+        quick, "_openrouter",
+        lambda url, payload, *, key, timeout_s: {
+            "choices": [{"message": {"content": "NOVAULT"}}]
+        },
+    )
+    _stub_cli(monkeypatch, agy_rc=1, claude_rc=1)
+    monkeypatch.setattr(brain, "reply", fake_reply)
+
+    resp = _post({"q": "who are the co-founders of <project>"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "stub brain answer"
+    assert body["route"] == "brain"
+    assert captured, "brain.reply was never called"
+    assert "the <project> founders are Ali, <name> and <name>" in captured[0]
+    assert "Question: who are the co-founders of <project>" in captured[0]
