@@ -1,4 +1,4 @@
-"""Q2 hello-envelope MAC tests: `_adapter_mac` picks the real Wi-Fi adapter,
+"""Q2 hello-envelope MAC tests: `_adapter_mac` picks the first non-virtual adapter,
 `uuid.getnode` is only the fallback when no non-virtual interface matches.
 
 No network: `psutil.net_if_addrs` (and `uuid.getnode` in the fallback test) are

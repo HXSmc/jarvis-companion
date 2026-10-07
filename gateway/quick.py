@@ -46,7 +46,7 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jarvis-quick")
 BRAIN_TIMEOUT_SECONDS = 15
 ROUTER_TIMEOUT_SECONDS = 5.0
 ANSWER_TIMEOUT_SECONDS = 20.0
-WEB_TIMEOUT_SECONDS = 40  # the phone app's own timeout raise is a separate iOS change; this cap must sit under it
+WEB_TIMEOUT_SECONDS = 40  # shared deadline across both web attempts — total web time bounded to 40 s (iOS client waits 45 s)
 
 DEFAULT_QUICK_MODEL = "google/gemini-2.5-flash-lite"
 DEFAULT_ROUTER_MODEL = "typesafe/jev-1.13"
@@ -120,12 +120,30 @@ def _is_action(q: str) -> bool:
 _QUESTION_WORDS = re.compile(r"\b(who|what|when|where|which|how|why|whose|whom)\b", re.IGNORECASE)
 
 
+_CLAUSE_SPLIT = re.compile(r"\b(?:and|also|then|but)\b", re.IGNORECASE)
+
+
 def _extract_question(text: str) -> str:
-    """Text from the LAST question-word to the end — STT gives no punctuation, so a
-    long multi-intent utterance is answered by its trailing question. No question
-    word → the text unchanged."""
-    matches = list(_QUESTION_WORDS.finditer(text))
-    return text[matches[-1].start():].strip() if matches else text.strip()
+    """Clauses are split on and/also/then/but (STT gives no punctuation); the
+    LAST clause containing a question word is cut at that word (existing
+    behaviour) and extended backward over contiguous question clauses — so a
+    compound question keeps its subject ("who … of <project> and when did it
+    start" stays whole) while multi-intent chatter keeps only the trailing
+    question. No question word → the text unchanged."""
+    clauses = [c for c in (part.strip() for part in _CLAUSE_SPLIT.split(text)) if c]
+    last = None
+    for i, clause in enumerate(clauses):
+        if _QUESTION_WORDS.search(clause):
+            last = i
+    if last is None:
+        return text.strip()
+    matches = list(_QUESTION_WORDS.finditer(clauses[last]))
+    parts = [clauses[last][matches[-1].start():].strip()]
+    for clause in reversed(clauses[:last]):
+        if not _QUESTION_WORDS.search(clause):
+            break  # non-question chatter stops the backward walk
+        parts.insert(0, clause)
+    return " and ".join(parts)
 
 
 # ponytail: the owner's active company — one constant, no config, no list
@@ -145,21 +163,40 @@ def _project_tokens() -> set[str]:
     return tokens
 
 
+_PROJECT_PREPOSITIONS = frozenset({"of", "for", "about", "on", "at", "with", "in"})
+
+
 def _resolve_project(q: str, tokens: set[str] | None = None) -> str:
-    """'my/the/our project' → DEFAULT_PROJECT; STT-variant tokens → the closest
-    project token (first-3-chars shared AND difflib ratio ≥ 0.5, so '<name>'/'tawid'
-    → '<project>' but 'towed' never does)."""
+    """'my/the/our project' → DEFAULT_PROJECT; an STT-variant token → the closest
+    project token, but only when the shape says "project name": alphabetic, ≥4
+    letters, not already a project token, directly after of/for/about/on/at/
+    with/in or directly before "project", difflib-close (get_close_matches ≥
+    _FUZZY_MIN_RATIO), sharing the first 3 chars, and ≥2/3 the length of the
+    candidate — so '<name>' → '<project>' but 'note'/'deal'/'2025'/'audio' never move."""
     q = _DEFAULT_PROJECT_RE.sub(DEFAULT_PROJECT, q)
     if tokens is None:
         tokens = _project_tokens()
-    for token in {t for t in re.findall(r"[a-z0-9]+", q.lower())
-                  if len(t) >= 4 and t not in STOPWORDS and t not in tokens}:
-        candidates = [p for p in tokens if p[:3] == token[:3]]
-        if not candidates:
+    words = re.findall(r"[a-z0-9]+", q.lower())
+    for i, token in enumerate(words):
+        if len(token) < 4 or not token.isalpha() or token in tokens:
             continue
-        best = max(candidates, key=lambda p: difflib.SequenceMatcher(None, token, p).ratio())
-        if difflib.SequenceMatcher(None, token, best).ratio() >= _FUZZY_MIN_RATIO:
-            q = re.sub(rf"\b{re.escape(token)}\b", best, q, flags=re.IGNORECASE)
+        if not ((i > 0 and words[i - 1] in _PROJECT_PREPOSITIONS)
+                or (i + 1 < len(words) and words[i + 1] == "project")):
+            continue
+        # prefix filter FIRST: the raw closest match can be a wrong-prefix token
+        # ("<name>" → example at 0.6 beats <project> at 0.545), which the prefix gate
+        # would then reject outright instead of falling through to <project>.
+        sharing = sorted(p for p in tokens if p[:3] == token[:3])
+        matches = difflib.get_close_matches(token, sharing, n=1, cutoff=_FUZZY_MIN_RATIO)
+        if not matches:
+            continue
+        best = matches[0]
+        if min(len(token), len(best)) * 3 < 2 * max(len(token), len(best)):
+            continue
+        # ponytail: residual ceiling — a preposition-led dictionary word that is
+        # ≥2/3 the length of a project token ("with notebook" → "notekit") still
+        # rewrites; upgrade path = a stoplist of common words.
+        q = re.sub(rf"\b{re.escape(token)}\b", best, q, flags=re.IGNORECASE)
     return q
 
 
@@ -384,9 +421,10 @@ def _agy_answer(q: str) -> tuple[str | None, str | None]:
     return _parse_cli_stdout(proc.stdout)
 
 
-def _claude_web_answer(q: str) -> tuple[str | None, str | None]:
+def _claude_web_answer(q: str, timeout_s: float = WEB_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
     """`claude -p` with WebSearch — brain.py's invocation style → (answer, source).
 
+    timeout_s is the REMAINING share of _web_answer's shared deadline.
     Same slim config dir as the brain (~/.claude-jarvis-brain, owner-gated
     login), so until that one-time login this replies "Not logged in",
     which the sentinel check below treats as no answer.
@@ -411,7 +449,7 @@ def _claude_web_answer(q: str) -> tuple[str | None, str | None]:
             text=True,
             cwd=scratch,
             env=env,
-            timeout=WEB_TIMEOUT_SECONDS,
+            timeout=timeout_s,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None, None
@@ -430,16 +468,23 @@ async def _offload(fn, *args):
 async def _web_answer(q: str, engine: str) -> tuple[str | None, str | None]:
     """Local-CLI web answer: agy first (unless engine=="claude"), claude fallback.
 
-    Any no-answer (CLI missing, non-zero exit, timeout, empty stdout,
-    UNKNOWN, refusal, question echo) falls through to the next engine and
-    finally to None → the caller's brain fallback. Stderr and progress
-    chatter never ship as an answer.
+    One shared deadline of WEB_TIMEOUT_SECONDS spans both attempts — the
+    claude fallback gets only the remaining time and is skipped when under
+    5 s remain, so total web time is bounded to WEB_TIMEOUT_SECONDS. Any
+    no-answer (CLI missing, non-zero exit, timeout, empty stdout, UNKNOWN,
+    refusal, question echo) falls through to the next engine and finally to
+    None → the caller's brain fallback. Stderr and progress chatter never
+    ship as an answer.
     """
+    deadline = time.monotonic() + WEB_TIMEOUT_SECONDS
     if engine != "claude":
         answer, source = await _offload(_agy_answer, q)
         if _is_answer(q, answer):
             return answer, source
-    answer, source = await _offload(_claude_web_answer, q)
+    remaining = deadline - time.monotonic()
+    if remaining < 5:
+        return None, None
+    answer, source = await _offload(_claude_web_answer, q, remaining)
     if _is_answer(q, answer):
         return answer, source
     return None, None
@@ -481,12 +526,15 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
     vault — Jev misroutes those (a stranger's name for an owner-fact question).
     """
     start = time.monotonic()
-    q = _extract_question(q)
-    q = _resolve_project(q)
     skip = brain == "skip"
-    snippets, best = await _offload(retrieve, q)
+    # Action check on the RAW utterance, before any extraction — trailing
+    # question clauses inside a command ("send <name> an email about what we
+    # discussed") must not turn it into a lookup.
     if _is_action(q):
         return await _brain_answer(q, skip, start)
+    q = _extract_question(q)
+    q = _resolve_project(q, await _offload(_project_tokens))
+    snippets, best = await _offload(retrieve, q)
     if isinstance(best, tuple) and best[0] >= 2 and best[1] >= 1:
         route = "vault"  # strong note match — vault-first, no Jev call
     else:

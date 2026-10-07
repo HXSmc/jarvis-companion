@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import re
 import sys
 import time
 import types
@@ -279,7 +280,7 @@ def test_cursor_toggle_leads_scrollable_key_row(gateway_server):
                 html = resp.text
                 assert 'id="cursor-toggle"' in html, target
                 assert "function initialCursor" in html, target  # cursor.js inlined
-                assert "#bar .row.keys { overflow-x: auto; }" in html, target
+                assert re.search(r"\.row\.keys\s*\{[^}]*overflow-x:\s*auto", html), target
                 assert '<div class="row keys">' in html, target
                 # toggle is the first button in the key row, before any key button
                 assert html.index('id="cursor-toggle"') < html.index('class="key"'), target

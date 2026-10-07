@@ -142,6 +142,8 @@ def handle_message(raw: str) -> dict | None:
 
 def _adapter_mac() -> int | None:
     """First non-virtual interface's AF_LINK MAC as an int (None if none found)."""
+    # ponytail: substring list is not exhaustive — an unlisted virtual adapter
+    # slips through; upgrade = query the adapter type (SNMP if_type) instead of names.
     virtual = ("Tailscale", "Loopback", "vEthernet", "WSL", "Bluetooth", "VMware", "Virtual")
     for name, addrs in psutil.net_if_addrs().items():
         if any(v in name for v in virtual):
