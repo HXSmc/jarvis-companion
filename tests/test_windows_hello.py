@@ -14,8 +14,10 @@ import pytest
 
 try:  # psutil >= 7 moved the namedtuple module
     from psutil._ntuples import snicaddr as snic
+    from psutil._ntuples import snicstats
 except ImportError:
     from psutil._common import snic
+    from psutil._common import snicstats
 
 from windows.agent import main
 
@@ -30,6 +32,14 @@ def fake_addrs(monkeypatch: pytest.MonkeyPatch) -> None:
             "Wi-Fi": [snic(family=psutil.AF_LINK, address="<mac-wifi>", netmask=None, broadcast=None, ptp=None)],
         },
     )
+    monkeypatch.setattr(
+        psutil,
+        "net_if_stats",
+        lambda: {
+            "Tailscale": snicstats(isup=True, duplex=0, speed=-1, mtu=1500, flags=0),
+            "Wi-Fi": snicstats(isup=True, duplex=2, speed=0, mtu=1500, flags=0),
+        },
+    )
 
 
 def test_hello_reports_wifi_mac(fake_addrs) -> None:
@@ -37,8 +47,30 @@ def test_hello_reports_wifi_mac(fake_addrs) -> None:
     assert envelope["payload"] == {"mac": "<mac-wifi>"}
 
 
+def test_hello_skips_disconnected_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        psutil,
+        "net_if_addrs",
+        lambda: {
+            "Ethernet 2": [snic(family=psutil.AF_LINK, address="<mac-eth>", netmask=None, broadcast=None, ptp=None)],
+            "Wi-Fi": [snic(family=psutil.AF_LINK, address="<mac-wifi>", netmask=None, broadcast=None, ptp=None)],
+        },
+    )
+    monkeypatch.setattr(
+        psutil,
+        "net_if_stats",
+        lambda: {
+            "Ethernet 2": snicstats(isup=False, duplex=0, speed=0, mtu=1500, flags=0),
+            "Wi-Fi": snicstats(isup=True, duplex=2, speed=0, mtu=1500, flags=0),
+        },
+    )
+    envelope = json.loads(main._hello_envelope())
+    assert envelope["payload"] == {"mac": "<mac-wifi>"}
+
+
 def test_hello_falls_back_to_getnode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: {})
+    monkeypatch.setattr(psutil, "net_if_stats", lambda: {})
     monkeypatch.setattr(main.uuid, "getnode", lambda: 0xAABBCCDDEE02)
     envelope = json.loads(main._hello_envelope())
     assert envelope["payload"] == {"mac": "aa:bb:cc:dd:ee:02"}

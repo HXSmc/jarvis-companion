@@ -145,8 +145,12 @@ def _adapter_mac() -> int | None:
     # ponytail: substring list is not exhaustive — an unlisted virtual adapter
     # slips through; upgrade = query the adapter type (SNMP if_type) instead of names.
     virtual = ("Tailscale", "Loopback", "vEthernet", "WSL", "Bluetooth", "VMware", "Virtual")
+    stats = psutil.net_if_stats()
     for name, addrs in psutil.net_if_addrs().items():
         if any(v in name for v in virtual):
+            continue
+        st = stats.get(name)
+        if st is None or not st.isup:
             continue
         for addr in addrs:
             if addr.family == psutil.AF_LINK:
