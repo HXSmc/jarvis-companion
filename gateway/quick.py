@@ -125,25 +125,33 @@ _CLAUSE_SPLIT = re.compile(r"\b(?:and|also|then|but)\b", re.IGNORECASE)
 
 def _extract_question(text: str) -> str:
     """Clauses are split on and/also/then/but (STT gives no punctuation); the
-    LAST clause containing a question word is cut at that word (existing
-    behaviour) and extended backward over contiguous question clauses — so a
-    compound question keeps its subject ("who … of <project> and when did it
-    start" stays whole) while multi-intent chatter keeps only the trailing
-    question. No question word → the text unchanged."""
-    clauses = [c for c in (part.strip() for part in _CLAUSE_SPLIT.split(text)) if c]
+    cut point is the question word of the LAST clause containing one, extended
+    backward over contiguous question clauses — and everything from that cut
+    to the END of the utterance is kept, so a trailing clause without its own
+    question word ("who are <name> and <name>", "…of <project> and <name>") is
+    never split away. No question word → the text unchanged."""
+    clauses: list[tuple[int, str]] = []  # (start offset in text, clause)
+    pos = 0
+    for part in _CLAUSE_SPLIT.split(text):
+        if not part.strip():
+            continue
+        start = text.find(part, pos)
+        clauses.append((start, part))
+        pos = start + len(part)
     last = None
-    for i, clause in enumerate(clauses):
+    for i, (_start, clause) in enumerate(clauses):
         if _QUESTION_WORDS.search(clause):
             last = i
     if last is None:
         return text.strip()
-    matches = list(_QUESTION_WORDS.finditer(clauses[last]))
-    parts = [clauses[last][matches[-1].start():].strip()]
-    for clause in reversed(clauses[:last]):
-        if not _QUESTION_WORDS.search(clause):
+    start, clause = clauses[last]
+    matches = list(_QUESTION_WORDS.finditer(clause))
+    cut = start + matches[-1].start()
+    for clause_start, prev in reversed(clauses[:last]):
+        if not _QUESTION_WORDS.search(prev):
             break  # non-question chatter stops the backward walk
-        parts.insert(0, clause)
-    return " and ".join(parts)
+        cut = clause_start
+    return text[cut:].strip()
 
 
 # ponytail: the owner's active company — one constant, no config, no list
@@ -166,19 +174,20 @@ def _project_tokens() -> set[str]:
 _PROJECT_PREPOSITIONS = frozenset({"of", "for", "about", "on", "at", "with", "in"})
 
 
-def _resolve_project(q: str, tokens: set[str] | None = None) -> str:
+def _resolve_project(q: str, tokens: set[str]) -> str:
     """'my/the/our project' → DEFAULT_PROJECT; an STT-variant token → the closest
     project token, but only when the shape says "project name": alphabetic, ≥4
-    letters, not already a project token, directly after of/for/about/on/at/
-    with/in or directly before "project", difflib-close (get_close_matches ≥
-    _FUZZY_MIN_RATIO), sharing the first 3 chars, and ≥2/3 the length of the
-    candidate — so '<name>' → '<project>' but 'note'/'deal'/'2025'/'audio' never move."""
+    letters, not a stopword, not already a project token, directly after of/
+    for/about/on/at/with/in or directly before "project", difflib-close
+    (get_close_matches ≥ _FUZZY_MIN_RATIO), sharing the first 3 chars, and ≥2/3
+    the length of the candidate — so '<name>' → '<project>' but 'note'/'deal'/
+    '2025'/'audio' never move. Only the gated occurrence is rewritten (rebuild
+    from the word list by index), never every twin of the word."""
     q = _DEFAULT_PROJECT_RE.sub(DEFAULT_PROJECT, q)
-    if tokens is None:
-        tokens = _project_tokens()
     words = re.findall(r"[a-z0-9]+", q.lower())
     for i, token in enumerate(words):
-        if len(token) < 4 or not token.isalpha() or token in tokens:
+        if (len(token) < 4 or not token.isalpha()
+                or token in tokens or token in STOPWORDS):
             continue
         if not ((i > 0 and words[i - 1] in _PROJECT_PREPOSITIONS)
                 or (i + 1 < len(words) and words[i + 1] == "project")):
@@ -196,8 +205,8 @@ def _resolve_project(q: str, tokens: set[str] | None = None) -> str:
         # ponytail: residual ceiling — a preposition-led dictionary word that is
         # ≥2/3 the length of a project token ("with notebook" → "notekit") still
         # rewrites; upgrade path = a stoplist of common words.
-        q = re.sub(rf"\b{re.escape(token)}\b", best, q, flags=re.IGNORECASE)
-    return q
+        words[i] = best
+    return " ".join(words)
 
 
 def retrieve(q: str, vault_root: Path | None = None) -> tuple[list[str], tuple[int, int] | None]:
@@ -530,6 +539,9 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
     # Action check on the RAW utterance, before any extraction — trailing
     # question clauses inside a command ("send <name> an email about what we
     # discussed") must not turn it into a lookup.
+    # ponytail: imperative-led questions ("show me who founded <project>") route
+    # to the brain and return null under brain=skip; upgrade = tolerate a
+    # trailing question clause in _is_action.
     if _is_action(q):
         return await _brain_answer(q, skip, start)
     q = _extract_question(q)
