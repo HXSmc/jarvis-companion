@@ -46,6 +46,8 @@
     display: flex; flex-direction: column; gap: 6px;
   }
   #bar .row { display: flex; gap: 6px; height: 38px; }
+  #bar .row.keys { overflow-x: auto; }
+  #bar .row.keys button { flex: 0 0 auto; }
   #bar input[type=text] {
     flex: 1; min-width: 0; border-radius: 8px; border: 1px solid #3a3a3c;
     background: #2c2c2e; color: #eee; padding: 0 10px; font-size: 16px;
@@ -80,7 +82,8 @@
   <div class="row">
     <input id="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type…">
   </div>
-  <div class="row">
+  <div class="row keys">
+    <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
     <button type="button" class="key" data-k="esc">esc</button>
     <button type="button" class="key" data-k="delete">del</button>
     <button type="button" class="key" data-k="tab">tab</button>
@@ -92,7 +95,6 @@
     <button type="button" class="mod" data-m="ctrl">ctrl</button>
     <button type="button" class="mod" data-m="alt">alt</button>
     <button type="button" class="mod" data-m="shift">shift</button>
-    <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
   </div>
 </div>
 <script>/*CURSOR_JS*/</script>

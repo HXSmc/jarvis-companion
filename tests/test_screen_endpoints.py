@@ -264,3 +264,24 @@ def test_kill_switch_unmounts_router(monkeypatch):
     finally:
         monkeypatch.delenv("SCREEN_CONTROL", raising=False)
         importlib.reload(app_module)
+
+
+def test_cursor_toggle_leads_scrollable_key_row(gateway_server):
+    """Phone-width fix: the Cursor toggle ships first in a horizontally
+    scrollable key row (12 buttons x 40px min + 11 x 6px gap = 546px,
+    wider than any iPhone — without overflow-x the trailing buttons,
+    shift and Cursor, render off-screen)."""
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            for target in ("mac", "windows"):
+                resp = await http.get("/screen", params={"target": target}, headers=IOS_AUTH_HEADER)
+                assert resp.status_code == 200, (target, resp.text)
+                html = resp.text
+                assert 'id="cursor-toggle"' in html, target
+                assert "function initialCursor" in html, target  # cursor.js inlined
+                assert "#bar .row.keys { overflow-x: auto; }" in html, target
+                assert '<div class="row keys">' in html, target
+                # toggle is the first button in the key row, before any key button
+                assert html.index('id="cursor-toggle"') < html.index('class="key"'), target
+
+    asyncio.run(run())

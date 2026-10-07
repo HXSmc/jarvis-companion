@@ -552,7 +552,7 @@ final class AppModel: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
+        request.timeoutInterval = 45
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["q": question, "brain": "auto"])
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {

@@ -63,6 +63,7 @@ def test_env_minimal_with_dedicated_config_dir(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-do-not-print")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/should-not-leak")
+    monkeypatch.setenv("USER", "jarvis-test-user")
     config_dir = tmp_path / "claude-jarvis-brain"
     monkeypatch.setattr(brain, "BRAIN_CONFIG_DIR", config_dir)
 
@@ -74,7 +75,13 @@ def test_env_minimal_with_dedicated_config_dir(
     assert env["CLAUDE_CONFIG_DIR"] == str(config_dir)
     assert "ANTHROPIC_API_KEY" not in env
     assert "SSH_AUTH_SOCK" not in env
-    assert set(env) <= {"PATH", "HOME", "LANG", "TERM", "CLAUDE_CONFIG_DIR"}
+    assert set(env) <= {"PATH", "HOME", "LANG", "TERM", "USER", "CLAUDE_CONFIG_DIR"}
+    # Regression check (iOS "brain unavailable" bug): USER must reach the
+    # subprocess — the CLI's Keychain-backed auth lookup resolves its account
+    # from it, and without it `claude -p` reports "Not logged in" in any
+    # minimal-env subprocess spawn (not launchd-specific), even with a valid
+    # login (HOME/PATH alone are not enough).
+    assert env["USER"] == "jarvis-test-user"
     assert (config_dir / "settings.json").read_text().strip() == "{}"
 
 

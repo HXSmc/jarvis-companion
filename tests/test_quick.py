@@ -1,13 +1,16 @@
 """Quick-ask (/ask) checks: routing fallbacks, vault retrieval, endpoint flow.
 
 No network: OpenRouter is stubbed at the `_openrouter` seam, routing at
-`route_question`, the brain at `mac.voice.brain.reply`; retrieval runs against
-temp-dir vaults (never the real one, never Secrets).
+`route_question`, the local web CLIs at `subprocess.run`, the brain at
+`mac.voice.brain.reply`; retrieval runs against temp-dir vaults (never the
+real one, never Secrets). No real agy/claude call ever happens.
 """
 
 from __future__ import annotations
 
 import asyncio
+import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
@@ -59,25 +62,38 @@ def _post(
 
 
 def test_route_heuristic_vault_when_hits(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Jev seam failing + vault hits ≥1 → heuristic says vault."""
+    """Jev seam failing + best note ≥2 distinct keywords with a name match → vault."""
     from gateway import quick
 
     def boom(*args, **kwargs):
         raise RuntimeError("jev down")
 
     monkeypatch.setattr(quick, "_openrouter", boom)
-    assert quick.route_question("what is the <project> resend key", 3) == "vault"
+    assert quick.route_question("what is the <project> resend key", (3, 1)) == "vault"
 
 
 def test_route_heuristic_web_when_no_hits(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Jev seam failing + zero vault hits → heuristic says web."""
+    """Jev seam failing + no qualifying note → heuristic says web."""
     from gateway import quick
 
     def boom(*args, **kwargs):
         raise RuntimeError("jev down")
 
     monkeypatch.setattr(quick, "_openrouter", boom)
-    assert quick.route_question("who is the ceo of amd", 0) == "web"
+    assert quick.route_question("who is the ceo of amd", None) == "web"
+
+
+def test_route_heuristic_web_when_best_has_no_name_match(
+    quick_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best note matched ≥2 keywords but only in the body → web, not vault."""
+    from gateway import quick
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("jev down")
+
+    monkeypatch.setattr(quick, "_openrouter", boom)
+    assert quick.route_question("how many rings does saturn have", (2, 0)) == "web"
 
 
 def test_route_jev_choice_respected(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,9 +135,11 @@ def test_retrieve_finds_planted_fact(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    snippets, hits = retrieve("what is the <project> resend key", vault_root=tmp_path)
+    snippets, best = retrieve("what is the <project> resend key", vault_root=tmp_path)
 
-    assert hits >= 1
+    # 2 distinct keywords matched (<project>, resend — "key" is under the 4-letter
+    # bar), <project> in the path/name.
+    assert best == (2, 1)
     assert snippets
     assert any("RESEND_KEY_XYZ" in s for s in snippets)
 
@@ -135,10 +153,10 @@ def test_retrieve_excludes_secrets(tmp_path) -> None:
         "the wakanda passphrase is SECRET_MARKER_9\n", encoding="utf-8"
     )
 
-    snippets, hits = retrieve("wakanda passphrase", vault_root=tmp_path)
+    snippets, best = retrieve("wakanda passphrase", vault_root=tmp_path)
 
-    # The only matching note lives under Secrets/ — pruned, so zero hits.
-    assert hits == 0
+    # The only matching note lives under Secrets/ — pruned, so nothing qualifies.
+    assert best is None
     assert snippets == []
     assert all("SECRET_MARKER_9" not in s for s in snippets)
 
@@ -151,10 +169,11 @@ def test_retrieve_caps_snippets(tmp_path) -> None:
             "wakanda " + "x" * 400 + "\n", encoding="utf-8"
         )
 
-    snippets, hits = retrieve("wakanda", vault_root=tmp_path)
+    snippets, best = retrieve("wakanda", vault_root=tmp_path)
 
-    assert hits >= 10
-    assert len(snippets) <= 6
+    # Single-keyword question → every note qualifies, but only the top 4 ship.
+    assert best == (1, 0)
+    assert len(snippets) == 4
     assert sum(len(s) for s in snippets) <= 2500
 
 
@@ -208,36 +227,179 @@ def test_ask_rejects_shared_token(quick_env, monkeypatch: pytest.MonkeyPatch) ->
     assert "answer" not in resp.json()
 
 
+def _stub_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agy_stdout: str = "",
+    agy_rc: int = 0,
+    claude_stdout: str = "",
+    claude_rc: int = 0,
+    agy_error: Exception | None = None,
+) -> list[dict]:
+    """Stub `subprocess.run` for the two web CLIs; records every call.
+
+    agy and claude are told apart by argv[0]; each returns its own stdout/rc.
+    """
+    from gateway import quick
+
+    calls: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append({"argv": list(argv), **kwargs})
+        if argv[0] == "agy":
+            if agy_error is not None:
+                raise agy_error
+            return subprocess.CompletedProcess(argv, agy_rc, stdout=agy_stdout, stderr="")
+        return subprocess.CompletedProcess(argv, claude_rc, stdout=claude_stdout, stderr="")
+
+    monkeypatch.setattr(quick.subprocess, "run", fake_run)
+    return calls
+
+
 def test_ask_no_vault_answer_goes_web(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vault NOVAULT → the local agy CLI answers; a URL in the line is the source."""
     from gateway import quick
 
     monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: (["irrelevant note"], 2))
     monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "vault")
-
-    calls: list[dict] = []
-
-    def fake_openrouter(url, payload, *, key, timeout_s):
-        calls.append(payload)
-        if len(calls) == 1:  # vault generative call
-            return {"choices": [{"message": {"content": "NOVAULT"}}]}
-        return {
-            "choices": [
-                {"message": {"content": "Saturn has several ring groups. https://science.nasa.gov/saturn/rings/"}}
-            ]
-        }
-
-    monkeypatch.setattr(quick, "_openrouter", fake_openrouter)
+    monkeypatch.setattr(
+        quick, "_openrouter",
+        lambda url, payload, *, key, timeout_s: {
+            "choices": [{"message": {"content": "NOVAULT"}}]
+        },
+    )
+    calls = _stub_cli(
+        monkeypatch,
+        agy_stdout="Saturn has several ring groups. https://science.nasa.gov/saturn/rings/",
+    )
 
     resp = _post({"q": "how many rings does saturn have"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["route"] == "web"
+    assert body["answer"] == "Saturn has several ring groups. https://science.nasa.gov/saturn/rings/"
     assert body["source"] == "https://science.nasa.gov/saturn/rings/"
-    assert len(calls) == 2
-    # Web request shape: the openrouter:web_search server tool, ≤3 results.
-    assert calls[1]["tools"] == [
-        {"type": "openrouter:web_search", "parameters": {"max_results": 3}}
-    ]
+    assert [c["argv"][0] for c in calls] == ["agy"]  # agy answered — no claude call
+
+
+def test_ask_web_agy_argv_and_env(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """agy call shape: exact argv prefix, pinned prompt, AGY_KIND=quick, 40 s cap."""
+    calls = _web_route_env(monkeypatch, agy_stdout="Santiago")
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Santiago"
+    assert body["route"] == "web"
+    assert body["source"] is None  # no URL in the answer line
+
+    (call,) = calls
+    assert call["argv"][:3] == ["agy", "--dangerously-skip-permissions", "--print"]
+    prompt = call["argv"][3]
+    assert prompt.startswith("Answer with exactly the answer and nothing else")
+    assert prompt.endswith("Question: what is the capital of Chile?")
+    assert "reply exactly UNKNOWN" in prompt
+    assert call["env"]["AGY_KIND"] == "quick"
+    assert call["timeout"] == 40
+    assert call["capture_output"] is True and call["text"] is True
+
+
+def test_ask_web_agy_chatter_ignored(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Progress chatter before the answer is ignored — the LAST line ships."""
+    _web_route_env(monkeypatch, agy_stdout="Searching the web...\nworking...\nSantiago")
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    assert resp.json()["answer"] == "Santiago"
+
+
+def test_ask_web_agy_timeout_claude_fallback(
+    quick_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agy timeout → the claude fallback runs with WebSearch + the brain config dir."""
+    calls = _web_route_env(
+        monkeypatch,
+        agy_error=subprocess.TimeoutExpired(["agy"], 25),
+        claude_stdout="Santiago",
+    )
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Santiago"
+    assert body["route"] == "web"
+
+    assert [c["argv"][0] for c in calls] == ["agy", "claude"]
+    claude = calls[1]
+    assert claude["argv"][:2] == ["claude", "-p"]
+    i_tools = claude["argv"].index("--tools")
+    assert claude["argv"][i_tools + 1] == "WebSearch"
+    i_turns = claude["argv"].index("--max-turns")
+    assert claude["argv"][i_turns + 1] == "3"
+    assert claude["env"]["CLAUDE_CONFIG_DIR"].endswith(".claude-jarvis-brain")
+    assert claude["input"].endswith("Question: what is the capital of Chile?")
+    assert claude["timeout"] == 40
+
+
+def test_ask_web_claude_not_logged_in_brain_down(
+    quick_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agy fails, claude says "Not logged in" (owner gate not open yet) → no
+    answer → brain; brain down → null."""
+    from mac.voice import brain
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("brain down")
+
+    _web_route_env(monkeypatch, agy_rc=1, claude_stdout="Not logged in")
+    monkeypatch.setattr(brain, "reply", boom)
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_ask_web_engine_off_no_subprocess(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """web_engine: off → the brain answers directly, no CLI subprocess at all."""
+    from gateway import quick
+    from mac.voice import brain
+
+    monkeypatch.setattr(quick, "_settings", lambda: dict(TEST_SETTINGS, web_engine="off"))
+
+    def spy(argv, **kwargs):
+        raise AssertionError("no subprocess may run when web_engine is off")
+
+    monkeypatch.setattr(quick.subprocess, "run", spy)
+    monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: "stub brain answer")
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "stub brain answer"
+    assert body["route"] == "brain"
+
+
+def test_ask_web_engine_claude_skips_agy(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """web_engine: claude → agy is never called; claude answers directly."""
+    from gateway import quick
+
+    monkeypatch.setattr(quick, "_settings", lambda: dict(TEST_SETTINGS, web_engine="claude"))
+    calls = _stub_cli(monkeypatch, claude_stdout="Santiago")
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Santiago"
+    assert body["route"] == "web"
+    assert [c["argv"][0] for c in calls] == ["claude"]
+
+
+def test_web_path_openrouter_search_removed() -> None:
+    """The OpenRouter web_search server tool is gone from quick.py (W2)."""
+    src = Path(__file__).resolve().parents[1] / "gateway" / "quick.py"
+    assert "openrouter:web_search" not in src.read_text(encoding="utf-8")
 
 
 def test_ask_openrouter_failure_falls_back_to_brain(
@@ -252,6 +414,8 @@ def test_ask_openrouter_failure_falls_back_to_brain(
     monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: ([], 0))
     monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "vault")
     monkeypatch.setattr(quick, "_openrouter", boom)
+    # Both web CLIs fail too — the brain is the last resort.
+    _stub_cli(monkeypatch, agy_rc=1, claude_rc=1)
     monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: "stub brain answer")
 
     resp = _post({"q": "tell me about the <project> ledger"})
@@ -280,3 +444,326 @@ def test_ask_brain_skip_short_circuits(quick_env, monkeypatch: pytest.MonkeyPatc
     assert body["route"] == "brain"
     assert body["source"] is None
     assert isinstance(body["ms"], int) and body["ms"] >= 0
+
+
+def _web_route_env(monkeypatch: pytest.MonkeyPatch, **cli_kwargs) -> list[dict]:
+    """Stub retrieve/routing so the web path runs with the given CLI outputs.
+
+    Both engines get the same stdout unless the caller splits them via
+    agy_stdout/claude_stdout kwargs (see _stub_cli).
+    """
+    from gateway import quick
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: ([], None))
+    monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "web")
+    shared = cli_kwargs.pop("web_content", None)
+    if shared is not None:
+        cli_kwargs.setdefault("agy_stdout", shared)
+        cli_kwargs.setdefault("claude_stdout", shared)
+    return _stub_cli(monkeypatch, **cli_kwargs)
+
+
+def test_ask_web_echo_falls_back_to_brain(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A web reply echoing the question is no answer → brain (auto)."""
+    from mac.voice import brain
+
+    q = "what is the capital of Chile?"
+    # Both CLIs parrot the question back — never an answer.
+    calls = _web_route_env(monkeypatch, web_content=q)
+    monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: "stub brain answer")
+
+    resp = _post({"q": q})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "stub brain answer"
+    assert body["route"] == "brain"
+    assert [c["argv"][0] for c in calls] == ["agy", "claude"]  # both engines tried once
+
+
+def test_ask_web_echo_skip_returns_null(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Echo + brain=skip → no brain call, {"answer": null, "route": "web"}."""
+    from mac.voice import brain
+
+    def spy(*args, **kwargs):
+        raise AssertionError("brain.reply must not be called when brain=skip")
+
+    q = "what is the capital of Chile?"
+    _web_route_env(monkeypatch, web_content=q)
+    monkeypatch.setattr(brain, "reply", spy)
+
+    resp = _post({"q": q, "brain": "skip"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "web"
+
+
+def test_ask_web_unknown_brain_down(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Web UNKNOWN + brain failure → null, route brain."""
+    from mac.voice import brain
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("brain down")
+
+    q = "what is the capital of Chile?"
+    _web_route_env(monkeypatch, web_content="UNKNOWN")
+    monkeypatch.setattr(brain, "reply", boom)
+
+    resp = _post({"q": q})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_retrieve_ranks_name_match_above_body_only(tmp_path) -> None:
+    """A keyword in the note's path/name outranks body-only matches; a note
+    matching a single common keyword never qualifies."""
+    from gateway.quick import retrieve
+
+    projects = tmp_path / "Projects"
+    projects.mkdir()
+    (projects / "jarvis-companion.md").write_text(
+        "jarvis companion gateway settings NAME_MATCH_MARKER\n", encoding="utf-8"
+    )
+    (tmp_path / "bodyonly.md").write_text(
+        "the jarvis companion gateway config lives here BODY_MATCH_MARKER\n", encoding="utf-8"
+    )
+    (tmp_path / "onlyone.md").write_text(
+        "config values are stored in env files ONE_MATCH_MARKER\n", encoding="utf-8"
+    )
+
+    snippets, best = retrieve(
+        "where is the jarvis companion gateway config", vault_root=tmp_path
+    )
+
+    # jarvis/companion/gateway matched (config is bodyonly.md-only); the two
+    # path/name keywords make this note outrank the 4-keyword body-only match.
+    assert best == (3, 2)
+    name_i = next(i for i, s in enumerate(snippets) if "NAME_MATCH_MARKER" in s)
+    body_i = next(i for i, s in enumerate(snippets) if "BODY_MATCH_MARKER" in s)
+    assert name_i < body_i
+    assert all("ONE_MATCH_MARKER" not in s for s in snippets)
+
+
+def test_retrieve_unrelated_vault_routes_web(tmp_path, quick_env, monkeypatch) -> None:
+    """General-knowledge question vs unrelated notes → zero qualifying files,
+    heuristic route web."""
+    from gateway import quick
+    from gateway.quick import retrieve
+
+    notes = tmp_path / "Notes"
+    notes.mkdir()
+    (notes / "cooking.md").write_text("sourdough starter needs feeding daily.\n", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("jev down")
+
+    snippets, best = retrieve("what is the capital of Chile?", vault_root=tmp_path)
+    assert snippets == []
+    assert best is None
+    monkeypatch.setattr(quick, "_openrouter", boom)
+    assert quick.route_question("what is the capital of Chile?", best) == "web"
+
+
+def test_ask_strong_vault_match_skips_jev(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Best note ≥2 distinct keywords with a name hit → vault-first: Jev is
+    never called, the vault generative call answers."""
+    from gateway import quick
+
+    monkeypatch.setattr(
+        quick, "retrieve", lambda q, vault_root=None: (["karajy: the co-founder is Sara"], (3, 1))
+    )
+
+    def jev_spy(*args, **kwargs):
+        raise AssertionError("Jev must not be called on a strong vault match")
+
+    monkeypatch.setattr(quick, "route_question", jev_spy)
+    monkeypatch.setattr(
+        quick, "_openrouter",
+        lambda url, payload, *, key, timeout_s: {
+            "choices": [{"message": {"content": "Sara, the co-founder"}}]
+        },
+    )
+
+    resp = _post({"q": "who is the co-founder of Karajy?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Sara, the co-founder"
+    assert body["route"] == "vault"
+
+
+def test_ask_action_routes_brain_without_jev(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Imperative opener → brain with no Jev call; brain=skip → null/brain."""
+    from gateway import quick
+    from mac.voice import brain
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: (["safari tips"], None))
+
+    def jev_spy(*args, **kwargs):
+        raise AssertionError("Jev must not be called on an action intent")
+
+    monkeypatch.setattr(quick, "route_question", jev_spy)
+    monkeypatch.setattr(quick, "_openrouter", jev_spy)
+    monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: "stub brain answer")
+
+    resp = _post({"q": "open safari and search flights"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "stub brain answer"
+    assert body["route"] == "brain"
+
+    def brain_spy(*args, **kwargs):
+        raise AssertionError("brain.reply must not be called when brain=skip")
+
+    monkeypatch.setattr(brain, "reply", brain_spy)
+    resp = _post({"q": "open safari and search flights", "brain": "skip"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_ask_jev_called_without_override(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No strong match, not an action → Jev decides (Decisions API is hit),
+    then the agy CLI answers the web route."""
+    from gateway import quick
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: ([], None))
+    seen: list[str] = []
+
+    def fake_openrouter(url, payload, *, key, timeout_s):
+        seen.append(url)
+        return {"answers": {"route": {"type": "choice", "choice": "web"}}}
+
+    monkeypatch.setattr(quick, "_openrouter", fake_openrouter)
+    _stub_cli(monkeypatch, agy_stdout="Santiago")
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "Santiago"
+    assert body["route"] == "web"
+    assert quick._DECISIONS_URL in seen  # Jev was consulted
+
+
+@pytest.mark.parametrize("failure", ["the brain is unavailable", "brain unavailable"])
+def test_ask_brain_failure_sentinel(
+    failure: str, quick_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The brain's own failure text is not an answer → null."""
+    from gateway import quick
+    from mac.voice import brain
+
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: ([], None))
+    monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "brain")
+    monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: failure)
+
+    resp = _post({"q": "tell me about the <project> ledger"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_ask_web_refusal_falls_to_idontknow(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A web refusal ("Cannot fulfill request") is no answer → brain; brain
+    down → null — never the refusal text itself."""
+    from mac.voice import brain
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("brain down")
+
+    q = "what is the tallest building in Riyadh?"
+    _web_route_env(monkeypatch, web_content="Cannot fulfill request")
+    monkeypatch.setattr(brain, "reply", boom)
+
+    resp = _post({"q": q})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_extract_question_trailing_clause() -> None:
+    """STT gives no punctuation — a multi-intent utterance is answered by its
+    trailing question clause; a plain question returns itself."""
+    from gateway.quick import _extract_question
+
+    utterance = (
+        "doing well just keep on doing what you're doing make sure that you fix "
+        "the brain issue and also check that you Jarvis phone do have brain now "
+        "and can answer me questions for example can you answer me who are the "
+        "co-founders of <name>"
+    )
+    assert _extract_question(utterance) == "who are the co-founders of <name>"
+    assert _extract_question("who are the co-founders of <name>") == "who are the co-founders of <name>"
+
+
+def test_resolve_project_aliases() -> None:
+    """STT variants sharing the first 3 chars + ratio ≥0.5 resolve to the project
+    token; 'towed' never does; my/the/our project → the default project."""
+    from gateway.quick import _resolve_project
+
+    tokens = {"<project>", "notekit"}
+    assert "<project>" in _resolve_project("who are the co-founders of <name>", tokens).lower()
+    towed = _resolve_project("who are the co-founders of towed", tokens).lower()
+    assert "towed" in towed and "<project>" not in towed
+    for phrase in ("my project", "the project", "our project"):
+        assert "<project>" in _resolve_project(
+            f"who are the co-founders of {phrase}", tokens
+        ).lower()
+
+
+def test_brain_failure_returns_null(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Brain stub raising + web stub no-answer → {"answer": None} — never a
+    canned miss string the phone would speak verbatim."""
+    from mac.voice import brain
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("brain down")
+
+    _web_route_env(monkeypatch, web_content="UNKNOWN")
+    monkeypatch.setattr(brain, "reply", boom)
+
+    resp = _post({"q": "what is the capital of Chile?"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] is None
+    assert body["route"] == "brain"
+
+
+def test_brain_fallback_gets_vault_snippets(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vault NOVAULT + web no-answer → the brain fallback prompt carries the
+    vault snippets and the question — the toolless brain cannot read the vault
+    itself, so the context rides along (R6)."""
+    from gateway import quick
+    from mac.voice import brain
+
+    captured: list[str] = []
+
+    def fake_reply(transcript, timeout_s=60):
+        captured.append(transcript)
+        return "stub brain answer"
+
+    monkeypatch.setattr(
+        quick, "retrieve",
+        lambda q, vault_root=None: (["the <project> founders are Ali, <name> and <name>"], (3, 1)),
+    )
+    monkeypatch.setattr(
+        quick, "_openrouter",
+        lambda url, payload, *, key, timeout_s: {
+            "choices": [{"message": {"content": "NOVAULT"}}]
+        },
+    )
+    _stub_cli(monkeypatch, agy_rc=1, claude_rc=1)
+    monkeypatch.setattr(brain, "reply", fake_reply)
+
+    resp = _post({"q": "who are the co-founders of <project>"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] == "stub brain answer"
+    assert body["route"] == "brain"
+    assert captured, "brain.reply was never called"
+    assert "the <project> founders are Ali, <name> and <name>" in captured[0]
+    assert "Question: who are the co-founders of <project>" in captured[0]

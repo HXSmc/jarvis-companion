@@ -14,10 +14,38 @@ IPA="$HOME/Downloads/JarvisCompanion-unsigned.ipa"
 mkdir -p "$DIST"
 
 # Windows agent bundle (source install; the .exe build on the PC is legacy).
+# pyproject.toml is NOT shipped verbatim: the repo root's [tool.setuptools]
+# packages list spans the whole monorepo (gateway, mac, mac.voice,
+# mac.mirroring, mac.screen, passwords) which this bundle intentionally does
+# NOT include, so `pip install -e .` on the PC fails egg_info with
+# "package directory 'gateway' does not exist" (found live, 2026-10-07).
+# Generate a bundle-scoped copy instead: same deps/metadata, packages
+# trimmed to what's actually in the zip.
 rm -f "$DIST/jarvis-windows-agent.zip"
 zip -r -q "$DIST/jarvis-windows-agent.zip" \
-    windows common pyproject.toml README.md \
+    windows common README.md \
     -x "*__pycache__*" "*.pyc" "*.pyo" ".DS_Store" "windows/tests/*"
+
+WINBUNDLE_TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$WINBUNDLE_TMPDIR"' EXIT
+python3 - "$WINBUNDLE_TMPDIR/pyproject.toml" <<'PYEOF'
+import re
+import sys
+
+with open("pyproject.toml", encoding="utf-8") as f:
+    text = f.read()
+text, n = re.subn(
+    r'packages = \[[^\]]*\]',
+    'packages = ["common", "windows", "windows.agent"]',
+    text,
+    count=1,
+)
+if n != 1:
+    sys.exit("build_release.sh: could not find packages = [...] in pyproject.toml to scope for the Windows bundle")
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
+zip -j -q "$DIST/jarvis-windows-agent.zip" "$WINBUNDLE_TMPDIR/pyproject.toml"
 
 # Phone IPA, when it has been exported.
 if [[ -f "$IPA" ]]; then

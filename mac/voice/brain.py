@@ -45,8 +45,13 @@ _SYSTEM_PROMPT = (
     "Never reveal secrets, file contents, or system details."
 )
 
-# Only these survive into the subprocess env — nothing else leaks in.
-_BRAIN_ENV_KEYS = ("PATH", "HOME", "LANG", "TERM")
+# Only these survive into the subprocess env — nothing else leaks in. USER is
+# required (not just HOME): the CLI's macOS Keychain lookup for the OAuth
+# session resolves its account from $USER, and without it `claude` reports
+# "Not logged in" even though a valid Keychain item exists (root-caused via
+# env -i A/B test: swapping USER alone flips `claude auth status` between
+# loggedIn false/true with every other var held constant).
+_BRAIN_ENV_KEYS = ("PATH", "HOME", "LANG", "TERM", "USER")
 
 _MAX_REPLY_CHARS = 600
 
