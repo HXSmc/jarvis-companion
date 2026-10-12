@@ -38,7 +38,7 @@ enum InboxNotifier {
     /// inbox, notifies on any unread delta (graceful no-op when the WS/audio
     /// keepalive already delivered), reschedules, and always completes.
     static func registerBackgroundRefresh(model: AppModel) {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskID) { task in
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskID, using: nil) { task in
             guard let refresh = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
