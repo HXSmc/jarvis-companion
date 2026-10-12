@@ -24,7 +24,7 @@ import os
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -133,8 +133,11 @@ def _phone_dir() -> Path | None:
     return Path(_PHONE_DIR_DEFAULT).expanduser()
 
 
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _now_iso() -> str:
+    """Naive local isoformat — same as jarvis-phone's writers (watcher._iso).
+    The drainer's _is_stale does fromisoformat(created) - naive now(); a "Z"
+    suffix parses aware on py≥3.11 and the subtraction raises TypeError."""
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _queue_file() -> str:
@@ -193,13 +196,13 @@ def _enqueue_outbound(new: int, items: list[dict]) -> None:
     if (directory / "queue" / "OVERNIGHT").exists() and email:
         payload = {
             "channel": "email",
-            "created": _utcnow_iso(),
+            "created": _now_iso(),
             "payload": {"to": email, "subject": subject, "body": text},
         }
     elif phone:
         payload = {
             "channel": "whatsapp",
-            "created": _utcnow_iso(),
+            "created": _now_iso(),
             "payload": {"to": phone, "text": text},
         }
     else:
@@ -233,7 +236,7 @@ def _enqueue_urgent_event(new: int, items: list[dict], body: dict) -> None:
         "call_eligible": True,
         "summary": subject,
         "details": details,
-        "created": _utcnow_iso(),
+        "created": _now_iso(),
         "source": {"origin_cwd": str(Path(__file__).resolve().parent.parent)},
     }
     _enqueue(directory / "queue" / "events" / _queue_file(), event)
@@ -327,7 +330,7 @@ def _cli(argv: list[str]) -> int:
         return 1
     payload = {
         "channel": "whatsapp",
-        "created": _utcnow_iso(),
+        "created": _now_iso(),
         "payload": {"to": phone, "text": "[TEST] jarvis inbox notify path OK — jarvis://inbox"},
     }
     path = directory / "queue" / "outbound" / _queue_file()

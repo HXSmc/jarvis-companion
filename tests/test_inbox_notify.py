@@ -15,6 +15,7 @@ import asyncio
 import json
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -83,6 +84,15 @@ def _events(phone_home: Path) -> list[dict]:
     return [json.loads(f.read_text()) for f in sorted(directory.glob("*.json"))]
 
 
+def _assert_drainer_parseable(msg: dict) -> None:
+    """Drainer's _is_stale comparison must not TypeError: naive now() minus
+    fromisoformat(created) only works when 'created' has no tz suffix (a
+    trailing Z parses aware on py>=3.11)."""
+    created = datetime.fromisoformat(msg["created"])
+    assert created.tzinfo is None, msg["created"]
+    _ = (datetime.now() - created).total_seconds()
+
+
 async def run_new_whatsapp(server_factory, store_home: Path, phone_home: Path) -> None:
     async with server_factory() as base:
         async with httpx.AsyncClient(base_url=f"http://{base}") as http:
@@ -96,6 +106,7 @@ async def run_new_whatsapp(server_factory, store_home: Path, phone_home: Path) -
     assert msg["payload"]["to"] == OWNER_PHONE, msg
     assert "jarvis://inbox" in msg["payload"]["text"], msg
     assert "Vercel" in msg["payload"]["text"] and "GitHub" in msg["payload"]["text"], msg
+    _assert_drainer_parseable(msg)
     shutil.rmtree(phone_home / "queue" / "outbound")
     print("[1] new>0 -> one whatsapp outbound with jarvis://inbox + owner phone")
 
@@ -132,6 +143,7 @@ async def run_urgent_event(server_factory, store_home: Path, phone_home: Path) -
     assert event["call_eligible"] is True, event
     assert event["type"] == "decision-request" and event["kind"] == "needs_input", event
     assert event["summary"] == "Vendor deadline today", event
+    _assert_drainer_parseable(event)
     # Non-urgent (flag absent) is message-only: no events file ever.
     shutil.rmtree(phone_home / "queue" / "events")
     async with server_factory() as base:
