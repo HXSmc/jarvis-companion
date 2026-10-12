@@ -32,10 +32,17 @@
 			</array>
 		</dict>
 	</array>
-	<!-- audio background mode: silent-audio keepalive holds the gateway WS -->
+	<!-- audio background mode: silent-audio keepalive holds the gateway WS;
+	     fetch = J3 BGAppRefreshTask inbox refresh fallback -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>fetch</string>
+	</array>
+	<!-- J3: BGAppRefreshTask identifier (must match InboxNotifier.refreshTaskID) -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>personal.jarvis.inbox-refresh</string>
 	</array>
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>Notifies you when a handoff arrives from the Mac.</string>

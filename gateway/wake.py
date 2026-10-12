@@ -5,8 +5,10 @@ MAC a Windows agent reported over its websocket (persisted by `remember_mac`
 into ~/.jarvis/windows_mac.json). Neither → HTTP 400 with the setup hint.
 
 The magic packet goes to the global broadcast 255.255.255.255:9 plus any
-directed broadcast addresses an ifconfig parse yields (best-effort —
-broadcast-only is acceptable). Sending is a module-level seam (`_send_packet`)
+directed broadcast addresses an ifconfig parse yields (best-effort), plus a
+unicast to the vault's `pc_ip` (same section/mechanism as `pc_mac`, no
+default — W5 proved unicast to the PC's LAN IP is the variant that wakes it;
+absent `pc_ip` → broadcast-only, logged). Sending is a module-level seam (`_send_packet`)
 so tests never put real packets on the wire; the wait loop polls the registry
 every 2 s through `asyncio.sleep` (`_sleep` seam), never blocking the loop.
 
@@ -128,6 +130,13 @@ def _vault_mac() -> str | None:
     return _normalise_mac(section.get("pc_mac") or "")
 
 
+def _vault_ip() -> str | None:
+    """`pc_ip` from the vault section, or None when absent/not a dotted quad."""
+    section = config.read_section(str(Path(config.DEFAULT_VAULT_PATH).expanduser())) or {}
+    ip = (section.get("pc_ip") or "").strip()
+    return ip if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) else None
+
+
 def _resolve_mac() -> str | None:
     """Vault `pc_mac` first, else the last agent-reported MAC."""
     return _vault_mac() or last_seen_mac()
@@ -145,6 +154,11 @@ async def wake_pc() -> dict:
         raise HTTPException(status_code=400, detail=NO_MAC_DETAIL)
     packet = magic_packet(mac)
     targets = [("255.255.255.255", WOL_PORT)] + [(b, WOL_PORT) for b in _directed_broadcasts()]
+    pc_ip = _vault_ip()
+    if pc_ip:
+        targets.append((pc_ip, WOL_PORT))
+    else:
+        logger.info("wake: no pc_ip in vault — skipping unicast send")
     sent = True
     try:
         _send_packet(packet, targets)

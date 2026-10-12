@@ -29,6 +29,7 @@ import random
 import sys
 import uuid
 
+import psutil
 import websockets
 
 from windows.agent import commands
@@ -139,10 +140,32 @@ def handle_message(raw: str) -> dict | None:
     return {"id": msg.get("id"), "ok": ok, "data": data}
 
 
+def _adapter_mac() -> int | None:
+    """First non-virtual interface's AF_LINK MAC as an int (None if none found)."""
+    # ponytail: substring list is not exhaustive — an unlisted virtual adapter
+    # slips through; upgrade = query the adapter type (SNMP if_type) instead of names.
+    virtual = ("Tailscale", "Loopback", "vEthernet", "WSL", "Bluetooth", "VMware", "Virtual")
+    stats = psutil.net_if_stats()
+    for name, addrs in psutil.net_if_addrs().items():
+        if any(v in name for v in virtual):
+            continue
+        st = stats.get(name)
+        if st is None or not st.isup:
+            continue
+        for addr in addrs:
+            if addr.family == psutil.AF_LINK:
+                hex_ = addr.address.replace(":", "").replace("-", "")
+                if len(hex_) == 12 and int(hex_[:2], 16) & 0x01 == 0:
+                    return int(hex_, 16)
+    return None
+
+
 def _hello_envelope() -> str:
     """Connect-time `hello` (Q2): reports the NIC MAC; payload omits it when random."""
-    mac = uuid.getnode()
-    payload = {} if mac & 0x01 else {"mac": ":".join(f"{(mac >> s) & 0xFF:02x}" for s in range(40, -1, -8))}
+    mac = _adapter_mac()
+    if mac is None:
+        mac = uuid.getnode()
+    payload = {} if (mac >> 40) & 0x01 else {"mac": ":".join(f"{(mac >> s) & 0xFF:02x}" for s in range(40, -1, -8))}
     return json.dumps({"id": f"{random.getrandbits(32):08x}", "type": "hello", "payload": payload})
 
 

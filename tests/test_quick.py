@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
@@ -39,6 +40,11 @@ def quick_env(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else None,
     )
     monkeypatch.setattr(quick, "_settings", lambda: dict(TEST_SETTINGS))
+    # Hermetic ask() runs: _resolve_project gets a fixed token set, never the
+    # real vault's Projects glob.
+    monkeypatch.setattr(
+        quick, "_project_tokens", lambda: {"<project>", "notekit", "jarvis", "companion"}
+    )
 
 
 def _post(
@@ -297,7 +303,8 @@ def test_ask_web_agy_argv_and_env(quick_env, monkeypatch: pytest.MonkeyPatch) ->
     assert call["argv"][:3] == ["agy", "--dangerously-skip-permissions", "--print"]
     prompt = call["argv"][3]
     assert prompt.startswith("Answer with exactly the answer and nothing else")
-    assert prompt.endswith("Question: what is the capital of Chile?")
+    # _resolve_project rebuilds from the word list → normalized (lowercase, no "?")
+    assert prompt.endswith("Question: what is the capital of chile")
     assert "reply exactly UNKNOWN" in prompt
     assert call["env"]["AGY_KIND"] == "quick"
     assert call["timeout"] == 40
@@ -337,8 +344,9 @@ def test_ask_web_agy_timeout_claude_fallback(
     i_turns = claude["argv"].index("--max-turns")
     assert claude["argv"][i_turns + 1] == "3"
     assert claude["env"]["CLAUDE_CONFIG_DIR"].endswith(".claude-jarvis-brain")
-    assert claude["input"].endswith("Question: what is the capital of Chile?")
-    assert claude["timeout"] == 40
+    assert claude["input"].endswith("Question: what is the capital of chile")
+    # remaining share of the shared deadline — full 40 s when agy failed instantly
+    assert 5 <= claude["timeout"] <= 40
 
 
 def test_ask_web_claude_not_logged_in_brain_down(
@@ -766,4 +774,151 @@ def test_brain_fallback_gets_vault_snippets(quick_env, monkeypatch: pytest.Monke
     assert body["route"] == "brain"
     assert captured, "brain.reply was never called"
     assert "the <project> founders are Ali, <name> and <name>" in captured[0]
-    assert "Question: who are the co-founders of <project>" in captured[0]
+    # _resolve_project rebuilds from the word list → normalized question text
+    assert "Question: who are the co founders of <project>" in captured[0]
+
+
+def test_ask_action_checked_on_raw_utterance(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1: an action is detected on the RAW utterance — no extraction, no
+    project resolution, straight to the brain with the full command."""
+    from gateway import quick
+    from mac.voice import brain
+
+    q = "send <name> an email about what we discussed"
+
+    def spy(text):
+        raise AssertionError("extraction/resolution must not run on an action")
+
+    monkeypatch.setattr(quick, "_extract_question", spy)
+    monkeypatch.setattr(quick, "_resolve_project", spy)
+
+    captured: list[str] = []
+
+    def fake_reply(transcript, timeout_s=60):
+        captured.append(transcript)
+        return "stub brain answer"
+
+    monkeypatch.setattr(brain, "reply", fake_reply)
+
+    resp = _post({"q": q})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["route"] == "brain"
+    assert body["answer"] == "stub brain answer"
+    assert q in captured[0]  # the brain got the raw command
+
+
+def test_extract_question_compound_keeps_subject() -> None:
+    """R3: contiguous question clauses join — the trailing "when did it start"
+    must not drop the "who are the co-founders" subject."""
+    from gateway.quick import _extract_question
+
+    q = "who are the co-founders of <project> and when did it start"
+    assert _extract_question(q) == q
+
+
+def test_extract_question_noncontiguous_question_excluded() -> None:
+    """R3: an early question clause separated by non-question chatter ("what
+    you're doing … check that …") stays out — only the trailing question ships."""
+    from gateway.quick import _extract_question
+
+    owner_call = (
+        "doing well just keep on doing what you're doing make sure that you fix "
+        "the brain issue and also check that you Jarvis phone do have brain now "
+        "and can answer me questions for example can you answer me who are the "
+        "co-founders of <name>"
+    )
+    assert _extract_question(owner_call) == "who are the co-founders of <name>"
+
+
+def test_extract_question_keeps_tail_without_question_word() -> None:
+    """R1: a trailing clause with no question word of its own is never split
+    away — the text from the cut point to the END of the utterance ships."""
+    from gateway.quick import _extract_question
+
+    assert _extract_question("who are <name> and <name>") == "who are <name> and <name>"
+    status = "what is the status of <project> and <name>"
+    assert _extract_question(status) == status
+    compound = "who are the co-founders of <project> and when did it start"
+    assert _extract_question(compound) == compound
+    owner = (
+        "doing well just keep on doing what you're doing make sure that you fix "
+        "the brain issue and also check that you Jarvis phone do have brain now "
+        "and can answer me questions for example can you answer me who are the "
+        "co-founders of <name>"
+    )
+    assert _extract_question(owner) == "who are the co-founders of <name>"
+
+
+def test_resolve_project_requires_project_shape() -> None:
+    """R2: a token is rewritten only in project-name position with a close,
+    prefix-sharing, length-compatible candidate — common words never move."""
+    from gateway.quick import _resolve_project
+
+    tokens = {"<project>", "notekit", "dealwatch", "audit"}
+    # must resolve
+    assert "<project>" in _resolve_project("who are the co-founders of <name>", tokens)
+    assert "<project>" in _resolve_project("the <name> project status", tokens)  # before "project"
+    # must NOT resolve — each comes back unchanged
+    for q in (
+        "take a note",                                   # "note" follows "a", not a preposition
+        "tell me about the deal with microsoft",          # "deal" follows "the"
+        "what happened in 2025",                          # digits — not alphabetic
+        "play the audio",                                 # "audio" follows "the", no preposition
+    ):
+        assert _resolve_project(q, tokens) == q
+
+
+def test_resolve_project_rewrites_only_gated_occurrence() -> None:
+    """R2: a repeated word is rewritten ONLY at the occurrence that passed the
+    position gate — its twins elsewhere in the utterance never move."""
+    from gateway.quick import _resolve_project
+
+    tokens = {"<project>"}
+    q = "<name> notes and a summary of <name>"
+    # only the "<name>" after "of" resolves; the subject-position twin stays
+    assert _resolve_project(q, tokens) == "<name> notes and a summary of <project>"
+
+
+def test_resolve_project_never_rewrites_stopwords() -> None:
+    """R2: a STOPWORDS token in gated position ("their" after "about") is
+    skipped even when a project token is a near-exact match."""
+    from gateway.quick import _resolve_project
+
+    assert _resolve_project("notes about their plan", {"theirs"}) == "notes about their plan"
+
+
+def test_web_answer_second_attempt_gets_remaining_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R4: one shared deadline — the claude fallback's timeout is the REMAINING
+    time after agy consumed part of the window, never the full 40 s again."""
+    from gateway import quick
+
+    def slow_agy(q):
+        time.sleep(0.3)
+        return None, None
+
+    monkeypatch.setattr(quick, "_agy_answer", slow_agy)
+    calls = _stub_cli(monkeypatch, claude_stdout="Santiago")
+
+    answer, _source = asyncio.run(quick._web_answer("what is the capital of Chile?", "agy"))
+    assert answer == "Santiago"
+    (call,) = calls
+    assert call["argv"][0] == "claude"
+    assert 5 <= call["timeout"] <= quick.WEB_TIMEOUT_SECONDS - 0.3
+
+
+def test_web_answer_skips_second_attempt_when_time_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R4: under 5 s remaining after the first attempt → claude never runs."""
+    from gateway import quick
+
+    def slow_agy(q):
+        time.sleep(0.3)
+        return None, None
+
+    monkeypatch.setattr(quick, "_agy_answer", slow_agy)
+    monkeypatch.setattr(quick, "WEB_TIMEOUT_SECONDS", 4)
+    calls = _stub_cli(monkeypatch, claude_stdout="Santiago")
+
+    result = asyncio.run(quick._web_answer("what is the capital of Chile?", "agy"))
+    assert result == (None, None)
+    assert calls == []

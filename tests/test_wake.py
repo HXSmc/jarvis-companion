@@ -4,7 +4,7 @@ No network: `wake._send_packet` (the socket seam) is stubbed, `registry.roles`
 monkeypatched, `_directed_broadcasts` stubbed (no ifconfig subprocess), and the
 90 s wait driven by a fake clock over the `_now`/`_sleep` seams. The endpoint
 rides a minimal FastAPI app mounting only `wake.router` (W1 wires it into the
-real app — that file is off-limits here). Exactly 8 tests; the 401 check is
+real app — that file is off-limits here). Exactly 11 tests; the 401 check is
 folded into test_wake_waits_for_registry.
 """
 
@@ -130,6 +130,46 @@ def test_wake_sends_both_targets(
     assert packet == wake.magic_packet("aa:bb:cc:dd:ee:ff")
     assert ("255.255.255.255", 9) in targets
     assert ("<lan>.1.255", 9) in targets  # directed-broadcast attempt alongside global
+
+
+def test_wake_sends_unicast_to_pc_ip(
+    stubbed_token, wake_app, monkeypatch, sent, tmp_state
+) -> None:
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff", "pc_ip": "<lan>.1.117"})
+    monkeypatch.setattr(wake.registry, "roles", lambda: ["windows"])
+
+    resp = _post_wake(wake_app, stubbed_token)
+
+    assert resp.status_code == 200
+    [packet, targets] = sent[0]
+    assert ("<lan>.1.117", 9) in targets  # unicast — the W5-proven variant
+    assert packet == wake.magic_packet("aa:bb:cc:dd:ee:ff")
+    assert ("255.255.255.255", 9) in targets  # broadcasts kept alongside
+    assert ("<lan>.1.255", 9) in targets
+
+
+def test_wake_no_pc_ip_broadcast_only(
+    stubbed_token, wake_app, monkeypatch, sent, tmp_state
+) -> None:
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff"})  # no pc_ip key
+    monkeypatch.setattr(wake.registry, "roles", lambda: ["windows"])
+
+    resp = _post_wake(wake_app, stubbed_token)
+
+    assert resp.status_code == 200
+    assert sent[0][1] == [("255.255.255.255", 9), ("<lan>.1.255", 9)]  # no unicast
+
+
+def test_wake_malformed_pc_ip_ignored(
+    stubbed_token, wake_app, monkeypatch, sent, tmp_state
+) -> None:
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff", "pc_ip": "not-an-ip"})
+    monkeypatch.setattr(wake.registry, "roles", lambda: ["windows"])
+
+    resp = _post_wake(wake_app, stubbed_token)
+
+    assert resp.status_code == 200
+    assert sent[0][1] == [("255.255.255.255", 9), ("<lan>.1.255", 9)]
 
 
 def test_wake_waits_for_registry(
