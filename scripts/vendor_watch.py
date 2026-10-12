@@ -38,7 +38,7 @@ RESUME_PATH = Path(os.environ.get("JARVIS_VENDOR_WATCH_RESUME")
                    or Path.home() / "Desktop" / "<project> Pack" / "resume.md")
 
 <project>_CONTEXT = """Business context (for next_steps suggestions only):
-- Vendor4 Teams call happened Sun 11 Oct 2026 12:00 KSA; quote + GRC pack still owed to Vendor4.
+- Vendor4 Teams call happened Sun 11 Oct 2026 12:00 KSA; Vendor4 OWES <project> its quote + GRC pack (<project> is waiting on Vendor4, not the reverse).
 - Vendor prices arriving -> rerun margins in ~/Desktop/<project> Pack/Gross Margin Estimate (mid-range).md.
 - Vendor compliance = 11-question checklist in ~/Desktop/<project> Pack/AI Options + Eval Plan.md.
 - Deck = claude.ai artifact <deck-id> (pricing source of truth)."""

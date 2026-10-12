@@ -12,6 +12,8 @@
 		5A0B1C2D3E4F5061726A7323 /* WebBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7313 /* WebBridge.swift */; };
 		5A0B1C2D3E4F5061726A7324 /* KeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7314 /* KeepAlive.swift */; };
 		5A0B1C2D3E4F5061726A7325 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */; };
+		5A0B1C2D3E4F5061726A7371 /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7351 /* InboxView.swift */; };
+		5A0B1C2D3E4F5061726A7381 /* InboxNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7361 /* InboxNotifier.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,6 +21,8 @@
 		5A0B1C2D3E4F5061726A7312 /* JarvisView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarvisView.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7313 /* WebBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebBridge.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7314 /* KeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeepAlive.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7351 /* InboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxView.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7361 /* InboxNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxNotifier.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7315 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7316 /* JarvisCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -50,6 +54,8 @@
 				5A0B1C2D3E4F5061726A7312 /* JarvisView.swift */,
 				5A0B1C2D3E4F5061726A7313 /* WebBridge.swift */,
 				5A0B1C2D3E4F5061726A7314 /* KeepAlive.swift */,
+				5A0B1C2D3E4F5061726A7351 /* InboxView.swift */,
+				5A0B1C2D3E4F5061726A7361 /* InboxNotifier.swift */,
 				5A0B1C2D3E4F5061726A7315 /* Info.plist */,
 				5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */,
 			);
@@ -132,6 +138,8 @@
 				5A0B1C2D3E4F5061726A7322 /* JarvisView.swift in Sources */,
 				5A0B1C2D3E4F5061726A7323 /* WebBridge.swift in Sources */,
 				5A0B1C2D3E4F5061726A7324 /* KeepAlive.swift in Sources */,
+				5A0B1C2D3E4F5061726A7371 /* InboxView.swift in Sources */,
+				5A0B1C2D3E4F5061726A7381 /* InboxNotifier.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
