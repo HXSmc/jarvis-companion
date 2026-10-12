@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/Users/<user>/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.jarvis.vendor-watch</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/<user>/Desktop/personal/jarvis-companion/.venv/bin/python3</string>
+		<string>scripts/vendor_watch.py</string>
+		<string>--once</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>8</integer>
+			<key>Minute</key>
+			<integer>23</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>14</integer>
+			<key>Minute</key>
+			<integer>23</integer>
+		</dict>
+	</array>
+	<key>WorkingDirectory</key>
+		<string>/Users/<user>/Desktop/personal/jarvis-companion</string>
+</dict>
+</plist>

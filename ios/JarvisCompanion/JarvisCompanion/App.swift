@@ -360,6 +360,9 @@ final class AppModel: ObservableObject {
     let bridge = WebBridge()
     let web = WebController()
     let dictation = DictationController()
+    /// Single InboxModel instance: the Home unread badge and the Inbox sheet
+    /// share this state.
+    let inbox = InboxModel()
 
     @Published var statusText = "starting"
     @Published var gatewayURLField = AppSettings.gatewayURL {
@@ -381,6 +384,7 @@ final class AppModel: ObservableObject {
     @Published var isSending = false
     @Published var showSettings = false
     @Published var showPushedPage = false
+    @Published var showInbox = false
     /// Bumped when the fullScreenCover dismisses so Home's hidden web host
     /// re-claims the shared WKWebView (see JarvisWebView).
     @Published var webHostToken = 0
@@ -401,6 +405,13 @@ final class AppModel: ObservableObject {
             .sink { [weak self] connected, error in
                 self?.statusText = connected ? "connected" : (error ?? "disconnected")
             }
+            .store(in: &cancellables)
+
+        // Inbox state is a separate ObservableObject: cascade its changes so
+        // views observing AppModel (the Home unread badge) repaint with it.
+        inbox.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
         dictation.onFinalTranscript = { [weak self] text in
@@ -429,6 +440,8 @@ final class AppModel: ObservableObject {
         KeepAlive.start()
         KeepAlive.requestNotificationPermission()
         bridge.connect()
+        // Prime the unread badge even before the sheet is ever opened.
+        inbox.refresh()
     }
 
     /// Shared send path (behavior item 4): mic release, the typed row, and the
@@ -680,6 +693,13 @@ final class AppModel: ObservableObject {
     /// replies `{id, ok, data: {url}}` and pushes `navigate` — the WKWebView
     /// loads the checkout URL and the Mac drives it from there.
     func openHandoff(_ url: URL) {
+        // jarvis://inbox opens the vendor-mail inbox sheet.
+        if url.scheme == "jarvis", url.host == "inbox" {
+            showInbox = true
+            inbox.refresh()
+            statusText = "inbox"
+            return
+        }
         guard url.scheme == "jarvis", url.host == "handoff",
               let id = url.pathComponents.dropFirst().first, !id.isEmpty else {
             statusText = "unrecognized jarvis:// link: \(url.absoluteString)"
@@ -751,6 +771,12 @@ final class AppModel: ObservableObject {
                     self?.reportResult(id: id, ok: false, data: ["error": error.localizedDescription])
                 }
             }
+        case "inbox_new":
+            // Gateway push from POST /inbox/notify: refresh the shared
+            // InboxModel so the badge and an open sheet update. handleCommand
+            // runs on main (WebBridge hops before dispatch), matching ask().
+            inbox.refresh()
+            reportResult(id: id, ok: true, data: ["unread": payload["unread"] ?? 0])
         default:
             reportResult(id: id, ok: false, data: ["error": "unknown command: \(type)"])
         }
@@ -797,6 +823,7 @@ struct ContentView: View {
         // windowed view (see JarvisWebView).
         .background { hiddenWebHost }
         .sheet(isPresented: $model.showSettings) { SettingsSheet(model: model) }
+        .sheet(isPresented: $model.showInbox) { InboxScreen(model: model.inbox) }
         .fullScreenCover(isPresented: $model.showPushedPage) {
             PushedPageView(model: model)
         }
@@ -810,6 +837,27 @@ struct ContentView: View {
                 .foregroundColor(.jarvisMuted)
             Spacer(minLength: 8)
             statusPill
+            Button {
+                model.showInbox = true
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundColor(.jarvisMuted)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                    if model.inbox.unread > 0 {
+                        Text("\(model.inbox.unread)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .frame(minWidth: 16, minHeight: 16)
+                            .background(Capsule().fill(Color.jarvisDanger))
+                            .offset(x: -6, y: 6)
+                    }
+                }
+            }
+            .accessibilityLabel("Inbox")
             Button {
                 model.showSettings = true
             } label: {
