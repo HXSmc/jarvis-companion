@@ -98,6 +98,32 @@ def test_cursor_math_and_gestures():
     assert consts is True
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_sleep_tap_two_tap_confirm():
+    """Sleep button state machine: first tap arms for 3 s, second tap inside
+    the window fires, a tap past the deadline re-arms instead of firing."""
+    checks = [
+        "c.sleepTap(null, 1000)",
+        "c.sleepTap({deadline: 2000}, 1999).fire",
+        "c.sleepTap({deadline: 2000}, 2001)",
+        "c.sleepLabel(true) + '|' + c.sleepLabel(false)",
+        "c.SLEEP_CONFIRM_MS",
+    ]
+    script = (
+        "const c = require(" + json.dumps(str(CURSOR_JS)) + ");\n"
+        + "\n".join(f"console.log(JSON.stringify({expr}));" for expr in checks)
+    )
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    lines = out.stdout.strip().splitlines()
+    assert len(lines) == len(checks), out.stderr
+    arm, fires, rearm, label, window = (json.loads(x) for x in lines)
+    assert arm == {"state": {"deadline": 4000}, "fire": False}  # 1000 + SLEEP_CONFIRM_MS
+    assert fires is True                                       # inside the 3 s window
+    assert rearm == {"state": {"deadline": 5001}, "fire": False}  # past deadline: re-arm
+    assert label == "Confirm|Sleep"
+    assert window == 3000
+
+
 def test_cursor_payload_reaches_driver(gateway_server, fake_send_events):
     """The payloads cursor mode sends (tap/right/move at the cursor) pass the
     protocol unchanged: pydantic adds defaults (button, dx, ...), so compare

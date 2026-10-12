@@ -46,8 +46,9 @@
     display: flex; flex-direction: column; gap: 6px;
   }
   #bar .row { display: flex; gap: 6px; height: 38px; }
-  #bar .row.keys { overflow-x: auto; }
+  #bar .row.keys { flex: 1; min-width: 0; overflow-x: auto; }
   #bar .row.keys button { flex: 0 0 auto; }
+  #bar #sleep-btn { flex: 0 0 auto; }
   #bar input[type=text] {
     flex: 1; min-width: 0; border-radius: 8px; border: 1px solid #3a3a3c;
     background: #2c2c2e; color: #eee; padding: 0 10px; font-size: 16px;
@@ -58,6 +59,7 @@
     touch-action: manipulation;
   }
   #bar button.mod.on { background: #0a84ff; }
+  #bar #sleep-btn.arm { background: #b3261e; color: #fff; }
   /* cursor mode: shrink-fit wrapper around the canvas; the aspect-ratio +
      max constraints keep the wrapper exactly the canvas's rendered size
      (ratio is re-synced from the frame in JS). */
@@ -82,19 +84,22 @@
   <div class="row">
     <input id="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type…">
   </div>
-  <div class="row keys">
-    <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
-    <button type="button" class="key" data-k="esc">esc</button>
-    <button type="button" class="key" data-k="delete">del</button>
-    <button type="button" class="key" data-k="tab">tab</button>
-    <button type="button" class="key" data-k="left">&#8592;</button>
-    <button type="button" class="key" data-k="up">&#8593;</button>
-    <button type="button" class="key" data-k="down">&#8595;</button>
-    <button type="button" class="key" data-k="right">&#8594;</button>
-    <button type="button" class="mod" data-m="cmd">cmd</button>
-    <button type="button" class="mod" data-m="ctrl">ctrl</button>
-    <button type="button" class="mod" data-m="alt">alt</button>
-    <button type="button" class="mod" data-m="shift">shift</button>
+  <div class="row">
+    <div class="row keys">
+      <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
+      <button type="button" class="key" data-k="esc">esc</button>
+      <button type="button" class="key" data-k="delete">del</button>
+      <button type="button" class="key" data-k="tab">tab</button>
+      <button type="button" class="key" data-k="left">&#8592;</button>
+      <button type="button" class="key" data-k="up">&#8593;</button>
+      <button type="button" class="key" data-k="down">&#8595;</button>
+      <button type="button" class="key" data-k="right">&#8594;</button>
+      <button type="button" class="mod" data-m="cmd">cmd</button>
+      <button type="button" class="mod" data-m="ctrl">ctrl</button>
+      <button type="button" class="mod" data-m="alt">alt</button>
+      <button type="button" class="mod" data-m="shift">shift</button>
+    </div>
+    <button type="button" id="sleep-btn" aria-label="Put the PC to sleep">Sleep</button>
   </div>
 </div>
 <script>/*CURSOR_JS*/</script>
@@ -115,6 +120,7 @@ var target = new URLSearchParams(location.search).get("target") === "windows" ? 
 var etag = null;          // last frame's ETag -> If-None-Match
 var objUrl = null;        // current frame's blob URL
 var stopped = false;      // set on 401: freeze the whole page
+var pcSleeping = false;   // true from sleep-tap fire until the status poll sees the PC back online
 var lastInput = 0;        // ms timestamp of last input POST -> fps boost
 var state = { mac: null, windows: null };
 var mods = [];            // sticky modifiers, consumed by the next key event
@@ -143,6 +149,7 @@ function expired() { showBanner(BANNER_EXPIRED, true); }
 
 // --- frame loop ------------------------------------------------------------
 function pullFrame() {
+  if (target === "windows" && pcSleeping) return Promise.resolve(); // don't wake it back up
   var dpr = window.devicePixelRatio || 1;
   var w = Math.min(1600, Math.max(320, Math.round(canvas.clientWidth * dpr)));
   var headers = {};
@@ -180,6 +187,7 @@ function frameLoop() {
 
 // --- input -----------------------------------------------------------------
 function sendEvents(events) {
+  if (target === "windows" && pcSleeping) return Promise.resolve(); // don't wake it back up
   lastInput = Date.now();
   return fetch("/screen/" + target + "/input", {
     method: "POST",
@@ -212,6 +220,53 @@ document.querySelectorAll("#bar button.mod[data-m]").forEach(function (b) {
     if (i === -1) m.push(b.dataset.m); else m.splice(i, 1);
     setMods(m);
   });
+});
+
+// --- Sleep PC (bottom bar, two-tap confirm — cursor.js sleepTap) -----------
+// Tap once -> "Confirm" for 3 s; tap again -> POST /screen/windows/
+// sleep. The agent acks before it suspends, so the reply lands while the PC is
+// still up; after that the status poll's "PC offline" banner takes over and
+// the dying frame loop's fetch errors are swallowed (catch in pullFrame).
+var sleepBtn = document.getElementById("sleep-btn");
+var sleepArmed = null;  // sleepTap state: null or {deadline}
+var sleepTimer = null;  // disarm timeout
+
+function renderSleepBtn() {
+  sleepBtn.textContent = sleepLabel(sleepArmed !== null);
+  sleepBtn.classList.toggle("arm", sleepArmed !== null);
+}
+
+sleepBtn.addEventListener("click", function () {
+  if (sleepBtn.disabled) return;
+  var r = sleepTap(sleepArmed, Date.now());
+  sleepArmed = r.state;
+  if (sleepTimer) clearTimeout(sleepTimer);
+  if (!r.fire) {
+    renderSleepBtn();
+    sleepTimer = setTimeout(function () {
+      sleepArmed = null;
+      renderSleepBtn();
+    }, SLEEP_CONFIRM_MS);
+    return;
+  }
+  sleepBtn.disabled = true;
+  sleepBtn.textContent = "PC going to sleep…";
+  // Set BEFORE the request fires: the agent acks fast enough that the frame
+  // loop's next tick can land inside the suspend grace window and round-trip
+  // over the same websocket, which keeps the PC awake right after it suspends.
+  pcSleeping = true;
+  fetch("/screen/windows/sleep", { method: "POST" })
+    .then(function (res) {
+      if (res.status === 401) return expired();
+      if (!res.ok) { sleepBtn.textContent = "Sleep failed — PC offline?"; pcSleeping = false; }
+      // 200: ack received, the PC suspends; the offline banner follows on its own
+    })
+    .catch(function () { sleepBtn.textContent = "Sleep failed — PC offline?"; pcSleeping = false; });
+  setTimeout(function () {
+    sleepBtn.disabled = false;
+    sleepArmed = null;
+    renderSleepBtn();
+  }, 5000);
 });
 
 var textEl = document.getElementById("text");
@@ -482,7 +537,10 @@ function pollStatus() {
       .then(function (res) {
         if (res.status === 401) return expired();
         if (!res.ok) return;
-        return res.json().then(function (s) { state[t] = s; });
+        return res.json().then(function (s) {
+          state[t] = s;
+          if (t === "windows" && s.online) pcSleeping = false; // back up, safe to poll frames again
+        });
       })
       .then(refreshBanner)
       .catch(function () {});

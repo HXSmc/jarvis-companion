@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 
 import psutil
@@ -22,13 +23,15 @@ logger = logging.getLogger(__name__)
 
 ALLOWED = (
     "specs", "uptime", "disk", "processes", "wake", "sleep", "list_dir",
-    "screen_frame", "screen_input", "open",
+    "screen_frame", "screen_input", "open", "diag_power",
 )
 
 IS_WINDOWS = platform.system() == "Windows"
 LIST_DIR_LIMIT = 200
 PROCESS_LIMIT = 25
 POWERSHELL_TIMEOUT_S = 15
+DIAG_TIMEOUT_S = 30  # Get-WinEvent over a 24h window is slower than the other one-liners
+SLEEP_ACK_DELAY_S = 1.0  # suspend grace: the reply must flush to the gateway first
 
 # list_dir scope (LOW-3): these three trees and nothing else — the whole-home
 # scope let a junction/symlink resolve anywhere the user could read.
@@ -111,13 +114,13 @@ def run_command(name: str | None, payload=None) -> tuple[bool, object]:
         return False, f"error: {exc}"
 
 
-def _powershell(command: str) -> str:
+def _powershell(command: str, timeout: float = POWERSHELL_TIMEOUT_S) -> str:
     """Run a PowerShell snippet on Windows; raises on non-zero exit."""
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=POWERSHELL_TIMEOUT_S,
+        timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(f"powershell exit {result.returncode}: {result.stderr.strip()}")
@@ -182,11 +185,10 @@ def _send_wake_key() -> None:
 
 
 def _suspend() -> None:
-    subprocess.run(
-        ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
-        check=True,
-        timeout=30,
-    )
+    # ctypes, not `rundll32 powrprof.dll,SetSuspendState`: the rundll32 path
+    # hibernates whenever hibernation is enabled, and this PC must S3-sleep
+    # (Wake-on-LAN only wakes it from sleep). bHibernate=FALSE, bForce=TRUE.
+    ctypes.windll.powrprof.SetSuspendState(0, 1, 0)
 
 
 def _wake(_payload) -> str:
@@ -199,8 +201,63 @@ def _wake(_payload) -> str:
 def _sleep(_payload) -> str:
     if not IS_WINDOWS:
         return "sleep: Windows only, not executed on this machine"
-    _suspend()
+    # Reply-before-suspend: run_command's return value IS the ack the gateway
+    # awaits, so the suspend rides a delayed daemon timer and the ack goes out
+    # first — otherwise the blocking suspend would strand the reply.
+    timer = threading.Timer(SLEEP_ACK_DELAY_S, _suspend)
+    timer.daemon = True
+    timer.start()
     return "sleep requested"
+
+
+# Fixed, no-argument, read-only sleep/resume forensics (root-cause evidence
+# for the sleep-wakes-itself / resume-BSOD investigation). Each sub-query runs
+# independently and reports its own failure text — e.g. the Minidump listing
+# is expected to 403 when the agent runs unelevated, and that must not blank
+# out the other results.
+_DIAG_QUERIES = {
+    "lastwake": "powercfg /lastwake",
+    "waketimers": "powercfg /waketimers",
+    "wake_armed": "powercfg /devicequery wake_armed",
+    "power_report": "powercfg /a",  # S3 vs Modern Standby (S0ix) — changes what "sleep" means
+    "minidump_listing": (
+        "Get-ChildItem 'C:\\Windows\\Minidump' -ErrorAction Stop "
+        "| Select-Object Name,Length,LastWriteTime | Format-List | Out-String -Width 4096"
+    ),
+    "bugcheck_events": (
+        "Get-WinEvent -FilterHashtable @{LogName='System';Id=1001;"
+        "ProviderName='Microsoft-Windows-WER-SystemErrorReporting';StartTime=(Get-Date).AddHours(-24)} "
+        "-ErrorAction Stop | Format-List TimeCreated,Message | Out-String -Width 4096"
+    ),
+    "kernel_power_events": (
+        "Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Power';"
+        "Id=41,42,107;StartTime=(Get-Date).AddHours(-24)} "
+        "-ErrorAction Stop | Format-List TimeCreated,Id,Message | Out-String -Width 4096"
+    ),
+    "power_troubleshooter_events": (
+        "Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Power-Troubleshooter';"
+        "Id=1;StartTime=(Get-Date).AddHours(-24)} "
+        "-ErrorAction Stop | Format-List TimeCreated,Message | Out-String -Width 4096"
+    ),
+    "reliability_records": (
+        "Get-CimInstance Win32_ReliabilityRecords -ErrorAction Stop "
+        "| Where-Object { $_.TimeGenerated -ge (Get-Date).AddHours(-24) } "
+        "| Format-List TimeGenerated,SourceName,Message | Out-String -Width 4096"
+    ),
+}
+
+
+def _diag_power(_payload) -> dict:
+    """Run the fixed diagnostic queries above; one failing query never blocks the rest."""
+    if not IS_WINDOWS:
+        return {"error": "diag_power: Windows only, not executed on this machine"}
+    results = {}
+    for name, cmd in _DIAG_QUERIES.items():
+        try:
+            results[name] = _powershell(cmd, timeout=DIAG_TIMEOUT_S)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            results[name] = f"error: {exc}"
+    return results
 
 
 def _list_dir(payload) -> dict:
@@ -335,4 +392,5 @@ _HANDLERS = {
     "screen_frame": _screen_frame,
     "screen_input": _screen_input,
     "open": _open,
+    "diag_power": _diag_power,
 }

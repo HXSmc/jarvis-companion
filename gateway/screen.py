@@ -342,3 +342,16 @@ async def screen_open(request: Request, target: Target, body: OpenBody) -> dict:
         if not reply.get("ok"):
             raise HTTPException(status_code=422, detail=str(reply.get("data") or "app not found"))
     return {"ok": True}
+
+
+@router.post("/windows/sleep")
+async def screen_sleep(request: Request) -> dict:
+    """Sleep the PC: the page's Sleep button rides the screen_session cookie
+    (Path=/screen — it can never reach /pc/*), so this is the cookie-authed
+    twin of wake.py's POST /pc/sleep, same agent roundtrip."""
+    _require(request)
+    _windows_online()
+    reply = await agent_roundtrip(voice_router.request_envelope("sleep"))
+    if not reply.get("ok"):
+        raise HTTPException(status_code=503, detail=str(reply.get("data") or PC_OFFLINE_DETAIL))
+    return {"ok": True}

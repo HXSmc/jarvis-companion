@@ -6,7 +6,9 @@ paths (PowerShell CIM, wake key, suspend) are mocked.
 
 from __future__ import annotations
 
+import inspect
 import os
+import threading
 import time
 
 import psutil
@@ -40,12 +42,42 @@ def test_refuses_none_and_empty_command_names():
     assert commands.run_command("") == (False, "refused")
 
 
-def test_allowlist_is_exactly_the_ten_commands():
+def test_allowlist_is_exactly_the_eleven_commands():
     assert commands.ALLOWED == (
         "specs", "uptime", "disk", "processes", "wake", "sleep", "list_dir",
-        "screen_frame", "screen_input", "open",
+        "screen_frame", "screen_input", "open", "diag_power",
     )
     assert set(commands._HANDLERS) == set(commands.ALLOWED)
+
+
+def test_diag_power_runs_every_query_and_isolates_failures(monkeypatch):
+    """Fixed, no-argument, read-only sleep/resume forensics: each sub-query
+    gets its own try/except so one failure (e.g. Minidump access denied when
+    unelevated) never blanks out the others."""
+    monkeypatch.setattr(commands, "IS_WINDOWS", True)
+
+    def fake_powershell(cmd, timeout=commands.POWERSHELL_TIMEOUT_S):
+        if "Minidump" in cmd:
+            raise RuntimeError("powershell exit 1: access denied")
+        return f"ok: {cmd[:12]}"
+
+    monkeypatch.setattr(commands, "_powershell", fake_powershell)
+    ok, data = commands.run_command("diag_power")
+    assert ok is True
+    assert set(data) == set(commands._DIAG_QUERIES)
+    assert data["minidump_listing"] == "error: powershell exit 1: access denied"
+    assert data["lastwake"].startswith("ok:")
+
+
+def test_diag_power_non_windows_is_a_no_op():
+    monkeypatch_value = commands.IS_WINDOWS
+    try:
+        commands.IS_WINDOWS = False
+        ok, data = commands.run_command("diag_power")
+        assert ok is True
+        assert "Windows only" in data["error"]
+    finally:
+        commands.IS_WINDOWS = monkeypatch_value
 
 
 # --- happy paths -----------------------------------------------------------
@@ -114,14 +146,23 @@ def test_wake_happy_path_windows_mocked(monkeypatch):
     assert fired == ["wake"]
 
 
-def test_sleep_happy_path_windows_mocked(monkeypatch):
+def test_sleep_acks_before_deferred_suspend(monkeypatch):
     monkeypatch.setattr(commands, "IS_WINDOWS", True)
-    fired = []
-    monkeypatch.setattr(commands, "_suspend", lambda: fired.append("sleep"))
+    fired = threading.Event()
+    monkeypatch.setattr(commands, "_suspend", fired.set)
+    monkeypatch.setattr(commands, "SLEEP_ACK_DELAY_S", 0.0)
     ok, data = commands.run_command("sleep")
     assert ok is True
-    assert data == "sleep requested"
-    assert fired == ["sleep"]
+    assert data == "sleep requested"  # the ack returns before the suspend
+    assert fired.wait(2)              # the suspend fires on the deferred timer
+
+
+def test_suspend_is_s3_not_hibernate_capable_rundll32():
+    # Spec: rundll32 SetSuspendState hibernates when hibernation is enabled —
+    # the suspend must go through ctypes with bHibernate=FALSE instead.
+    source = inspect.getsource(commands._suspend)
+    assert "subprocess" not in source  # no shelled-out suspend path at all
+    assert "ctypes.windll.powrprof.SetSuspendState(0, 1, 0)" in source
 
 
 def test_list_dir_happy_path_default_root(monkeypatch, tmp_path):
