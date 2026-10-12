@@ -6,14 +6,25 @@ writes items, NEVER summarises (summaries/next_steps are generated once at
 ingest by J1) — it only lists, flips the read flag, and pushes an
 ``inbox_new`` command to the connected iOS socket. File access is serialised
 with an fcntl lock on ``inbox.json.lock``; writes are atomic (tmp + rename).
+
+J3 adds the guaranteed Mac-side path: notify with new mail also enqueues a
+jarvis-phone outbound message (WhatsApp-to-self with a ``jarvis://inbox``
+link; email instead while the overnight marker is set) and, when the caller
+flags the mail urgent, a jarvis-phone event. The jarvis-phone root is
+overridable via ``JARVIS_PHONE_DIR``; every enqueue failure is logged and
+swallowed — notify must never raise.
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
+import sys
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,7 +34,10 @@ from gateway.auth import require_bearer_any
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
 _STORE_NAME = "inbox.json"
+_PHONE_DIR_DEFAULT = "~/Desktop/personal/jarvis-phone"
 
 
 def _store_dir() -> Path:
@@ -103,6 +117,138 @@ def _unread_count(items: list[dict]) -> int:
     return sum(1 for item in items if not item.get("read"))
 
 
+def _phone_dir() -> Path | None:
+    """jarvis-phone repo root, or None = queue writes disabled.
+
+    JARVIS_PHONE_DIR overrides (tests point it at a tmp dir). Without an
+    override, tests (pytest sets PYTEST_CURRENT_TEST) get None so a notify
+    can NEVER drop a file into the real outbound queue — J2's regression
+    posts new>0 and would otherwise trigger a real WhatsApp send.
+    """
+    override = os.environ.get("JARVIS_PHONE_DIR")
+    if override:
+        return Path(override).expanduser()
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    return Path(_PHONE_DIR_DEFAULT).expanduser()
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _queue_file() -> str:
+    """jarvis-phone queue filename convention: <ts>-<pid>.json."""
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.json"
+
+
+def _enqueue(path: Path, payload: dict) -> bool:
+    """Atomic write (tmp + rename, same idiom as _mark_read). False = IO error."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        logger.warning("inbox: jarvis-phone enqueue failed (%s): %s", path, exc)
+        return False
+
+
+def _owner_contact(directory: Path) -> tuple[str, str]:
+    """(phone_whatsapp, email) from jarvis-phone config/owner.json; empty on any failure."""
+    try:
+        data = json.loads(
+            (directory / "config" / "owner.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    return str(data.get("phone_whatsapp") or ""), str(data.get("email") or "")
+
+
+def _unread_vendors(items: list[dict], count: int) -> list[str]:
+    """Distinct vendors of the newest `count` unread items, newest-first."""
+    vendors: list[str] = []
+    for item in _newest_first([i for i in items if not i.get("read")]):
+        vendor = str(item.get("vendor") or item.get("sender") or "").strip()
+        if vendor and vendor not in vendors:
+            vendors.append(vendor)
+    return vendors[:count]
+
+
+def _enqueue_outbound(new: int, items: list[dict]) -> None:
+    """One guaranteed-path message: WhatsApp normally, email while overnight."""
+    directory = _phone_dir()
+    if directory is None or new <= 0:
+        return
+    phone, email = _owner_contact(directory)
+    text = f"{new} new vendor email(s)"
+    vendors = ", ".join(_unread_vendors(items, new))
+    if vendors:
+        text += f": {vendors}"
+    text += ". Open jarvis://inbox"
+    subject = f"[jarvis] vendor inbox: {new} new"
+    if (directory / "queue" / "OVERNIGHT").exists() and email:
+        payload = {
+            "channel": "email",
+            "created": _utcnow_iso(),
+            "payload": {"to": email, "subject": subject, "body": text},
+        }
+    elif phone:
+        payload = {
+            "channel": "whatsapp",
+            "created": _utcnow_iso(),
+            "payload": {"to": phone, "text": text},
+        }
+    else:
+        logger.warning("inbox: no owner contact (owner.json), message skipped")
+        return
+    _enqueue(directory / "queue" / "outbound" / _queue_file(), payload)
+
+
+def _enqueue_urgent_event(new: int, items: list[dict], body: dict) -> None:
+    """Urgent mail ALSO raises a jarvis-phone event (owner may get called).
+
+    Mirrors jarvis-event.sh's shape; call_eligible is true on this path and
+    this path ONLY — non-urgent new mail is message-only, never a call.
+    """
+    directory = _phone_dir()
+    if directory is None or new <= 0:
+        return
+    newest = _newest_first([i for i in items if not i.get("read")])
+    item = newest[0] if newest else {}
+    subject = str(body.get("subject") or item.get("subject") or "vendor inbox urgent item")
+    summary = str(body.get("summary") or item.get("summary") or "")
+    steps = body.get("next_steps", item.get("next_steps"))
+    details = summary
+    if isinstance(steps, list) and steps:
+        details = (details + "\n" if details else "") + "\n".join(str(s) for s in steps)
+    event = {
+        "type": "decision-request",
+        "kind": "needs_input",
+        "project": "jarvis-companion",
+        "task": "vendor inbox urgent item",
+        "call_eligible": True,
+        "summary": subject,
+        "details": details,
+        "created": _utcnow_iso(),
+        "source": {"origin_cwd": str(Path(__file__).resolve().parent.parent)},
+    }
+    _enqueue(directory / "queue" / "events" / _queue_file(), event)
+
+
+def _enqueue_guaranteed(new: int, items: list[dict], body: dict) -> None:
+    """Guaranteed-path side of notify; any failure is logged, never raised."""
+    try:
+        _enqueue_outbound(new, items)
+        if body.get("urgent") is True:
+            _enqueue_urgent_event(new, items, body)
+    except Exception:
+        logger.warning("inbox: guaranteed-path enqueue failed", exc_info=True)
+
+
 def _loopback_guard(request: Request) -> None:
     """/inbox/notify is a localhost-only trigger: anything but 127.0.0.1 gets 403."""
     host = request.client.host if request.client else None
@@ -132,10 +278,12 @@ async def mark_read(item_id: str) -> dict:
 async def notify(request: Request) -> dict:
     """Local watcher (J1/J3) pokes new mail: recount unread, push `inbox_new` to ios.
 
-    Body ``{"new": int, "unread": int}`` (both optional) — the unread count in
-    the pushed payload is always recounted from the store, never trusted from
-    the body. No ios socket connected (or send failure) still replies 200
-    ``{"ok": true, "delivered": false}``` — notify must never raise.
+    Body ``{"new": int, "unread": int, "urgent": bool}`` (all optional) — the
+    unread count in the pushed payload is always recounted from the store,
+    never trusted from the body. ``new > 0`` also fires the guaranteed path
+    (jarvis-phone WhatsApp/email + urgent event); enqueue failures never fail
+    the request. No ios socket connected (or send failure) still replies 200
+    ``{"ok": true, "delivered": false}`` — notify must never raise.
     """
     _loopback_guard(request)
     try:
@@ -145,10 +293,12 @@ async def notify(request: Request) -> dict:
     if not isinstance(body, dict):
         body = {}
     new = body.get("new")
-    unread = _unread_count(_load_items())
+    items = _load_items()
+    unread = _unread_count(items)
     payload: dict = {"unread": unread}
     if isinstance(new, int):
         payload["new"] = new
+    _enqueue_guaranteed(new if isinstance(new, int) else 0, items, body)
     try:
         delivered = await registry.send_to_role(
             "ios",
@@ -161,3 +311,32 @@ async def notify(request: Request) -> dict:
     except Exception:
         delivered = False
     return {"ok": True, "delivered": bool(delivered)}
+
+
+def _cli(argv: list[str]) -> int:
+    """``python3 -m gateway.inbox --test``: ONE real WhatsApp-to-self message
+    ("[TEST] jarvis inbox notify path OK — jarvis://inbox") into the real
+    outbound queue, so the hub can verify the whole chain end-to-end."""
+    if "--test" not in argv:
+        print(__name__ + ": pass --test to enqueue one test WhatsApp message")
+        return 2
+    directory = Path(os.environ.get("JARVIS_PHONE_DIR") or _PHONE_DIR_DEFAULT).expanduser()
+    phone, _ = _owner_contact(directory)
+    if not phone:
+        print("no phone_whatsapp in " + str(directory / "config" / "owner.json"), file=sys.stderr)
+        return 1
+    payload = {
+        "channel": "whatsapp",
+        "created": _utcnow_iso(),
+        "payload": {"to": phone, "text": "[TEST] jarvis inbox notify path OK — jarvis://inbox"},
+    }
+    path = directory / "queue" / "outbound" / _queue_file()
+    if not _enqueue(path, payload):
+        print(f"enqueue failed: {path}", file=sys.stderr)
+        return 1
+    print(f"queued {path.name} (whatsapp, to owner phone per owner.json)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_cli(sys.argv[1:]))

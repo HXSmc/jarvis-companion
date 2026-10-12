@@ -3,6 +3,7 @@ import Combine
 import Speech
 import SwiftUI
 import UIKit
+import UserNotifications
 
 /// App entry + scene + WS lifecycle ownership: the AppModel glues the WebBridge
 /// (gateway WS, role=ios) to the WebController (driven WKWebView), routes
@@ -12,6 +13,12 @@ import UIKit
 struct JarvisCompanionApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = AppModel()
+
+    init() {
+        // BGTaskScheduler handlers must be registered before launch finishes
+        // (J3): the refresh task is the WS/audio-keepalive fallback path.
+        InboxNotifier.registerBackgroundRefresh(model: model)
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -363,6 +370,10 @@ final class AppModel: ObservableObject {
     /// Single InboxModel instance: the Home unread badge and the Inbox sheet
     /// share this state.
     let inbox = InboxModel()
+    /// J3: retained so UNUserNotificationCenter keeps it alive (an unretained
+    /// delegate gets its taps dropped); routes notification taps into
+    /// openHandoff, the same path as the jarvis:// url scheme.
+    private let notificationDelegate = InboxNotificationDelegate()
 
     @Published var statusText = "starting"
     @Published var gatewayURLField = AppSettings.gatewayURL {
@@ -439,6 +450,12 @@ final class AppModel: ObservableObject {
         // the background (KeepAlive).
         KeepAlive.start()
         KeepAlive.requestNotificationPermission()
+        // J3: inbox notification taps funnel through openHandoff, exactly like
+        // a jarvis://inbox link arriving.
+        notificationDelegate.onOpenInbox = { [weak self] in
+            if let url = URL(string: "jarvis://inbox") { self?.openHandoff(url) }
+        }
+        UNUserNotificationCenter.current().delegate = notificationDelegate
         bridge.connect()
         // Prime the unread badge even before the sheet is ever opened.
         inbox.refresh()
@@ -725,6 +742,10 @@ final class AppModel: ObservableObject {
         // F2: leaving the active scene cancels the hold — discard the
         // capture instead of sending it.
         if phase != .active { dictation.cancelDiscard() }
+        // J3: leaving the foreground arms the BGAppRefresh fallback for when
+        // the audio-keepalive WS gets reclaimed; submitting while foregrounded
+        // would be pointless (the live WS already delivers inbox_new).
+        if phase == .background { InboxNotifier.scheduleBackgroundRefresh() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {
@@ -775,7 +796,16 @@ final class AppModel: ObservableObject {
             // Gateway push from POST /inbox/notify: refresh the shared
             // InboxModel so the badge and an open sheet update. handleCommand
             // runs on main (WebBridge hops before dispatch), matching ask().
+            // J3: local notification ONLY while backgrounded (same guard as
+            // the navigate case) — foreground, the user is looking at the
+            // badge/sheet already; iOS conventions say don't spam on-screen.
             inbox.refresh()
+            if !web.isForeground {
+                InboxNotifier.notify(
+                    unread: payload["unread"] as? Int ?? inbox.unread,
+                    new: payload["new"] as? Int ?? 0
+                )
+            }
             reportResult(id: id, ok: true, data: ["unread": payload["unread"] ?? 0])
         default:
             reportResult(id: id, ok: false, data: ["error": "unknown command: \(type)"])
