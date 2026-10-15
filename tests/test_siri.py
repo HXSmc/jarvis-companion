@@ -113,7 +113,7 @@ def test_hung_router_times_out(ios_token: str, monkeypatch: pytest.MonkeyPatch) 
     resp, elapsed = _post(ios_token, "tell me a joke")
 
     assert resp.status_code == 200
-    assert resp.json() == {"reply": "Jarvis is taking too long, try again."}
+    assert resp.json() == {"reply": "Started, check the app."}
     assert elapsed < 5.0
 
 

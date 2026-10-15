@@ -34,7 +34,11 @@ router = APIRouter()
 # instead of hanging the Shortcut.
 ROUTER_TIMEOUT_SECONDS = 15
 
-_TIMEOUT_REPLY = "Jarvis is taking too long, try again."
+# The router may still finish after our deadline, so never say "try again"
+# (a retry with a new msg_id could start the task twice).
+_TIMEOUT_REPLY = "Started, check the app."
+# Same cap as central.ChatBody.text.
+MAX_TEXT_CHARS = 4000
 _ROUTER_DOWN_REPLY = "The mini PC router is unavailable, try again."
 # The shared token can start nothing on the mini PC (C1): tasks need the app.
 _SHARED_TOKEN_REPLY = "Tasks go through the Jarvis app"
@@ -99,7 +103,7 @@ _WAKE_RE = re.compile(
 )
 
 
-async def _router_reply(text: str, thread_id: str) -> dict:
+async def _router_reply(text: str, thread_id: str, msg_id: str) -> dict:
     """central.route (source "voice"), hard-bounded; failure → canned reply, never a 500.
 
     `reply` always holds something speakable: the router's reply, else its
@@ -108,7 +112,7 @@ async def _router_reply(text: str, thread_id: str) -> dict:
     """
     try:
         data = await asyncio.wait_for(
-            central.route(thread_id, uuid.uuid4().hex, text, "voice"),
+            central.route(thread_id, msg_id, text, "voice"),
             timeout=ROUTER_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -123,7 +127,10 @@ async def _router_reply(text: str, thread_id: str) -> dict:
 # The Shortcut sends the shared token; the iPhone app sends `ios_token`.
 @router.post("/siri/hey", dependencies=[Depends(require_bearer_any("token", "ios_token"))])
 async def siri_hey(request: Request, authorization: str | None = Header(default=None)) -> dict:
-    """`{"text": "<transcript>", "thread_id"?: str}` → local intent or router → `{"reply": ...}`.
+    """`{"text": "<transcript>", "thread_id"?: str, "msg_id"?: str}` → local intent or router → `{"reply": ...}`.
+
+    A client `msg_id` (central.ID_PATTERN) is passed to the router so a retry is
+    idempotent; without one each call gets a fresh id.
 
     The body is read off the Request (not a Pydantic param) so the Shortcut's
     POST works without a Content-Type header. Beyond 2 in-flight or 20/60 s
@@ -133,8 +140,11 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         body = await request.json()
         text = str(body.get("text") or "")
         thread_id = str(body.get("thread_id") or VOICE_THREAD_ID)
+        msg_id = str(body.get("msg_id") or uuid.uuid4().hex)
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail='expected JSON body {"text": "..."}')
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=400, detail=f"text longer than {MAX_TEXT_CHARS} characters")
     if text.strip().lower() in _STATUS_PHRASES:
         return {"reply": _status_reply()}
     # Quick-ask prefixes: delegate to the terse /ask pipeline (never a brain slot).
@@ -170,7 +180,9 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         return {"reply": _SHARED_TOKEN_REPLY}
     if not _THREAD_RE.fullmatch(thread_id):
         raise HTTPException(status_code=400, detail="invalid thread_id")
+    if not _THREAD_RE.fullmatch(msg_id):
+        raise HTTPException(status_code=400, detail="invalid msg_id")
     if _brain_semaphore.locked() or not _brain_slot_available():
         return {"reply": _BUSY_REPLY}
     async with _brain_semaphore:
-        return await _router_reply(text, thread_id)
+        return await _router_reply(text, thread_id, msg_id)

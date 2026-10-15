@@ -158,6 +158,18 @@ def test_sessions_filtered_with_phase_fallback():
     assert "internal" not in data[1]
 
 
+def test_phase_fallback_map(monkeypatch):
+    states = ["running", "needs_input", "done", "failed", "idle", "stopped", "weird", None]
+    monkeypatch.setattr(router_stub, "SESSIONS", [
+        {"session_id": f"s{i}", "state": st, "phase": "bogus"} for i, st in enumerate(states)
+    ] + [{"session_id": "live", "state": "done", "phase": "in_review"}])
+    data = _call("GET", "/central/sessions", headers=IOS).json()
+    assert [s["phase"] for s in data] == [
+        "in_progress", "in_review", "done", "done", "done", "done", "in_progress", "in_progress",
+        "in_review",  # a valid router phase wins over the state map
+    ]
+
+
 def test_message_and_stop_forward():
     resp = _call("POST", "/central/sessions/s-run/message", headers=IOS, json={"msg_id": "m-9", "text": "go"})
     assert resp.json() == {"ok": True, "action": "delivered"}
@@ -214,6 +226,25 @@ def test_router_unreachable_is_502(monkeypatch):
         resp = _call(method, path, headers=IOS, json=body)
         assert resp.status_code == 502
         assert resp.json() == {"detail": "router unavailable"}
+
+
+@pytest.mark.parametrize("path", ["/central/sessions/s-run/events", "/central/feed"])
+def test_sse_unexpected_error_is_502_and_client_closed(path, monkeypatch):
+    closed: list[bool] = []
+
+    class Boom(httpx.AsyncClient):
+        async def send(self, *a, **kw):
+            raise RuntimeError("not an httpx error")
+
+        async def aclose(self):
+            closed.append(True)
+            await super().aclose()
+
+    monkeypatch.setattr(central, "_client", lambda timeout: Boom(timeout=timeout))
+    resp = _call("GET", path, headers=IOS)
+    assert resp.status_code == 502
+    assert resp.json() == {"detail": "router unavailable"}
+    assert closed == [True]
 
 
 def test_router_token_missing_is_502(stub_router):
@@ -285,6 +316,30 @@ def test_siri_fallback_needs_input_speaks_prompt():
     assert resp.json()["options"] == ["staging", "prod"]
 
 
+def test_siri_client_msg_id_passed_to_router():
+    _call("POST", "/siri/hey", headers=IOS, json={"text": "build me a thing", "msg_id": "m-abc-1"})
+    assert router_stub.seen[-1]["body"]["msg_id"] == "m-abc-1"
+
+
+def test_siri_bad_msg_id_400():
+    resp = _call("POST", "/siri/hey", headers=IOS, json={"text": "hello", "msg_id": "m/1"})
+    assert resp.status_code == 400
+    assert router_stub.seen == []
+
+
+def test_siri_text_over_4000_is_400_before_intents(monkeypatch):
+    from gateway import siri
+
+    monkeypatch.setattr(siri, "roles", lambda: [])
+    for headers in (IOS, {"Authorization": f"Bearer {TOKEN}"}):
+        resp = _call("POST", "/siri/hey", headers=headers, json={"text": "status " + "x" * 4000})
+        assert resp.status_code == 400
+        resp = _call("POST", "/siri/hey", headers=headers, json={"text": "q: " + "x" * 4000})
+        assert resp.status_code == 400
+    assert _call("POST", "/siri/hey", headers=IOS, json={"text": "x" * 4000}).status_code == 200
+    assert len(router_stub.seen) == 1
+
+
 def test_siri_bad_thread_id_400():
     resp = _call("POST", "/siri/hey", headers=IOS, json={"text": "hello", "thread_id": "../x"})
     assert resp.status_code == 400
@@ -312,8 +367,14 @@ def test_siri_status_stays_local(monkeypatch):
 @pytest.mark.parametrize("text,cmd", [
     ("show mini pc screen", "screen_minipc"),
     ("Mini PC screen", "screen_minipc"),
-    ("show my mini pc", "screen_minipc"),
+    ("show my mini pc", None),  # no "screen": not a screen request
     ("Show Mini PC screen", "screen_minipc"),
+    ("mini-pc screen", "screen_minipc"),
+    ("show the minipc screen", "screen_minipc"),
+    ("open the mini pc's screen", "screen_minipc"),
+    ("show me the mini pc logs", None),
+    ("show mini pc disk usage", "disk"),
+    ("what is the mini pc showing", None),
     ("show my pc screen", "screen_windows"),
     ("show my mac screen", "screen_mac"),
     ("is the mini pc busy", None),

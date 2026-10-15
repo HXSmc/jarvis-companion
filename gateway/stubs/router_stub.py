@@ -3,7 +3,8 @@
 Run: `uvicorn gateway.stubs.router_stub:app --port 8800` and point the gateway at
 it with MINIPC_ROUTER_URL=http://127.0.0.1:8800. No auth check — it records the
 headers it saw (`seen`) so tests can assert what the gateway forwarded. Delete
-when the real router is up.
+when the real router is up. GET /feed is NOT in the framing contract yet; it is
+the shape the gateway's /central/feed expects the router to add.
 """
 
 from __future__ import annotations

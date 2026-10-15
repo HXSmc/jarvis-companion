@@ -7,6 +7,11 @@ passthrough. The router bearer (`MINIPC_ROUTER_TOKEN`, vault `## Jarvis
 Companion`) is read per request through `common.config.get_token` and is never
 logged, echoed, or returned. Router failures surface as a 502 with a short
 generic detail (never the upstream body).
+
+Beyond the contract: GET /central/feed relays the router's GET /feed (SSE, one
+event per line of {seq, ts, session_id, type, from, to, text}) for the Agency
+Floor. The framing doc does not define /feed yet; until the router serves it,
+/central/feed answers 502.
 """
 
 from __future__ import annotations
@@ -47,7 +52,12 @@ _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at",
     "project", "task", "summary", "phase",
 )
-_PHASE_FALLBACK = {"running": "in_progress", "needs_input": "in_review"}
+_PHASES = ("in_progress", "in_review", "done")
+# Used only when the router sends no valid `phase`; an unknown state is in_progress.
+_PHASE_FALLBACK = {
+    "running": "in_progress", "needs_input": "in_review",
+    "done": "done", "failed": "done", "idle": "done", "stopped": "done",
+}
 
 router = APIRouter(dependencies=[Depends(require_bearer_any("ios_token"))])
 # The Agency Floor page holds no data or secrets (it fetches everything with the
@@ -132,8 +142,8 @@ def _bad_gateway(exc: RouterError) -> HTTPException:
 
 def _session(item: dict) -> dict:
     out = _pick(item, _SESSION_KEYS)
-    if out.get("phase") not in ("in_progress", "in_review", "done"):
-        out["phase"] = _PHASE_FALLBACK.get(out.get("state"), "done")
+    if out.get("phase") not in _PHASES:
+        out["phase"] = _PHASE_FALLBACK.get(out.get("state"), "in_progress")
     return out
 
 
@@ -199,10 +209,10 @@ async def _sse(path: str, last_event_id: str | None) -> StreamingResponse:
     client = _client(SSE_TIMEOUT)
     try:
         resp = await client.send(client.build_request("GET", f"{router_base()}{path}", headers=headers), stream=True)
-    except httpx.HTTPError as exc:
+    except Exception as exc:  # not only httpx errors: never leak the client or a 500
         await client.aclose()
         logger.warning("router GET %s failed: %s", path, type(exc).__name__)
-        raise HTTPException(status_code=502, detail=ROUTER_UNAVAILABLE)
+        raise HTTPException(status_code=502, detail=ROUTER_UNAVAILABLE) from None
     if resp.status_code != 200:
         status = resp.status_code
         await resp.aclose()
