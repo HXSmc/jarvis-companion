@@ -91,6 +91,21 @@
     position: fixed; top: 46px; left: 8px; right: 8px; z-index: 10;
     text-align: center; color: #aaa; font-size: 12px; pointer-events: none;
   }
+  /* Mini PC landscape = full screen: chrome hidden, #vnc fills the viewport,
+     so noVNC's ResizeObserver -> resizeSession sends one SetDesktopSize
+     (rfb.js debounces it 500 ms). Only ⌨ stays reachable, as a corner button. */
+  #kbd-fab {
+    display: none; position: fixed; right: 12px; bottom: 12px; z-index: 10;
+    width: 44px; height: 44px; border: 0; border-radius: 22px;
+    background: rgba(44,44,46,.7); color: #eee; font-size: 20px;
+    touch-action: manipulation;
+  }
+  #kbd-fab.on { background: rgba(10,132,255,.85); }
+  @media (orientation: landscape) {
+    body.minipc #seg, body.minipc #vnc-hint, body.minipc #bar { display: none; }
+    body.minipc #wrap { inset: 0; }
+    body.minipc #kbd-fab { display: block; }
+  }
   /* off-screen, NOT display:none — iOS won't focus a hidden field */
   #kbd {
     position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0;
@@ -133,6 +148,7 @@
     <button type="button" id="sleep-btn" aria-label="Put the PC to sleep">Sleep</button>
   </div>
 </div>
+<button type="button" id="kbd-fab" aria-label="Toggle keyboard">⌨</button>
 <!-- off-screen, NOT display:none — iOS refuses to focus a hidden field -->
 <textarea id="kbd" autocapitalize="off" autocorrect="off" autocomplete="off"
   spellcheck="false" aria-label="Mini PC keyboard input"></textarea>
@@ -794,17 +810,22 @@ function sendVncEvents(events) {
 // --- Mini PC keyboard toggle (off-screen textarea raises the iOS keyboard) ---
 var kbdBtn = document.getElementById("kbd-toggle");
 var kbdEl = document.getElementById("kbd");
+var kbdFab = document.getElementById("kbd-fab"); // landscape full-screen twin of kbdBtn
 var kbdLast = ""; // textarea diff baseline
 
-kbdBtn.addEventListener("click", function () {
+function toggleKbd() {
   if (document.activeElement === kbdEl) kbdEl.blur(); else kbdEl.focus();
-});
+}
+kbdBtn.addEventListener("click", toggleKbd);
+kbdFab.addEventListener("click", toggleKbd); // focus() stays inside the tap gesture, as iOS requires
 kbdEl.addEventListener("focus", function () {
   kbdBtn.classList.add("on");
+  kbdFab.classList.add("on");
   kbdBtn.setAttribute("aria-pressed", "true");
 });
 kbdEl.addEventListener("blur", function () {
   kbdBtn.classList.remove("on");
+  kbdFab.classList.remove("on");
   kbdBtn.setAttribute("aria-pressed", "false");
 });
 kbdEl.addEventListener("input", function () {
@@ -861,11 +882,22 @@ function pollStatus() {
   });
 }
 
+// Mini PC landscape is full screen (CSS above); tell the iOS app so it hides
+// the status bar + its Done bar too. Outside the app there is no handler.
+var landscapeMq = window.matchMedia("(orientation: landscape)");
+function syncFullscreen() {
+  var fs = target === "minipc" && landscapeMq.matches;
+  try { window.webkit.messageHandlers.screenFullscreen.postMessage(fs); } catch (e) {}
+}
+landscapeMq.addEventListener("change", syncFullscreen);
+
 // show/hide the right surface for the current target: JPEG canvas for
 // mac/windows, the noVNC container for minipc. The cursor overlay div moves
 // between them so cursor mode works over both.
 function showTargetUI() {
   var minipc = target === "minipc";
+  document.body.classList.toggle("minipc", minipc); // scopes the landscape full-screen CSS
+  syncFullscreen();
   cursorWrap.style.display = minipc ? "none" : "";
   vncEl.hidden = !minipc;
   hintEl.hidden = !minipc;

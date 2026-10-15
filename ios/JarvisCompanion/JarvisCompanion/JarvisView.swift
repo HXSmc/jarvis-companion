@@ -24,8 +24,11 @@ struct HeldEval {
 /// WS commands navigate it, evaluate JS on it (incl. the T5.2 credential-prefill
 /// JS, which arrives as an evaluateJS payload carrying `expected_host`), and
 /// screenshot it back.
-final class WebController: NSObject, ObservableObject, WKNavigationDelegate {
+final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
     var webView: WKWebView?
+    /// /screen posts `screenFullscreen` (true = Mini PC target in landscape);
+    /// PushedPageView hides the status bar + Done bar while it is set.
+    @Published var screenFullscreen = false
     /// Set by the app from scenePhase; backgrounded commands fail fast instead
     /// of running unreliable background JS.
     var isForeground = true
@@ -44,6 +47,7 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate {
     func navigate(to url: URL) {
         currentURL = url
         lastNavigationFinished = false
+        screenFullscreen = false // a new page starts with the normal chrome
         // A new navigation invalidates any eval still held for an earlier page.
         dropHeldEval()
         webView?.load(URLRequest(url: url))
@@ -116,6 +120,14 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate {
         eval.completion(.failure(JarvisError.hostMismatch))
     }
 
+    /// Only toggles chrome; PushedPageView also requires landscape before
+    /// hiding Done, so a page posting `true` in portrait can't strand the user.
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "screenFullscreen", message.frameInfo.isMainFrame else { return }
+        screenFullscreen = (message.body as? Bool) ?? false
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         lastNavigationFinished = true
         if let url = webView.url {
@@ -145,7 +157,11 @@ struct JarvisWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         if let existing = controller.webView { return existing }
-        let view = WKWebView()
+        let config = WKWebViewConfiguration()
+        // ponytail: the content controller retains the handler — fine, the
+        // WebController lives as long as the app.
+        config.userContentController.add(controller, name: "screenFullscreen")
+        let view = WKWebView(frame: .zero, configuration: config)
         controller.attach(view)
         return view
     }
