@@ -46,8 +46,9 @@
     display: flex; flex-direction: column; gap: 6px;
   }
   #bar .row { display: flex; gap: 6px; height: 38px; }
-  #bar .row.keys { overflow-x: auto; }
+  #bar .row.keys { flex: 1; min-width: 0; overflow-x: auto; }
   #bar .row.keys button { flex: 0 0 auto; }
+  #bar #sleep-btn { flex: 0 0 auto; }
   #bar input[type=text] {
     flex: 1; min-width: 0; border-radius: 8px; border: 1px solid #3a3a3c;
     background: #2c2c2e; color: #eee; padding: 0 10px; font-size: 16px;
@@ -58,6 +59,7 @@
     touch-action: manipulation;
   }
   #bar button.mod.on { background: #0a84ff; }
+  #bar #sleep-btn.arm { background: #b3261e; color: #fff; }
   /* cursor mode: shrink-fit wrapper around the canvas; the aspect-ratio +
      max constraints keep the wrapper exactly the canvas's rendered size
      (ratio is re-synced from the frame in JS). */
@@ -69,34 +71,87 @@
     width: 24px; height: 24px; pointer-events: none; z-index: 5;
   }
   #cwrap.cur #cursor { display: block; }
+  #vnc.cur #cursor { display: block; }
+  #vnc {
+    position: absolute; inset: 0; background: #000; touch-action: none;
+  }
+  #vnc[hidden] { display: none; }
+  /* ponytail: transparent shield over #vnc in cursor mode only — stops
+     noVNC's native touch/mouse gestures from double-firing alongside the
+     cursor-mode gestures; sits below #cursor (z-index 5), above the canvas. */
+  #vnc-shield {
+    display: none; position: absolute; inset: 0; z-index: 2; touch-action: none;
+  }
+  #vnc-status {
+    position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(28,28,30,.85); color: #aaa; padding: 4px 10px;
+    border-radius: 6px; font-size: 12px; pointer-events: none;
+  }
+  #vnc-hint {
+    position: fixed; top: 46px; left: 8px; right: 8px; z-index: 10;
+    text-align: center; color: #aaa; font-size: 12px; pointer-events: none;
+  }
+  /* Mini PC landscape = full screen: chrome hidden, #vnc fills the viewport,
+     so noVNC's ResizeObserver -> resizeSession sends one SetDesktopSize
+     (rfb.js debounces it 500 ms). Only ⌨ stays reachable, as a corner button. */
+  #kbd-fab {
+    display: none; position: fixed; right: 12px; bottom: 12px; z-index: 10;
+    width: 44px; height: 44px; border: 0; border-radius: 22px;
+    background: rgba(44,44,46,.7); color: #eee; font-size: 20px;
+    touch-action: manipulation;
+  }
+  #kbd-fab.on { background: rgba(10,132,255,.85); }
+  @media (orientation: landscape) {
+    body.minipc #seg, body.minipc #vnc-hint, body.minipc #bar { display: none; }
+    body.minipc #wrap { inset: 0; }
+    body.minipc #kbd-fab { display: block; }
+  }
+  /* off-screen, NOT display:none — iOS won't focus a hidden field */
+  #kbd {
+    position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0;
+  }
 </style>
 </head>
 <body>
 <div id="seg">
   <button type="button" data-t="mac"><span class="dot on" id="dot-mac"></span>Mac</button>
   <button type="button" data-t="windows"><span class="dot" id="dot-windows"></span>PC</button>
+  <button type="button" data-t="minipc"><span class="dot" id="dot-minipc"></span>Mini PC</button>
 </div>
+<div id="vnc-hint" hidden>tap = click · long-press = right click · two fingers = scroll · ⌨ = keyboard</div>
 <div id="banner"></div>
-<div id="wrap"><div id="cwrap"><canvas id="view" width="320" height="240"></canvas><div id="cursor" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="#111" stroke-width="5" stroke-linecap="round"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg></div></div></div>
+<div id="wrap">
+  <div id="cwrap"><canvas id="view" width="320" height="240"></canvas><div id="cursor" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="#111" stroke-width="5" stroke-linecap="round"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg></div></div>
+  <div id="vnc" hidden><div id="vnc-status"></div></div>
+  <div id="vnc-shield"></div>
+</div>
 <div id="bar">
   <div class="row">
     <input id="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type…">
   </div>
-  <div class="row keys">
-    <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
-    <button type="button" class="key" data-k="esc">esc</button>
-    <button type="button" class="key" data-k="delete">del</button>
-    <button type="button" class="key" data-k="tab">tab</button>
-    <button type="button" class="key" data-k="left">&#8592;</button>
-    <button type="button" class="key" data-k="up">&#8593;</button>
-    <button type="button" class="key" data-k="down">&#8595;</button>
-    <button type="button" class="key" data-k="right">&#8594;</button>
-    <button type="button" class="mod" data-m="cmd">cmd</button>
-    <button type="button" class="mod" data-m="ctrl">ctrl</button>
-    <button type="button" class="mod" data-m="alt">alt</button>
-    <button type="button" class="mod" data-m="shift">shift</button>
+  <div class="row">
+    <div class="row keys">
+      <button type="button" id="cursor-toggle" class="mod" aria-pressed="false">Cursor</button>
+      <button type="button" id="kbd-toggle" class="mod" aria-pressed="false" aria-label="Toggle keyboard">⌨</button>
+      <button type="button" class="key" data-k="esc">esc</button>
+      <button type="button" class="key" data-k="delete">del</button>
+      <button type="button" class="key" data-k="tab">tab</button>
+      <button type="button" class="key" data-k="left">&#8592;</button>
+      <button type="button" class="key" data-k="up">&#8593;</button>
+      <button type="button" class="key" data-k="down">&#8595;</button>
+      <button type="button" class="key" data-k="right">&#8594;</button>
+      <button type="button" class="mod" data-m="cmd">cmd</button>
+      <button type="button" class="mod" data-m="ctrl">ctrl</button>
+      <button type="button" class="mod" data-m="alt">alt</button>
+      <button type="button" class="mod" data-m="shift">shift</button>
+    </div>
+    <button type="button" id="sleep-btn" aria-label="Put the PC to sleep">Sleep</button>
   </div>
 </div>
+<button type="button" id="kbd-fab" aria-label="Toggle keyboard">⌨</button>
+<!-- off-screen, NOT display:none — iOS refuses to focus a hidden field -->
+<textarea id="kbd" autocapitalize="off" autocorrect="off" autocomplete="off"
+  spellcheck="false" aria-label="Mini PC keyboard input"></textarea>
 <script>/*CURSOR_JS*/</script>
 <script>
 "use strict";
@@ -111,10 +166,12 @@ var canvas = document.getElementById("view");
 var ctx = canvas.getContext("2d");
 var bannerEl = document.getElementById("banner");
 
-var target = new URLSearchParams(location.search).get("target") === "windows" ? "windows" : "mac";
+var t0 = new URLSearchParams(location.search).get("target");
+var target = t0 === "windows" ? "windows" : t0 === "minipc" ? "minipc" : "mac";
 var etag = null;          // last frame's ETag -> If-None-Match
 var objUrl = null;        // current frame's blob URL
 var stopped = false;      // set on 401: freeze the whole page
+var pcSleeping = false;   // true from sleep-tap fire until the status poll sees the PC back online
 var lastInput = 0;        // ms timestamp of last input POST -> fps boost
 var state = { mac: null, windows: null };
 var mods = [];            // sticky modifiers, consumed by the next key event
@@ -143,6 +200,7 @@ function expired() { showBanner(BANNER_EXPIRED, true); }
 
 // --- frame loop ------------------------------------------------------------
 function pullFrame() {
+  if (target === "windows" && pcSleeping) return Promise.resolve(); // don't wake it back up
   var dpr = window.devicePixelRatio || 1;
   var w = Math.min(1600, Math.max(320, Math.round(canvas.clientWidth * dpr)));
   var headers = {};
@@ -173,6 +231,10 @@ function pullFrame() {
 
 function frameLoop() {
   if (stopped) return;
+  if (target === "minipc") {
+    setTimeout(frameLoop, 1000); // noVNC owns the stream; no JPEG pulls
+    return;
+  }
   pullFrame().then(function () {
     setTimeout(frameLoop, frameDelay());
   });
@@ -180,6 +242,8 @@ function frameLoop() {
 
 // --- input -----------------------------------------------------------------
 function sendEvents(events) {
+  if (target === "windows" && pcSleeping) return Promise.resolve(); // don't wake it back up
+  if (target === "minipc") return sendVncEvents(events); // noVNC drives the Mini PC; no input POST
   lastInput = Date.now();
   return fetch("/screen/" + target + "/input", {
     method: "POST",
@@ -212,6 +276,53 @@ document.querySelectorAll("#bar button.mod[data-m]").forEach(function (b) {
     if (i === -1) m.push(b.dataset.m); else m.splice(i, 1);
     setMods(m);
   });
+});
+
+// --- Sleep PC (bottom bar, two-tap confirm — cursor.js sleepTap) -----------
+// Tap once -> "Confirm" for 3 s; tap again -> POST /screen/windows/
+// sleep. The agent acks before it suspends, so the reply lands while the PC is
+// still up; after that the status poll's "PC offline" banner takes over and
+// the dying frame loop's fetch errors are swallowed (catch in pullFrame).
+var sleepBtn = document.getElementById("sleep-btn");
+var sleepArmed = null;  // sleepTap state: null or {deadline}
+var sleepTimer = null;  // disarm timeout
+
+function renderSleepBtn() {
+  sleepBtn.textContent = sleepLabel(sleepArmed !== null);
+  sleepBtn.classList.toggle("arm", sleepArmed !== null);
+}
+
+sleepBtn.addEventListener("click", function () {
+  if (sleepBtn.disabled) return;
+  var r = sleepTap(sleepArmed, Date.now());
+  sleepArmed = r.state;
+  if (sleepTimer) clearTimeout(sleepTimer);
+  if (!r.fire) {
+    renderSleepBtn();
+    sleepTimer = setTimeout(function () {
+      sleepArmed = null;
+      renderSleepBtn();
+    }, SLEEP_CONFIRM_MS);
+    return;
+  }
+  sleepBtn.disabled = true;
+  sleepBtn.textContent = "PC going to sleep…";
+  // Set BEFORE the request fires: the agent acks fast enough that the frame
+  // loop's next tick can land inside the suspend grace window and round-trip
+  // over the same websocket, which keeps the PC awake right after it suspends.
+  pcSleeping = true;
+  fetch("/screen/windows/sleep", { method: "POST" })
+    .then(function (res) {
+      if (res.status === 401) return expired();
+      if (!res.ok) { sleepBtn.textContent = "Sleep failed — PC offline?"; pcSleeping = false; }
+      // 200: ack received, the PC suspends; the offline banner follows on its own
+    })
+    .catch(function () { sleepBtn.textContent = "Sleep failed — PC offline?"; pcSleeping = false; });
+  setTimeout(function () {
+    sleepBtn.disabled = false;
+    sleepArmed = null;
+    renderSleepBtn();
+  }, 5000);
 });
 
 var textEl = document.getElementById("text");
@@ -336,7 +447,22 @@ var cursorEl = document.getElementById("cursor");
 var cursorBtn = document.getElementById("cursor-toggle");
 var cursor = initialCursor(canvas.width, canvas.height);
 
-function cursorScale() { return canvas.getBoundingClientRect().width / canvas.width; }
+// Frame pixel dims the cursor math normalizes against: the JPEG canvas for
+// mac/windows, the RFB framebuffer for minipc. (ponytail: rfb._fbWidth/
+// _fbHeight are private noVNC fields; guarded, and the Cursor toggle is hidden
+// when RFB.messages.pointerEvent is missing so these paths never run against a
+// stub.)
+function frameSize() {
+  if (target === "minipc" && rfb && rfb._fbWidth)
+    return { w: rfb._fbWidth, h: rfb._fbHeight };
+  return { w: canvas.width, h: canvas.height };
+}
+
+function cursorScale() {
+  if (target === "minipc" && rfb && rfb._fbWidth)
+    return vncEl.getBoundingClientRect().width / rfb._fbWidth;
+  return canvas.getBoundingClientRect().width / canvas.width;
+}
 
 function positionCursor() {
   var s = cursorScale();
@@ -346,22 +472,35 @@ function positionCursor() {
 }
 
 function saveCursorPos() {
+  var d = frameSize();
   try {
     sessionStorage.setItem("screen.cursorPos",
-      JSON.stringify({ x: cursor.x, y: cursor.y, frameW: canvas.width, frameH: canvas.height }));
+      JSON.stringify({ x: cursor.x, y: cursor.y, frameW: d.w, frameH: d.h }));
   } catch (err) {} // private mode can throw
 }
 
+// Mini PC: resizeSession changes the RFB framebuffer mid-session while the
+// cursor may still carry the old dims — rescale to the live frame so the
+// overlay and the real click point agree. No-op when dims are unchanged
+// (mac/windows canvas dims never change). Persists on change so a reload
+// restores the rescaled point, not the stale one.
+function resyncCursor() {
+  var d = frameSize();
+  var next = rescaleCursor(cursor, d.w, d.h);
+  if (next !== cursor) { cursor = next; saveCursorPos(); positionCursor(); }
+}
+
 function syncCursorToFrame() {
-  cursorWrap.style.aspectRatio = canvas.width + " / " + canvas.height;
+  var d = frameSize();
+  cursorWrap.style.aspectRatio = d.w + " / " + d.h;
   var p = null;
   try {
     p = JSON.parse(sessionStorage.getItem("screen.cursorPos") || "null");
   } catch (err) {} // private mode can throw
-  cursor = p && p.frameW === canvas.width && p.frameH === canvas.height
-    ? p : initialCursor(canvas.width, canvas.height);
-  cursor.x = Math.min(Math.max(cursor.x, 0), canvas.width - 1);
-  cursor.y = Math.min(Math.max(cursor.y, 0), canvas.height - 1);
+  cursor = p && p.frameW === d.w && p.frameH === d.h
+    ? p : initialCursor(d.w, d.h);
+  cursor.x = Math.min(Math.max(cursor.x, 0), d.w - 1);
+  cursor.y = Math.min(Math.max(cursor.y, 0), d.h - 1);
   positionCursor();
 }
 
@@ -370,6 +509,12 @@ function syncCursorToFrame() {
 function applyCursorMode(on) {
   cursorMode = on;
   cursorWrap.classList.toggle("cur", on);
+  // vncEl is declared later in the script (Mini PC section); on a
+  // ?target=minipc load this runs before that assignment — the connect
+  // handler re-applies it once the RFB is live.
+  if (target === "minipc" && vncEl) vncEl.classList.toggle("cur", on);
+  // shieldEl is declared later (Mini PC section), same hoisting note as vncEl.
+  if (shieldEl) shieldEl.style.display = (on && target === "minipc") ? "block" : "none";
   cursorBtn.classList.toggle("on", on);
   cursorBtn.setAttribute("aria-pressed", on ? "true" : "false");
   cancelCursorGesture();
@@ -392,7 +537,8 @@ function cancelCursorGesture() {
 
 function cursorDown(e) {
   e.preventDefault();
-  canvas.setPointerCapture(e.pointerId);
+  e.currentTarget.setPointerCapture(e.pointerId); // canvas over JPEG, #vnc over noVNC
+  resyncCursor(); // Mini PC framebuffer may have resized since the last gesture
   if (cGesture) return; // secondary pointers are ignored while ON
   cGesture = {
     id: e.pointerId, t0: Date.now(), x0: e.clientX, y0: e.clientY,
@@ -400,7 +546,8 @@ function cursorDown(e) {
     timer: setTimeout(function () {
       if (cGesture && !cGesture.moved) {
         cGesture.consumed = true;
-        sendEvents([clickPayload("right", cursor, canvas.width, canvas.height)]);
+        var d = frameSize();
+        sendEvents([clickPayload("right", cursor, d.w, d.h)]);
       }
     }, LONGPRESS_MS)
   };
@@ -409,6 +556,7 @@ function cursorDown(e) {
 function cursorMove(e) {
   var g = cGesture;
   if (!g || e.pointerId !== g.id) return;
+  resyncCursor(); // before positionCursor: keep overlay on the live frame
   var dx = e.clientX - g.lastX, dy = e.clientY - g.lastY;
   g.lastX = e.clientX; g.lastY = e.clientY;
   if (!g.moved) {
@@ -420,13 +568,15 @@ function cursorMove(e) {
     g.moved = true;
     if (g.timer) { clearTimeout(g.timer); g.timer = null; }
   }
-  cursor = nextCursor(cursor, dx, dy, GAIN, cursorScale(), canvas.width, canvas.height);
+  var d = frameSize();
+  cursor = nextCursor(cursor, dx, dy, GAIN, cursorScale(), d.w, d.h);
   positionCursor();
 }
 
 function cursorUp(e) {
   var g = cGesture;
   if (!g || e.pointerId !== g.id) return;
+  resyncCursor(); // click/persist against the live frame dims
   cGesture = null;
   if (g.timer) clearTimeout(g.timer);
   saveCursorPos(); // persist even when a long-press consumed the gesture
@@ -434,7 +584,8 @@ function cursorUp(e) {
   var dist = Math.hypot(e.clientX - g.x0, e.clientY - g.y0);
   var kind = classifyGesture(Date.now() - g.t0, dist) === "tap" ? "tap" : "move";
   // a drag just parks the host pointer under the overlay (one move, no click)
-  sendEvents([clickPayload(kind, cursor, canvas.width, canvas.height)]);
+  var d = frameSize();
+  sendEvents([clickPayload(kind, cursor, d.w, d.h)]);
 }
 
 function cursorCancel(e) {
@@ -446,16 +597,31 @@ function cursorCancel(e) {
 // A stale cGesture wedges cursor mode (cursorDown's `if (cGesture) return`)
 // until reload — cancel it when the page hides or pointer capture is lost.
 // Direct mode's pending long-press timer dies alongside (endGesture).
+// Same teardown path setTarget uses to close the RFB: a backgrounded page or
+// a closed tab must not hold the shared Xvnc desktop at phone size.
+// ponytail: the mini PC restore watcher (fable 2, 20 s with no client ->
+// 1920x1080) relies on this clean close to shrink the desktop back.
+var hiddenClose = false; // hide/target-switch-triggered disconnect: suppress the 3 s auto-retry
+function disconnectVnc() {
+  // flag only brackets the disconnect() call: covers a sync 'disconnect' event
+  // (consumed by the hiddenClose check below), cleared again before rfb=null
+  // so an async/late event never inherits it for an unrelated later instance.
+  if (rfb) { hiddenClose = true; rfb.disconnect(); hiddenClose = false; rfb = null; }
+  vncUp = false;
+  vncCaption("");
+}
 document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) return;
   cancelCursorGesture();
   ptrs.clear(); pinchPrev = null;
   endGesture();
+  if (document.hidden) disconnectVnc();
+  else if (target === "minipc" && !rfb) connectVnc();
 });
 window.addEventListener("pagehide", function () {
   cancelCursorGesture();
   ptrs.clear(); pinchPrev = null;
   endGesture();
+  disconnectVnc();
 });
 canvas.addEventListener("lostpointercapture", cursorCancel);
 
@@ -465,6 +631,228 @@ try {
 syncCursorToFrame();
 applyCursorMode(cursorMode);
 
+// --- Mini PC target (noVNC over the gateway WS) ------------------------------
+// The noVNC bundle is served by the gateway at /screen/minipc/novnc/ (loaded
+// dynamically, offline — no CDN). The WS uses the "binary" subprotocol and the
+// same screen_session cookie as everything else; a 4001/4002/4003 close means
+// gateway-side auth/target failure — surfaced as "auth error", never a
+// password prompt.
+var vncEl = document.getElementById("vnc");
+var shieldEl = document.getElementById("vnc-shield");
+var vncStatusEl = document.getElementById("vnc-status");
+var hintEl = document.getElementById("vnc-hint");
+var rfb = null;            // live RFB handle, null when not on minipc or disconnected
+var RFB = null;            // the noVNC RFB constructor, filled by ensureVncModules()
+var KeyTable = null;       // noVNC core/input/keysym.js default export
+var keysyms = null;        // noVNC core/input/keysymdef.js {keysyms}
+var vncUp = false;         // RFB "connect" fired (drives the seg dot)
+var vncRetried = false;    // one auto-reconnect per disconnect episode
+var vncModules = null;     // memoised dynamic imports — loaded once, refs kept
+
+function ensureVncModules() {
+  if (vncModules) return vncModules;
+  vncModules = Promise.all([
+    import("/screen/minipc/novnc/core/rfb.js"),
+    import("/screen/minipc/novnc/core/input/keysym.js"),
+    import("/screen/minipc/novnc/core/input/keysymdef.js")
+  ]).then(function (m) {
+    RFB = m[0].default;
+    KeyTable = m[1].default;
+    keysyms = m[2].default;
+  });
+  return vncModules;
+}
+
+function vncCaption(text) { vncStatusEl.textContent = text; }
+
+function connectVnc() {
+  if (rfb) return;
+  vncRetried = false;
+  vncCaption("connecting…");
+  ensureVncModules().then(function () {
+    if (target !== "minipc" || rfb || document.hidden) return; // user switched away or page hid mid-import
+    rfb = new RFB(vncEl, (location.protocol === "https:" ? "wss://" : "ws://") +
+      location.host + "/screen/minipc/ws", { wsProtocols: ["binary"] });
+    var myRfb = rfb; // this call's instance; a late event from a superseded one is a no-op below
+    rfb.scaleViewport = true;
+    rfb.resizeSession = true;
+    rfb.showDotCursor = true;
+    rfb.addEventListener("connect", function () {
+      vncUp = true;
+      vncRetried = false;
+      // ponytail: pointerEvent is semi-private noVNC API — hide the Cursor
+      // toggle if it ever disappears, so cursor mode can't half-work
+      cursorBtn.style.display = RFB && RFB.messages && typeof RFB.messages.pointerEvent === "function" ? "" : "none";
+      applyCursorMode(cursorMode); // set shield + overlay class on the live RFB
+      renderSeg();
+      vncCaption("connected");
+      syncCursorToFrame();
+      resyncCursor();
+    });
+    rfb.addEventListener("disconnect", function () {
+      if (rfb !== myRfb) return; // stale event from a superseded instance
+      rfb = null;
+      vncUp = false;
+      renderSeg();
+      vncCaption("disconnected — tap to retry");
+      if (hiddenClose) { hiddenClose = false; return; } // page hid: no auto-retry fight
+      if (!vncRetried) {
+        vncRetried = true;
+        setTimeout(function () {
+          if (target === "minipc" && !rfb) connectVnc(); // one auto-retry
+        }, 3000);
+      }
+    });
+    rfb.addEventListener("credentialsrequired", function () {
+      vncCaption("auth error (gateway)"); // never prompt for a password
+    });
+    rfb.addEventListener("securityfailure", function () {
+      vncCaption("auth error (gateway)");
+    });
+  }).catch(function (e) {
+    console.error("vnc:", e && e.message ? e.message : e);
+    vncCaption("disconnected — tap to retry");
+    if (!vncRetried) {
+      vncRetried = true;
+      setTimeout(function () {
+        if (target === "minipc" && !rfb) connectVnc();
+      }, 3000);
+    }
+  });
+}
+
+// tap the black surface to reconnect after a disconnect
+vncEl.addEventListener("click", function () {
+  if (target === "minipc" && !rfb) connectVnc();
+});
+
+// DIRECT mode: no page pointer handlers on #vnc — noVNC core handles tap,
+// long-press right-click and two-finger scroll natively. The tap-to-retry
+// above attaches to #vnc; the trackpad gestures (cursor mode only) attach to
+// #vnc-shield instead, which is only on-screen while cursor mode is on.
+shieldEl.addEventListener("pointerdown", cursorDown);
+shieldEl.addEventListener("pointermove", cursorMove);
+shieldEl.addEventListener("pointerup", cursorUp);
+shieldEl.addEventListener("pointercancel", cursorCancel);
+shieldEl.addEventListener("lostpointercapture", cursorCancel);
+shieldEl.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+function vncMouse(nx, ny, mask) {
+  // ponytail: RFB.messages.pointerEvent is noVNC's wire encoder (static,
+  // semi-private) — takes framebuffer pixel coords, no rescale. (rfb._sendMouse
+  // would rescale them through display.absX()/absY(), right only at scale 1.)
+  // VNC button mask: 1 left, 4 right, 8 wheel-up, 16 wheel-down. Coords are
+  // computed at send time — resizeSession changes _fbWidth mid-session.
+  if (!rfb || !RFB || !RFB.messages || typeof RFB.messages.pointerEvent !== "function" || !rfb._fbWidth) return;
+  RFB.messages.pointerEvent(rfb._sock, Math.round(nx * rfb._fbWidth), Math.round(ny * rfb._fbHeight), mask);
+}
+
+function vncKeyDef(k) {
+  switch (k) {
+    case "esc":    return [KeyTable.XK_Escape, "Escape"];
+    case "delete": return [KeyTable.XK_BackSpace, "Backspace"];
+    case "tab":    return [KeyTable.XK_Tab, "Tab"];
+    case "return": return [KeyTable.XK_Return, "Enter"];
+    case "up":     return [KeyTable.XK_Up, "ArrowUp"];
+    case "down":   return [KeyTable.XK_Down, "ArrowDown"];
+    case "left":   return [KeyTable.XK_Left, "ArrowLeft"];
+    case "right":  return [KeyTable.XK_Right, "ArrowRight"];
+  }
+  return null; // ponytail: the key row only offers the keys above
+}
+
+function vncModDef(m) {
+  switch (m) {
+    case "ctrl":  return [KeyTable.XK_Control_L, "ControlLeft"];
+    case "alt":   return [KeyTable.XK_Alt_L, "AltLeft"];
+    case "shift": return [KeyTable.XK_Shift_L, "ShiftLeft"];
+    case "cmd":   return [KeyTable.XK_Super_L, "MetaLeft"];
+  }
+  return null;
+}
+
+function sendVncEvents(events) {
+  if (!rfb) return Promise.resolve(); // disconnected: drop; tap #vnc to reconnect
+  events.forEach(function (ev) {
+    var i, d;
+    if (ev.type === "key") {
+      d = vncKeyDef(ev.key);
+      if (!d) return;
+      var held = [];
+      (ev.mods || []).forEach(function (m) {
+        var md = vncModDef(m);
+        if (md) { rfb.sendKey(md[0], md[1], true); held.push(md); }
+      });
+      rfb.sendKey(d[0], d[1]); // press + release
+      for (i = 0; i < held.length; i++) rfb.sendKey(held[i][0], held[i][1], false);
+    } else if (ev.type === "text") {
+      // the synthetic return rides the batch's key:return event — no double Enter
+      for (var ch of ev.text) {
+        var ks = keysyms.lookup(ch.codePointAt(0));
+        if (ks) rfb.sendKey(ks, null);
+      }
+    } else if (ev.type === "tap") {
+      vncMouse(ev.x, ev.y, 1); vncMouse(ev.x, ev.y, 0);
+    } else if (ev.type === "right") {
+      vncMouse(ev.x, ev.y, 4); vncMouse(ev.x, ev.y, 0);
+    } else if (ev.type === "move") {
+      vncMouse(ev.x, ev.y, 0);
+    } else if (ev.type === "scroll" && ev.dy) {
+      // one wheel notch per 40 css px of #vnc height, min 1
+      var n = Math.max(1, Math.round(Math.abs(ev.dy) * vncEl.getBoundingClientRect().height / 40));
+      d = ev.dy < 0 ? 8 : 16;
+      var x = ev.x || 0.5, y = ev.y || 0.5;
+      for (i = 0; i < n; i++) { vncMouse(x, y, d); vncMouse(x, y, 0); }
+    }
+  });
+}
+
+// --- Mini PC keyboard toggle (off-screen textarea raises the iOS keyboard) ---
+var kbdBtn = document.getElementById("kbd-toggle");
+var kbdEl = document.getElementById("kbd");
+var kbdFab = document.getElementById("kbd-fab"); // landscape full-screen twin of kbdBtn
+var kbdLast = ""; // textarea diff baseline
+
+function toggleKbd() {
+  if (document.activeElement === kbdEl) kbdEl.blur(); else kbdEl.focus();
+}
+kbdBtn.addEventListener("click", toggleKbd);
+kbdFab.addEventListener("click", toggleKbd); // focus() stays inside the tap gesture, as iOS requires
+kbdEl.addEventListener("focus", function () {
+  kbdBtn.classList.add("on");
+  kbdFab.classList.add("on");
+  kbdBtn.setAttribute("aria-pressed", "true");
+});
+kbdEl.addEventListener("blur", function () {
+  kbdBtn.classList.remove("on");
+  kbdFab.classList.remove("on");
+  kbdBtn.setAttribute("aria-pressed", "false");
+});
+kbdEl.addEventListener("input", function () {
+  var v = kbdEl.value;
+  if (v.length > 100) { kbdEl.value = ""; kbdLast = ""; return; } // reset value + baseline
+  if (!rfb) { kbdEl.value = ""; kbdLast = ""; return; }
+  var common = 0;
+  while (common < v.length && common < kbdLast.length && v[common] === kbdLast[common]) common++;
+  for (var i = kbdLast.length - common; i > 0; i--)
+    rfb.sendKey(KeyTable.XK_BackSpace, "Backspace");
+  for (var j = common; j < v.length; j++) {
+    var ks = keysyms.lookup(v.codePointAt(j));
+    if (ks) rfb.sendKey(ks, null);
+    if (v.codePointAt(j) > 0xffff) j++; // skip the low surrogate of an astral char
+  }
+  kbdLast = v; // nothing typed is ever logged
+});
+kbdEl.addEventListener("keydown", function (e) {
+  if (!rfb) return;
+  if (e.key === "Enter") {
+    e.preventDefault();
+    rfb.sendKey(KeyTable.XK_Return, "Enter");
+  } else if (e.key === "Backspace" && kbdEl.value === "") {
+    rfb.sendKey(KeyTable.XK_BackSpace, "Backspace");
+  }
+});
+
 // --- status poll + target switch --------------------------------------------
 function renderSeg() {
   document.querySelectorAll("#seg button").forEach(function (b) {
@@ -473,32 +861,77 @@ function renderSeg() {
   document.getElementById("dot-mac").classList.toggle("on", !state.mac || !!state.mac.online);
   var pcDot = document.getElementById("dot-windows");
   pcDot.classList.toggle("on", !!(state.windows && state.windows.online));
+  // minipc's dot: live RFB session, else the 10 s status poll like the others
+  document.getElementById("dot-minipc").classList.toggle("on", vncUp || !!(state.minipc && state.minipc.online));
 }
 
 function pollStatus() {
   if (stopped) return;
-  ["mac", "windows"].forEach(function (t) {
+  ["mac", "windows", "minipc"].forEach(function (t) {
     fetch("/screen/" + t + "/status")
       .then(function (res) {
         if (res.status === 401) return expired();
         if (!res.ok) return;
-        return res.json().then(function (s) { state[t] = s; });
+        return res.json().then(function (s) {
+          state[t] = s;
+          if (t === "windows" && s.online) pcSleeping = false; // back up, safe to poll frames again
+        });
       })
       .then(refreshBanner)
       .catch(function () {});
   });
 }
 
+// Mini PC landscape is full screen (CSS above); tell the iOS app so it hides
+// the status bar + its Done bar too. Outside the app there is no handler.
+var landscapeMq = window.matchMedia("(orientation: landscape)");
+function syncFullscreen() {
+  var fs = target === "minipc" && landscapeMq.matches;
+  try { window.webkit.messageHandlers.screenFullscreen.postMessage(fs); } catch (e) {}
+}
+landscapeMq.addEventListener("change", syncFullscreen);
+
+// show/hide the right surface for the current target: JPEG canvas for
+// mac/windows, the noVNC container for minipc. The cursor overlay div moves
+// between them so cursor mode works over both.
+function showTargetUI() {
+  var minipc = target === "minipc";
+  document.body.classList.toggle("minipc", minipc); // scopes the landscape full-screen CSS
+  syncFullscreen();
+  cursorWrap.style.display = minipc ? "none" : "";
+  vncEl.hidden = !minipc;
+  hintEl.hidden = !minipc;
+  kbdBtn.style.display = minipc ? "" : "none";
+  // ponytail: mac keeps today's always-on Sleep button; only Mini PC hides it
+  sleepBtn.style.display = minipc ? "none" : "";
+  if (minipc) vncEl.appendChild(cursorEl);
+  else cursorWrap.appendChild(cursorEl);
+}
+
+function setTarget(t) {
+  if (target === t) return;
+  if (target === "minipc") {
+    disconnectVnc(); // same teardown as hide; hiddenClose also suppresses the 3 s auto-retry
+    if (kbdEl) kbdEl.blur(); // drop the iOS keyboard before leaving minipc
+    kbdBtn.classList.remove("on");
+    kbdBtn.setAttribute("aria-pressed", "false");
+  }
+  target = t;
+  etag = null; // frames are per-target; force a full 200 pull
+  showTargetUI();
+  applyCursorMode(cursorMode); // retarget the overlay class
+  renderSeg();
+  pollStatus();
+  if (t === "minipc") connectVnc();
+  else { syncCursorToFrame(); pullFrame(); }
+}
+
 document.querySelectorAll("#seg button").forEach(function (b) {
-  b.addEventListener("click", function () {
-    target = b.dataset.t;
-    etag = null; // frames are per-target; force a full 200 pull
-    renderSeg();
-    pollStatus();
-    pullFrame();
-  });
+  b.addEventListener("click", function () { setTarget(b.dataset.t); });
 });
 
+showTargetUI();
+if (target === "minipc") connectVnc(); // ?target=minipc deep link
 renderSeg();
 pollStatus();
 setInterval(pollStatus, 10000);

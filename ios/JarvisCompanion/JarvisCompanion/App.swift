@@ -13,6 +13,7 @@ import UserNotifications
 struct JarvisCompanionApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = AppModel()
+    @UIApplicationDelegateAdaptor(OrientationDelegate.self) private var orientation
 
     init() {
         // BGTaskScheduler handlers must be registered before launch finishes
@@ -26,6 +27,26 @@ struct JarvisCompanionApp: App {
                 .onOpenURL { url in model.openHandoff(url) }
                 .onAppear { model.start() }
                 .onChange(of: scenePhase) { model.sceneChanged($0) }
+        }
+    }
+}
+
+/// Home stays portrait; the pushed page (e.g. /screen, Mini PC full screen)
+/// may rotate. Info.plist lists landscape so this mask is allowed to widen.
+final class OrientationDelegate: NSObject, UIApplicationDelegate {
+    static var allowLandscape = false
+
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        Self.allowLandscape ? .allButUpsideDown : .portrait
+    }
+
+    /// Re-query the mask now; back to Home also rotates to portrait.
+    static func set(allowLandscape allow: Bool) {
+        allowLandscape = allow
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            if !allow { scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) }
         }
     }
 }
@@ -855,7 +876,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showSettings) { SettingsSheet(model: model) }
         .sheet(isPresented: $model.showInbox) { InboxScreen(model: model.inbox) }
         .fullScreenCover(isPresented: $model.showPushedPage) {
-            PushedPageView(model: model)
+            PushedPageView(model: model, web: model.web)
         }
     }
 
@@ -1252,27 +1273,38 @@ struct SettingsSheet: View {
 /// WebBridge, not here).
 struct PushedPageView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var web: WebController
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    /// Page asked for full screen AND the phone is landscape (compact height):
+    /// portrait always shows Done, whatever the page posted.
+    private var fullscreen: Bool { web.screenFullscreen && verticalSizeClass == .compact }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button {
-                    model.showPushedPage = false
-                } label: {
-                    Text("Done")
-                        .font(.body.weight(.medium))
-                        .foregroundColor(.jarvisAccent)
+            if !fullscreen {
+                HStack {
+                    Button {
+                        model.showPushedPage = false
+                    } label: {
+                        Text("Done")
+                            .font(.body.weight(.medium))
+                            .foregroundColor(.jarvisAccent)
+                    }
+                    .frame(minHeight: 44)
+                    Spacer()
                 }
-                .frame(minHeight: 44)
-                Spacer()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 4)
             JarvisWebView(controller: model.web)
         }
         .background(Color.jarvisBackground.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .statusBarHidden(fullscreen)
+        .onAppear { OrientationDelegate.set(allowLandscape: true) }
         .onDisappear {
+            OrientationDelegate.set(allowLandscape: false)
             // Bump so Home's hidden host re-claims the shared WKWebView now
             // that the cover host is gone.
             model.webHostToken += 1

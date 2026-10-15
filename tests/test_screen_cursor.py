@@ -98,6 +98,57 @@ def test_cursor_math_and_gestures():
     assert consts is True
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_rescale_cursor_tracks_frame_resize():
+    """Mini PC S5: a cursor restored with stale frame dims rescales to the
+    live RFB framebuffer size (resizeSession can change it mid-session)."""
+    checks = [
+        "c.rescaleCursor(null, 390, 748)",                               # null -> initial
+        "c.rescaleCursor({x:250,y:277,frameW:500,frameH:553}, 500, 553)", # same dims: unchanged
+        "c.rescaleCursor({x:250,y:277,frameW:500,frameH:553}, 390, 748)", # live resize
+        "c.rescaleCursor({x:499,y:552,frameW:500,frameH:553}, 200, 200)", # edge needs the clamp
+    ]
+    script = (
+        "const c = require(" + json.dumps(str(CURSOR_JS)) + ");\n"
+        + "\n".join(f"console.log(JSON.stringify({expr}));" for expr in checks)
+    )
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    lines = out.stdout.strip().splitlines()
+    assert len(lines) == len(checks), out.stderr
+    null_cur, same, rescaled, edge = (json.loads(x) for x in lines)
+    assert null_cur == {"x": 195, "y": 374, "frameW": 390, "frameH": 748}
+    assert same == {"x": 250, "y": 277, "frameW": 500, "frameH": 553}
+    assert rescaled == {"x": 195, "y": 375, "frameW": 390, "frameH": 748}
+    # 499/500*200 = 199.6 -> raw round is 200, the frameW-1/H-1 clamp pulls it to 199
+    assert edge == {"x": 199, "y": 199, "frameW": 200, "frameH": 200}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_sleep_tap_two_tap_confirm():
+    """Sleep button state machine: first tap arms for 3 s, second tap inside
+    the window fires, a tap past the deadline re-arms instead of firing."""
+    checks = [
+        "c.sleepTap(null, 1000)",
+        "c.sleepTap({deadline: 2000}, 1999).fire",
+        "c.sleepTap({deadline: 2000}, 2001)",
+        "c.sleepLabel(true) + '|' + c.sleepLabel(false)",
+        "c.SLEEP_CONFIRM_MS",
+    ]
+    script = (
+        "const c = require(" + json.dumps(str(CURSOR_JS)) + ");\n"
+        + "\n".join(f"console.log(JSON.stringify({expr}));" for expr in checks)
+    )
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    lines = out.stdout.strip().splitlines()
+    assert len(lines) == len(checks), out.stderr
+    arm, fires, rearm, label, window = (json.loads(x) for x in lines)
+    assert arm == {"state": {"deadline": 4000}, "fire": False}  # 1000 + SLEEP_CONFIRM_MS
+    assert fires is True                                       # inside the 3 s window
+    assert rearm == {"state": {"deadline": 5001}, "fire": False}  # past deadline: re-arm
+    assert label == "Confirm|Sleep"
+    assert window == 3000
+
+
 def test_cursor_payload_reaches_driver(gateway_server, fake_send_events):
     """The payloads cursor mode sends (tap/right/move at the cursor) pass the
     protocol unchanged: pydantic adds defaults (button, dx, ...), so compare

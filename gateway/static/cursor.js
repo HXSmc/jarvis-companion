@@ -8,6 +8,7 @@ var GAIN = 1.5;          // finger CSS px -> cursor CSS px
 var TAP_MS = 300;        // tap = hold at most this long...
 var TAP_DIST_CSS = 8;    // ...and move at most this far (CSS px)
 var LONGPRESS_MS = 500;  // held this long without moving -> right-click
+var SLEEP_CONFIRM_MS = 3000;  // Sleep button: second tap must land within this
 
 function initialCursor(frameW, frameH) {
   return { x: Math.round(frameW / 2), y: Math.round(frameH / 2), frameW: frameW, frameH: frameH };
@@ -25,6 +26,22 @@ function nextCursor(prev, dxCss, dyCss, gain, scale, frameW, frameH) {
   };
 }
 
+// Mini PC: resizeSession can change the RFB framebuffer mid-session while a
+// restored/moved cursor still carries the old dims — rescale the point
+// proportionally so the overlay and the real click point agree.
+function rescaleCursor(cursor, frameW, frameH) {
+  if (!cursor || !cursor.frameW || !cursor.frameH)
+    return initialCursor(frameW, frameH);
+  if (cursor.frameW === frameW && cursor.frameH === frameH)
+    return cursor;
+  return {
+    x: Math.min(Math.max(Math.round(cursor.x * frameW / cursor.frameW), 0), frameW - 1),
+    y: Math.min(Math.max(Math.round(cursor.y * frameH / cursor.frameH), 0), frameH - 1),
+    frameW: frameW,
+    frameH: frameH
+  };
+}
+
 function classifyGesture(dtMs, distCss) {
   return dtMs <= TAP_MS && distCss <= TAP_DIST_CSS ? "tap" : "drag";
 }
@@ -34,9 +51,25 @@ function clickPayload(kind, cursor, frameW, frameH) {
   return { type: kind, x: cursor.x / frameW, y: cursor.y / frameH };
 }
 
+// Two-tap confirm for the Sleep PC button: the first tap arms it for
+// SLEEP_CONFIRM_MS, a second tap within that window fires. Pure — the page
+// owns the timers and rendering. state is null (disarmed) or {deadline}.
+function sleepTap(state, nowMs) {
+  if (state && nowMs <= state.deadline)
+    return { state: null, fire: true };
+  return { state: { deadline: nowMs + SLEEP_CONFIRM_MS }, fire: false };
+}
+
+function sleepLabel(armed) {
+  return armed ? "Confirm" : "Sleep";
+}
+
 if (typeof module !== "undefined")
   module.exports = {
     initialCursor: initialCursor, nextCursor: nextCursor,
+    rescaleCursor: rescaleCursor,
     classifyGesture: classifyGesture, clickPayload: clickPayload,
-    GAIN: GAIN, TAP_MS: TAP_MS, TAP_DIST_CSS: TAP_DIST_CSS, LONGPRESS_MS: LONGPRESS_MS
+    sleepTap: sleepTap, sleepLabel: sleepLabel,
+    GAIN: GAIN, TAP_MS: TAP_MS, TAP_DIST_CSS: TAP_DIST_CSS,
+    LONGPRESS_MS: LONGPRESS_MS, SLEEP_CONFIRM_MS: SLEEP_CONFIRM_MS
   };

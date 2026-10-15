@@ -28,11 +28,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 
 from common import config
-from gateway import registry
+from gateway import agents, registry
 from gateway.auth import require_bearer_any
+from mac.voice import router as voice_router
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +182,27 @@ async def wake_pc() -> dict:
         "waited_ms": int((_now() - start) * 1000),
         "mac": mac,
     }
+
+
+@router.post("/pc/sleep", dependencies=[Depends(require_bearer_any("token", "ios_token"))])
+async def sleep_pc() -> Response:
+    """Forward the `sleep` command to the connected windows agent (S3 suspend).
+
+    Mirror of /pc/wake's shape: {"sent", "ok", "data"} on success; HTTP 503
+    {"sent": false, "error": "pc offline"} when no agent is connected (or the
+    connection drops mid-send). The agent acks BEFORE it suspends, so the
+    roundtrip reply arrives while the PC is still awake.
+    """
+    offline = JSONResponse(status_code=503, content={"sent": False, "error": "pc offline"})
+    if agents.WINDOWS_ROLE not in registry.roles():
+        return offline
+    try:
+        reply = await agents.agent_roundtrip(voice_router.request_envelope("sleep"))
+    except HTTPException as exc:
+        if exc.status_code == 503:  # roles() said online, but the send failed
+            return offline
+        raise
+    return {"sent": True, "ok": bool(reply.get("ok")), "data": reply.get("data")}
 
 
 async def handle_hello(message: dict, role: str) -> dict:
