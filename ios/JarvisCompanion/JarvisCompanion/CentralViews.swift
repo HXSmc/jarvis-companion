@@ -308,7 +308,7 @@ struct ChatLine: Identifiable, Equatable {
 /// once a session exists, messages go to /central/sessions/{id}/message. Each
 /// send gets one msg_id, reused on Retry (the router is idempotent on it). The
 /// SSE loop resumes with Last-Event-ID (the integer seq) and keeps listening
-/// across turns (every turn ends with `done`) until a 401/403, close(), or
+/// across turns (every turn ends with `done` or `error`) until a 401/403, close(), or
 /// maxReconnects quiet attempts while a turn is still being answered.
 @MainActor
 final class ChatModel: ObservableObject {
@@ -553,7 +553,11 @@ final class ChatModel: ObservableObject {
             if !prompt.isEmpty, !alreadyShown(prompt) { lines.append(ChatLine(role: .jarvis, text: prompt)) }
             options = event["options"] as? [String] ?? []
         case "error":
+            // Terminal for the turn: show it once, then idle like after `done`
+            // (no quiet-reconnect countdown for a turn that already failed).
+            turnActive = false
             lines.append(ChatLine(role: .error, text: text.isEmpty ? "session error" : text))
+            echoed = []
         case "done":
             turnActive = false
             if !text.isEmpty, !alreadyShown(text) { lines.append(ChatLine(role: .jarvis, text: text)) }
