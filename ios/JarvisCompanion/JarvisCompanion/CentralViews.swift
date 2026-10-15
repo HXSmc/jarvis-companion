@@ -307,8 +307,9 @@ struct ChatLine: Identifiable, Equatable {
 /// One chat thread. A new thread posts to /chat (thread_id "app-<8 hex>");
 /// once a session exists, messages go to /central/sessions/{id}/message. Each
 /// send gets one msg_id, reused on Retry (the router is idempotent on it). The
-/// SSE loop resumes with Last-Event-ID (the integer seq) and reconnects with
-/// backoff until `done`, a 401/403, close(), or maxReconnects quiet attempts.
+/// SSE loop resumes with Last-Event-ID (the integer seq) and keeps listening
+/// across turns (every turn ends with `done`) until a 401/403, close(), or
+/// maxReconnects quiet attempts while a turn is still being answered.
 @MainActor
 final class ChatModel: ObservableObject {
     @Published var lines: [ChatLine] = []
@@ -323,13 +324,20 @@ final class ChatModel: ObservableObject {
     private var failed: (text: String, ownerIndex: Int)?
     /// Highest seq seen; nil until the first event (seq 0 is a real event).
     private var lastSeq: Int?
+    /// Seq of every rendered event: a replay (fresh open of an old session, a
+    /// reconnect) renders each event once, so old history shows once as history.
+    private var seenSeqs: Set<Int> = []
+    /// A sent message is still being answered; only then do quiet reconnects count.
+    private var turnActive = false
+    /// The live loop holds an open SSE connection (cleared by whoever cancels it).
+    private var streamConnected = false
     private var streamTask: Task<Void, Never>?
     /// Set by close(): no stream may start after the sheet went away.
     private var closed = false
     /// Reconnects in a row with no event before giving up.
     private static let maxReconnects = 8
 
-    private enum StreamEnd { case done, unauthorized, dropped(gotEvent: Bool) }
+    private enum StreamEnd { case unauthorized, dropped(gotEvent: Bool) }
 
     init(sessionID: String?, title: String) {
         self.sessionID = sessionID
@@ -356,6 +364,8 @@ final class ChatModel: ObservableObject {
         canRetry = false
         options = []
         isSending = true
+        // Set before the POST: this turn's `done` may arrive on the open stream first.
+        turnActive = true
         Task {
             defer { isSending = false }
             do {
@@ -374,8 +384,9 @@ final class ChatModel: ObservableObject {
                 }
                 pendingMsgID = nil
                 Haptics.success()
-                startStream()
+                wakeStream()
             } catch {
+                turnActive = false
                 failed = (text: text, ownerIndex: ownerIndex)
                 canRetry = true
                 lines.append(ChatLine(role: .error, text: "send failed: \(error.localizedDescription)"))
@@ -413,18 +424,21 @@ final class ChatModel: ObservableObject {
             var quietAttempts = 0
             while !Task.isCancelled {
                 guard let end = await self?.streamOnce(sid) else { return }
-                switch end {
-                case .done, .unauthorized:
+                guard case .dropped(let gotEvent) = end else {
                     self?.streamEnded()
                     return
-                case .dropped(let gotEvent):
-                    // Only a connection that delivered something resets the backoff.
-                    if gotEvent {
-                        delay = 1
-                        quietAttempts = 0
-                    }
                 }
-                quietAttempts += 1
+                // Only a connection that delivered something resets the backoff.
+                if gotEvent {
+                    delay = 1
+                    quietAttempts = 0
+                }
+                // Between turns a quiet stream is normal: keep listening, never give up.
+                if self?.turnActive == true {
+                    quietAttempts += 1
+                } else {
+                    quietAttempts = 0
+                }
                 if quietAttempts >= ChatModel.maxReconnects {
                     self?.lines.append(ChatLine(role: .error, text: "live updates lost, reopen the chat"))
                     self?.streamEnded()
@@ -434,6 +448,15 @@ final class ChatModel: ObservableObject {
                 delay = min(delay * 2, 30)
             }
         }
+    }
+
+    /// After a send: a loop asleep between reconnects would show the new turn
+    /// late, so replace it with a fresh one. An open connection is kept.
+    private func wakeStream() {
+        guard !streamConnected else { return }
+        streamTask?.cancel()
+        streamTask = nil
+        startStream()
     }
 
     /// The loop ended on its own; a later send may start a new one.
@@ -446,6 +469,7 @@ final class ChatModel: ObservableObject {
         closed = true
         streamTask?.cancel()
         streamTask = nil
+        streamConnected = false
     }
 
     func stop() {
@@ -465,6 +489,8 @@ final class ChatModel: ObservableObject {
     /// the preceding `id:` becomes Last-Event-ID for the next reconnect.
     private func streamOnce(_ sid: String) async -> StreamEnd {
         var gotEvent = false
+        // A cancelled loop leaves the flag to close()/wakeStream(), which reset it.
+        defer { if !Task.isCancelled { streamConnected = false } }
         do {
             var request = try Central.request("/central/sessions/\(sid)/events", timeout: 660)
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -476,15 +502,15 @@ final class ChatModel: ObservableObject {
                 return .unauthorized
             }
             try Central.check(response, data: nil)
+            streamConnected = true
             var eventID: String?
             for try await line in bytes.lines {
                 if line.hasPrefix("id:") {
                     eventID = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
                 } else if line.hasPrefix("data:") {
                     gotEvent = true
-                    let type = handle(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces), id: eventID)
+                    handle(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces), id: eventID)
                     eventID = nil
-                    if type == "done" { return .done }
                 }
             }
         } catch {
@@ -493,14 +519,14 @@ final class ChatModel: ObservableObject {
         return .dropped(gotEvent: gotEvent)
     }
 
-    /// Applies one event; returns its type (nil for junk or a replayed seq).
-    private func handle(_ payload: String, id: String?) -> String? {
+    /// Applies one event; junk and already-rendered seqs are ignored.
+    private func handle(_ payload: String, id: String?) {
         guard let data = payload.data(using: .utf8),
-              let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
-        // Replays after a resume are dropped by seq; the SSE `id:` fills in a missing seq.
+              let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        // Replays are dropped by seq; the SSE `id:` fills in a missing seq.
         if let seq = event["seq"] as? Int ?? id.flatMap({ Int($0) }) {
-            if let last = lastSeq, seq <= last { return nil }
-            lastSeq = seq
+            guard seenSeqs.insert(seq).inserted else { return }
+            lastSeq = max(lastSeq ?? seq, seq)
         }
         let type = event["type"] as? String
         // Option buttons only live while the session is waiting on them.
@@ -518,11 +544,11 @@ final class ChatModel: ObservableObject {
         case "error":
             lines.append(ChatLine(role: .error, text: text.isEmpty ? "session error" : text))
         case "done":
+            turnActive = false
             if !text.isEmpty { lines.append(ChatLine(role: .jarvis, text: text)) }
         default:
             break
         }
-        return type
     }
 }
 
