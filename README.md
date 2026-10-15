@@ -26,5 +26,6 @@ No cloud. No paid APIs. Not for distribution.
 ## Remote screen
 
 - open the screen: `https://<ts-host>:8790/screen` (from the app or any Bearer-capable client; session cookie lasts 12 h)
+- the page now also controls the mini PC desktop over noVNC through the gateway (`gateway/vnc.py`); `gateway/screen.py`/`gateway/vnc.py` edits need `launchctl kickstart -k gui/$(id -u)/com.jarvis.companion.gateway` to take effect, while `screen.html` is live-reloaded
 - disable: set `SCREEN_CONTROL=0` and restart the gateway
 - smoke: `.venv/bin/python -m mac.screen.smoke`

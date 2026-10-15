@@ -26,7 +26,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents, inbox, quick, screen, wake
+from gateway import agents, inbox, quick, screen, vnc, wake
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
@@ -41,6 +41,7 @@ app.include_router(wake.router, prefix="")
 app.include_router(inbox.router, prefix="")
 # SCREEN_CONTROL=0 unmounts /screen/* (kill switch); default on.
 if os.environ.get("SCREEN_CONTROL", "1") != "0":
+    app.include_router(vnc.router)  # Mini PC VNC routes (/screen/minipc/novnc/*, /screen/minipc/ws); same SCREEN_CONTROL kill switch as screen.router.
     app.include_router(screen.router)
 
 

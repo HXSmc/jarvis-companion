@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/screen")
 
-Target = Literal["mac", "windows"]
+Target = Literal["mac", "windows", "minipc"]
+
+MINIPC_VNC_DETAIL = "minipc target uses the VNC websocket"
 
 SCREEN_HTML = Path(__file__).resolve().parent / "static" / "screen.html"
 CURSOR_JS = SCREEN_HTML.parent / "cursor.js"
@@ -283,6 +285,9 @@ async def screen_status(request: Request, target: Target) -> dict:
             "target": "mac", "online": True,
             "tcc_ok": driver.tcc_ok(), "display_asleep": driver.display_asleep(),
         }
+    if target == "minipc":
+        from gateway.vnc import online
+        return {"target": "minipc", "online": await online(), "tcc_ok": None, "display_asleep": None}
     return {"target": "windows", "online": WINDOWS_ROLE in roles(), "tcc_ok": None, "display_asleep": None}
 
 
@@ -294,6 +299,8 @@ async def screen_frame(
     q: int = Query(default=55, ge=20, le=90),
 ) -> Response:
     _require(request)
+    if target == "minipc":
+        raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
     async with _frame_locks[target]:
         if target == "mac":
             from mac.screen import driver
@@ -313,6 +320,8 @@ async def screen_frame(
 @router.post("/{target}/input")
 async def screen_input(request: Request, target: Target, body: InputBody) -> dict:
     _require(request)
+    if target == "minipc":
+        raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
     if not _input_slot_available(target, len(body.events)):
         raise HTTPException(status_code=429, detail="too many input events")
     events = [event.model_dump() for event in body.events]
@@ -332,6 +341,8 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
 @router.post("/{target}/open")
 async def screen_open(request: Request, target: Target, body: OpenBody) -> dict:
     _require(request)
+    if target == "minipc":
+        raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
     if target == "mac":
         proc = await run_in_threadpool(subprocess.run, ["open", "-a", body.name])
         if proc.returncode != 0:

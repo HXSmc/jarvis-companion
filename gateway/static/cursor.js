@@ -26,6 +26,22 @@ function nextCursor(prev, dxCss, dyCss, gain, scale, frameW, frameH) {
   };
 }
 
+// Mini PC: resizeSession can change the RFB framebuffer mid-session while a
+// restored/moved cursor still carries the old dims — rescale the point
+// proportionally so the overlay and the real click point agree.
+function rescaleCursor(cursor, frameW, frameH) {
+  if (!cursor || !cursor.frameW || !cursor.frameH)
+    return initialCursor(frameW, frameH);
+  if (cursor.frameW === frameW && cursor.frameH === frameH)
+    return cursor;
+  return {
+    x: Math.min(Math.max(Math.round(cursor.x * frameW / cursor.frameW), 0), frameW - 1),
+    y: Math.min(Math.max(Math.round(cursor.y * frameH / cursor.frameH), 0), frameH - 1),
+    frameW: frameW,
+    frameH: frameH
+  };
+}
+
 function classifyGesture(dtMs, distCss) {
   return dtMs <= TAP_MS && distCss <= TAP_DIST_CSS ? "tap" : "drag";
 }
@@ -51,6 +67,7 @@ function sleepLabel(armed) {
 if (typeof module !== "undefined")
   module.exports = {
     initialCursor: initialCursor, nextCursor: nextCursor,
+    rescaleCursor: rescaleCursor,
     classifyGesture: classifyGesture, clickPayload: clickPayload,
     sleepTap: sleepTap, sleepLabel: sleepLabel,
     GAIN: GAIN, TAP_MS: TAP_MS, TAP_DIST_CSS: TAP_DIST_CSS,
