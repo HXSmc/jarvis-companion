@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from common import config
 from gateway import central, quick, screen, wake
-from gateway.auth import _bearer_matches, require_bearer_any
+from gateway.auth import _bearer_matches, ios_token_is_shared, require_bearer_any
 from gateway.registry import roles
 from mac.voice import router as voice_router
 
@@ -175,8 +175,9 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         if not result["sent"]:
             return {"reply": "PC wake failed to send — check the Mac and PC are on the same network"}
         return {"reply": "PC didn't come online after 90 seconds — check Wake-on-LAN is enabled"}
-    # The dependency already let the bearer in; only ios_token goes on to the router.
-    if not _bearer_matches(authorization, config.get_token(name="ios_token")):
+    # The dependency already let the bearer in; only ios_token goes on to the router
+    # (never while ios_token equals the shared token: it would not prove the phone).
+    if ios_token_is_shared() or not _bearer_matches(authorization, config.get_token(name="ios_token")):
         return {"reply": _SHARED_TOKEN_REPLY}
     if not _THREAD_RE.fullmatch(thread_id):
         raise HTTPException(status_code=400, detail="invalid thread_id")

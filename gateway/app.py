@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
 from common import config
-from gateway.auth import require_bearer
+from gateway.auth import IOS_TOKEN_SHARED_DETAIL, ios_token_is_shared, require_bearer
 
 HOST = "127.0.0.1"
 
@@ -18,7 +20,30 @@ if _bind_host != HOST:
     print(f"[gateway] Refusing to bind non-loopback host: {_bind_host}", file=sys.stderr)
     raise SystemExit(1)
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+def warn_if_ios_token_shared() -> bool:
+    """Startup check: ios_token == shared token gets a loud warning (True).
+
+    The ios-only routes refuse it per request anyway (503, see gateway.auth);
+    this makes the misconfiguration visible at boot, not on the first phone call.
+    """
+    if not ios_token_is_shared():
+        return False
+    message = f"[gateway] SECURITY: {IOS_TOKEN_SHARED_DETAIL}; ios-only routes refuse every request until the vault is fixed"
+    logger.critical(message)
+    print(message, file=sys.stderr)
+    return True
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    warn_if_ios_token_shared()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health", dependencies=[Depends(require_bearer)])
