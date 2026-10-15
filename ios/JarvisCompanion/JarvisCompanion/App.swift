@@ -417,6 +417,10 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var showPushedPage = false
     @Published var showInbox = false
+    /// Session the last /siri/hey answer pointed at ("Open chat" on Home).
+    @Published var lastSession: ChatTarget?
+    /// Chat sheet presented from Home.
+    @Published var openChat: ChatTarget?
     /// Bumped when the fullScreenCover dismisses so Home's hidden web host
     /// re-claims the shared WKWebView (see JarvisWebView).
     @Published var webHostToken = 0
@@ -492,6 +496,7 @@ final class AppModel: ObservableObject {
         ownerText = text
         replyText = nil
         routeTag = nil
+        lastSession = nil
         replyIsError = false
         isSending = true
         // F3: URLComponents-built endpoint — https enforced, no query or
@@ -536,6 +541,9 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.replyText = reply
+                if let sid = obj["session_id"] as? String, !sid.isEmpty {
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                }
                 self.replyIsError = false
                 self.typedText = ""
                 Haptics.success()
@@ -553,7 +561,7 @@ final class AppModel: ObservableObject {
 
     /// Shared F3 builder behind heyEndpoint(): same https enforcement and
     /// path appending, suffix picked per endpoint (/siri/hey, /ask, /pc/wake).
-    private static func gatewayEndpoint(_ suffix: String) -> URL? {
+    static func gatewayEndpoint(_ suffix: String) -> URL? {
         guard var comps = URLComponents(
             string: AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
         ), comps.scheme?.lowercased() == "https", comps.host != nil else {
@@ -592,6 +600,7 @@ final class AppModel: ObservableObject {
         ownerText = text
         replyText = nil
         routeTag = nil
+        lastSession = nil
         replyIsError = false
         isSending = true
         guard let url = Self.gatewayEndpoint("/ask") else {
@@ -655,6 +664,7 @@ final class AppModel: ObservableObject {
         ownerText = nil
         replyText = "PC: waking…"
         routeTag = nil
+        lastSession = nil
         replyIsError = false
         isSending = true
         guard let url = Self.gatewayEndpoint("/pc/wake") else {
@@ -855,16 +865,25 @@ struct ContentView: View {
     /// Ask-chip focus target (spec §23): tapping `Ask` puts `?` in the typed
     /// row and raises the keyboard on it.
     @FocusState private var typedFieldFocused: Bool
+    /// Wordmark menu choice: Controls (this screen), Sessions, Floor.
+    @AppStorage("homeView") private var homeView: HomeView = .controls
 
     var body: some View {
         ZStack {
             Color.jarvisBackground.ignoresSafeArea()
             VStack(spacing: 24) {
                 topBar
-                conversation
-                chips
-                micSection
-                typedRow
+                switch homeView {
+                case .controls:
+                    conversation
+                    chips
+                    micSection
+                    typedRow
+                case .sessions:
+                    SessionsBoard()
+                case .floor:
+                    FloorView()
+                }
             }
             .padding(16)
         }
@@ -875,6 +894,7 @@ struct ContentView: View {
         .background { hiddenWebHost }
         .sheet(isPresented: $model.showSettings) { SettingsSheet(model: model) }
         .sheet(isPresented: $model.showInbox) { InboxScreen(model: model.inbox) }
+        .sheet(item: $model.openChat) { ChatView(target: $0) }
         .fullScreenCover(isPresented: $model.showPushedPage) {
             PushedPageView(model: model, web: model.web)
         }
@@ -882,10 +902,23 @@ struct ContentView: View {
 
     private var topBar: some View {
         HStack(spacing: 16) {
-            Text("JARVIS")
-                .font(.system(size: markSize, weight: .semibold))
-                .tracking(2.6)
+            Menu {
+                Picker("View", selection: $homeView) {
+                    ForEach(HomeView.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("JARVIS")
+                        .font(.system(size: markSize, weight: .semibold))
+                        .tracking(2.6)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: markSize * 0.8, weight: .semibold))
+                }
                 .foregroundColor(.jarvisMuted)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Home view: \(homeView.label)")
             Spacer(minLength: 8)
             statusPill
             Button {
@@ -978,6 +1011,20 @@ struct ContentView: View {
                             .foregroundColor(.jarvisMuted)
                             .textSelection(.enabled)
                     }
+                    if let session = model.lastSession {
+                        Button {
+                            model.openChat = session
+                        } label: {
+                            Text("Open chat")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundColor(.jarvisAccent)
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: 44)
+                                .background(
+                                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisAccent.opacity(0.14))
+                                )
+                        }
+                    }
                 } else if model.ownerText == nil {
                     Text("Hold the mic. Ask for your Mac or PC screen.")
                         .font(.system(size: replySize))
@@ -992,15 +1039,15 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// Chips, two rows (spec §23): the original three quick chips on top,
-    /// `Ask` (focus the typed row, `?` prefilled) + `Wake PC` below.
+    /// Chips, two rows (spec §23): screen chips Mac / PC / Mini PC on top,
+    /// Status + `Ask` (focus the typed row, `?` prefilled) + `Wake PC` below.
     private var chips: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 ForEach([
-                    Chip(label: "Mac screen", payload: "Show Mac screen"),
-                    Chip(label: "PC screen", payload: "Show PC screen"),
-                    Chip(label: "Status", payload: "Status"),
+                    Chip(label: "Mac", payload: "Show Mac screen"),
+                    Chip(label: "PC", payload: "Show PC screen"),
+                    Chip(label: "Mini PC", payload: "Show Mini PC screen"),
                 ]) { chip in
                     Button {
                         model.ask(chip.payload)
@@ -1012,6 +1059,13 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 8) {
+                Button {
+                    model.ask("Status")
+                } label: {
+                    chipLabel("Status")
+                }
+                .disabled(chipDisabled)
+                .opacity(chipDisabled ? 0.35 : 1.0)
                 Button {
                     model.typedText = "?"
                     typedFieldFocused = true
