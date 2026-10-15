@@ -307,7 +307,8 @@ struct ChatLine: Identifiable, Equatable {
 /// One chat thread. A new thread posts to /chat (thread_id "app-<8 hex>");
 /// once a session exists, messages go to /central/sessions/{id}/message. Each
 /// send gets one msg_id, reused on Retry (the router is idempotent on it). The
-/// SSE loop resumes with Last-Event-ID and runs until close().
+/// SSE loop resumes with Last-Event-ID (the integer seq) and reconnects with
+/// backoff until `done`, a 401/403, close(), or maxReconnects quiet attempts.
 @MainActor
 final class ChatModel: ObservableObject {
     @Published var lines: [ChatLine] = []
@@ -320,8 +321,15 @@ final class ChatModel: ObservableObject {
     let threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
     private var pendingMsgID: String?
     private var failed: (text: String, ownerIndex: Int)?
-    private var lastSeq = 0
+    /// Highest seq seen; nil until the first event (seq 0 is a real event).
+    private var lastSeq: Int?
     private var streamTask: Task<Void, Never>?
+    /// Set by close(): no stream may start after the sheet went away.
+    private var closed = false
+    /// Reconnects in a row with no event before giving up.
+    private static let maxReconnects = 8
+
+    private enum StreamEnd { case done, unauthorized, dropped(gotEvent: Bool) }
 
     init(sessionID: String?, title: String) {
         self.sessionID = sessionID
@@ -392,23 +400,50 @@ final class ChatModel: ObservableObject {
         }
     }
 
+    /// The sheet appeared: allow streaming again and start it.
+    func open() {
+        closed = false
+        startStream()
+    }
+
     func startStream() {
-        guard streamTask == nil, let sid = sessionID else { return }
-        streamTask = Task {
+        guard !closed, streamTask == nil, let sid = sessionID else { return }
+        streamTask = Task { [weak self] in
             var delay: UInt64 = 1
+            var quietAttempts = 0
             while !Task.isCancelled {
-                do {
-                    try await streamOnce(sid)
-                    delay = 1
-                } catch {
-                    delay = min(delay * 2, 30)
+                guard let end = await self?.streamOnce(sid) else { return }
+                switch end {
+                case .done, .unauthorized:
+                    self?.streamEnded()
+                    return
+                case .dropped(let gotEvent):
+                    // Only a connection that delivered something resets the backoff.
+                    if gotEvent {
+                        delay = 1
+                        quietAttempts = 0
+                    }
+                }
+                quietAttempts += 1
+                if quietAttempts >= ChatModel.maxReconnects {
+                    self?.lines.append(ChatLine(role: .error, text: "live updates lost, reopen the chat"))
+                    self?.streamEnded()
+                    return
                 }
                 try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                delay = min(delay * 2, 30)
             }
         }
     }
 
+    /// The loop ended on its own; a later send may start a new one.
+    /// A cancelled loop leaves streamTask alone (close() or a newer loop owns it).
+    private func streamEnded() {
+        if !Task.isCancelled { streamTask = nil }
+    }
+
     func close() {
+        closed = true
         streamTask?.cancel()
         streamTask = nil
     }
@@ -428,34 +463,50 @@ final class ChatModel: ObservableObject {
     /// One SSE connection. `bytes.lines` drops blank lines, so an event is
     /// dispatched on its `data:` line (the contract sends one-line JSON);
     /// the preceding `id:` becomes Last-Event-ID for the next reconnect.
-    private func streamOnce(_ sid: String) async throws {
-        var request = try Central.request("/central/sessions/\(sid)/events", timeout: 660)
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        // Integer only: the gateway drops any non-numeric Last-Event-ID anyway.
-        if lastSeq > 0 { request.setValue(String(lastSeq), forHTTPHeaderField: "Last-Event-ID") }
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        try Central.check(response, data: nil)
-        var eventID: String?
-        for try await line in bytes.lines {
-            if line.hasPrefix("id:") {
-                eventID = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
-            } else if line.hasPrefix("data:") {
-                handle(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces), id: eventID)
-                eventID = nil
+    private func streamOnce(_ sid: String) async -> StreamEnd {
+        var gotEvent = false
+        do {
+            var request = try Central.request("/central/sessions/\(sid)/events", timeout: 660)
+            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            // Integer only: the gateway drops any non-numeric Last-Event-ID anyway.
+            if let last = lastSeq { request.setValue(String(last), forHTTPHeaderField: "Last-Event-ID") }
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+                lines.append(ChatLine(role: .error, text: "unauthorized, check the token in Settings"))
+                return .unauthorized
             }
+            try Central.check(response, data: nil)
+            var eventID: String?
+            for try await line in bytes.lines {
+                if line.hasPrefix("id:") {
+                    eventID = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                } else if line.hasPrefix("data:") {
+                    gotEvent = true
+                    let type = handle(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces), id: eventID)
+                    eventID = nil
+                    if type == "done" { return .done }
+                }
+            }
+        } catch {
+            // Network drop, timeout or cancel: the caller decides whether to retry.
         }
+        return .dropped(gotEvent: gotEvent)
     }
 
-    private func handle(_ payload: String, id: String?) {
+    /// Applies one event; returns its type (nil for junk or a replayed seq).
+    private func handle(_ payload: String, id: String?) -> String? {
         guard let data = payload.data(using: .utf8),
-              let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+              let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         // Replays after a resume are dropped by seq; the SSE `id:` fills in a missing seq.
         if let seq = event["seq"] as? Int ?? id.flatMap({ Int($0) }) {
-            if seq <= lastSeq { return }
+            if let last = lastSeq, seq <= last { return nil }
             lastSeq = seq
         }
+        let type = event["type"] as? String
+        // Option buttons only live while the session is waiting on them.
+        if type != "needs_input" { options = [] }
         let text = event["text"] as? String ?? ""
-        switch event["type"] as? String {
+        switch type {
         case "text":
             if !text.isEmpty { lines.append(ChatLine(role: .jarvis, text: text)) }
         case "status":
@@ -471,6 +522,7 @@ final class ChatModel: ObservableObject {
         default:
             break
         }
+        return type
     }
 }
 
@@ -523,7 +575,7 @@ struct ChatView: View {
         .padding(16)
         .background(Color.jarvisBackground.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .onAppear { model.startStream() }
+        .onAppear { model.open() }
         .onDisappear { model.close() }
     }
 
