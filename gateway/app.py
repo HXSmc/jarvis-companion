@@ -40,6 +40,7 @@ app.include_router(quick.router, prefix="")
 app.include_router(wake.router, prefix="")
 app.include_router(inbox.router, prefix="")
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
+app.include_router(central.public_router)  # /central/floor page only: no data, no auth
 # SCREEN_CONTROL=0 unmounts /screen/* (kill switch); default on.
 if os.environ.get("SCREEN_CONTROL", "1") != "0":
     app.include_router(vnc.router)  # Mini PC VNC routes (/screen/minipc/novnc/*, /screen/minipc/ws); same SCREEN_CONTROL kill switch as screen.router.

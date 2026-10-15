@@ -14,10 +14,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path as FilePath
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import config
@@ -49,6 +50,21 @@ _SESSION_KEYS = (
 _PHASE_FALLBACK = {"running": "in_progress", "needs_input": "in_review"}
 
 router = APIRouter(dependencies=[Depends(require_bearer_any("ios_token"))])
+# The Agency Floor page holds no data or secrets (it fetches everything with the
+# bearer the app injects), so it is the one /central route served without auth.
+public_router = APIRouter()
+
+FLOOR_HTML = FilePath(__file__).resolve().parent / "static" / "floor.html"
+FLOOR_CSP = (
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+    "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+AGENTIC_OS_URL_DEFAULT = "http://127.0.0.1:8787"
+AGENTIC_OS_TOKEN_PATH = FilePath.home() / ".config" / "agentic-os" / "token"
+AGENTIC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+_HUB_KEYS = ("key", "dirLabel", "engine", "active", "lastTs")
+_AGENT_KEYS = ("id", "persona", "engine", "label", "active", "status")
 
 
 class RouterError(Exception):
@@ -223,3 +239,62 @@ async def session_events(
 @router.get("/central/feed")
 async def feed(last_event_id: str | None = Header(default=None)) -> StreamingResponse:
     return await _sse("/feed", last_event_id)
+
+
+@public_router.get("/central/floor")
+async def floor() -> HTMLResponse:
+    return HTMLResponse(
+        FLOOR_HTML.read_text(),
+        headers={"Cache-Control": "no-store", "Content-Security-Policy": FLOOR_CSP},
+    )
+
+
+def agentic_os_base() -> str:
+    return os.environ.get("AGENTIC_OS_URL", AGENTIC_OS_URL_DEFAULT).rstrip("/")
+
+
+def agentic_os_token() -> str | None:
+    """The agentic-os dashboard bearer, read per request (tests stub this)."""
+    try:
+        return AGENTIC_OS_TOKEN_PATH.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _agentic_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """The outbound agentic-os client (tests swap in an ASGI transport here)."""
+    return httpx.AsyncClient(timeout=timeout)
+
+
+def _hub(item: dict) -> dict:
+    out = _pick(item, _HUB_KEYS)
+    agents = item.get("agents")
+    out["agents"] = [_pick(a, _AGENT_KEYS) for a in agents if isinstance(a, dict)] if isinstance(agents, list) else []
+    return out
+
+
+@router.get("/central/agents")
+async def agents() -> dict:
+    """The Mac's hub sessions + their agents from agentic-os, trimmed; down -> no hubs."""
+    empty = {"device": None, "hubs": []}
+    token = agentic_os_token()
+    if not token:
+        return empty
+    try:
+        async with _agentic_client(AGENTIC_TIMEOUT) as client:
+            resp = await client.get(
+                f"{agentic_os_base()}/api/snapshot", headers={"Authorization": f"Bearer {token}"}
+            )
+        data = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("agentic-os snapshot failed: %s", type(exc).__name__)
+        return empty
+    sessions = data.get("sessions") if isinstance(data, dict) else None
+    if not isinstance(sessions, dict):
+        return empty
+    hubs = sessions.get("hubs")
+    device = sessions.get("device")
+    return {
+        "device": device if isinstance(device, str) else None,
+        "hubs": [_hub(h) for h in hubs if isinstance(h, dict)] if isinstance(hubs, list) else [],
+    }

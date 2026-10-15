@@ -634,14 +634,18 @@ struct ChatView: View {
     }
 }
 
-/// Floor: the gateway's /central/floor page in its own WKWebView (bearer on
-/// the first request). A 404 means the page isn't built yet.
+/// Floor: the gateway's /central/floor page (the Agency Floor) in its own
+/// WKWebView. The page holds no data; it fetches /central/* itself with the
+/// bearer injected below as `window.__JARVIS` (never in a URL or storage).
+/// "Open chat" in its side sheet posts `{type:"openChat", session_id, title}`
+/// to the `jarvis` handler. A 404 means the gateway predates the page.
 struct FloorView: View {
+    var onOpenChat: (ChatTarget) -> Void = { _ in }
     @State private var comingSoon = false
 
     var body: some View {
         if !comingSoon, let request = try? Central.request("/central/floor") {
-            FloorWebView(request: request) { comingSoon = true }
+            FloorWebView(request: request, onNotFound: { comingSoon = true }, onOpenChat: onOpenChat)
                 .clipShape(RoundedRectangle(cornerRadius: jarvisRadius))
         } else {
             Text(comingSoon ? "Floor coming soon" : "set gateway in settings")
@@ -655,11 +659,24 @@ struct FloorView: View {
 private struct FloorWebView: UIViewRepresentable {
     let request: URLRequest
     let onNotFound: () -> Void
+    let onOpenChat: (ChatTarget) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onNotFound: onNotFound) }
+    static let handlerName = "jarvis"
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(origin: request.url, onNotFound: onNotFound, onOpenChat: onOpenChat)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView()
+        let config = WKWebViewConfiguration()
+        let controller = WKUserContentController()
+        controller.addUserScript(WKUserScript(source: Self.bootstrap(), injectionTime: .atDocumentStart,
+                                              forMainFrameOnly: true))
+        // The controller retains its handler; the proxy keeps that a weak ref (no cycle).
+        controller.add(WeakScriptHandler(context.coordinator), name: Self.handlerName)
+        config.userContentController = controller
+        config.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: .zero, configuration: config)
         view.isOpaque = false
         view.backgroundColor = UIColor(Color.jarvisBackground)
         view.navigationDelegate = context.coordinator
@@ -667,11 +684,41 @@ private struct FloorWebView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onOpenChat = onOpenChat
+    }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: handlerName)
+        uiView.configuration.userContentController.removeAllUserScripts()
+    }
+
+    /// `window.__JARVIS = {token, base}` as a JSON literal (escaped by JSONSerialization).
+    static func bootstrap() -> String {
+        let payload: [String: String] = ["token": AppSettings.token, "base": ""]
+        let json = (try? JSONSerialization.data(withJSONObject: payload))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return "window.__JARVIS = Object.freeze(\(json));"
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        let origin: URL?
         let onNotFound: () -> Void
-        init(onNotFound: @escaping () -> Void) { self.onNotFound = onNotFound }
+        var onOpenChat: (ChatTarget) -> Void
+
+        init(origin: URL?, onNotFound: @escaping () -> Void, onOpenChat: @escaping (ChatTarget) -> Void) {
+            self.origin = origin
+            self.onNotFound = onNotFound
+            self.onOpenChat = onOpenChat
+        }
+
+        /// The bearer is injected into every main-frame page, so stay on the gateway origin.
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let url = navigationAction.request.url
+            let same = url?.scheme == origin?.scheme && url?.host == origin?.host && url?.port == origin?.port
+            decisionHandler(same ? .allow : .cancel)
+        }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
@@ -683,5 +730,29 @@ private struct FloorWebView: UIViewRepresentable {
             }
             decisionHandler(.allow)
         }
+
+        func userContentController(_ userContentController: WKUserContentController,
+                                   didReceive message: WKScriptMessage) {
+            guard message.frameInfo.isMainFrame,
+                  let body = message.body as? [String: Any],
+                  body["type"] as? String == "openChat",
+                  let sid = body["session_id"] as? String,
+                  sid.range(of: "^[A-Za-z0-9-]{1,64}$", options: .regularExpression) != nil
+            else { return }
+            let title = (body["title"] as? String).map { String($0.prefix(80)) } ?? "Chat"
+            onOpenChat(ChatTarget(sessionID: sid, title: title))
+        }
+    }
+}
+
+/// Forwards script messages to a weakly held handler so the user content
+/// controller (which retains its handlers) does not keep the coordinator alive.
+private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
     }
 }

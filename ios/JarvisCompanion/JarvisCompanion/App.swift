@@ -882,7 +882,7 @@ struct ContentView: View {
                 case .sessions:
                     SessionsBoard()
                 case .floor:
-                    FloorView()
+                    FloorView { model.openChat = $0 }
                 }
             }
             .padding(16)
