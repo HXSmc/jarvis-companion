@@ -18,6 +18,7 @@ import base64
 import collections
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -28,13 +29,14 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from common import config
 from gateway.agents import WINDOWS_ROLE, agent_roundtrip
+from gateway.auth import require_bearer_any
 from gateway.registry import roles, send_to_role
 from mac.voice import router as voice_router
 
@@ -48,6 +50,13 @@ MINIPC_VNC_DETAIL = "minipc target uses the VNC websocket"
 
 SCREEN_HTML = Path(__file__).resolve().parent / "static" / "screen.html"
 CURSOR_JS = SCREEN_HTML.parent / "cursor.js"
+
+# Non-secret {"mac": "<tailscale ip>", "windows": "<tailscale ip>"}, read per
+# request (example: gateway/rustdesk.example.json). Only an IP leaves this
+# file: links are rebuilt from the parsed address, so a password key is ignored.
+RUSTDESK_CONFIG = Path.home() / ".jarvis" / "rustdesk.json"
+RUSTDESK_TARGETS = ("mac", "windows")
+_TAILSCALE_NET = ipaddress.ip_network("<cgnat-ip>/10")
 
 NOT_AUTHENTICATED = "not authenticated"
 SHARED_TOKEN_DETAIL = "shared token not valid for screen"
@@ -119,6 +128,40 @@ def _require(request: Request) -> str:
     if kind is None:
         raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     return kind
+
+
+def rustdesk_links() -> dict[str, str]:
+    """{"mac"/"windows": "rustdesk://<ip>"} for each configured Tailscale IPv4; {} when unset.
+
+    Direct IP over Tailscale only: an address outside <cgnat-ip>/10 is dropped
+    (logged), as is a missing/unparseable file. Never a password in the link.
+    """
+    try:
+        data = json.loads(RUSTDESK_CONFIG.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        logger.warning("rustdesk: %s unreadable or not JSON", RUSTDESK_CONFIG)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    links = {}
+    for target in RUSTDESK_TARGETS:
+        try:
+            ip = ipaddress.IPv4Address(str(data.get(target) or "").strip())
+        except ValueError:
+            continue
+        if ip not in _TAILSCALE_NET:
+            logger.warning("rustdesk: %s IP is not a Tailscale address, ignored", target)
+            continue
+        links[target] = f"rustdesk://{ip}"
+    return links
+
+
+@router.get("/rustdesk", dependencies=[Depends(require_bearer_any("ios_token"))])
+async def screen_rustdesk() -> dict:
+    """RustDesk deep links for the configured hosts (phone-only ios_token)."""
+    return rustdesk_links()
 
 
 def _windows_online() -> None:
@@ -203,7 +246,10 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
         kind = _require(request)
     # Serve-time inline: cursor.js is spliced into the page's placeholder
     # script tag — one request, no extra route, no separate cacheable fetch.
-    response = HTMLResponse(SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text()))
+    # The page's RustDesk button gets its links the same way (the page itself
+    # rides the cookie, which /screen/rustdesk does not accept).
+    html = SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text())
+    response = HTMLResponse(html.replace("/*RUSTDESK_LINKS*/{}", json.dumps(rustdesk_links())))
     if kind in ("bearer", "boot"):
         response.set_cookie(
             SESSION_COOKIE, _mint_session(),
