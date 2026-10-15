@@ -743,7 +743,7 @@ struct FloorView: View {
     @State private var comingSoon = false
 
     var body: some View {
-        if !comingSoon, let request = try? Central.request("/central/floor") {
+        if !comingSoon, let request = Self.pageRequest() {
             FloorWebView(request: request, onNotFound: { comingSoon = true }, onOpenChat: onOpenChat)
                 .clipShape(RoundedRectangle(cornerRadius: jarvisRadius))
         } else {
@@ -752,6 +752,14 @@ struct FloorView: View {
                 .foregroundColor(.jarvisMuted)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// The page itself is public and holds no data: load it without the bearer,
+    /// which only reaches the page's own /central/* fetches via `window.__JARVIS`.
+    private static func pageRequest() -> URLRequest? {
+        guard var request = try? Central.request("/central/floor") else { return nil }
+        request.setValue(nil, forHTTPHeaderField: "Authorization")
+        return request
     }
 }
 
