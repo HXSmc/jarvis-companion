@@ -28,11 +28,14 @@ _INTENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 def route(transcript: str) -> str | None:
     """Keyword intents -> allowlisted command name; None = no match (brain fallback).
 
-    The screen intents ("screen_mac"/"screen_windows") never reach the agent
+    The screen intents ("screen_mac"/"screen_windows"/"screen_minipc") never reach the agent
     path — gateway/siri.py intercepts them and launches the control page (SC7);
     they're checked before _INTENTS so no existing keyword can shadow them.
     """
     text = transcript.lower()
+    # Mini PC first: its "pc" would otherwise land on screen_windows.
+    if ("mini pc" in text or "minipc" in text) and ("screen" in text or "show" in text):
+        return "screen_minipc"
     if "screen" in text:
         if "mac" in text:
             return "screen_mac"

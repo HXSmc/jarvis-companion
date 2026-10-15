@@ -3,9 +3,9 @@
 W1 criteria: each quick prefix routes to `quick.ask` with the prefix stripped
 and never consumes a brain slot; wake intent variants call `wake.wake_pc` and
 map its result / no-MAC 400 to the spoken replies; status, screen and plain
-brain transcripts behave exactly as before the dispatch was inserted.
+router transcripts behave exactly as before the dispatch was inserted.
 `quick.ask` and `wake.wake_pc` are monkeypatched — the vault, OpenRouter,
-sockets and `claude -p` are never touched.
+sockets and the router are never touched.
 """
 
 from __future__ import annotations
@@ -177,20 +177,22 @@ def test_status_and_screen_still_win(
     assert launches == ["mac"]
 
 
-def test_plain_text_still_brains(
+def test_plain_text_goes_to_router(
     stubbed_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
 ) -> None:
     """An unprefixed transcript must not be intercepted by the quick prefix."""
-    from gateway import quick
-    from mac.voice import brain
+    from gateway import central, quick
 
     async def explode(q: str, brain_flag: str = "auto") -> quick.QuickAnswer:
         raise AssertionError("quick.ask must not run for plain transcripts")
 
+    async def answered(*args):
+        return {"action": "answered", "session_id": None, "title": "joke", "reply": "a router answer"}
+
     monkeypatch.setattr(quick, "ask", explode)
-    monkeypatch.setattr(brain, "reply", lambda *args: "a brain answer")
+    monkeypatch.setattr(central, "route", answered)
 
     resp = _post(stubbed_token, "tell me a joke")
 
     assert resp.status_code == 200
-    assert resp.json() == {"reply": "a brain answer"}
+    assert resp.json()["reply"] == "a router answer"
