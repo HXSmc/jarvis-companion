@@ -136,6 +136,15 @@ def test_chat_forwards_with_source_app_and_filters_keys():
     assert sent["body"] == {"thread_id": "app-1a2b", "msg_id": "m-1", "text": "do a thing", "source": "app"}
 
 
+def test_chat_answered_passes_null_session_id():
+    resp = _call("POST", "/chat", headers=IOS, json={"thread_id": "app-1", "msg_id": "m-1", "text": "tell me x"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["action"] == "answered"
+    assert "session_id" in data and data["session_id"] is None
+    assert data["reply"] == "42"
+
+
 def test_chat_needs_input_carries_prompt_and_options():
     resp = _call("POST", "/chat", headers=IOS, json={"thread_id": "t", "msg_id": "m", "text": "ask me"})
     assert resp.json()["prompt"] == "Which env?"
@@ -240,6 +249,15 @@ def test_siri_fallback_routes_to_router():
     assert sent["body"]["source"] == "voice"
     assert sent["body"]["thread_id"] == "phone-voice"
     assert re.fullmatch(r"[0-9a-f]{32}", sent["body"]["msg_id"])
+
+
+def test_siri_fallback_answered_inline_with_client_thread():
+    resp = _call("POST", "/siri/hey", headers=IOS, json={"text": "tell me the time", "thread_id": "app-xyz"})
+    data = resp.json()
+    assert data["reply"] == "42"
+    assert data["action"] == "answered"
+    assert "session_id" in data and data["session_id"] is None
+    assert router_stub.seen[-1]["body"]["thread_id"] == "app-xyz"
 
 
 def test_siri_fallback_client_thread_and_shortcut_token():

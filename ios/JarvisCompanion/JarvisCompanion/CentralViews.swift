@@ -320,7 +320,6 @@ final class ChatModel: ObservableObject {
     let threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
     private var pendingMsgID: String?
     private var failed: (text: String, ownerIndex: Int)?
-    private var lastEventID: String?
     private var lastSeq = 0
     private var streamTask: Task<Void, Never>?
 
@@ -432,7 +431,8 @@ final class ChatModel: ObservableObject {
     private func streamOnce(_ sid: String) async throws {
         var request = try Central.request("/central/sessions/\(sid)/events", timeout: 660)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        if let last = lastEventID { request.setValue(last, forHTTPHeaderField: "Last-Event-ID") }
+        // Integer only: the gateway drops any non-numeric Last-Event-ID anyway.
+        if lastSeq > 0 { request.setValue(String(lastSeq), forHTTPHeaderField: "Last-Event-ID") }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         try Central.check(response, data: nil)
         var eventID: String?
@@ -449,13 +449,11 @@ final class ChatModel: ObservableObject {
     private func handle(_ payload: String, id: String?) {
         guard let data = payload.data(using: .utf8),
               let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
-        let seq = event["seq"] as? Int
-        // Replays after a resume are dropped by seq.
-        if let seq = seq {
+        // Replays after a resume are dropped by seq; the SSE `id:` fills in a missing seq.
+        if let seq = event["seq"] as? Int ?? id.flatMap({ Int($0) }) {
             if seq <= lastSeq { return }
             lastSeq = seq
         }
-        if let resumeID = id ?? seq.map { String($0) } { lastEventID = resumeID }
         let text = event["text"] as? String ?? ""
         switch event["type"] as? String {
         case "text":
