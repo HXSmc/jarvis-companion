@@ -16,13 +16,22 @@ import pytest
 
 from common import config
 
+IOS_TOKEN = "jarvis_ios_test_token_456"
+
 
 @pytest.fixture
 def stubbed_token(monkeypatch: pytest.MonkeyPatch) -> str:
     token = "jarvis_test_token_123"
-    # Name-aware like conftest's gateway_server; ios_token unset here (None).
-    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": token if name == "token" else None)
+    # Name-aware like conftest's gateway_server: shared + ios tokens, nothing else.
+    tokens = {"token": token, "ios_token": IOS_TOKEN}
+    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": tokens.get(name))
     return token
+
+
+@pytest.fixture
+def ios_token(stubbed_token: str) -> str:
+    """The iPhone app's bearer: the only one /siri/hey forwards to the router."""
+    return IOS_TOKEN
 
 
 def _post(stubbed_token: str | None, text: str) -> tuple[httpx.Response, float]:
@@ -95,13 +104,13 @@ def _hang_router(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
     return release
 
 
-def test_hung_router_times_out(stubbed_token: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hung_router_times_out(ios_token: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from gateway import siri
 
     _hang_router(monkeypatch)
     monkeypatch.setattr(siri, "ROUTER_TIMEOUT_SECONDS", 1)
 
-    resp, elapsed = _post(stubbed_token, "tell me a joke")
+    resp, elapsed = _post(ios_token, "tell me a joke")
 
     assert resp.status_code == 200
     assert resp.json() == {"reply": "Jarvis is taking too long, try again."}
@@ -120,14 +129,14 @@ def fresh_brain_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_third_concurrent_call_gets_busy(
-    stubbed_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+    ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
 ) -> None:
     """Semaphore(2) full → immediate busy reply, no queueing."""
     from gateway.app import app
 
     async def run() -> list[httpx.Response]:
         release = _hang_router(monkeypatch)
-        headers = {"Authorization": f"Bearer {stubbed_token}"}
+        headers = {"Authorization": f"Bearer {ios_token}"}
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -145,7 +154,7 @@ def test_third_concurrent_call_gets_busy(
 
 
 def test_rate_limit_at_20_per_60s(
-    stubbed_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+    ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
 ) -> None:
     """21st router call inside the 60 s window → busy reply."""
     from gateway import central, siri
@@ -158,7 +167,7 @@ def test_rate_limit_at_20_per_60s(
     async def run() -> httpx.Response:
         from gateway.app import app
 
-        headers = {"Authorization": f"Bearer {stubbed_token}"}
+        headers = {"Authorization": f"Bearer {ios_token}"}
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:

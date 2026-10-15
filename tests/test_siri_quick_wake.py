@@ -19,13 +19,22 @@ from fastapi import HTTPException
 
 from common import config
 
+IOS_TOKEN = "jarvis_ios_test_token_456"
+
 
 @pytest.fixture
 def stubbed_token(monkeypatch: pytest.MonkeyPatch) -> str:
     token = "jarvis_test_token_123"
-    # Name-aware like conftest's gateway_server; ios_token unset here (None).
-    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": token if name == "token" else None)
+    # Name-aware like conftest's gateway_server: shared + ios tokens, nothing else.
+    tokens = {"token": token, "ios_token": IOS_TOKEN}
+    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": tokens.get(name))
     return token
+
+
+@pytest.fixture
+def ios_token(stubbed_token: str) -> str:
+    """The iPhone app's bearer: the only one /siri/hey forwards to the router."""
+    return IOS_TOKEN
 
 
 @pytest.fixture
@@ -178,7 +187,7 @@ def test_status_and_screen_still_win(
 
 
 def test_plain_text_goes_to_router(
-    stubbed_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+    ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
 ) -> None:
     """An unprefixed transcript must not be intercepted by the quick prefix."""
     from gateway import central, quick
@@ -192,7 +201,7 @@ def test_plain_text_goes_to_router(
     monkeypatch.setattr(quick, "ask", explode)
     monkeypatch.setattr(central, "route", answered)
 
-    resp = _post(stubbed_token, "tell me a joke")
+    resp = _post(ios_token, "tell me a joke")
 
     assert resp.status_code == 200
     assert resp.json()["reply"] == "a router answer"

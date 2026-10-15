@@ -8,6 +8,8 @@ from the agent registry, and everything that isn't a local intent (status,
 quick-ask, screen, wake) goes to the mini PC router's POST /route (via
 gateway/central.py), hard-bounded by ROUTER_TIMEOUT_SECONDS. The router's
 action/session_id/title ride along so the phone can open the session.
+Only the iPhone app's `ios_token` may reach the router: the Shortcut's shared
+token gets the local intents and otherwise a fixed reply (_SHARED_TOKEN_REPLY).
 """
 
 from __future__ import annotations
@@ -18,10 +20,11 @@ import re
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
+from common import config
 from gateway import central, quick, screen, wake
-from gateway.auth import require_bearer_any
+from gateway.auth import _bearer_matches, require_bearer_any
 from gateway.registry import roles
 from mac.voice import router as voice_router
 
@@ -33,6 +36,8 @@ ROUTER_TIMEOUT_SECONDS = 15
 
 _TIMEOUT_REPLY = "Jarvis is taking too long, try again."
 _ROUTER_DOWN_REPLY = "The mini PC router is unavailable, try again."
+# The shared token can start nothing on the mini PC (C1): tasks need the app.
+_SHARED_TOKEN_REPLY = "Tasks go through the Jarvis app"
 
 # Voice turns share one router thread unless the client names its own.
 VOICE_THREAD_ID = "phone-voice"
@@ -117,7 +122,7 @@ async def _router_reply(text: str, thread_id: str) -> dict:
 
 # The Shortcut sends the shared token; the iPhone app sends `ios_token`.
 @router.post("/siri/hey", dependencies=[Depends(require_bearer_any("token", "ios_token"))])
-async def siri_hey(request: Request) -> dict:
+async def siri_hey(request: Request, authorization: str | None = Header(default=None)) -> dict:
     """`{"text": "<transcript>", "thread_id"?: str}` → local intent or router → `{"reply": ...}`.
 
     The body is read off the Request (not a Pydantic param) so the Shortcut's
@@ -160,6 +165,9 @@ async def siri_hey(request: Request) -> dict:
         if not result["sent"]:
             return {"reply": "PC wake failed to send — check the Mac and PC are on the same network"}
         return {"reply": "PC didn't come online after 90 seconds — check Wake-on-LAN is enabled"}
+    # The dependency already let the bearer in; only ios_token goes on to the router.
+    if not _bearer_matches(authorization, config.get_token(name="ios_token")):
+        return {"reply": _SHARED_TOKEN_REPLY}
     if not _THREAD_RE.fullmatch(thread_id):
         raise HTTPException(status_code=400, detail="invalid thread_id")
     if _brain_semaphore.locked() or not _brain_slot_available():
