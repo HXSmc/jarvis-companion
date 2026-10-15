@@ -410,6 +410,8 @@ final class AppModel: ObservableObject {
     @Published var ownerText: String?
     @Published var replyText: String?
     @Published var replyIsError = false
+    /// Tappable link under the reply (RustDesk not installed -> App Store).
+    @Published var replyLink: URL?
     /// Muted `route · ms` tag under the reply — quick-ask only; the plain
     /// brain path keeps it nil (spec §22).
     @Published var routeTag: String?
@@ -495,6 +497,7 @@ final class AppModel: ObservableObject {
         guard !text.isEmpty, !isSending, askReady else { return }
         ownerText = text
         replyText = nil
+        replyLink = nil
         routeTag = nil
         lastSession = nil
         replyIsError = false
@@ -599,6 +602,7 @@ final class AppModel: ObservableObject {
         guard text.hasPrefix("?"), !question.isEmpty, !isSending, askReady else { return }
         ownerText = text
         replyText = nil
+        replyLink = nil
         routeTag = nil
         lastSession = nil
         replyIsError = false
@@ -663,6 +667,7 @@ final class AppModel: ObservableObject {
         guard !isSending, askReady else { return }
         ownerText = nil
         replyText = "PC: waking…"
+        replyLink = nil
         routeTag = nil
         lastSession = nil
         replyIsError = false
@@ -719,11 +724,67 @@ final class AppModel: ObservableObject {
         }.resume()
     }
 
+    /// Chip long-press "Open in RustDesk": GET <gateway>/screen/rustdesk (ios
+    /// token), open `rustdesk://<ip>` for the target ("mac"/"windows"). Open
+    /// fails (app missing) -> install hint + App Store link in the reply area.
+    func openRustDesk(_ target: String) {
+        guard !isSending, askReady else { return }
+        let name = target == "mac" ? "Mac" : "PC"
+        ownerText = nil
+        replyText = nil
+        replyLink = nil
+        routeTag = nil
+        lastSession = nil
+        replyIsError = false
+        guard let url = Self.gatewayEndpoint("/screen/rustdesk") else {
+            fail("gateway URL must be https")
+            return
+        }
+        isSending = true
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isSending = false
+                if let error = error {
+                    self.fail(error)
+                    return
+                }
+                if let http = response as? HTTPURLResponse,
+                   !(200...299).contains(http.statusCode) {
+                    if http.statusCode == 401 || http.statusCode == 403 {
+                        self.fail("unauthorized, check the token in Settings")
+                    } else {
+                        self.fail("HTTP \(http.statusCode)")
+                    }
+                    return
+                }
+                guard let data = data,
+                      let links = (try? JSONSerialization.jsonObject(with: data)) as? [String: String],
+                      let link = links[target].flatMap(URL.init(string:)),
+                      link.scheme == RustDesk.scheme else {
+                    self.setFailure("RustDesk is not set up for the \(name)")
+                    return
+                }
+                RustDesk.open(link) {
+                    DispatchQueue.main.async {
+                        self.replyText = "Install RustDesk from the App Store"
+                        self.replyLink = RustDesk.appStore
+                        self.replyIsError = true
+                    }
+                }
+            }
+        }.resume()
+    }
+
     /// Shared failure surface: every failure path (HTTP/URL/parse errors,
     /// permission denial, engine errors, empty transcript) funnels here so
     /// the error haptic always fires; only one place sets the reply state.
     private func setFailure(_ message: String) {
         replyText = message
+        replyLink = nil
         replyIsError = true
         Haptics.error()
     }
@@ -1005,6 +1066,12 @@ struct ContentView: View {
                         .foregroundColor(model.replyIsError ? .jarvisDanger : .jarvisText)
                         .textSelection(.enabled)
                         .transition(.opacity)
+                    if let link = model.replyLink {
+                        Link("Open the App Store", destination: link)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.jarvisAccent)
+                            .frame(minHeight: 44)
+                    }
                     if let tag = model.routeTag {
                         Text(tag)
                             .font(.footnote)
@@ -1056,6 +1123,12 @@ struct ContentView: View {
                     }
                     .disabled(chipDisabled)
                     .opacity(chipDisabled ? 0.35 : 1.0)
+                    // Long-press: RustDesk for Mac/PC (no RustDesk on the Mini PC).
+                    .contextMenu {
+                        if let target = rustDeskTarget(chip.label) {
+                            Button("Open in RustDesk") { model.openRustDesk(target) }
+                        }
+                    }
                 }
             }
             HStack(spacing: 8) {
@@ -1083,6 +1156,10 @@ struct ContentView: View {
                 .opacity(chipDisabled ? 0.35 : 1.0)
             }
         }
+    }
+
+    private func rustDeskTarget(_ chipLabel: String) -> String? {
+        ["Mac": "mac", "PC": "windows"][chipLabel]
     }
 
     private var chipDisabled: Bool {

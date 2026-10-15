@@ -1,5 +1,21 @@
 import SwiftUI
+import UIKit
 import WebKit
+
+/// RustDesk deep links (`rustdesk://<tailscale ip>`, never a password).
+/// No canOpenURL (no LSApplicationQueriesSchemes): open() reports success.
+enum RustDesk {
+    static let scheme = "rustdesk"
+    static let appStore = URL(string: "https://apps.apple.com/app/id1581225015")!
+
+    /// Opens the link; on failure runs `onFail`, or opens the App Store page when nil.
+    static func open(_ url: URL, onFail: (() -> Void)? = nil) {
+        UIApplication.shared.open(url) { ok in
+            guard !ok else { return }
+            if let onFail = onFail { onFail() } else { UIApplication.shared.open(appStore) }
+        }
+    }
+}
 
 /// Error surfaced when a gateway command arrives while the app is backgrounded —
 /// DESIGN.md "Failure handling": JS is unreliable in background, so the app only
@@ -126,6 +142,18 @@ final class WebController: NSObject, ObservableObject, WKNavigationDelegate, WKS
                                didReceive message: WKScriptMessage) {
         guard message.name == "screenFullscreen", message.frameInfo.isMainFrame else { return }
         screenFullscreen = (message.body as? Bool) ?? false
+    }
+
+    /// /screen's RustDesk button navigates to `rustdesk://<ip>`: hand it to iOS
+    /// (WebKit cannot load it); RustDesk not installed -> App Store page.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url, url.scheme == RustDesk.scheme else {
+            decisionHandler(.allow)
+            return
+        }
+        decisionHandler(.cancel)
+        RustDesk.open(url)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

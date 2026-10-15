@@ -95,6 +95,8 @@ _SCREEN_REPLIES = {
     "screen_minipc": "Opening your Mini PC screen",
 }
 
+_RUSTDESK_NAMES = {"rustdesk_mac": "Mac", "rustdesk_windows": "PC"}
+
 # Wake intents (spec §19), fullmatch on the stripped transcript: magic packet
 # out, then the reply reports the online-wait result.
 _WAKE_RE = re.compile(
@@ -162,6 +164,13 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
     if cmd in _SCREEN_REPLIES:
         await screen.launch_screen(cmd[len("screen_"):])
         return {"reply": _SCREEN_REPLIES[cmd]}
+    # RustDesk intents: a local reply with the deep link (no router call, any token).
+    if cmd in _RUSTDESK_NAMES:
+        target = cmd[len("rustdesk_"):]
+        link = screen.rustdesk_links().get(target)
+        if link is None:
+            return {"reply": f"RustDesk is not set up for the {_RUSTDESK_NAMES[cmd]}"}
+        return {"reply": f"Open RustDesk for your {_RUSTDESK_NAMES[cmd]}: {link}"}
     # Wake intents (§19): the online wait already happened inside wake_pc.
     if _WAKE_RE.fullmatch(stripped):
         try:

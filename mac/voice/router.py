@@ -36,8 +36,16 @@ def route(transcript: str) -> str | None:
     The screen intents ("screen_mac"/"screen_windows"/"screen_minipc") never reach the agent
     path — gateway/siri.py intercepts them and launches the control page (SC7);
     they're checked before _INTENTS so no existing keyword can shadow them.
+    Same for "rustdesk_mac"/"rustdesk_windows" (siri.py replies with the deep link).
     """
     text = transcript.lower()
+    # RustDesk before screen ("rustdesk mac screen" is a RustDesk ask); gateway/siri.py
+    # answers these locally with the deep link. The Mini PC has no RustDesk.
+    if "rustdesk" in text.replace(" ", "") and not _MINIPC_RE.search(text):
+        if "mac" in text:
+            return "rustdesk_mac"
+        if any(word in text for word in ("pc", "windows", "computer")):
+            return "rustdesk_windows"
     # Mini PC first: its "pc" would otherwise land on screen_windows. "show" alone
     # is not enough ("show me the mini pc logs" is not a screen request).
     if _MINIPC_RE.search(text) and _SCREEN_RE.search(text):
