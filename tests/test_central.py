@@ -130,7 +130,7 @@ def test_session_id_validated(sid):
 def test_chat_forwards_with_source_app_and_filters_keys():
     resp = _call("POST", "/chat", headers=IOS, json={"thread_id": "app-1a2b", "msg_id": "m-1", "text": "do a thing"})
     assert resp.json() == {"action": "spawned", "session_id": "s-new", "kind": "claude",
-                           "title": "New task", "reply": "Started"}
+                           "title": "New task", "reply": "Started", "seq": 3}
     sent = router_stub.seen[-1]
     assert sent["path"] == "/route"
     assert sent["body"] == {"thread_id": "app-1a2b", "msg_id": "m-1", "text": "do a thing", "source": "app"}

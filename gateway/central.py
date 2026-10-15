@@ -47,7 +47,9 @@ ROUTER_UNAVAILABLE = "router unavailable"
 ROUTER_UNCONFIGURED = "router not configured"
 
 # Keys passed back to the phone; anything else the router adds is dropped.
-_ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options")
+# `seq` (when the router sends it) is the event seq of the reply, so the phone
+# resumes the session stream after it instead of rendering the reply twice.
+_ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq")
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at",
     "project", "task", "summary", "phase",

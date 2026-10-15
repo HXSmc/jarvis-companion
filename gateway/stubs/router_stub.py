@@ -65,7 +65,7 @@ async def route(request: Request):
         return {"action": "needs_input", "session_id": "s-ask", "kind": "claude", "title": "Deploy",
                 "reply": None, "prompt": "Which env?", "options": ["staging", "prod"]}
     return {"action": "spawned", "session_id": "s-new", "kind": "claude", "title": "New task",
-            "reply": "Started", "internal_debug": "dropped by gateway"}
+            "reply": "Started", "seq": 3, "internal_debug": "dropped by gateway"}
 
 
 @app.get("/sessions")

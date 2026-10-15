@@ -327,6 +327,9 @@ final class ChatModel: ObservableObject {
     /// Seq of every rendered event: a replay (fresh open of an old session, a
     /// reconnect) renders each event once, so old history shows once as history.
     private var seenSeqs: Set<Int> = []
+    /// Texts /chat rendered without a seq; the stream's replay of each is skipped
+    /// once (fallback for a router that sends no `seq` on /route).
+    private var echoed: [String] = []
     /// A sent message is still being answered; only then do quiet reconnects count.
     private var turnActive = false
     /// The live loop holds an open SSE connection (cleared by whoever cancels it).
@@ -400,12 +403,20 @@ final class ChatModel: ObservableObject {
         lines[ownerIndex].chip = action
         if let sid = obj["session_id"] as? String, !sid.isEmpty { sessionID = sid }
         if let title = obj["title"] as? String, !title.isEmpty { self.title = title }
+        // The stream replays this turn's reply: mark its seq rendered and resume after it.
+        let seq = obj["seq"] as? Int
+        if let seq = seq {
+            seenSeqs.insert(seq)
+            lastSeq = max(lastSeq ?? seq, seq)
+        }
         if let reply = obj["reply"] as? String, !reply.isEmpty {
             lines.append(ChatLine(role: .jarvis, text: reply))
+            if seq == nil { echoed.append(reply) }
         }
         if action == "needs_input" {
             if let prompt = obj["prompt"] as? String, !prompt.isEmpty {
                 lines.append(ChatLine(role: .jarvis, text: prompt))
+                if seq == nil { echoed.append(prompt) }
             }
             options = obj["options"] as? [String] ?? []
         }
@@ -534,21 +545,29 @@ final class ChatModel: ObservableObject {
         let text = event["text"] as? String ?? ""
         switch type {
         case "text":
-            if !text.isEmpty { lines.append(ChatLine(role: .jarvis, text: text)) }
+            if !text.isEmpty, !alreadyShown(text) { lines.append(ChatLine(role: .jarvis, text: text)) }
         case "status":
             if !text.isEmpty { lines.append(ChatLine(role: .status, text: text)) }
         case "needs_input":
             let prompt = event["prompt"] as? String ?? text
-            if !prompt.isEmpty { lines.append(ChatLine(role: .jarvis, text: prompt)) }
+            if !prompt.isEmpty, !alreadyShown(prompt) { lines.append(ChatLine(role: .jarvis, text: prompt)) }
             options = event["options"] as? [String] ?? []
         case "error":
             lines.append(ChatLine(role: .error, text: text.isEmpty ? "session error" : text))
         case "done":
             turnActive = false
-            if !text.isEmpty { lines.append(ChatLine(role: .jarvis, text: text)) }
+            if !text.isEmpty, !alreadyShown(text) { lines.append(ChatLine(role: .jarvis, text: text)) }
+            echoed = []
         default:
             break
         }
+    }
+
+    /// True once for a text /chat already rendered; that copy is then forgotten.
+    private func alreadyShown(_ text: String) -> Bool {
+        guard let index = echoed.firstIndex(of: text) else { return false }
+        echoed.remove(at: index)
+        return true
     }
 }
 
