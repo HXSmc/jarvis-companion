@@ -34,14 +34,16 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 import time
+import urllib.parse
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from common import config
 from gateway import registry
@@ -53,6 +55,12 @@ logger = logging.getLogger(__name__)
 
 _STORE_NAME = "inbox.json"
 _PHONE_DIR_DEFAULT = "~/Desktop/personal/jarvis-phone"
+
+# Inbox item ids are example message IDs as stored by scripts/vendor_watch.py
+# (`h["ID"]`): url-safe alphanumerics plus `-` and `_`. Anything else can only
+# be a probe — reject it before it is ever interpolated into a forwarded URL
+# (`notify?`/`notify#` pivot onto other routes, `..` climbs the path).
+_ITEM_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def _store_dir() -> Path:
@@ -314,7 +322,7 @@ async def _mac_mark_read(item_id: str) -> httpx.Response | None:
     try:
         async with _mac_client() as client:
             return await client.post(
-                f"{_mac_gateway()}/inbox/{item_id}/read",
+                f"{_mac_gateway()}/inbox/{urllib.parse.quote(item_id, safe='')}/read",
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.HTTPError as exc:
@@ -372,6 +380,11 @@ async def get_inbox() -> dict:
     "/inbox/{item_id}/read", dependencies=[Depends(require_bearer_any("ios_token"))]
 )
 async def mark_read(item_id: str) -> dict:
+    # Store ids are always regex-clean (see _ITEM_ID_RE), so this 404s local
+    # lookups no differently — but in box mode it fires BEFORE the forward, so
+    # a probe like /inbox/notify%3F/read can never pivot onto another Mac route.
+    if not _ITEM_ID_RE.fullmatch(item_id):
+        raise HTTPException(status_code=404, detail="unknown inbox item")
     if _mac_gateway():
         resp = await _mac_mark_read(item_id)
         if resp is None:
@@ -388,16 +401,29 @@ async def mark_read(item_id: str) -> dict:
     return {"ok": True, "unread": _unread_count(items)}
 
 
-@router.post(
-    "/inbox/notify", dependencies=[Depends(require_bearer_any("ios_token", "token"))]
-)
+# /inbox/notify auth: box mode is ios_token-ONLY — the shared token is more
+# widely held (PC agent config, the iCloud Shortcut) and must not reach the
+# box's copy of this route. Mac mode keeps accepting either token: J1's
+# watcher holds the shared token and the Mac's notify also runs the
+# guaranteed-path enqueue.
+_NOTIFY_AUTH_BOX = require_bearer_any("ios_token")
+_NOTIFY_AUTH_ANY = require_bearer_any("ios_token", "token")
+
+
+async def _notify_auth(authorization: str | None = Header(default=None)) -> None:
+    await (_NOTIFY_AUTH_BOX if _mac_gateway() else _NOTIFY_AUTH_ANY)(authorization)
+
+
+@router.post("/inbox/notify", dependencies=[Depends(_notify_auth)])
 async def notify(request: Request) -> dict:
     """Watcher (J1/J3) pokes new mail: recount unread, push `inbox_new` to ios.
 
     Body ``{"new": int, "unread": int, "urgent": bool}`` (all optional) — the
     unread count in the pushed payload is always recounted (from the local
     store, or from the Mac's own /inbox in box mode — see module docstring),
-    never trusted from the body. ``new > 0`` also fires the guaranteed path
+    never trusted from the body. In box mode the route takes the ios_token
+    only (see _notify_auth) and clamps ``new`` to 0..1000. ``new > 0`` also
+    fires the guaranteed path
     (jarvis-phone WhatsApp/email + urgent event) — but ONLY in Mac mode; in
     box mode the Mac's own local notify call already ran that, so running it
     again here would double-send. Enqueue failures never fail the request.
@@ -413,6 +439,8 @@ async def notify(request: Request) -> dict:
         body = {}
     new = body.get("new")
     if _mac_gateway():
+        if isinstance(new, int):
+            new = max(0, min(1000, new))  # clamp the counter relayed to ios
         mac_data = await _mac_get_inbox()
         unread = mac_data.get("unread", 0) if isinstance(mac_data, dict) else 0
     else:

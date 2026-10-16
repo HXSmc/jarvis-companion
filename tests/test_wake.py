@@ -4,7 +4,7 @@ No network: `wake._send_packet` (the socket seam) is stubbed, `registry.roles`
 monkeypatched, `_directed_broadcasts` stubbed (no ifconfig subprocess), and the
 90 s wait driven by a fake clock over the `_now`/`_sleep` seams. The endpoint
 rides a minimal FastAPI app mounting only `wake.router` (W1 wires it into the
-real app — that file is off-limits here). Exactly 13 tests; the 401 check is
+real app — that file is off-limits here). Exactly 15 tests; the 401 check is
 folded into test_wake_waits_for_registry. The last 2 exercise the real
 `_send_packet` socket loop directly (its own module-level `socket.socket` is
 monkeypatched — no packets hit the wire) to cover the per-target resilience
@@ -15,6 +15,7 @@ there).
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import httpx
 import pytest
@@ -71,9 +72,17 @@ def fake_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
 
 @pytest.fixture
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[tuple[bytes, list[tuple[str, int]]]]:
-    """Records (packet, targets) at the socket seam — no real packets, no ifconfig."""
+    """Records (packet, targets) at the socket seam — no real packets, no ifconfig.
+
+    Returns the target count like the real _send_packet (wake_pc maps
+    count > 0 onto the reply's `sent` flag)."""
     calls: list[tuple[bytes, list[tuple[str, int]]]] = []
-    monkeypatch.setattr(wake, "_send_packet", lambda packet, targets: calls.append((packet, targets)))
+
+    def record(packet, targets):
+        calls.append((packet, targets))
+        return len(targets)
+
+    monkeypatch.setattr(wake, "_send_packet", record)
     monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
     return calls
 
@@ -252,20 +261,20 @@ def test_remember_and_last_seen_roundtrip(monkeypatch, tmp_path) -> None:
     assert wake.last_seen_mac() is None
 
 
-class _FakeSocket:
-    """Stand-in for socket.socket: records sendto() calls, one target raises."""
+class _FakeSocket(socket.socket):
+    """socket.socket with a faked sendto(): records calls; targets listed in
+    `fail_addr`/`fail_addrs` raise OSError like a dead unicast hop.
+
+    Subclasses the REAL socket so the asyncio event loop's own socketpair()
+    (which resolves the monkeypatched `socket.socket` name) keeps working —
+    no packet is ever put on the wire because sendto is the only faked call."""
 
     log: list[tuple[str, int]] = []
     fail_addr = None
-
-    def __init__(self, *a, **kw) -> None:
-        pass
-
-    def setsockopt(self, *a, **kw) -> None:
-        pass
+    fail_addrs: frozenset[tuple[str, int]] = frozenset()
 
     def sendto(self, packet: bytes, addr: tuple[str, int]) -> None:
-        if addr == self.fail_addr:
+        if addr == self.fail_addr or addr in self.fail_addrs:
             raise OSError(64, "Host is down")
         self.log.append(addr)
 
@@ -286,7 +295,7 @@ def test_send_packet_one_bad_target_does_not_block_the_rest(monkeypatch) -> None
     monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
 
     targets = [("255.255.255.255", 9), ("<lan>.1.255", 9), ("<lan>.1.117", 9)]
-    wake._send_packet(b"packet", targets)  # must not raise
+    assert wake._send_packet(b"packet", targets) == 2  # must not raise; counts the sends
 
     assert _FakeSocket.log == [("255.255.255.255", 9), ("<lan>.1.255", 9)]
 
@@ -297,6 +306,48 @@ def test_send_packet_all_targets_ok(monkeypatch) -> None:
     monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
 
     targets = [("255.255.255.255", 9), ("<lan>.1.255", 9)]
-    wake._send_packet(b"packet", targets)
+    assert wake._send_packet(b"packet", targets) == 2
 
     assert _FakeSocket.log == targets
+
+
+def test_wake_sent_false_when_every_target_fails(
+    stubbed_token, wake_app, monkeypatch, tmp_state, fake_clock
+) -> None:
+    """I2: `sent` reflects the real per-target outcome — a batch where every
+    sendto raises OSError must report sent:false, not a blanket True."""
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff"})
+    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
+    _FakeSocket.log = []
+    _FakeSocket.fail_addrs = frozenset({("255.255.255.255", 9), ("<lan>.1.255", 9)})
+    monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
+    monkeypatch.setattr(wake.registry, "roles", lambda: [])  # PC never comes online
+
+    resp = _post_wake(wake_app, stubbed_token)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sent"] is False
+    assert body["online"] is False
+    assert _FakeSocket.log == []  # every sendto raised
+
+
+def test_wake_sent_true_when_one_target_succeeds(
+    stubbed_token, wake_app, monkeypatch, tmp_state, fake_clock
+) -> None:
+    """One successful send among failures is enough for sent:true — the dead
+    target must not mask the packet that actually went out."""
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff"})
+    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
+    _FakeSocket.log = []
+    _FakeSocket.fail_addrs = frozenset({("255.255.255.255", 9)})
+    monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
+    monkeypatch.setattr(wake.registry, "roles", lambda: [])
+
+    resp = _post_wake(wake_app, stubbed_token)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sent"] is True
+    assert body["online"] is False
+    assert _FakeSocket.log == [("<lan>.1.255", 9)]  # only the healthy target
