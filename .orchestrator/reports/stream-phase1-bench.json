@@ -1,0 +1,53 @@
+[
+  {
+    "path": "JPEG polling (emulated, 200 ms delay)",
+    "trials": 15,
+    "latency_median_ms": 151.1,
+    "latency_p90_ms": 256.6,
+    "fps": 1.4,
+    "kbps": 1014,
+    "cpu_pct": 15.0
+  },
+  {
+    "path": "JPEG polling (emulated, 1000 ms delay)",
+    "trials": 15,
+    "latency_median_ms": 243.9,
+    "latency_p90_ms": 376.4,
+    "fps": 0.0,
+    "kbps": 241,
+    "cpu_pct": 3.5
+  },
+  {
+    "path": "noVNC (websockify, default tight)",
+    "trials": 14,
+    "latency_median_ms": 27.1,
+    "latency_p90_ms": 36.3,
+    "fps": 7.5,
+    "kbps": 21102,
+    "cpu_pct": 14.1
+  },
+  {
+    "path": "H.264 stream (VA-API vah264lpenc)",
+    "trials": 15,
+    "latency_median_ms": 60.0,
+    "latency_p90_ms": 61.0,
+    "fps": 7.5,
+    "kbps": 4487,
+    "cpu_pct": 28.3,
+    "decoded_fps": 30.1,
+    "decode_errors": 0,
+    "helpers_left_after_close": 0
+  },
+  {
+    "path": "H.264 stream (openh264, software)",
+    "trials": 15,
+    "latency_median_ms": 127.0,
+    "latency_p90_ms": 130.9,
+    "fps": 7.2,
+    "kbps": 3820,
+    "cpu_pct": 84.0,
+    "decoded_fps": 30.2,
+    "decode_errors": 0,
+    "helpers_left_after_close": 0
+  }
+]

@@ -20,7 +20,6 @@ import hashlib
 import json
 import logging
 import os
-import urllib.parse
 from pathlib import Path
 
 import httpx
@@ -111,24 +110,10 @@ _live = 0  # current concurrent vnc_ws sessions (L2 cap)
 @router.websocket("/ws")
 async def vnc_ws(ws: WebSocket) -> None:
     global _live
-    # screen._authorized only touches .cookies/.headers — a WebSocket carries
-    # both, so the same helper serves HTTP and WS (no duplicate auth logic).
-    kind = screen._authorized(ws)
-    if kind not in ("cookie", "bearer"):
+    # Shared with gateway/stream.py: cookie/ios Bearer + M2 origin guard.
+    if not await screen._ws_authorized(ws):
         await ws.close(code=1008)
         return
-    # M2 cross-site WebSocket hijack guard: a cookie-authenticated connection
-    # must prove same-origin (Origin netloc == the Host we serve, or the
-    # tailscale serve base from screen._public_base). Bearer connections are
-    # the iOS app — no Origin, no check.
-    if kind == "cookie":
-        origin = ws.headers.get("origin")
-        allowed = {ws.headers.get("host", "")}
-        base = await screen._public_base()
-        allowed.add(urllib.parse.urlsplit(base).netloc)
-        if not origin or urllib.parse.urlsplit(origin).netloc not in allowed:
-            await ws.close(code=1008)
-            return
     await ws.accept(subprotocol="binary")
     if _live >= MAX_VNC_SESSIONS:
         await ws.close(code=4004)

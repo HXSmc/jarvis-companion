@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Screen stream</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 13px -apple-system, system-ui, sans-serif; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100%; max-height: 100%; touch-action: none; outline: none; }
+  #bar { position: fixed; top: env(safe-area-inset-top, 0); left: 0; right: 0; display: flex; gap: 12px;
+         padding: 4px 8px; background: rgba(0,0,0,.55); z-index: 2; }
+  #bar a { color: #8cf; }
+  #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+<div id="bar"><span id="stat">connecting…</span><a id="fallback" href="/screen">JPEG view</a></div>
+<div id="wrap"><canvas id="c" tabindex="0"></canvas></div>
+<div id="msg"></div>
+<script>
+"use strict";
+const target = new URLSearchParams(location.search).get("target") || "minipc";
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const statEl = document.getElementById("stat");
+document.getElementById("fallback").href = "/screen?target=" + encodeURIComponent(target);
+// Exposed for scripts/stream_bench.py (headless Chromium measurements).
+const stats = window.__stream = { frames: 0, decoded: 0, bytes: 0, keys: 0, errors: 0, rtt: null };
+
+function fail(text) {
+  const m = document.getElementById("msg");
+  m.textContent = text;
+  m.style.display = "flex";
+}
+
+if (!("VideoDecoder" in window)) {
+  fail("This browser has no WebCodecs video decoder. Use the JPEG view.");
+} else {
+  start();
+}
+
+// "avc1.PPCCLL" from the SPS NAL (type 7) of an Annex-B keyframe.
+function codecFromAU(au) {
+  for (let i = 0; i + 4 < au.length; i++) {
+    if (au[i] === 0 && au[i + 1] === 0 && au[i + 2] === 1 && (au[i + 3] & 0x1f) === 7) {
+      const hex = (b) => b.toString(16).padStart(2, "0");
+      return "avc1." + hex(au[i + 4]) + hex(au[i + 5]) + hex(au[i + 6]);
+    }
+  }
+  return null;
+}
+
+function start() {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host +
+                           "/screen/" + encodeURIComponent(target) + "/stream");
+  ws.binaryType = "arraybuffer";
+  let decoder = null, codec = null, needKey = true, latest = null;
+
+  const send = (obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+
+  function newDecoder() {
+    if (decoder && decoder.state !== "closed") decoder.close();
+    decoder = new VideoDecoder({
+      output(frame) {
+        if (latest) latest.close();  // only the newest frame is ever drawn
+        latest = frame;
+        stats.decoded++;
+      },
+      // Rebuild on the next keyframe, not here: a config error would loop forever.
+      error() { stats.errors++; needKey = true; decoder = null; send({ type: "keyframe" }); },
+    });
+    // No hardwareAcceleration hint: "prefer-hardware" is a hard requirement and fails without a GPU decoder.
+    if (codec) decoder.configure({ codec, optimizeForLatency: true });
+  }
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "ping") send({ type: "pong", t: msg.t });
+      return;
+    }
+    const view = new DataView(ev.data);
+    const key = (view.getUint8(0) & 1) === 1;
+    const ts = view.getFloat64(1, true);
+    const au = new Uint8Array(ev.data, 9);
+    stats.frames++; stats.bytes += ev.data.byteLength;
+    if (key) {
+      stats.keys++;
+      const c = codecFromAU(au);
+      if (c && (c !== codec || !decoder)) { codec = c; newDecoder(); }
+      needKey = false;
+    }
+    if (needKey || !decoder || decoder.state !== "configured") return;
+    // A deep decode queue means we are behind: skip to the next keyframe.
+    if (!key && decoder.decodeQueueSize > 3) { needKey = true; send({ type: "keyframe" }); return; }
+    decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: Math.round(ts * 1000), data: au }));
+  };
+  ws.onclose = (ev) => {
+    const why = { 1008: "not signed in", 4004: "too many viewers", 4005: "no stream for this screen", 4006: "stream helper stopped" };
+    fail("Stream closed (" + (why[ev.code] || ev.code) + "). Reload, or use the JPEG view.");
+  };
+
+  function draw() {
+    if (latest) {
+      if (canvas.width !== latest.displayWidth || canvas.height !== latest.displayHeight) {
+        canvas.width = latest.displayWidth; canvas.height = latest.displayHeight;
+      }
+      ctx.drawImage(latest, 0, 0);
+      latest.close(); latest = null;
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  let lastF = 0, lastB = 0;
+  setInterval(() => {
+    statEl.textContent = (stats.frames - lastF) + " fps · " + Math.round((stats.bytes - lastB) * 8 / 1000) + " kbps";
+    lastF = stats.frames; lastB = stats.bytes;
+  }, 1000);
+
+  // ---- input: same ScreenEvent shapes as screen.html (coords 0..1) ----
+  const input = (events) => send({ type: "input", events });
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1),
+             y: Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1) };
+  };
+  let down = null, lastTap = 0, lastMove = 0;
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("pointerdown", (e) => { canvas.focus(); down = { ...pos(e), button: e.button }; });
+  canvas.addEventListener("pointermove", (e) => {
+    if (down || e.pointerType !== "mouse") return;
+    const now = performance.now();
+    if (now - lastMove < 33) return;  // ~30 moves/s keeps us under the 60/2 s input cap with clicks
+    lastMove = now; input([{ type: "move", ...pos(e) }]);
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    if (!down) return;
+    const p = pos(e), d = down; down = null;
+    const r = canvas.getBoundingClientRect();
+    const moved = Math.hypot((p.x - d.x) * r.width, (p.y - d.y) * r.height) > 8;
+    if (moved) { input([{ type: "drag", x: d.x, y: d.y, dx: p.x - d.x, dy: p.y - d.y }]); return; }
+    if (d.button === 2) { input([{ type: "right", ...p }]); return; }
+    const now = performance.now();
+    input([{ type: now - lastTap < 300 ? "dblclick" : "tap", ...p }]);
+    lastTap = now;
+  });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    input([{ type: "scroll", dx: Math.sign(e.deltaX), dy: Math.sign(e.deltaY) }]);
+  }, { passive: false });
+  const KEYS = { Enter: "return", Escape: "esc", Backspace: "delete", Tab: "tab", " ": "space",
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Home: "home", End: "end",
+    PageUp: "pageup", PageDown: "pagedown" };
+  for (let i = 1; i <= 12; i++) KEYS["F" + i] = "f" + i;
+  canvas.addEventListener("keydown", (e) => {
+    const mods = [];
+    if (e.metaKey) mods.push("cmd"); if (e.ctrlKey) mods.push("ctrl"); if (e.altKey) mods.push("alt");
+    if (KEYS[e.key]) {
+      if (e.shiftKey) mods.push("shift");
+      input([{ type: "key", key: KEYS[e.key], mods }]);
+    } else if (e.key.length === 1 && !mods.length) {
+      input([{ type: "text", text: e.key }]);
+    } else {
+      return;
+    }
+    e.preventDefault();
+  });
+}
+</script>
+</body>
+</html>

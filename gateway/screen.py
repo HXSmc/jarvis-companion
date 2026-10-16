@@ -24,6 +24,7 @@ import os
 import secrets
 import subprocess
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -121,6 +122,27 @@ def _require(request: Request) -> str:
     return kind
 
 
+async def _ws_authorized(ws) -> bool:
+    """WebSocket twin of _require: cookie/ios Bearer only, plus the origin check.
+
+    M2 cross-site WebSocket hijack guard: a cookie-authenticated connection
+    must prove same-origin (Origin netloc == the Host we serve, or the
+    tailscale serve base from _public_base). Bearer connections are the iOS
+    app — no Origin, no check. _authorized only touches .cookies/.headers, so
+    the same helper serves HTTP and WS.
+    """
+    kind = _authorized(ws)
+    if kind not in ("cookie", "bearer"):
+        return False
+    if kind == "cookie":
+        origin = ws.headers.get("origin")
+        allowed = {ws.headers.get("host", "")}
+        allowed.add(urllib.parse.urlsplit(await _public_base()).netloc)
+        if not origin or urllib.parse.urlsplit(origin).netloc not in allowed:
+            return False
+    return True
+
+
 def _windows_online() -> None:
     if WINDOWS_ROLE not in roles():
         raise HTTPException(status_code=503, detail=PC_OFFLINE_DETAIL)
@@ -203,7 +225,12 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
         kind = _require(request)
     # Serve-time inline: cursor.js is spliced into the page's placeholder
     # script tag — one request, no extra route, no separate cacheable fetch.
-    response = HTMLResponse(SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text()))
+    return _page(SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text()), kind)
+
+
+def _page(html: str, kind: str) -> HTMLResponse:
+    """HTML page response; a Bearer or boot handshake also mints the session cookie."""
+    response = HTMLResponse(html)
     if kind in ("bearer", "boot"):
         response.set_cookie(
             SESSION_COOKIE, _mint_session(),
