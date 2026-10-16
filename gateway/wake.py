@@ -92,11 +92,23 @@ def _directed_broadcasts() -> list[str]:
 
 
 def _send_packet(packet: bytes, targets: list[tuple[str, int]]) -> None:
-    """UDP blast of `packet` to every target — the socket seam tests stub."""
+    """UDP blast of `packet` to every target — the socket seam tests stub.
+
+    Best-effort PER TARGET: one target raising must never stop the others
+    from being sent. Found live 2026-10-16 — a unicast send to the PC's last
+    known IP while it is fully powered off (not just asleep, no ARP entry)
+    raises OSError(64, "Host is down") on macOS but not on Linux (the box),
+    which was making the whole batch look like it never went out at all on
+    the Mac even though the broadcast targets (which are what actually wake
+    a sleeping PC) had already gone out fine.
+    """
     for addr in targets:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            s.sendto(packet, addr)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                s.sendto(packet, addr)
+        except OSError:
+            logger.warning("wake: send to %s failed", addr, exc_info=True)
 
 
 def remember_mac(mac: str) -> None:

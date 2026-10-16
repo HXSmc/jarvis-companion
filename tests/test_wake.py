@@ -4,8 +4,12 @@ No network: `wake._send_packet` (the socket seam) is stubbed, `registry.roles`
 monkeypatched, `_directed_broadcasts` stubbed (no ifconfig subprocess), and the
 90 s wait driven by a fake clock over the `_now`/`_sleep` seams. The endpoint
 rides a minimal FastAPI app mounting only `wake.router` (W1 wires it into the
-real app — that file is off-limits here). Exactly 11 tests; the 401 check is
-folded into test_wake_waits_for_registry.
+real app — that file is off-limits here). Exactly 13 tests; the 401 check is
+folded into test_wake_waits_for_registry. The last 2 exercise the real
+`_send_packet` socket loop directly (its own module-level `socket.socket` is
+monkeypatched — no packets hit the wire) to cover the per-target resilience
+fix (found live 2026-10-16 on the Mac vs the box, see wake.py's docstring
+there).
 """
 
 from __future__ import annotations
@@ -246,3 +250,53 @@ def test_remember_and_last_seen_roundtrip(monkeypatch, tmp_path) -> None:
 
     state.write_text("{not json", encoding="utf-8")  # corrupt
     assert wake.last_seen_mac() is None
+
+
+class _FakeSocket:
+    """Stand-in for socket.socket: records sendto() calls, one target raises."""
+
+    log: list[tuple[str, int]] = []
+    fail_addr = None
+
+    def __init__(self, *a, **kw) -> None:
+        pass
+
+    def setsockopt(self, *a, **kw) -> None:
+        pass
+
+    def sendto(self, packet: bytes, addr: tuple[str, int]) -> None:
+        if addr == self.fail_addr:
+            raise OSError(64, "Host is down")
+        self.log.append(addr)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a) -> None:
+        pass
+
+
+def test_send_packet_one_bad_target_does_not_block_the_rest(monkeypatch) -> None:
+    """A single target's OSError (e.g. an off PC with no ARP entry on macOS)
+    must not stop the other targets from being sent — found live 2026-10-16:
+    this previously made the Mac report sent:false for a batch where the
+    broadcast targets (the ones that actually matter) went out fine."""
+    _FakeSocket.log = []
+    _FakeSocket.fail_addr = ("<lan>.1.117", 9)
+    monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
+
+    targets = [("255.255.255.255", 9), ("<lan>.1.255", 9), ("<lan>.1.117", 9)]
+    wake._send_packet(b"packet", targets)  # must not raise
+
+    assert _FakeSocket.log == [("255.255.255.255", 9), ("<lan>.1.255", 9)]
+
+
+def test_send_packet_all_targets_ok(monkeypatch) -> None:
+    _FakeSocket.log = []
+    _FakeSocket.fail_addr = None
+    monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
+
+    targets = [("255.255.255.255", 9), ("<lan>.1.255", 9)]
+    wake._send_packet(b"packet", targets)
+
+    assert _FakeSocket.log == targets
