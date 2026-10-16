@@ -13,11 +13,24 @@ link; email instead while the overnight marker is set) and, when the caller
 flags the mail urgent, a jarvis-phone event. The jarvis-phone root is
 overridable via ``JARVIS_PHONE_DIR``; every enqueue failure is logged and
 swallowed — notify must never raise.
+
+Split deploy (gateway on the mini PC): J1's watcher (``scripts/vendor_watch.py``)
+only ever runs on the Mac (it's the only machine with example MCP access), so
+the box's own local store is always empty. When ``MAC_GATEWAY_URL`` is set
+(box mode, same env + pattern as ``gateway/central.py`` and ``gateway/screen.py``),
+``GET /inbox`` and the mark-read route forward to the Mac's own copy of those
+routes with the ios_token instead of reading the local (empty) store.
+``POST /inbox/notify`` stays local even in box mode — its job there is to
+wake whichever "ios" websocket is connected to THIS gateway instance — but it
+skips the guaranteed-path enqueue (the Mac's own local notify call already
+ran that) and pulls the real unread count from the Mac instead of the local
+store.
 """
 
 from __future__ import annotations
 
 import fcntl
+import ipaddress
 import json
 import logging
 import os
@@ -27,8 +40,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from common import config
 from gateway import registry
 from gateway.auth import require_bearer_any
 
@@ -252,15 +267,96 @@ def _enqueue_guaranteed(new: int, items: list[dict], body: dict) -> None:
         logger.warning("inbox: guaranteed-path enqueue failed", exc_info=True)
 
 
+# Split deploy: MAC_GATEWAY_URL set = this process runs on the box, the
+# vendor-watch store lives on the Mac instead. Same env + helper shape as
+# gateway/central.py and gateway/screen.py.
+MAC_GATEWAY_ENV = "MAC_GATEWAY_URL"
+MAC_PROXY_TIMEOUT = httpx.Timeout(8.0, connect=3.0)
+
+
+def _mac_gateway() -> str | None:
+    return os.environ.get(MAC_GATEWAY_ENV, "").rstrip("/") or None
+
+
+def _mac_client() -> httpx.AsyncClient:
+    """Outbound client to the Mac gateway (tests swap in an ASGI transport here)."""
+    return httpx.AsyncClient(timeout=MAC_PROXY_TIMEOUT)
+
+
+def _ios_token() -> str | None:
+    return config.get_token(name="ios_token")
+
+
+async def _mac_get_inbox() -> dict | None:
+    """GET the Mac gateway's own /inbox; None on any failure (down, no token, bad body)."""
+    token = _ios_token()
+    if not token:
+        return None
+    try:
+        async with _mac_client() as client:
+            resp = await client.get(
+                f"{_mac_gateway()}/inbox", headers={"Authorization": f"Bearer {token}"}
+            )
+        data = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("mac gateway /inbox failed: %s", type(exc).__name__)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return None
+    return data
+
+
+async def _mac_mark_read(item_id: str) -> httpx.Response | None:
+    """POST the Mac gateway's own mark-read route; None = unreachable/no token."""
+    token = _ios_token()
+    if not token:
+        return None
+    try:
+        async with _mac_client() as client:
+            return await client.post(
+                f"{_mac_gateway()}/inbox/{item_id}/read",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.info("mac gateway /inbox/%s/read failed: %s", item_id, type(exc).__name__)
+        return None
+
+
+# Tailscale's CGNAT range (https://tailscale.com/kb/1015/100.x-addresses) —
+# every tailnet node gets one of these, and this port is never bound to
+# anything but 127.0.0.1 (tailscale serve fronts it on the tailnet side), so
+# a caller presenting one of these addresses already had to be an
+# authenticated tailnet peer to reach this process at all.
+_TAILNET_CGNAT = ipaddress.ip_network("<cgnat-ip>/10")
+
+
 def _loopback_guard(request: Request) -> None:
-    """/inbox/notify is a localhost-only trigger: anything but 127.0.0.1 gets 403."""
+    """/inbox/notify: localhost, or a tailnet peer, gets through; anything else 403s.
+
+    Confirmed empirically (2026-10-16): tailscale serve forwards the REAL
+    remote tailnet address here, not 127.0.0.1 — so this is what lets the
+    Mac's mail watcher reach the box's copy of this route cross-host over
+    the tailnet (with the shared/ios bearer token the route already
+    requires) instead of only ever being callable from the same machine.
+    The bearer-token check (Depends above) is the real access control; this
+    guard is strictly the extra "never the public internet" belt.
+    """
     host = request.client.host if request.client else None
-    if host != "127.0.0.1":
-        raise HTTPException(status_code=403, detail="loopback only")
+    if host == "127.0.0.1":
+        return
+    try:
+        if host and ipaddress.ip_address(host) in _TAILNET_CGNAT:
+            return
+    except ValueError:
+        pass
+    raise HTTPException(status_code=403, detail="loopback only")
 
 
 @router.get("/inbox", dependencies=[Depends(require_bearer_any("ios_token"))])
 async def get_inbox() -> dict:
+    if _mac_gateway():
+        data = await _mac_get_inbox()
+        return data if data is not None else {"items": [], "unread": 0}
     items = _newest_first(_load_items())
     return {"items": items, "unread": _unread_count(items)}
 
@@ -269,6 +365,16 @@ async def get_inbox() -> dict:
     "/inbox/{item_id}/read", dependencies=[Depends(require_bearer_any("ios_token"))]
 )
 async def mark_read(item_id: str) -> dict:
+    if _mac_gateway():
+        resp = await _mac_mark_read(item_id)
+        if resp is None:
+            raise HTTPException(status_code=503, detail="mac offline")
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="unknown inbox item")
+        try:
+            return resp.json()
+        except ValueError:
+            raise HTTPException(status_code=503, detail="mac offline") from None
     if not _mark_read(item_id):
         raise HTTPException(status_code=404, detail="unknown inbox item")
     items = _load_items()
@@ -279,13 +385,16 @@ async def mark_read(item_id: str) -> dict:
     "/inbox/notify", dependencies=[Depends(require_bearer_any("ios_token", "token"))]
 )
 async def notify(request: Request) -> dict:
-    """Local watcher (J1/J3) pokes new mail: recount unread, push `inbox_new` to ios.
+    """Watcher (J1/J3) pokes new mail: recount unread, push `inbox_new` to ios.
 
     Body ``{"new": int, "unread": int, "urgent": bool}`` (all optional) — the
-    unread count in the pushed payload is always recounted from the store,
+    unread count in the pushed payload is always recounted (from the local
+    store, or from the Mac's own /inbox in box mode — see module docstring),
     never trusted from the body. ``new > 0`` also fires the guaranteed path
-    (jarvis-phone WhatsApp/email + urgent event); enqueue failures never fail
-    the request. No ios socket connected (or send failure) still replies 200
+    (jarvis-phone WhatsApp/email + urgent event) — but ONLY in Mac mode; in
+    box mode the Mac's own local notify call already ran that, so running it
+    again here would double-send. Enqueue failures never fail the request.
+    No ios socket connected (or send failure) still replies 200
     ``{"ok": true, "delivered": false}`` — notify must never raise.
     """
     _loopback_guard(request)
@@ -296,12 +405,16 @@ async def notify(request: Request) -> dict:
     if not isinstance(body, dict):
         body = {}
     new = body.get("new")
-    items = _load_items()
-    unread = _unread_count(items)
+    if _mac_gateway():
+        mac_data = await _mac_get_inbox()
+        unread = mac_data.get("unread", 0) if isinstance(mac_data, dict) else 0
+    else:
+        items = _load_items()
+        unread = _unread_count(items)
+        _enqueue_guaranteed(new if isinstance(new, int) else 0, items, body)
     payload: dict = {"unread": unread}
     if isinstance(new, int):
         payload["new"] = new
-    _enqueue_guaranteed(new if isinstance(new, int) else 0, items, body)
     try:
         delivered = await registry.send_to_role(
             "ios",
