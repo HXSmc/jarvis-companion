@@ -56,12 +56,27 @@ def test_every_contract_role_has_a_sprite(role):
 
 
 def test_unknown_role_falls_back_to_worker_not_404():
+    from gateway.central import SPRITES_STATIC_DIR
+
     svg = _get("/central/sprites/NOPE_NOT_A_ROLE.svg")
     assert svg.status_code == 200
-    assert svg.text == sprites.svg_for("WORKER")
+    worker_svg_file = SPRITES_STATIC_DIR / "WORKER.svg"
+    if worker_svg_file.is_file():
+        # Static art has been merged; fallback should return the real file
+        assert svg.text == worker_svg_file.read_text()
+    else:
+        # Pre-merge: fallback uses the generator
+        assert svg.text == sprites.svg_for("WORKER")
+
     png = _get("/central/sprites/NOPE_NOT_A_ROLE@1x.png")
     assert png.status_code == 200
-    assert png.content == sprites.png_bytes_for("WORKER", sprites.PNG_SCALES["1x"])
+    worker_png_file = SPRITES_STATIC_DIR / "WORKER.png"
+    if worker_png_file.is_file():
+        # Static art has been merged; fallback should return the real file
+        assert png.content == worker_png_file.read_bytes()
+    else:
+        # Pre-merge: fallback uses the generator
+        assert png.content == sprites.png_bytes_for("WORKER", sprites.PNG_SCALES["1x"])
 
 
 def test_sprite_route_is_cacheable():
