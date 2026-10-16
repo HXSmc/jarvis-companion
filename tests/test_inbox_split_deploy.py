@@ -179,10 +179,24 @@ def test_notify_box_mode_pulls_unread_from_mac_and_skips_guaranteed_path(monkeyp
     assert captured["envelope"]["payload"]["unread"] == MAC_INBOX_BODY["unread"]
 
 
-def test_loopback_guard_accepts_tailnet_peer() -> None:
-    """A tailnet CGNAT address (e.g. the Mac calling the box) gets through."""
+def test_loopback_guard_accepts_tailnet_peer_in_box_mode(monkeypatch) -> None:
+    """A tailnet CGNAT address (e.g. the Mac calling the box) gets through
+    ONLY when MAC_GATEWAY_URL is set — i.e. only on the box."""
+    monkeypatch.setenv(inbox.MAC_GATEWAY_ENV, "http://mac.test")
     request = StarletteRequest({"type": "http", "client": ("<cgnat-ip>", 51515), "method": "POST"})
     inbox._loopback_guard(request)  # must not raise
+
+
+def test_loopback_guard_rejects_tailnet_peer_in_mac_mode(monkeypatch) -> None:
+    """On the Mac (MAC_GATEWAY_URL unset) the guard stays strictly loopback-only —
+    this route still runs the real guaranteed WhatsApp/email + call_eligible
+    path there, so widening it would let any tailnet holder of the shared
+    token trigger a real message or call to the owner."""
+    monkeypatch.delenv(inbox.MAC_GATEWAY_ENV, raising=False)
+    request = StarletteRequest({"type": "http", "client": ("<cgnat-ip>", 51515), "method": "POST"})
+    with pytest.raises(HTTPException) as exc:
+        inbox._loopback_guard(request)
+    assert exc.value.status_code == 403
 
 
 def test_loopback_guard_still_rejects_loopback_literal() -> None:
@@ -190,7 +204,8 @@ def test_loopback_guard_still_rejects_loopback_literal() -> None:
     inbox._loopback_guard(request)  # must not raise
 
 
-def test_loopback_guard_rejects_public_address() -> None:
+def test_loopback_guard_rejects_public_address(monkeypatch) -> None:
+    monkeypatch.setenv(inbox.MAC_GATEWAY_ENV, "http://mac.test")  # even in box mode
     for host in ("8.8.8.8", "<lan>.1.5", "::1", "10.0.0.5"):
         request = StarletteRequest({"type": "http", "client": (host, 51515), "method": "POST"})
         with pytest.raises(HTTPException) as exc:

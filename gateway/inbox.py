@@ -331,24 +331,31 @@ _TAILNET_CGNAT = ipaddress.ip_network("<cgnat-ip>/10")
 
 
 def _loopback_guard(request: Request) -> None:
-    """/inbox/notify: localhost, or a tailnet peer, gets through; anything else 403s.
+    """/inbox/notify: localhost always gets through; a tailnet peer ONLY in
+    box mode (MAC_GATEWAY_URL set). Anything else 403s.
 
     Confirmed empirically (2026-10-16): tailscale serve forwards the REAL
     remote tailnet address here, not 127.0.0.1 — so this is what lets the
     Mac's mail watcher reach the box's copy of this route cross-host over
-    the tailnet (with the shared/ios bearer token the route already
-    requires) instead of only ever being callable from the same machine.
-    The bearer-token check (Depends above) is the real access control; this
-    guard is strictly the extra "never the public internet" belt.
+    the tailnet. The tailnet allowance is scoped to box mode ONLY: on the
+    Mac this route still runs the guaranteed WhatsApp/email enqueue (and,
+    with ``urgent: true``, a call_eligible event) — relaxing the guard
+    there would let any tailnet peer holding the shared token (which is
+    more widely held than ios_token: the PC agent config, the iCloud
+    Shortcut) trigger a real message or phone call to the owner. The
+    bearer-token check (Depends above) is still the real access control
+    either way; this guard is the extra "never the public internet" belt,
+    and in Mac mode it stays as strict as it always was.
     """
     host = request.client.host if request.client else None
     if host == "127.0.0.1":
         return
-    try:
-        if host and ipaddress.ip_address(host) in _TAILNET_CGNAT:
-            return
-    except ValueError:
-        pass
+    if _mac_gateway():  # box mode only — see docstring
+        try:
+            if host and ipaddress.ip_address(host) in _TAILNET_CGNAT:
+                return
+        except ValueError:
+            pass
     raise HTTPException(status_code=403, detail="loopback only")
 
 

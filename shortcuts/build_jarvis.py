@@ -31,7 +31,16 @@ import sys
 import uuid
 from pathlib import Path
 
-DEFAULT_URL = "https://<mac-host>.<tailnet>.<tld>:8790/siri/hey"
+# Split deploy (2026-10-16): the phone's iOS websocket now lives on the box,
+# not the Mac — a Siri "show my Mac screen" POSTed to the Mac's own /siri/hey
+# would call launch_screen() there, find no "ios" role connected (it's on
+# the box), and silently do nothing (pushed:false). Point the Shortcut at
+# the box; the Mac gateway stays up as a fallback but is no longer where the
+# phone's socket lives. Rebuilding this constant is NOT enough on its own —
+# the already-installed "Jarvis" Shortcut on the phone needs re-running this
+# script (with the real token) and a manual re-import (one "Add Shortcut"
+# tap); see docs/HANDOFF.md.
+DEFAULT_URL = "https://minipc.<tailnet>.<tld>:8790/siri/hey"
 
 # The magic-variable placeholder: literal U+FFFC in the string, never an XML
 # entity (hex-confirmed against real exported samples in the research note).
