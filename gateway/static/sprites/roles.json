@@ -30,6 +30,11 @@
     "file": "SCOUT.svg"
   },
   {
+    "role": "EXPLORER",
+    "label": "Explorer",
+    "file": "EXPLORER.svg"
+  },
+  {
     "role": "FIXER",
     "label": "Fixer",
     "file": "FIXER.svg"
@@ -53,6 +58,11 @@
     "role": "MARKETER",
     "label": "Marketer",
     "file": "MARKETER.svg"
+  },
+  {
+    "role": "WORKER",
+    "label": "Worker",
+    "file": "WORKER.svg"
   },
   {
     "role": "GLM_WORKER",
