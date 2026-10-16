@@ -80,6 +80,21 @@ enum Central {
         }
         return obj
     }
+
+    /// One file as the raw body; the gateway answers with its id.
+    static func upload(_ file: ChatAttachment) async throws -> String {
+        var request = try Self.request("/central/attachments", method: "POST", timeout: 90)
+        if let url = request.url, var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            comps.queryItems = [URLQueryItem(name: "name", value: file.name)]
+            request.url = comps.url
+        }
+        request.setValue(file.mimeType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = file.data
+        guard let id = try await Self.json(request)["id"] as? String else {
+            throw CentralError("upload failed")
+        }
+        return id
+    }
 }
 
 /// One router session from GET /central/sessions. The gateway always fills
@@ -258,12 +273,7 @@ struct ChatTarget: Identifiable {
     let id = UUID()
     let sessionID: String?
     let title: String
-    /// Home's paperclip: the text typed so far, and which picker to open first.
-    var draft = ""
-    var pick: AttachPick?
 }
-
-enum AttachPick { case photos, files }
 
 @MainActor
 final class SessionsModel: ObservableObject {
@@ -791,21 +801,6 @@ final class ChatModel: ObservableObject {
         deliver(failed.text, files: failed.files, ownerIndex: failed.ownerIndex, midTurn: false)
     }
 
-    /// One file as the raw body; the gateway answers with its id.
-    private func upload(_ file: ChatAttachment) async throws -> String {
-        var request = try Central.request("/central/attachments", method: "POST", timeout: 90)
-        if let url = request.url, var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-            comps.queryItems = [URLQueryItem(name: "name", value: file.name)]
-            request.url = comps.url
-        }
-        request.setValue(file.mimeType, forHTTPHeaderField: "Content-Type")
-        request.httpBody = file.data
-        guard let id = try await Central.json(request)["id"] as? String else {
-            throw CentralError("upload failed")
-        }
-        return id
-    }
-
     private func deliver(_ text: String, files: [ChatAttachment], ownerIndex: Int, midTurn: Bool) {
         guard let msgID = pendingMsgID else { return }
         failed = nil
@@ -819,7 +814,7 @@ final class ChatModel: ObservableObject {
             var files = files
             do {
                 for index in files.indices where files[index].uploadedID == nil {
-                    files[index].uploadedID = try await upload(files[index])
+                    files[index].uploadedID = try await Central.upload(files[index])
                 }
                 var body: [String: Any] = ["msg_id": msgID, "text": text]
                 let ids = files.compactMap(\.uploadedID)
@@ -1053,14 +1048,10 @@ struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = ""
     @State private var showPhotos = false
-    @State private var photoItems: [PhotosPickerItem] = []
     @State private var showFiles = false
-    private let pick: AttachPick?
 
     init(target: ChatTarget) {
         _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title))
-        _draft = State(initialValue: target.draft)
-        pick = target.pick
     }
 
     var body: some View {
@@ -1112,50 +1103,10 @@ struct ChatView: View {
         .preferredColorScheme(.dark)
         .onAppear { model.open() }
         .onDisappear { model.close() }
-        .task {
-            guard let pick = pick else { return }
-            // A picker presented while the sheet is still sliding in gets dropped.
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            switch pick {
-            case .photos: showPhotos = true
-            case .files: showFiles = true
-            }
-        }
-        .photosPicker(isPresented: $showPhotos, selection: $photoItems,
-                      maxSelectionCount: ChatAttachment.maxCount, matching: .images)
-        .onChange(of: photoItems) { items in
-            guard !items.isEmpty else { return }
-            photoItems = []
-            Task { @MainActor in
-                for item in items {
-                    let name = "photo-\(model.attachments.count + 1).jpg"
-                    if let data = try? await item.loadTransferable(type: Data.self),
-                       let file = ChatAttachment.photo(data, name: name) {
-                        model.addAttachment(file)
-                    } else {
-                        model.lines.append(ChatLine(role: .error, text: "could not load that photo"))
-                    }
-                }
-            }
-        }
-        .fileImporter(isPresented: $showFiles, allowedContentTypes: ChatAttachment.fileTypes,
-                      allowsMultipleSelection: true) { result in
-            guard case .success(let urls) = result else { return }
-            for url in urls {
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                // Check the size first so a huge file is never read into memory.
-                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > ChatAttachment.maxBytes {
-                    model.lines.append(ChatLine(role: .error, text: "\(url.lastPathComponent) is over 10 MB"))
-                    continue
-                }
-                if let data = try? Data(contentsOf: url), let file = ChatAttachment.file(url: url, data: data) {
-                    model.addAttachment(file)
-                } else {
-                    model.lines.append(ChatLine(role: .error, text: "\(url.lastPathComponent): file type not supported"))
-                }
-            }
-        }
+        .attachmentPickers(photos: $showPhotos, files: $showFiles,
+                           count: { model.attachments.count },
+                           add: { model.addAttachment($0) },
+                           error: { model.lines.append(ChatLine(role: .error, text: $0)) })
     }
 
     private var header: some View {
@@ -1284,6 +1235,64 @@ struct ChatView: View {
         guard !model.isSending, !empty || !model.attachments.isEmpty else { return }
         model.send(draft)
         draft = ""
+    }
+}
+
+/// Photo Library + Files pickers shared by the chat sheet and the Home prompt:
+/// photos become JPEGs, files keep their type; problems go to `error`.
+private struct AttachmentPickers: ViewModifier {
+    @Binding var photos: Bool
+    @Binding var files: Bool
+    let count: () -> Int
+    let add: (ChatAttachment) -> Void
+    let error: (String) -> Void
+    @State private var photoItems: [PhotosPickerItem] = []
+
+    func body(content: Content) -> some View {
+        content
+            .photosPicker(isPresented: $photos, selection: $photoItems,
+                          maxSelectionCount: ChatAttachment.maxCount, matching: .images)
+            .onChange(of: photoItems) { items in
+                guard !items.isEmpty else { return }
+                photoItems = []
+                Task { @MainActor in
+                    for item in items {
+                        let name = "photo-\(count() + 1).jpg"
+                        if let data = try? await item.loadTransferable(type: Data.self),
+                           let file = ChatAttachment.photo(data, name: name) {
+                            add(file)
+                        } else {
+                            error("could not load that photo")
+                        }
+                    }
+                }
+            }
+            .fileImporter(isPresented: $files, allowedContentTypes: ChatAttachment.fileTypes,
+                          allowsMultipleSelection: true) { result in
+                guard case .success(let urls) = result else { return }
+                for url in urls {
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    // Check the size first so a huge file is never read into memory.
+                    if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > ChatAttachment.maxBytes {
+                        error("\(url.lastPathComponent) is over 10 MB")
+                        continue
+                    }
+                    if let data = try? Data(contentsOf: url), let file = ChatAttachment.file(url: url, data: data) {
+                        add(file)
+                    } else {
+                        error("\(url.lastPathComponent): file type not supported")
+                    }
+                }
+            }
+    }
+}
+
+extension View {
+    func attachmentPickers(photos: Binding<Bool>, files: Binding<Bool>, count: @escaping () -> Int,
+                           add: @escaping (ChatAttachment) -> Void,
+                           error: @escaping (String) -> Void) -> some View {
+        modifier(AttachmentPickers(photos: photos, files: files, count: count, add: add, error: error))
     }
 }
 

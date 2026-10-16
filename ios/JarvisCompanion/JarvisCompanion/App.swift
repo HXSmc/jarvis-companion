@@ -421,6 +421,8 @@ final class AppModel: ObservableObject {
     @Published var lastSession: ChatTarget?
     /// Chat sheet presented from Home.
     @Published var openChat: ChatTarget?
+    /// Files picked on Home for the next prompt (sent with it through /chat).
+    @Published var attachments: [ChatAttachment] = []
     /// Bumped when the fullScreenCover dismisses so Home's hidden web host
     /// re-claims the shared WKWebView (see JarvisWebView).
     @Published var webHostToken = 0
@@ -455,6 +457,8 @@ final class AppModel: ObservableObject {
             if text.isEmpty {
                 // Empty/whitespace transcript: NO network request (criterion 5).
                 self.setFailure("didn't catch that")
+            } else if !self.attachments.isEmpty {
+                self.sendWithFiles(text)
             } else {
                 self.ask(text)
             }
@@ -579,10 +583,67 @@ final class AppModel: ObservableObject {
     /// pipeline, anything else to the full brain via ask().
     func sendTyped() {
         let text = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("?") {
+        if !attachments.isEmpty {
+            sendWithFiles(text)
+        } else if text.hasPrefix("?") {
             quickAsk(text)
         } else {
             ask(text)
+        }
+    }
+
+    func addAttachment(_ file: ChatAttachment) {
+        guard attachments.count < ChatAttachment.maxCount else {
+            return setFailure("up to \(ChatAttachment.maxCount) files per message")
+        }
+        guard file.data.count <= ChatAttachment.maxBytes else {
+            return setFailure("\(file.name) is over 10 MB")
+        }
+        attachments.append(file)
+    }
+
+    func attachmentError(_ message: String) {
+        setFailure(message)
+    }
+
+    /// Prompt with files: /siri/hey takes text only, so this uploads each file
+    /// (POST /central/attachments) and posts to /chat on a fresh thread, the
+    /// same path the chat sheet uses. Uploaded ids are kept, so a resend after
+    /// a failure does not upload the same file twice.
+    func sendWithFiles(_ text: String) {
+        guard !isSending, askReady, !attachments.isEmpty else { return }
+        let names = attachments.map(\.name).joined(separator: ", ")
+        ownerText = text.isEmpty ? "📎 \(names)" : "\(text)\n📎 \(names)"
+        replyText = nil
+        routeTag = nil
+        lastSession = nil
+        replyIsError = false
+        isSending = true
+        let thread = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            defer { self.isSending = false }
+            var files = self.attachments
+            do {
+                for index in files.indices where files[index].uploadedID == nil {
+                    files[index].uploadedID = try await Central.upload(files[index])
+                }
+                let obj = try await Central.json(Central.request("/chat", method: "POST", json: [
+                    "msg_id": UUID().uuidString, "thread_id": thread, "text": text,
+                    "attachments": files.compactMap(\.uploadedID),
+                ], timeout: 45))
+                let reply = obj["reply"] as? String ?? ""
+                self.replyText = reply.isEmpty ? "sent" : reply
+                if let sid = obj["session_id"] as? String, !sid.isEmpty {
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                }
+                self.attachments = []
+                self.typedText = ""
+                Haptics.success()
+            } catch {
+                self.attachments = files
+                self.fail(error)
+            }
         }
     }
 
@@ -867,6 +928,8 @@ struct ContentView: View {
     @FocusState private var typedFieldFocused: Bool
     /// Wordmark menu choice: Controls (this screen), Sessions, Floor.
     @AppStorage("homeView") private var homeView: HomeView = .controls
+    @State private var showPhotos = false
+    @State private var showFiles = false
 
     var body: some View {
         ZStack {
@@ -878,6 +941,15 @@ struct ContentView: View {
                     conversation
                     chips
                     micSection
+                    if !model.attachments.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(model.attachments) { file in
+                                    AttachmentChip(file: file) { model.attachments.removeAll { $0.id == file.id } }
+                                }
+                            }
+                        }
+                    }
                     typedRow
                 case .sessions:
                     SessionsBoard()
@@ -895,6 +967,10 @@ struct ContentView: View {
         .sheet(isPresented: $model.showSettings) { SettingsSheet(model: model) }
         .sheet(isPresented: $model.showInbox) { InboxScreen(model: model.inbox) }
         .sheet(item: $model.openChat) { ChatView(target: $0) }
+        .attachmentPickers(photos: $showPhotos, files: $showFiles,
+                           count: { model.attachments.count },
+                           add: { model.addAttachment($0) },
+                           error: { model.attachmentError($0) })
         .fullScreenCover(isPresented: $model.showPushedPage) {
             PushedPageView(model: model, web: model.web)
         }
@@ -1176,12 +1252,10 @@ struct ContentView: View {
         }
     }
 
-    /// Files go through the chat sheet's upload path: a new thread opens with
-    /// the typed text as its draft and the chosen picker already up.
     private var attachMenu: some View {
         Menu {
-            Button { openChatToAttach(.photos) } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
-            Button { openChatToAttach(.files) } label: { Label("Files", systemImage: "doc") }
+            Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+            Button { showFiles = true } label: { Label("Files", systemImage: "doc") }
         } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 22))
@@ -1189,13 +1263,14 @@ struct ContentView: View {
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
-        .disabled(!model.askReady || model.isSending || dictation.isListening)
-        .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
+        .disabled(!canAttach)
+        .opacity(canAttach ? 1.0 : 0.35)
         .accessibilityLabel("Attach")
     }
 
-    private func openChatToAttach(_ pick: AttachPick) {
-        model.openChat = ChatTarget(sessionID: nil, title: "New chat", draft: model.typedText, pick: pick)
+    private var canAttach: Bool {
+        model.askReady && !model.isSending && !dictation.isListening
+            && model.attachments.count < ChatAttachment.maxCount
     }
 
     /// While held, the field mirrors the live partial transcript (behavior
