@@ -78,7 +78,7 @@ ROUTER_UNCONFIGURED = "router not configured"
 # resumes the session stream after it instead of rendering the reply twice.
 _ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq")
 _SESSION_KEYS = (
-    "session_id", "kind", "title", "state", "cwd", "updated_at",
+    "session_id", "kind", "title", "state", "cwd", "updated_at", "device",
     "project", "task", "summary", "phase", "last_activity_at", "health",
     # Ledger fields (session e7c7438a, live): dropped before this pass added
     # them to the allowlist, so the Floor/board never saw them.
@@ -298,7 +298,7 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
     out = _pick(item, _SESSION_KEYS)
     if out.get("phase") not in _PHASES:
         out["phase"] = _PHASE_FALLBACK.get(out.get("state"), "in_progress")
-    out["device"] = DEVICE
+    out["device"] = out.get("device") or DEVICE  # router sets "Mac" for Mac-hook rows
     # Router values pass through unchanged; fill only what an older router does not send.
     if not out.get("last_activity_at"):
         out["last_activity_at"] = out.get("updated_at")
