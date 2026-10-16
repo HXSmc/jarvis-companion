@@ -623,7 +623,9 @@ struct ChatLine: Identifiable, Equatable {
     let id = UUID()
     let role: Role
     var text: String
-    /// Router action chip on owner lines: resumed / spawned / answered / needs_input / queued.
+    /// Per-message chip on owner lines: its birth label from the POST action
+    /// (queued / delivered / resumed), then advanced by live SSE events to
+    /// working and finally answered or needs_input.
     var chip: String?
 }
 
@@ -655,6 +657,8 @@ final class ChatModel: ObservableObject {
     private var echoed: [String] = []
     /// A sent message is still being answered; only then do quiet reconnects count.
     private var turnActive = false
+    /// Advances owner-line chips from SSE turn events (session sends only).
+    private var chips = ChatChipMachine()
     /// The live loop holds an open SSE connection (cleared by whoever cancels it).
     private var streamConnected = false
     private var streamTask: Task<Void, Never>?
@@ -675,16 +679,19 @@ final class ChatModel: ObservableObject {
         guard !text.isEmpty, !isSending else { return }
         lines.append(ChatLine(role: .owner, text: text))
         pendingMsgID = UUID().uuidString
-        deliver(text, ownerIndex: lines.count - 1)
+        // Read before deliver flips it: true means a turn is already running,
+        // so this message queues behind it (skip-counted dones).
+        let midTurn = turnActive
+        deliver(text, ownerIndex: lines.count - 1, midTurn: midTurn)
     }
 
     /// Resend the failed message with the SAME msg_id.
     func retry() {
         guard let failed = failed, !isSending else { return }
-        deliver(failed.text, ownerIndex: failed.ownerIndex)
+        deliver(failed.text, ownerIndex: failed.ownerIndex, midTurn: false)
     }
 
-    private func deliver(_ text: String, ownerIndex: Int) {
+    private func deliver(_ text: String, ownerIndex: Int, midTurn: Bool) {
         guard let msgID = pendingMsgID else { return }
         failed = nil
         canRetry = false
@@ -701,6 +708,10 @@ final class ChatModel: ObservableObject {
                         json: ["msg_id": msgID, "text": text]
                     ))
                     lines[ownerIndex].chip = obj["action"] as? String
+                    chips.track(
+                        lineIndex: ownerIndex, action: obj["action"] as? String ?? "",
+                        sentMidTurn: midTurn
+                    )
                 } else {
                     let obj = try await Central.json(Central.request(
                         "/chat", method: "POST",
@@ -887,6 +898,22 @@ final class ChatModel: ObservableObject {
             echoed = []
         default:
             break
+        }
+        // Advance owner-line chips from the turn this event belongs to. With
+        // nothing tracked (fresh open replaying history, /chat threads) this
+        // is a no-op.
+        let chipEvent: ChatChipMachine.Event?
+        switch type {
+        case "text", "status": chipEvent = .activity
+        case "needs_input": chipEvent = .turnNeedsInput
+        case "done": chipEvent = .turnDone
+        case "error": chipEvent = .turnError
+        default: chipEvent = nil
+        }
+        if let chipEvent = chipEvent {
+            for change in chips.apply(chipEvent) {
+                lines[change.lineIndex].chip = change.chip
+            }
         }
     }
 

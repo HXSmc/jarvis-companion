@@ -9,7 +9,9 @@ quick-ask, screen, wake) goes to the mini PC router's POST /route (via
 gateway/central.py), hard-bounded by ROUTER_TIMEOUT_SECONDS. The router's
 action/session_id/title ride along so the phone can open the session.
 Only the iPhone app's `ios_token` may reach the router: the Shortcut's shared
-token gets the local intents and otherwise a fixed reply (_SHARED_TOKEN_REPLY).
+token can never start a router session (C1) — instead it gets a real answer
+from the terse quick-ask pipeline (gateway/quick.py: vault -> web -> brain),
+bounded by SHARED_TOKEN_TIMEOUT_SECONDS so Siri never hangs.
 """
 
 from __future__ import annotations
@@ -40,8 +42,14 @@ _TIMEOUT_REPLY = "Started, check the app."
 # Same cap as central.ChatBody.text.
 MAX_TEXT_CHARS = 4000
 _ROUTER_DOWN_REPLY = "The mini PC router is unavailable, try again."
-# The shared token can start nothing on the mini PC (C1): tasks need the app.
-_SHARED_TOKEN_REPLY = "Tasks go through the Jarvis app"
+# The shared token can start nothing on the mini PC (C1): a general question
+# instead goes through quick.ask (vault -> web -> brain, no router, no
+# tools) — bounded tighter than quick.ask's own worst case (Jev 5 s + vault
+# 20 s + web 40 s + brain 15 s) so a Shortcut run never hangs past Siri's
+# own ~30 s ceiling.
+SHARED_TOKEN_TIMEOUT_SECONDS = 25.0
+_SHARED_TOKEN_TIMEOUT_REPLY = "That's taking a while, try asking again."
+_SHARED_TOKEN_NO_ANSWER_REPLY = "I don't know. For tasks, use the Jarvis app."
 
 # Voice turns share one router thread unless the client names its own.
 VOICE_THREAD_ID = "phone-voice"
@@ -177,8 +185,16 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         return {"reply": "PC didn't come online after 90 seconds — check Wake-on-LAN is enabled"}
     # The dependency already let the bearer in; only ios_token goes on to the router
     # (never while ios_token equals the shared token: it would not prove the phone).
+    # Every other caller here is the shared-token Shortcut — it never reaches
+    # central.route; a general question gets a real answer from quick.ask instead.
     if ios_token_is_shared() or not _bearer_matches(authorization, config.get_token(name="ios_token")):
-        return {"reply": _SHARED_TOKEN_REPLY}
+        try:
+            result = await asyncio.wait_for(quick.ask(stripped), timeout=SHARED_TOKEN_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return {"reply": _SHARED_TOKEN_TIMEOUT_REPLY}
+        except Exception:
+            return {"reply": _SHARED_TOKEN_NO_ANSWER_REPLY}
+        return {"reply": result.answer or _SHARED_TOKEN_NO_ANSWER_REPLY}
     if not _THREAD_RE.fullmatch(thread_id):
         raise HTTPException(status_code=400, detail="invalid thread_id")
     if not _THREAD_RE.fullmatch(msg_id):

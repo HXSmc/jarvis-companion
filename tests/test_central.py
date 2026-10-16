@@ -339,18 +339,22 @@ def test_siri_fallback_answered_inline_with_client_thread():
 
 
 def test_siri_shared_token_never_reaches_router(monkeypatch):
-    from gateway import siri
+    from gateway import quick, siri
 
     async def must_not_route(*args):
         raise AssertionError("shared token must never reach central.route")
 
+    async def fake_ask(q: str, brain: str = "auto") -> quick.QuickAnswer:
+        return quick.QuickAnswer(f"answered: {q}", "web", 1, None)
+
     monkeypatch.setattr(central, "route", must_not_route)
+    monkeypatch.setattr(quick, "ask", fake_ask)
     monkeypatch.setattr(siri, "roles", lambda: [])
     shared = {"Authorization": f"Bearer {TOKEN}"}
     for text in ("tell me the time", "build me a thing", "ask me something"):
         resp = _call("POST", "/siri/hey", headers=shared, json={"text": text, "thread_id": "app-xyz"})
         assert resp.status_code == 200
-        assert resp.json() == {"reply": "Tasks go through the Jarvis app"}
+        assert resp.json() == {"reply": f"answered: {text}"}
     # Local intents still answer for the Shortcut.
     resp = _call("POST", "/siri/hey", headers=shared, json={"text": "status"})
     assert resp.json() == {"reply": "Jarvis gateway online. Connected: none"}
