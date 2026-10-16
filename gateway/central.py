@@ -661,8 +661,34 @@ SPRITE_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
 SPRITES_STATIC_DIR = FilePath(__file__).resolve().parent / "static" / "sprites"
 
 
+def _static_roles() -> set[str]:
+    """Roles fable 2's real art currently covers, from her roles.json
+    (`[{"role": "...", "label": "...", "file": "..."}, ...]`) — read fresh
+    each call like FLOOR_HTML.read_text() above (and from SPRITES_STATIC_DIR
+    at call time, not a path baked in at import, so tests can point it at a
+    tmp dir), so a v2 roles.json (adds EXPLORER/WORKER per her note) needs no
+    code change here to be picked up. Missing/unreadable file -> empty set,
+    not an error (v1 might not ship it, or the directory isn't merged yet)."""
+    try:
+        data = json.loads((SPRITES_STATIC_DIR / "roles.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {item["role"] for item in data if isinstance(item, dict) and isinstance(item.get("role"), str)}
+
+
 def _sprite_role(role: str) -> str:
-    return role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    """Normalize to a role this route can serve something for. Prefers her
+    roles.json (not a hardcoded list) when the role is one she's shipped art
+    for; otherwise falls back to sprites.ROLES, the generator's own role set
+    (which already covers EXPLORER/WORKER/etc — this is what keeps those
+    roles working today, before her v2 roles.json adds them); anything else
+    normalizes to WORKER so the route never 404s."""
+    up = role.upper()
+    if up in _static_roles() or up in sprites.ROLES:
+        return up
+    return "WORKER"
 
 
 @public_router.get("/central/sprites/{role}.svg")

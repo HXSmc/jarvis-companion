@@ -517,9 +517,18 @@ struct DeviceChip: View {
 
 struct RoleSprite: View {
     let role: String
+    @Environment(\.displayScale) private var displayScale
+
+    /// 1/2/3 only — matches the @1x/@2x/@3x files fable 2's build_sprites.py
+    /// actually produces (gateway/sprites.py's PNG fallback serves the same
+    /// three). Round rather than floor/ceil so a non-integer scale still
+    /// picks its closest real asset.
+    private var scale: Int {
+        min(3, max(1, Int(displayScale.rounded())))
+    }
 
     var body: some View {
-        AsyncImage(url: AppModel.gatewayEndpoint("/central/sprites/\(role)@2x.png")) { phase in
+        AsyncImage(url: AppModel.gatewayEndpoint("/central/sprites/\(role)@\(scale)x.png")) { phase in
             switch phase {
             case .success(let image):
                 image.resizable().interpolation(.none).aspectRatio(contentMode: .fit)

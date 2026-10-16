@@ -119,3 +119,48 @@ def test_static_1x_png_bare_filename_matches_fable2_naming(tmp_path, monkeypatch
     resp = _get("/central/sprites/BUILDER@1x.png")
     assert resp.status_code == 200
     assert resp.content == real_png
+
+
+# --- roles.json drives known-role resolution, not a hardcoded list ---------------
+
+def test_roles_json_role_resolves_even_if_not_in_generator_set(tmp_path, monkeypatch):
+    """A role fable 2's roles.json declares should resolve to itself (and
+    therefore try her static file) even if it were somehow outside
+    sprites.ROLES — roles.json is the authority on what she's shipped art for."""
+    import json as _json
+
+    (tmp_path / "roles.json").write_text(_json.dumps([{"role": "BUILDER", "label": "Builder", "file": "BUILDER.svg"}]))
+    (tmp_path / "BUILDER.svg").write_text("<svg data-source='fable2-art'></svg>")
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER.svg")
+    assert resp.status_code == 200
+    assert "fable2-art" in resp.text
+
+
+def test_roles_not_yet_in_roles_json_still_served_by_generator(tmp_path, monkeypatch):
+    """EXPLORER/WORKER aren't in fable 2's v1 roles.json yet (her v2 note) —
+    they must still resolve via sprites.ROLES and get a generated sprite,
+    not fall through to a 404 or an unrelated role."""
+    import json as _json
+
+    (tmp_path / "roles.json").write_text(_json.dumps([{"role": "BUILDER", "label": "Builder", "file": "BUILDER.svg"}]))
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/EXPLORER.svg")
+    assert resp.status_code == 200
+    assert resp.text == sprites.svg_for("EXPLORER")
+
+
+def test_missing_roles_json_falls_back_to_generator_set(tmp_path, monkeypatch):
+    # tmp_path has no roles.json at all (pre-merge state, matches today).
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER.svg")
+    assert resp.status_code == 200
+    assert resp.text == sprites.svg_for("BUILDER")
+
+
+def test_malformed_roles_json_does_not_crash(tmp_path, monkeypatch):
+    (tmp_path / "roles.json").write_text("not valid json {{{")
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER.svg")
+    assert resp.status_code == 200
+    assert resp.text == sprites.svg_for("BUILDER")

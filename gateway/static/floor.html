@@ -438,14 +438,28 @@
     return img;
   }
 
+  // fable 2's build_sprites.py (gateway/static/sprites/) draws the shared
+  // body (head+torso) centred at x=13 of a 32-wide canvas, with the per-role
+  // prop extending the bounding box out to x~30 on the right — so the body's
+  // own centre sits left of the canvas's geometric centre (~41%, not 50%).
+  // Anchoring on the canvas centre pulled every character ~13% off its desk
+  // (fable 2, 2026-10-16). A single uniform scale (not a fixed destination
+  // w/h) also fixes the non-uniform stretch that caused: it previously forced
+  // every sprite into a hardcoded 15x17 box regardless of the source image's
+  // real pixel size — fine for this file's own ~16x18 fallback grid, visibly
+  // squished for her real 32x32 (square) art.
+  const SPRITE_ANCHOR_X = 0.41;
+  const SPRITE_TARGET_H = 17; // on-screen height in desk units; width follows the image's own aspect ratio
+
   function drawAvatar(d, sx, sy, k, dim) {
     const r = ROLES[d.role] || ROLES.WORKER;
     ctx.globalAlpha = dim ? 0.45 : 1;
     const img = spriteImage(d.role || "WORKER");
-    if (img.complete && img.naturalWidth > 0) {
-      const iw = 15 * k, ih = 17 * k;
+    if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      const scale = (SPRITE_TARGET_H * k) / img.naturalHeight;
+      const iw = img.naturalWidth * scale, ih = img.naturalHeight * scale;
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(img, sx - iw / 2, sy - ih, iw, ih);
+      ctx.drawImage(img, sx - iw * SPRITE_ANCHOR_X, sy - ih, iw, ih);
       ctx.imageSmoothingEnabled = true;
     } else {
       // Fallback while the sprite image loads (first frame or two only, then
@@ -488,11 +502,16 @@
     // Spawn: rise from the floor while fading in.
     const z = (1 - k) * -10;
     ctx.save();
+    // Desk box first, avatar after: drawing the sprite before the desk let
+    // the desk's front face paint over the sprite's lower half (legs/feet)
+    // since canvas 2D has no real z-buffer, just paint order (fable 2,
+    // 2026-10-16). The avatar is always painted last among these two so the
+    // full sprite stays visible above the desk front.
+    ctx.globalAlpha = k;
+    box(d.x, d.y, z, w, dd, h, done ? "#3a3d47" : "#565b6b", k);
     ctx.globalAlpha = k;
     const av = scr(d.x + w * 0.3, d.y - 6 * sc, z + 4);
     drawAvatar(d, av[0], av[1], cam.s * sc * k, done);
-    ctx.globalAlpha = k;
-    box(d.x, d.y, z, w, dd, h, done ? "#3a3d47" : "#565b6b", k);
     // Monitor: a billboard on the back edge of the desk top, glyph from the role.
     const m = scr(d.x + w * 0.62, d.y + 2 * sc, z + h);
     const mw = 15 * sc * cam.s, mh = 11 * sc * cam.s;
