@@ -144,7 +144,6 @@
       <button type="button" class="mod" data-m="ctrl">ctrl</button>
       <button type="button" class="mod" data-m="alt">alt</button>
       <button type="button" class="mod" data-m="shift">shift</button>
-      <button type="button" id="rd-btn" aria-label="Open in RustDesk">RustDesk</button>
     </div>
     <button type="button" id="sleep-btn" aria-label="Put the PC to sleep">Sleep</button>
   </div>
@@ -162,8 +161,6 @@
 var BANNER_EXPIRED = "Session expired — re-open from the app.";
 var BANNER_TCC = "Screen permission missing on the Mac. System Settings -> Privacy & Security -> Screen & Audio Recording -> enable for the python binary in jarvis-companion/.venv (the launchd gateway), then restart the gateway.";
 var BANNER_PC = "PC offline";
-// {"mac"/"windows": "rustdesk://<tailscale ip>"}, spliced in at serve time; never a password.
-var RUSTDESK = /*RUSTDESK_LINKS*/{};
 
 var canvas = document.getElementById("view");
 var ctx = canvas.getContext("2d");
@@ -287,7 +284,6 @@ document.querySelectorAll("#bar button.mod[data-m]").forEach(function (b) {
 // still up; after that the status poll's "PC offline" banner takes over and
 // the dying frame loop's fetch errors are swallowed (catch in pullFrame).
 var sleepBtn = document.getElementById("sleep-btn");
-var rdBtn = document.getElementById("rd-btn");
 var sleepArmed = null;  // sleepTap state: null or {deadline}
 var sleepTimer = null;  // disarm timeout
 
@@ -908,7 +904,6 @@ function showTargetUI() {
   kbdBtn.style.display = minipc ? "" : "none";
   // ponytail: mac keeps today's always-on Sleep button; only Mini PC hides it
   sleepBtn.style.display = minipc ? "none" : "";
-  rdBtn.style.display = RUSTDESK[target] ? "" : "none";
   if (minipc) vncEl.appendChild(cursorEl);
   else cursorWrap.appendChild(cursorEl);
 }
@@ -933,11 +928,6 @@ function setTarget(t) {
 
 document.querySelectorAll("#seg button").forEach(function (b) {
   b.addEventListener("click", function () { setTarget(b.dataset.t); });
-});
-
-// The iOS app hands rustdesk:// navigations to RustDesk (or the App Store).
-rdBtn.addEventListener("click", function () {
-  if (RUSTDESK[target]) location.href = RUSTDESK[target];
 });
 
 showTargetUI();
