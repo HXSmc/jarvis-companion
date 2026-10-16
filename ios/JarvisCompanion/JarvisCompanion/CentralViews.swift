@@ -97,6 +97,8 @@ struct CentralSession: Identifiable, Decodable, Equatable {
     let device: String?
     let doing: String?
     let recap: [String]?
+    let lastActivityAt: String?
+    let health: String?
 
     var id: String { sessionId }
     var displayTask: String {
@@ -114,6 +116,67 @@ struct CentralSession: Identifiable, Decodable, Equatable {
         if let project = project, !project.isEmpty { return project }
         guard let cwd = cwd, !cwd.isEmpty else { return nil }
         return (cwd as NSString).lastPathComponent
+    }
+
+    /// Honest live status ("Working, last activity 20s ago" / "Waiting for you" /
+    /// "Stalled, no activity 14 min"); nil for finished sessions. Router `health`
+    /// and `last_activity_at` win; older routers fall back to phase + updated_at.
+    func statusLine(now: Date) -> (text: String, color: Color)? {
+        let ago = CentralTime.parse(lastActivityAt ?? updatedAt).map { CentralTime.ago($0, now: now) }
+        let fallback = phase == "in_review" ? "waiting_for_owner" : phase == "in_progress" ? "working" : nil
+        switch health ?? fallback ?? "" {
+        case "waiting_for_owner":
+            return ("Waiting for you", .jarvisAccent)
+        case "stalled":
+            return (ago.map { "Stalled, no activity \($0)" } ?? "Stalled", .jarvisDanger)
+        case "working":
+            return (ago.map { "Working, last activity \($0) ago" } ?? "Working", .centralGreen)
+        default:
+            return nil
+        }
+    }
+}
+
+/// The gateway's ISO 8601 UTC times, with or without fractional seconds.
+enum CentralTime {
+    private static let whole = ISO8601DateFormatter()
+    private static let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static func parse(_ text: String?) -> Date? {
+        guard let text = text, !text.isEmpty else { return nil }
+        return whole.date(from: text) ?? fractional.date(from: text)
+    }
+
+    static func ago(_ date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60) min" }
+        if seconds < 86400 { return "\(seconds / 3600) h" }
+        return "\(seconds / 86400) d"
+    }
+}
+
+/// The live status line; re-renders every 5 s on its own so "20s ago" keeps
+/// counting between polls without a refetch.
+struct StatusLine: View {
+    let session: CentralSession
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            if let status = session.statusLine(now: context.date) {
+                HStack(spacing: 6) {
+                    Circle().fill(status.color).frame(width: 6, height: 6)
+                    Text(status.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(status.color)
+                        .lineLimit(1)
+                }
+            }
+        }
     }
 }
 
@@ -162,13 +225,15 @@ final class SessionsModel: ObservableObject {
 }
 
 /// Sessions kanban: three columns paged horizontally, each ~85% wide so the
-/// next column peeks in. Refreshes every 10 s while on screen (`.task` is
-/// cancelled when the view goes away) and on pull. Tapping a card opens its
-/// recap; the recap has "Open chat".
+/// next column peeks in. Refreshes every 5 s while on screen and the app is
+/// in the foreground (`.task(id: scenePhase)` restarts/cancels the loop), and
+/// on pull; cards move columns and update in place by session id. Tapping a
+/// card opens its recap; the recap has "Open chat".
 struct SessionsBoard: View {
     @StateObject private var model = SessionsModel()
     @State private var openChat: ChatTarget?
     @State private var openRecap: RecapTarget?
+    @Environment(\.scenePhase) private var scenePhase
 
     private struct Column {
         let phase: String
@@ -221,10 +286,11 @@ struct SessionsBoard: View {
                 .modifier(ColumnPaging())
             }
         }
-        .task {
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 await model.refresh()
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
         .sheet(item: $openChat) { ChatView(target: $0) }
@@ -299,6 +365,7 @@ struct SessionCard: View {
                 Spacer(minLength: 6)
                 badge
             }
+            StatusLine(session: session)
             HStack(spacing: 6) {
                 if let device = session.device, !device.isEmpty {
                     DeviceChip(device: device)
@@ -357,7 +424,7 @@ struct DeviceChip: View {
 }
 
 /// Recap sheet: what the session is doing + short plain bullets ("I did…",
-/// "Needs you: …"). Reads the shared SessionsModel, so the 10 s poll keeps it
+/// "Needs you: …"). Reads the shared SessionsModel, so the 5 s poll keeps it
 /// live; "Open chat" opens the thread on top.
 struct RecapView: View {
     @ObservedObject var model: SessionsModel
@@ -377,6 +444,7 @@ struct RecapView: View {
                         Text(session.displayTask)
                             .font(.title3.weight(.semibold))
                             .foregroundColor(.jarvisText)
+                        StatusLine(session: session)
                         HStack(spacing: 6) {
                             if let device = session.device, !device.isEmpty {
                                 DeviceChip(device: device)

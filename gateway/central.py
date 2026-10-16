@@ -11,7 +11,9 @@ generic detail (never the upstream body).
 Plain words (round 3): each session also carries `device` (constant "Mini PC"),
 `doing` (one plain line) and `recap` (short plain bullets) made by a cheap
 OpenRouter model from the latest summary, plus `floor_hidden` (idle 30+ min,
-UTC, never for a session that needs the owner). The model runs in the
+UTC, never for a session that needs the owner). The router's `last_activity_at`
+and `health` pass through unchanged; when missing they fall back to
+`updated_at` and to the phase (working / waiting_for_owner / null). The model runs in the
 background only; the 10 s poll reads the cache in ~/.jarvis/central_state.json
 (keyed by session id + summary hash) and falls back to the router title.
 POST /central/clear-done stores one `cleared_before` UTC time there; done
@@ -68,9 +70,11 @@ ROUTER_UNCONFIGURED = "router not configured"
 _ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq")
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at",
-    "project", "task", "summary", "phase",
+    "project", "task", "summary", "phase", "last_activity_at", "health",
 )
 _PHASES = ("in_progress", "in_review", "done")
+# Used only when the router sends no `health` yet (pre-patch router); done -> None.
+_HEALTH_FALLBACK = {"in_progress": "working", "in_review": "waiting_for_owner"}
 # Used only when the router sends no valid `phase`; an unknown state is in_progress.
 _PHASE_FALLBACK = {
     "running": "in_progress", "needs_input": "in_review",
@@ -231,6 +235,11 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
     if out.get("phase") not in _PHASES:
         out["phase"] = _PHASE_FALLBACK.get(out.get("state"), "in_progress")
     out["device"] = DEVICE
+    # Router values pass through unchanged; fill only what an older router does not send.
+    if not out.get("last_activity_at"):
+        out["last_activity_at"] = out.get("updated_at")
+    if not out.get("health"):
+        out["health"] = _HEALTH_FALLBACK.get(out["phase"])
     # A cached line for an older summary still beats the raw title while the new one is made.
     hit = (plain or {}).get(out.get("session_id"))
     if isinstance(hit, dict) and isinstance(hit.get("doing"), str):
@@ -239,8 +248,10 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
     else:
         out["doing"] = out.get("title") or out.get("task") or out.get("session_id")
         out["recap"] = []
-    ts = _parse_ts(out.get("updated_at"))
-    needs_owner = out.get("state") == "needs_input" or out["phase"] == "in_review"
+    ts = _parse_ts(out.get("last_activity_at"))
+    needs_owner = (
+        out.get("state") == "needs_input" or out["phase"] == "in_review" or out["health"] == "waiting_for_owner"
+    )
     out["floor_hidden"] = bool(ts and not needs_owner and (now or _now()) - ts >= FLOOR_IDLE)
     return out
 

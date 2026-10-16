@@ -226,3 +226,47 @@ def test_floor_hidden_after_30_idle_minutes(monkeypatch):
 def test_floor_page_filters_hidden_sessions():
     html = central.FLOOR_HTML.read_text()
     assert "!x.floor_hidden" in html
+
+
+# --- live status: last_activity_at + health -----------------------------------
+
+def test_activity_and_health_pass_through_unchanged(monkeypatch):
+    items = [
+        {"session_id": "a", "state": "running", "updated_at": "2026-10-15T08:00:00Z",
+         "last_activity_at": "2026-10-15T11:59:40Z", "health": "stalled"},
+        {"session_id": "b", "state": "done", "health": "some_new_value",
+         "last_activity_at": "2026-10-15T11:00:00.123Z"},
+    ]
+    data = _sessions(monkeypatch, items)
+    assert (data[0]["last_activity_at"], data[0]["health"]) == ("2026-10-15T11:59:40Z", "stalled")
+    assert (data[1]["last_activity_at"], data[1]["health"]) == ("2026-10-15T11:00:00.123Z", "some_new_value")
+
+
+def test_activity_and_health_fallback_for_old_router(monkeypatch):
+    items = [
+        {"session_id": "run", "state": "running", "updated_at": "2026-10-15T11:00:00Z"},
+        {"session_id": "ask", "state": "needs_input", "updated_at": "2026-10-15T10:00:00Z"},
+        {"session_id": "done", "state": "done", "updated_at": "2026-10-15T12:00:00Z"},
+        {"session_id": "bare", "health": None, "last_activity_at": ""},
+    ]
+    data = {s["session_id"]: (s["last_activity_at"], s["health"]) for s in _sessions(monkeypatch, items)}
+    assert data == {
+        "run": ("2026-10-15T11:00:00Z", "working"),
+        "ask": ("2026-10-15T10:00:00Z", "waiting_for_owner"),
+        "done": ("2026-10-15T12:00:00Z", None),
+        "bare": (None, "working"),
+    }
+
+
+def test_floor_idle_uses_last_activity(monkeypatch):
+    items = [
+        # updated long ago, but real activity 5 min ago -> shown
+        {"session_id": "busy", "state": "running", "updated_at": "2026-10-15T09:00:00Z",
+         "last_activity_at": "2026-10-15T11:55:00Z"},
+        # stalled 40 min and router says waiting for owner -> still shown
+        {"session_id": "wait", "state": "running", "health": "waiting_for_owner",
+         "last_activity_at": "2026-10-15T11:20:00Z"},
+        {"session_id": "old", "state": "running", "last_activity_at": "2026-10-15T11:20:00Z"},
+    ]
+    data = {s["session_id"]: s["floor_hidden"] for s in _sessions(monkeypatch, items)}
+    assert data == {"busy": False, "wait": False, "old": True}
