@@ -1,4 +1,6 @@
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 /// Central chat (framing doc §3 + addendum §6): the Sessions kanban, the chat
@@ -627,6 +629,79 @@ struct ChatLine: Identifiable, Equatable {
     /// (queued / delivered / resumed), then advanced by live SSE events to
     /// working and finally answered or needs_input.
     var chip: String?
+    /// Files sent with an owner message (shown as chips above its text).
+    var files: [ChatAttachment] = []
+}
+
+/// A file picked for the next message. `uploadedID` is set once the gateway
+/// stored it (POST /central/attachments), so Retry re-sends the same ids
+/// without uploading again.
+struct ChatAttachment: Identifiable, Equatable {
+    let id = UUID()
+    let name: String
+    let mimeType: String
+    let data: Data
+    /// Small thumbnail for images, made once at pick time.
+    let preview: UIImage?
+    var uploadedID: String?
+
+    static let maxCount = 5
+    static let maxBytes = 10 * 1024 * 1024
+    static let fileTypes: [UTType] = [.image, .pdf, .plainText, .json, .commaSeparatedText]
+        + [UTType(filenameExtension: "md")].compactMap { $0 }
+
+    init(name: String, mimeType: String, data: Data) {
+        self.name = name
+        self.mimeType = mimeType
+        self.data = data
+        preview = mimeType.hasPrefix("image/") ? UIImage(data: data).map { Self.resized($0, longSide: 120) } : nil
+    }
+
+    /// A photo becomes a JPEG at most 2048 px on its long side: HEIC would not
+    /// open in the session, and full-size photos blow the 10 MB cap.
+    static func photo(_ data: Data, name: String = "photo.jpg") -> ChatAttachment? {
+        guard let image = UIImage(data: data),
+              let jpeg = resized(image, longSide: 2048).jpegData(compressionQuality: 0.8) else { return nil }
+        return ChatAttachment(name: name, mimeType: "image/jpeg", data: jpeg)
+    }
+
+    /// A file from the Files picker -> attachment with the gateway's media type; nil if unsupported.
+    static func file(url: URL, data: Data) -> ChatAttachment? {
+        let name = url.lastPathComponent
+        guard let type = UTType(filenameExtension: url.pathExtension) else { return nil }
+        if type.conforms(to: .image) {
+            let kept: [(UTType, String)] = [(.png, "image/png"), (.gif, "image/gif"), (.webP, "image/webp"), (.jpeg, "image/jpeg")]
+            if let match = kept.first(where: { type.conforms(to: $0.0) }) {
+                return ChatAttachment(name: name, mimeType: match.1, data: data)
+            }
+            return photo(data, name: (name as NSString).deletingPathExtension + ".jpg")
+        }
+        let mime: String
+        if type.conforms(to: .pdf) {
+            mime = "application/pdf"
+        } else if type.conforms(to: .json) {
+            mime = "application/json"
+        } else if type.conforms(to: .commaSeparatedText) {
+            mime = "text/csv"
+        } else if url.pathExtension.lowercased() == "md" {
+            mime = "text/markdown"
+        } else if type.conforms(to: .text) {
+            mime = "text/plain"
+        } else {
+            return nil
+        }
+        return ChatAttachment(name: name, mimeType: mime, data: data)
+    }
+
+    private static func resized(_ image: UIImage, longSide: CGFloat) -> UIImage {
+        let scale = min(1, longSide / max(image.size.width, image.size.height, 1))
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+    }
 }
 
 /// One chat thread. A new thread posts to /chat (thread_id "app-<8 hex>");
@@ -643,10 +718,12 @@ final class ChatModel: ObservableObject {
     @Published var title: String
     @Published var isSending = false
     @Published var canRetry = false
+    /// Files picked for the next message.
+    @Published var attachments: [ChatAttachment] = []
 
     let threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
     private var pendingMsgID: String?
-    private var failed: (text: String, ownerIndex: Int)?
+    private var failed: (text: String, files: [ChatAttachment], ownerIndex: Int)?
     /// Highest seq seen; nil until the first event (seq 0 is a real event).
     private var lastSeq: Int?
     /// Seq of every rendered event: a replay (fresh open of an old session, a
@@ -674,24 +751,57 @@ final class ChatModel: ObservableObject {
         self.title = title
     }
 
+    func addAttachment(_ file: ChatAttachment) {
+        guard attachments.count < ChatAttachment.maxCount else {
+            lines.append(ChatLine(role: .error, text: "up to \(ChatAttachment.maxCount) files per message"))
+            return
+        }
+        guard file.data.count <= ChatAttachment.maxBytes else {
+            lines.append(ChatLine(role: .error, text: "\(file.name) is over 10 MB"))
+            return
+        }
+        attachments.append(file)
+    }
+
+    func removeAttachment(_ id: UUID) {
+        attachments.removeAll { $0.id == id }
+    }
+
     func send(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isSending else { return }
-        lines.append(ChatLine(role: .owner, text: text))
+        guard !text.isEmpty || !attachments.isEmpty, !isSending else { return }
+        let files = attachments
+        attachments = []
+        lines.append(ChatLine(role: .owner, text: text, files: files))
         pendingMsgID = UUID().uuidString
         // Read before deliver flips it: true means a turn is already running,
         // so this message queues behind it (skip-counted dones).
         let midTurn = turnActive
-        deliver(text, ownerIndex: lines.count - 1, midTurn: midTurn)
+        deliver(text, files: files, ownerIndex: lines.count - 1, midTurn: midTurn)
     }
 
-    /// Resend the failed message with the SAME msg_id.
+    /// Resend the failed message with the SAME msg_id (files already uploaded are not sent again).
     func retry() {
         guard let failed = failed, !isSending else { return }
-        deliver(failed.text, ownerIndex: failed.ownerIndex, midTurn: false)
+        deliver(failed.text, files: failed.files, ownerIndex: failed.ownerIndex, midTurn: false)
     }
 
-    private func deliver(_ text: String, ownerIndex: Int, midTurn: Bool) {
+    /// One file as the raw body; the gateway answers with its id.
+    private func upload(_ file: ChatAttachment) async throws -> String {
+        var request = try Central.request("/central/attachments", method: "POST", timeout: 90)
+        if let url = request.url, var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            comps.queryItems = [URLQueryItem(name: "name", value: file.name)]
+            request.url = comps.url
+        }
+        request.setValue(file.mimeType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = file.data
+        guard let id = try await Central.json(request)["id"] as? String else {
+            throw CentralError("upload failed")
+        }
+        return id
+    }
+
+    private func deliver(_ text: String, files: [ChatAttachment], ownerIndex: Int, midTurn: Bool) {
         guard let msgID = pendingMsgID else { return }
         failed = nil
         canRetry = false
@@ -701,11 +811,17 @@ final class ChatModel: ObservableObject {
         turnActive = true
         Task {
             defer { isSending = false }
+            var files = files
             do {
+                for index in files.indices where files[index].uploadedID == nil {
+                    files[index].uploadedID = try await upload(files[index])
+                }
+                var body: [String: Any] = ["msg_id": msgID, "text": text]
+                let ids = files.compactMap(\.uploadedID)
+                if !ids.isEmpty { body["attachments"] = ids }
                 if let sid = sessionID {
                     let obj = try await Central.json(Central.request(
-                        "/central/sessions/\(sid)/message", method: "POST",
-                        json: ["msg_id": msgID, "text": text]
+                        "/central/sessions/\(sid)/message", method: "POST", json: body
                     ))
                     lines[ownerIndex].chip = obj["action"] as? String
                     chips.track(
@@ -713,9 +829,9 @@ final class ChatModel: ObservableObject {
                         sentMidTurn: midTurn
                     )
                 } else {
+                    body["thread_id"] = threadID
                     let obj = try await Central.json(Central.request(
-                        "/chat", method: "POST",
-                        json: ["thread_id": threadID, "msg_id": msgID, "text": text], timeout: 45
+                        "/chat", method: "POST", json: body, timeout: 45
                     ))
                     apply(route: obj, ownerIndex: ownerIndex)
                 }
@@ -724,7 +840,7 @@ final class ChatModel: ObservableObject {
                 wakeStream()
             } catch {
                 turnActive = false
-                failed = (text: text, ownerIndex: ownerIndex)
+                failed = (text: text, files: files, ownerIndex: ownerIndex)
                 canRetry = true
                 lines.append(ChatLine(role: .error, text: "send failed: \(error.localizedDescription)"))
                 Haptics.error()
@@ -931,6 +1047,9 @@ struct ChatView: View {
     @StateObject private var model: ChatModel
     @Environment(\.dismiss) private var dismiss
     @State private var draft = ""
+    @State private var showPhotos = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var showFiles = false
 
     init(target: ChatTarget) {
         _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title))
@@ -969,6 +1088,15 @@ struct ChatView: View {
                     .disabled(model.isSending)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if !model.attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(model.attachments) { file in
+                            AttachmentChip(file: file) { model.removeAttachment(file.id) }
+                        }
+                    }
+                }
+            }
             inputRow
         }
         .padding(16)
@@ -976,6 +1104,41 @@ struct ChatView: View {
         .preferredColorScheme(.dark)
         .onAppear { model.open() }
         .onDisappear { model.close() }
+        .photosPicker(isPresented: $showPhotos, selection: $photoItems,
+                      maxSelectionCount: ChatAttachment.maxCount, matching: .images)
+        .onChange(of: photoItems) { items in
+            guard !items.isEmpty else { return }
+            photoItems = []
+            Task { @MainActor in
+                for item in items {
+                    let name = "photo-\(model.attachments.count + 1).jpg"
+                    if let data = try? await item.loadTransferable(type: Data.self),
+                       let file = ChatAttachment.photo(data, name: name) {
+                        model.addAttachment(file)
+                    } else {
+                        model.lines.append(ChatLine(role: .error, text: "could not load that photo"))
+                    }
+                }
+            }
+        }
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: ChatAttachment.fileTypes,
+                      allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                // Check the size first so a huge file is never read into memory.
+                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > ChatAttachment.maxBytes {
+                    model.lines.append(ChatLine(role: .error, text: "\(url.lastPathComponent) is over 10 MB"))
+                    continue
+                }
+                if let data = try? Data(contentsOf: url), let file = ChatAttachment.file(url: url, data: data) {
+                    model.addAttachment(file)
+                } else {
+                    model.lines.append(ChatLine(role: .error, text: "\(url.lastPathComponent): file type not supported"))
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -1009,10 +1172,19 @@ struct ChatView: View {
         switch line.role {
         case .owner:
             VStack(alignment: .leading, spacing: 4) {
-                Text(line.text)
-                    .font(.body)
-                    .foregroundColor(.jarvisMuted)
-                    .textSelection(.enabled)
+                if !line.files.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(line.files) { AttachmentChip(file: $0) }
+                        }
+                    }
+                }
+                if !line.text.isEmpty {
+                    Text(line.text)
+                        .font(.body)
+                        .foregroundColor(.jarvisMuted)
+                        .textSelection(.enabled)
+                }
                 if let chip = line.chip {
                     Text(chip.replacingOccurrences(of: "_", with: " "))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -1023,7 +1195,7 @@ struct ChatView: View {
                 }
             }
         case .jarvis:
-            Text(line.text)
+            MarkdownText(text: line.text)
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .textSelection(.enabled)
@@ -1049,15 +1221,29 @@ struct ChatView: View {
     }
 
     private var inputRow: some View {
-        HStack(spacing: 8) {
-            TextField("message…", text: $draft, prompt: Text("message…").foregroundColor(.jarvisMuted))
+        HStack(alignment: .bottom, spacing: 8) {
+            Menu {
+                Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+                Button { showFiles = true } label: { Label("Files", systemImage: "doc") }
+            } label: {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 22))
+                    .foregroundColor(.jarvisAccent)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(model.isSending || model.attachments.count >= ChatAttachment.maxCount)
+            .accessibilityLabel("Attach")
+            // Vertical axis: long text wraps onto new lines (up to 6, then it scrolls);
+            // Return adds a line break, the arrow button sends.
+            TextField("message…", text: $draft, prompt: Text("message…").foregroundColor(.jarvisMuted), axis: .vertical)
+                .lineLimit(1...6)
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
+                .padding(.vertical, 11)
                 .frame(minHeight: 44)
                 .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
-                .submitLabel(.send)
-                .onSubmit(sendDraft)
             Button(action: sendDraft) {
                 Group {
                     if model.isSending {
@@ -1077,9 +1263,103 @@ struct ChatView: View {
     }
 
     private func sendDraft() {
-        guard !model.isSending, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let empty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !model.isSending, !empty || !model.attachments.isEmpty else { return }
         model.send(draft)
         draft = ""
+    }
+}
+
+/// A picked or sent file: thumbnail for images, doc icon + name otherwise;
+/// an ✕ when it can still be removed.
+struct AttachmentChip: View {
+    let file: ChatAttachment
+    var onRemove: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let preview = file.preview {
+                Image(uiImage: preview)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 36, height: 36)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Image(systemName: file.mimeType == "application/pdf" ? "doc.richtext" : "doc.text")
+                    .font(.system(size: 18))
+                    .foregroundColor(.jarvisAccent)
+                    .frame(width: 36, height: 36)
+            }
+            Text(file.name)
+                .font(.footnote)
+                .foregroundColor(.jarvisText)
+                .lineLimit(1)
+                .frame(maxWidth: 120, alignment: .leading)
+            if let onRemove = onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.jarvisMuted)
+                        .frame(width: 32, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Remove \(file.name)")
+            }
+        }
+        .padding(.leading, 4)
+        .padding(.trailing, onRemove == nil ? 10 : 0)
+        .frame(minHeight: 44)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.jarvisSurface))
+    }
+}
+
+/// A Jarvis reply rendered as markdown: ChatMarkdown splits the blocks
+/// (headings, bullets, numbered items, code fences, rules) and each block's
+/// inline marks (**bold**, *italic*, `code`, links) go through
+/// AttributedString's inline parser, so no raw `**` shows in the chat.
+struct MarkdownText: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(ChatMarkdown.blocks(text).enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: ChatMarkdown.Block) -> some View {
+        switch block {
+        case .paragraph(let line):
+            Text(Self.inline(line))
+        case .heading(let line):
+            Text(Self.inline(line)).font(.headline)
+        case .bullet(let line):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•").foregroundColor(.jarvisMuted)
+                Text(Self.inline(line))
+            }
+        case .numbered(let marker, let line):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(marker).foregroundColor(.jarvisMuted).monospacedDigit()
+                Text(Self.inline(line))
+            }
+        case .code(let code):
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(.footnote, design: .monospaced))
+                    .padding(10)
+            }
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.jarvisSurface))
+        case .rule:
+            Rectangle().fill(Color.jarvisMuted.opacity(0.4)).frame(height: 1)
+        }
+    }
+
+    /// Inline markdown -> styled text; anything the parser rejects shows as plain text.
+    static func inline(_ line: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: line, options: options)) ?? AttributedString(line)
     }
 }
 

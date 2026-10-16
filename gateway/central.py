@@ -20,6 +20,10 @@ background only; the 10 s poll reads the cache in ~/.jarvis/central_state.json
 POST /central/clear-done stores one `cleared_before` UTC time there; done
 sessions last updated at or before it are left out of /central/sessions.
 
+Attachments (gateway/attachments.py): POST /central/attachments stores one
+file; /chat and session messages take `attachments: [id]` and the gateway
+appends the files' local paths to the text for the session to Read.
+
 Beyond the contract: GET /central/feed relays the router's GET /feed (SSE, one
 event per line of {seq, ts, session_id, type, from, to, text}) for the Agency
 Floor. The framing doc does not define /feed yet; until the router serves it,
@@ -43,12 +47,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Path
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from common import config
-from gateway import sprites
+from gateway import attachments, sprites
 from gateway.auth import require_bearer_any
 from mac.voice import brain as _brain
 
@@ -467,21 +471,62 @@ def _schedule_plain(sessions: list[dict], plain: dict) -> None:
         task.add_done_callback(_tasks.discard)
 
 
-class ChatBody(BaseModel):
-    thread_id: str = Field(pattern=ID_PATTERN)
-    msg_id: str = Field(pattern=ID_PATTERN)
-    text: str = Field(min_length=1, max_length=4000)
-
-
 class MessageBody(BaseModel):
     msg_id: str = Field(pattern=ID_PATTERN)
-    text: str = Field(min_length=1, max_length=4000)
+    # Empty text is fine when files are attached (a photo with no words).
+    text: str = Field(default="", max_length=4000)
+    attachments: list[str] = Field(default_factory=list, max_length=attachments.MAX_PER_MESSAGE)
+
+    @model_validator(mode="after")
+    def _not_empty(self):
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("text or attachments required")
+        return self
+
+
+class ChatBody(MessageBody):
+    thread_id: str = Field(pattern=ID_PATTERN)
+
+
+def _with_files(body: MessageBody) -> str:
+    """Message text plus the attachment paths block; unknown id -> 400 before any router call."""
+    try:
+        if not body.attachments:
+            return body.text
+        return (body.text + attachments.note(body.attachments)).strip()
+    except attachments.AttachmentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except OSError:  # the file vanished between resolve and stat
+        raise HTTPException(status_code=400, detail="attachment not found") from None
+
+
+@router.post("/central/attachments")
+async def upload_attachment(request: Request, name: str = Query(default="", max_length=200)) -> dict:
+    """One file as the raw body (its Content-Type); stored for the next message to reference."""
+    try:
+        kind = attachments.media_type(request.headers.get("content-type"))
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > attachments.MAX_BYTES:
+            raise attachments.AttachmentError("file too large")
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > attachments.MAX_BYTES:
+                raise attachments.AttachmentError("file too large")
+        return attachments.save(bytes(data), name, kind)
+    except attachments.AttachmentError as exc:
+        status = 413 if str(exc) == "file too large" else 415 if "type" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from None
+    except OSError as exc:
+        logger.warning("attachment save failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="could not save") from None
 
 
 @router.post("/chat")
 async def chat(body: ChatBody) -> dict:
+    text = _with_files(body)
     try:
-        return await route(body.thread_id, body.msg_id, body.text, "app")
+        return await route(body.thread_id, body.msg_id, text, "app")
     except RouterError as exc:
         raise _bad_gateway(exc)
 
@@ -562,9 +607,10 @@ async def clear_done() -> dict:
 
 @router.post("/central/sessions/{session_id}/message")
 async def session_message(body: MessageBody, session_id: str = Path(pattern=ID_PATTERN)) -> dict:
+    text = _with_files(body)
     try:
         data = await _router_json(
-            "POST", f"/sessions/{session_id}/message", {"msg_id": body.msg_id, "text": body.text}
+            "POST", f"/sessions/{session_id}/message", {"msg_id": body.msg_id, "text": text}
         )
     except RouterError as exc:
         raise _bad_gateway(exc)
