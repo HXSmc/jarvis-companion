@@ -661,8 +661,34 @@ SPRITE_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
 SPRITES_STATIC_DIR = FilePath(__file__).resolve().parent / "static" / "sprites"
 
 
+def _static_roles() -> set[str]:
+    """Roles fable 2's real art currently covers, from her roles.json
+    (`[{"role": "...", "label": "...", "file": "..."}, ...]`) — read fresh
+    each call like FLOOR_HTML.read_text() above (and from SPRITES_STATIC_DIR
+    at call time, not a path baked in at import, so tests can point it at a
+    tmp dir), so a v2 roles.json (adds EXPLORER/WORKER per her note) needs no
+    code change here to be picked up. Missing/unreadable file -> empty set,
+    not an error (v1 might not ship it, or the directory isn't merged yet)."""
+    try:
+        data = json.loads((SPRITES_STATIC_DIR / "roles.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {item["role"] for item in data if isinstance(item, dict) and isinstance(item.get("role"), str)}
+
+
 def _sprite_role(role: str) -> str:
-    return role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    """Normalize to a role this route can serve something for. Prefers her
+    roles.json (not a hardcoded list) when the role is one she's shipped art
+    for; otherwise falls back to sprites.ROLES, the generator's own role set
+    (which already covers EXPLORER/WORKER/etc — this is what keeps those
+    roles working today, before her v2 roles.json adds them); anything else
+    normalizes to WORKER so the route never 404s."""
+    up = role.upper()
+    if up in _static_roles() or up in sprites.ROLES:
+        return up
+    return "WORKER"
 
 
 @public_router.get("/central/sprites/{role}.svg")
@@ -674,14 +700,25 @@ async def sprite_svg(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> Response
     return Response(sprites.svg_for(looked_up), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS)
 
 
+def _sprite_png_candidates(role: str, scale: str) -> tuple[str, ...]:
+    """fable 2's build_sprites.py names the 1x file `{role}.png` (bare, no
+    `@1x`) and only `@2x`/`@3x` carry a scale suffix. Check that real name
+    first; `{role}@1x.png` stays a defensive second match in case that ever
+    changes, so this route doesn't silently fall back to the generator."""
+    if scale == "1":
+        return (f"{role}.png", f"{role}@1x.png")
+    return (f"{role}@{scale}x.png",)
+
+
 @public_router.get("/central/sprites/{role}@{scale}x.png")
 async def sprite_png(
     role: str = Path(pattern=r"^[A-Za-z_]{1,32}$"), scale: str = Path(pattern=r"^[123]$")
 ) -> Response:
     looked_up = _sprite_role(role)
-    art_file = SPRITES_STATIC_DIR / f"{looked_up}@{scale}x.png"
-    if art_file.is_file():
-        return Response(art_file.read_bytes(), media_type="image/png", headers=SPRITE_CACHE_HEADERS)
+    for name in _sprite_png_candidates(looked_up, scale):
+        art_file = SPRITES_STATIC_DIR / name
+        if art_file.is_file():
+            return Response(art_file.read_bytes(), media_type="image/png", headers=SPRITE_CACHE_HEADERS)
     return Response(
         sprites.png_bytes_for(looked_up, sprites.PNG_SCALES[f"{scale}x"]),
         media_type="image/png", headers=SPRITE_CACHE_HEADERS,
