@@ -652,9 +652,11 @@
     const kv = (k, v) => { if (v == null || v === "") return; body.append(el("div", "k", k), el("div", "v", String(v))); };
     if (d.kind === "session") {
       const s = d.session;
-      document.getElementById("s-title").textContent = s.title || s.session_id;
-      document.getElementById("s-meta").textContent = [d.pod, s.kind, (s.phase || "").replace("_", " ")].filter(Boolean).join(" · ");
-      kv("TASK", s.task); kv("SUMMARY", s.summary); kv("STATE", s.state); kv("UPDATED", s.updated_at);
+      document.getElementById("s-title").textContent = s.doing || s.title || s.session_id;
+      document.getElementById("s-meta").textContent = [s.device, d.pod, s.kind, (s.phase || "").replace("_", " ")].filter(Boolean).join(" · ");
+      if (s.recap && s.recap.length) kv("RECAP", s.recap.map((r) => "\u2022 " + r).join("\n"));
+      else kv("SUMMARY", s.summary);
+      kv("STATE", s.state); kv("UPDATED", s.updated_at);
       const lines = feedLines.get(s.session_id) || [];
       if (lines.length) {
         body.append(el("div", "k", "LAST FEED"));
@@ -665,7 +667,7 @@
       const b = el("button", "primary", "OPEN CHAT");
       b.addEventListener("click", () => {
         const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis;
-        if (h) h.postMessage({ type: "openChat", session_id: s.session_id, title: s.title || s.task || "Chat" });
+        if (h) h.postMessage({ type: "openChat", session_id: s.session_id, title: s.doing || s.title || s.task || "Chat" });
       });
       actions.append(b);
     } else if (d.kind === "hub") {
@@ -704,7 +706,8 @@
   let sessionsOk = true;
   async function refresh() {
     const [s, a] = await Promise.allSettled([getJSON("/central/sessions"), getJSON("/central/agents")]);
-    if (s.status === "fulfilled" && Array.isArray(s.value)) { sessions = s.value; sessionsOk = true; }
+    // The gateway marks sessions idle 30+ min (UTC, server side); needs-you sessions never are.
+    if (s.status === "fulfilled" && Array.isArray(s.value)) { sessions = s.value.filter((x) => !x.floor_hidden); sessionsOk = true; }
     else sessionsOk = false;
     if (a.status === "fulfilled" && a.value && Array.isArray(a.value.hubs)) { hubs = a.value.hubs; macDevice = a.value.device; }
     document.getElementById("toast").textContent = !sessionsOk && !sessions.length ? "ROUTER UNREACHABLE" : "";

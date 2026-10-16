@@ -8,6 +8,17 @@ Companion`) is read per request through `common.config.get_token` and is never
 logged, echoed, or returned. Router failures surface as a 502 with a short
 generic detail (never the upstream body).
 
+Plain words (round 3): each session also carries `device` (constant "Mini PC"),
+`doing` (one plain line) and `recap` (short plain bullets) made by a cheap
+OpenRouter model from the latest summary, plus `floor_hidden` (idle 30+ min,
+UTC, never for a session that needs the owner). The router's `last_activity_at`
+and `health` pass through unchanged; when missing they fall back to
+`updated_at` and to the phase (working / waiting_for_owner / null). The model runs in the
+background only; the 10 s poll reads the cache in ~/.jarvis/central_state.json
+(keyed by session id + summary hash) and falls back to the router title.
+POST /central/clear-done stores one `cleared_before` UTC time there; done
+sessions last updated at or before it are left out of /central/sessions.
+
 Beyond the contract: GET /central/feed relays the router's GET /feed (SSE, one
 event per line of {seq, ts, session_id, type, from, to, text}) for the Agency
 Floor. The framing doc does not define /feed yet; until the router serves it,
@@ -16,9 +27,15 @@ Floor. The framing doc does not define /feed yet; until the router serves it,
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 
 import httpx
@@ -27,6 +44,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import config
+from gateway import quick
 from gateway.auth import require_bearer_any
 
 logger = logging.getLogger(__name__)
@@ -52,14 +70,34 @@ ROUTER_UNCONFIGURED = "router not configured"
 _ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq")
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at",
-    "project", "task", "summary", "phase",
+    "project", "task", "summary", "phase", "last_activity_at", "health",
 )
 _PHASES = ("in_progress", "in_review", "done")
+# Used only when the router sends no `health` yet (pre-patch router); done -> None.
+_HEALTH_FALLBACK = {"in_progress": "working", "in_review": "waiting_for_owner"}
 # Used only when the router sends no valid `phase`; an unknown state is in_progress.
 _PHASE_FALLBACK = {
     "running": "in_progress", "needs_input": "in_review",
     "done": "done", "failed": "done", "idle": "done", "stopped": "done",
 }
+
+DEVICE = "Mini PC"
+FLOOR_IDLE = timedelta(minutes=30)
+STATE_PATH = FilePath.home() / ".jarvis" / "central_state.json"
+SUMMARY_MODEL_DEFAULT = "anthropic/claude-haiku-5.5"
+PLAIN_TIMEOUT_SECONDS = 20.0
+PLAIN_RETRY_SECONDS = 600  # a failed generation for one summary is not retried sooner
+DOING_MAX = 80
+RECAP_MAX_ITEMS = 6
+RECAP_ITEM_MAX = 140
+PLAIN_INSTRUCTION = (
+    "You explain what an AI helper session is doing, for a busy owner who is not technical. "
+    'Reply with JSON only: {"doing": "...", "recap": ["...", "..."]}. '
+    '"doing": one short line, under 70 characters, saying what it is doing right now in plain words. '
+    '"recap": 1 to 5 short bullets in first person past tense, like "I fixed the login page" '
+    'or "I downloaded the photos". If the owner must act, the last bullet starts with "Needs you: ". '
+    "No jargon, no code, no file paths, no markdown."
+)
 
 router = APIRouter(dependencies=[Depends(require_bearer_any("ios_token"))])
 # The Agency Floor page holds no data or secrets (it fetches everything with the
@@ -142,11 +180,193 @@ def _bad_gateway(exc: RouterError) -> HTTPException:
     return HTTPException(status_code=502, detail=str(exc))
 
 
-def _session(item: dict) -> dict:
+def _now() -> datetime:
+    """Current UTC time (the seam tests pin)."""
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(value) -> datetime | None:
+    """Router ISO time -> aware UTC datetime; naive means UTC; junk -> None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _iso(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _load_state() -> dict:
+    """{"cleared_before": iso | None, "plain": {sid: {hash, doing, recap}}}; missing/bad file -> empty."""
+    try:
+        data = json.loads(STATE_PATH.read_text())
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        data = {}
+    cleared = data.get("cleared_before")
+    plain = data.get("plain")
+    return {
+        "cleared_before": cleared if isinstance(cleared, str) else None,
+        "plain": plain if isinstance(plain, dict) else {},
+    }
+
+
+def _save_state(state: dict) -> None:
+    """Atomic write, private like wake.py's state: dir 0o700, file 0o600. Raises OSError."""
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, STATE_PATH)
+
+
+def _summary_hash(summary: str) -> str:
+    return hashlib.sha256(summary.encode()).hexdigest()[:16]
+
+
+def _session(item: dict, plain: dict | None = None, now: datetime | None = None) -> dict:
     out = _pick(item, _SESSION_KEYS)
     if out.get("phase") not in _PHASES:
         out["phase"] = _PHASE_FALLBACK.get(out.get("state"), "in_progress")
+    out["device"] = DEVICE
+    # Router values pass through unchanged; fill only what an older router does not send.
+    if not out.get("last_activity_at"):
+        out["last_activity_at"] = out.get("updated_at")
+    if not out.get("health"):
+        out["health"] = _HEALTH_FALLBACK.get(out["phase"])
+    # A cached line for an older summary still beats the raw title while the new one is made.
+    hit = (plain or {}).get(out.get("session_id"))
+    if isinstance(hit, dict) and isinstance(hit.get("doing"), str):
+        out["doing"] = hit["doing"]
+        out["recap"] = [r for r in hit.get("recap") or [] if isinstance(r, str)]
+    else:
+        out["doing"] = out.get("title") or out.get("task") or out.get("session_id")
+        out["recap"] = []
+    ts = _parse_ts(out.get("last_activity_at"))
+    needs_owner = (
+        out.get("state") == "needs_input" or out["phase"] == "in_review" or out["health"] == "waiting_for_owner"
+    )
+    out["floor_hidden"] = bool(ts and not needs_owner and (now or _now()) - ts >= FLOOR_IDLE)
     return out
+
+
+def _cleared(session: dict, cleared_before: datetime | None) -> bool:
+    """Done and last updated at/before the clear (no time -> treated as old)."""
+    if cleared_before is None or session["phase"] != "done":
+        return False
+    ts = _parse_ts(session.get("updated_at"))
+    return ts is None or ts <= cleared_before
+
+
+# --- plain-words generation (background only; never awaited by the poll) -------
+
+_plain_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jarvis-plain")
+_inflight: set[str] = set()
+_failed: dict[str, float] = {}  # "sid:hash" -> monotonic time of the last failure
+_tasks: set[asyncio.Task] = set()  # strong refs so running workers are not garbage collected
+_known_ids: set[str] = set()  # session ids in the latest poll; the cache is pruned to these
+
+
+def _plain_line(value, limit: int) -> str:
+    """One plain line: markdown marks and bullet prefixes stripped, spaces folded, capped."""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"[*`#>]+", "", value)
+    text = re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", text)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _clean_plain(text: str) -> dict | None:
+    """Model reply -> {"doing", "recap"} or None when it is not usable JSON."""
+    match = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    doing = _plain_line(data.get("doing"), DOING_MAX)
+    if not doing:
+        return None
+    raw = data.get("recap")
+    items = raw if isinstance(raw, list) else []
+    recap = [line for line in (_plain_line(r, RECAP_ITEM_MAX) for r in items) if line]
+    return {"doing": doing, "recap": recap[:RECAP_MAX_ITEMS]}
+
+
+def _generate_plain(session: dict) -> dict | None:
+    """Blocking: one OpenRouter call -> {"doing", "recap"}; None when unconfigured or unusable."""
+    settings = quick._settings()
+    key = (settings.get("openrouter_key") or "").strip()
+    if not key:
+        return None
+    model = (settings.get("summary_model") or "").strip() or SUMMARY_MODEL_DEFAULT
+    facts = "\n".join(
+        f"{label}: {session[k]}" for label, k in (("Title", "title"), ("Task", "task"), ("State", "state"))
+        if isinstance(session.get(k), str) and session[k]
+    )
+    payload = {
+        "model": model,
+        "max_tokens": 400,
+        "messages": [
+            {"role": "system", "content": PLAIN_INSTRUCTION},
+            {"role": "user", "content": f"{facts}\nLatest summary:\n{session['summary'][:4000]}"},
+        ],
+    }
+    data = quick._openrouter(quick._CHAT_URL, payload, key=key, timeout_s=PLAIN_TIMEOUT_SECONDS)
+    return _clean_plain(quick._content_text(data))
+
+
+async def _plain_worker(sid: str, digest: str, session: dict) -> None:
+    key = f"{sid}:{digest}"
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(_plain_executor, _generate_plain, session)
+        if result is None:
+            _failed[key] = time.monotonic()
+            return
+        # Load + save run with no await between them, so workers never interleave on the file.
+        state = _load_state()
+        plain = {k: v for k, v in state["plain"].items() if k in _known_ids}
+        plain[sid] = {"hash": digest, **result}
+        state["plain"] = plain
+        _save_state(state)
+    except Exception as exc:  # a failed summary never breaks the gateway
+        logger.info("plain summary for %s failed: %s", sid, type(exc).__name__)
+        _failed[key] = time.monotonic()
+    finally:
+        _inflight.discard(key)
+
+
+def _schedule_plain(sessions: list[dict], plain: dict) -> None:
+    """Fire-and-forget generation for sessions whose summary is not cached yet."""
+    now = time.monotonic()
+    if len(_failed) > 1000:
+        _failed.clear()
+    loop = asyncio.get_running_loop()
+    for s in sessions:
+        sid, summary = s.get("session_id"), s.get("summary")
+        if not isinstance(sid, str) or not isinstance(summary, str) or not summary.strip():
+            continue
+        digest = _summary_hash(summary)
+        hit = plain.get(sid)
+        key = f"{sid}:{digest}"
+        if isinstance(hit, dict) and hit.get("hash") == digest:
+            continue
+        if key in _inflight or now - _failed.get(key, -PLAIN_RETRY_SECONDS) < PLAIN_RETRY_SECONDS:
+            continue
+        _inflight.add(key)
+        task = loop.create_task(_plain_worker(sid, digest, s))
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
 
 
 class ChatBody(BaseModel):
@@ -176,7 +396,34 @@ async def sessions() -> list[dict]:
         raise _bad_gateway(exc)
     if not isinstance(data, list):
         raise HTTPException(status_code=502, detail="router sent invalid json")
-    return [_session(item) for item in data if isinstance(item, dict)]
+    state = _load_state()
+    now = _now()
+    cleared_before = _parse_ts(state["cleared_before"])
+    items = [item for item in data if isinstance(item, dict)]
+    out = []
+    raw = []
+    for item in items:
+        session = _session(item, state["plain"], now)
+        if not _cleared(session, cleared_before):
+            out.append(session)
+            raw.append(_pick(item, _SESSION_KEYS))
+    _known_ids.clear()
+    _known_ids.update(s["session_id"] for s in out if isinstance(s.get("session_id"), str))
+    _schedule_plain(raw, state["plain"])
+    return out
+
+
+@router.post("/central/clear-done")
+async def clear_done() -> dict:
+    """Hide every session that is done now; one that becomes active again reappears."""
+    state = _load_state()
+    state["cleared_before"] = _iso(_now())
+    try:
+        _save_state(state)
+    except OSError as exc:
+        logger.warning("central state save failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="could not save") from None
+    return {"cleared_before": state["cleared_before"]}
 
 
 @router.post("/central/sessions/{session_id}/message")

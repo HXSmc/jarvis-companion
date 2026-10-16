@@ -62,3 +62,15 @@ def gateway_server(monkeypatch):
             await serve_task
 
     return _server
+
+
+@pytest.fixture(autouse=True)
+def isolate_central_state(monkeypatch, tmp_path):
+    """No test touches ~/.jarvis/central_state.json, the vault, or a real model."""
+    from gateway import central
+
+    monkeypatch.setattr(central, "STATE_PATH", tmp_path / "central_state.json")
+    monkeypatch.setattr(central, "_generate_plain", lambda session: None)
+    monkeypatch.setattr(central, "_inflight", set())
+    monkeypatch.setattr(central, "_failed", {})
+    monkeypatch.setattr(central, "_known_ids", set())
