@@ -44,7 +44,7 @@ from pathlib import Path as FilePath
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import config
@@ -642,32 +642,49 @@ async def floor() -> HTMLResponse:
     )
 
 
-# Role sprites (Ask 2): one pixel grid per role (gateway/sprites.py is the
-# single source of truth), served two ways — SVG for the Floor's <img>/canvas
-# use, a plain colour grid as JSON for the iOS Sessions board (SwiftUI Canvas
-# can't decode SVG from the network). Public like /central/floor: an <img> or
-# fetch from the Floor/board can't attach a bearer, and a sprite carries no
-# data or secret. `role` is looked up in sprites.ROLES (no path join, no file
-# access), falling back to WORKER's sprite for anything unknown — the route
-# itself never 404s so a stale/unexpected role string can't blank a card.
+# Role sprites (Ask 2). Ownership split (fable 2, 2026-10-16): the real art
+# — per-role SVG + PNG @1x/2x/3x, a combined sprites.svg with <symbol
+# id="sprite-ROLE">, preview.html — lives under gateway/static/sprites/, built
+# in fable 2's own worktree (~/Desktop/personal/jarvis-companion-sprites,
+# branch `sprites`). This file never creates or edits anything in that
+# directory. What's wired here: the route serves a static file from there
+# when one exists, and falls back to gateway/sprites.py's procedural
+# generator (SVG natively; PNG via its hand-rolled encoder) when it doesn't —
+# so the Floor and the Sessions board both render something today and pick up
+# the real art automatically the moment fable 2 merges it, no redeploy of
+# this logic needed. Public like /central/floor: an <img>/AsyncImage/Canvas
+# fetch can't attach a bearer, and a sprite carries no data or secret. `role`
+# is looked up in sprites.ROLES (no path join, no arbitrary file access),
+# falling back to WORKER for anything unknown — the route itself never 404s
+# so a stale/unexpected role string can't blank a card.
 SPRITE_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
+SPRITES_STATIC_DIR = FilePath(__file__).resolve().parent / "static" / "sprites"
+
+
+def _sprite_role(role: str) -> str:
+    return role.upper() if role.upper() in sprites.ROLES else "WORKER"
 
 
 @public_router.get("/central/sprites/{role}.svg")
 async def sprite_svg(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> Response:
-    looked_up = role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    looked_up = _sprite_role(role)
+    art_file = SPRITES_STATIC_DIR / f"{looked_up}.svg"
+    if art_file.is_file():
+        return Response(art_file.read_bytes(), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS)
+    return Response(sprites.svg_for(looked_up), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS)
+
+
+@public_router.get("/central/sprites/{role}@{scale}x.png")
+async def sprite_png(
+    role: str = Path(pattern=r"^[A-Za-z_]{1,32}$"), scale: str = Path(pattern=r"^[123]$")
+) -> Response:
+    looked_up = _sprite_role(role)
+    art_file = SPRITES_STATIC_DIR / f"{looked_up}@{scale}x.png"
+    if art_file.is_file():
+        return Response(art_file.read_bytes(), media_type="image/png", headers=SPRITE_CACHE_HEADERS)
     return Response(
-        sprites.svg_for(looked_up), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS
-    )
-
-
-@public_router.get("/central/sprites/{role}.json")
-async def sprite_grid(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> JSONResponse:
-    looked_up = role.upper() if role.upper() in sprites.ROLES else "WORKER"
-    grid = sprites.grid_for(looked_up)
-    return JSONResponse(
-        {"w": sprites.GRID_W, "h": sprites.GRID_H, "role": looked_up, "rows": grid},
-        headers=SPRITE_CACHE_HEADERS,
+        sprites.png_bytes_for(looked_up, sprites.PNG_SCALES[f"{scale}x"]),
+        media_type="image/png", headers=SPRITE_CACHE_HEADERS,
     )
 
 
