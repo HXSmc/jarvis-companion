@@ -1,0 +1,77 @@
+[
+  {
+    "role": "ARCHITECT",
+    "label": "Planner",
+    "file": "ARCHITECT.svg"
+  },
+  {
+    "role": "SPEC_WRITER",
+    "label": "Planner",
+    "file": "SPEC_WRITER.svg"
+  },
+  {
+    "role": "RESEARCHER",
+    "label": "Researcher",
+    "file": "RESEARCHER.svg"
+  },
+  {
+    "role": "REVIEWER",
+    "label": "Reviewer",
+    "file": "REVIEWER.svg"
+  },
+  {
+    "role": "BUILDER",
+    "label": "Builder",
+    "file": "BUILDER.svg"
+  },
+  {
+    "role": "SCOUT",
+    "label": "Scout",
+    "file": "SCOUT.svg"
+  },
+  {
+    "role": "EXPLORER",
+    "label": "Explorer",
+    "file": "EXPLORER.svg"
+  },
+  {
+    "role": "FIXER",
+    "label": "Fixer",
+    "file": "FIXER.svg"
+  },
+  {
+    "role": "VERIFIER",
+    "label": "Verifier",
+    "file": "VERIFIER.svg"
+  },
+  {
+    "role": "SECURITY",
+    "label": "Security",
+    "file": "SECURITY.svg"
+  },
+  {
+    "role": "DESIGNER",
+    "label": "Designer",
+    "file": "DESIGNER.svg"
+  },
+  {
+    "role": "MARKETER",
+    "label": "Marketer",
+    "file": "MARKETER.svg"
+  },
+  {
+    "role": "WORKER",
+    "label": "Worker",
+    "file": "WORKER.svg"
+  },
+  {
+    "role": "GLM_WORKER",
+    "label": "GLM worker",
+    "file": "GLM_WORKER.svg"
+  },
+  {
+    "role": "OWNER",
+    "label": "Owner",
+    "file": "OWNER.svg"
+  }
+]
