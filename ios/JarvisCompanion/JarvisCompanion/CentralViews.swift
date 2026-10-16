@@ -81,7 +81,8 @@ enum Central {
 }
 
 /// One router session from GET /central/sessions. The gateway always fills
-/// `phase` (in_progress / in_review / done); the rest may be missing.
+/// `phase` (in_progress / in_review / done), `device`, `doing` (plain line)
+/// and `recap` (plain bullets); the rest may be missing.
 struct CentralSession: Identifiable, Decodable, Equatable {
     let sessionId: String
     let kind: String?
@@ -93,14 +94,95 @@ struct CentralSession: Identifiable, Decodable, Equatable {
     let task: String?
     let summary: String?
     let phase: String?
+    let device: String?
+    let doing: String?
+    let recap: [String]?
+    let lastActivityAt: String?
+    let health: String?
 
     var id: String { sessionId }
-    var displayTask: String { task ?? title ?? sessionId }
+    var displayTask: String {
+        for text in [doing, title, task] {
+            if let text = text, !text.isEmpty { return text }
+        }
+        return sessionId
+    }
+    /// One line for the card: the "Needs you:" bullet first, else the first bullet.
+    var recapPreview: String? {
+        let items = recap ?? []
+        return items.first { $0.hasPrefix("Needs you") } ?? items.first
+    }
     var displayProject: String? {
         if let project = project, !project.isEmpty { return project }
         guard let cwd = cwd, !cwd.isEmpty else { return nil }
         return (cwd as NSString).lastPathComponent
     }
+
+    /// Honest live status ("Working, last activity 20s ago" / "Waiting for you" /
+    /// "Stalled, no activity 14 min"); nil for finished sessions. Router `health`
+    /// and `last_activity_at` win; older routers fall back to phase + updated_at.
+    func statusLine(now: Date) -> (text: String, color: Color)? {
+        let ago = CentralTime.parse(lastActivityAt ?? updatedAt).map { CentralTime.ago($0, now: now) }
+        let fallback = phase == "in_review" ? "waiting_for_owner" : phase == "in_progress" ? "working" : nil
+        switch health ?? fallback ?? "" {
+        case "waiting_for_owner":
+            return ("Waiting for you", .jarvisAccent)
+        case "stalled":
+            return (ago.map { "Stalled, no activity \($0)" } ?? "Stalled", .jarvisDanger)
+        case "working":
+            return (ago.map { "Working, last activity \($0) ago" } ?? "Working", .centralGreen)
+        default:
+            return nil
+        }
+    }
+}
+
+/// The gateway's ISO 8601 UTC times, with or without fractional seconds.
+enum CentralTime {
+    private static let whole = ISO8601DateFormatter()
+    private static let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static func parse(_ text: String?) -> Date? {
+        guard let text = text, !text.isEmpty else { return nil }
+        return whole.date(from: text) ?? fractional.date(from: text)
+    }
+
+    static func ago(_ date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60) min" }
+        if seconds < 86400 { return "\(seconds / 3600) h" }
+        return "\(seconds / 86400) d"
+    }
+}
+
+/// The live status line; re-renders every 5 s on its own so "20s ago" keeps
+/// counting between polls without a refetch.
+struct StatusLine: View {
+    let session: CentralSession
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            if let status = session.statusLine(now: context.date) {
+                HStack(spacing: 6) {
+                    Circle().fill(status.color).frame(width: 6, height: 6)
+                    Text(status.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(status.color)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+}
+
+/// Which session's recap sheet is open.
+struct RecapTarget: Identifiable {
+    let id: String
 }
 
 /// What a chat sheet opens on: an existing session, or nil for a new thread.
@@ -128,14 +210,30 @@ final class SessionsModel: ObservableObject {
             self.error = error.localizedDescription
         }
     }
+
+    /// Hide every done session (gateway stores the time); reactivated ones come back.
+    func clearDone() async {
+        do {
+            _ = try await Central.data(Central.request("/central/clear-done", method: "POST"))
+            await refresh()
+        } catch is CancellationError {
+            return
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
 }
 
 /// Sessions kanban: three columns paged horizontally, each ~85% wide so the
-/// next column peeks in. Refreshes every 10 s while on screen (`.task` is
-/// cancelled when the view goes away) and on pull. Tapping a card opens chat.
+/// next column peeks in. Refreshes every 5 s while on screen and the app is
+/// in the foreground (`.task(id: scenePhase)` restarts/cancels the loop), and
+/// on pull; cards move columns and update in place by session id. Tapping a
+/// card opens its recap; the recap has "Open chat".
 struct SessionsBoard: View {
     @StateObject private var model = SessionsModel()
     @State private var openChat: ChatTarget?
+    @State private var openRecap: RecapTarget?
+    @Environment(\.scenePhase) private var scenePhase
 
     private struct Column {
         let phase: String
@@ -159,6 +257,14 @@ struct SessionsBoard: View {
                 }
                 Spacer(minLength: 8)
                 Button {
+                    Task { await model.clearDone() }
+                } label: {
+                    Label("Clear done", systemImage: "checkmark.circle")
+                        .font(.subheadline)
+                        .foregroundColor(.jarvisMuted)
+                        .frame(minHeight: 44)
+                }
+                Button {
                     openChat = ChatTarget(sessionID: nil, title: "New chat")
                 } label: {
                     Label("New chat", systemImage: "plus")
@@ -180,13 +286,15 @@ struct SessionsBoard: View {
                 .modifier(ColumnPaging())
             }
         }
-        .task {
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 await model.refresh()
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
         .sheet(item: $openChat) { ChatView(target: $0) }
+        .sheet(item: $openRecap) { RecapView(model: model, sessionID: $0.id) }
     }
 
     private func column(_ phase: String, label: String) -> some View {
@@ -200,7 +308,7 @@ struct SessionsBoard: View {
                 LazyVStack(spacing: 8) {
                     ForEach(items) { session in
                         Button {
-                            openChat = ChatTarget(sessionID: session.sessionId, title: session.displayTask)
+                            openRecap = RecapTarget(id: session.sessionId)
                         } label: {
                             SessionCard(session: session)
                         }
@@ -241,8 +349,9 @@ private struct ColumnTargets: ViewModifier {
     }
 }
 
-/// Card: task (bold), project (mono purple), summary (2 lines); radius 12 +
-/// 1 px border. done → "done ✓" green, in review → "needs you" orange.
+/// Card: what it's doing (bold), device chip + project (mono purple), one
+/// plain recap line (else the summary, 2 lines); radius 12 + 1 px border.
+/// done → "done ✓" green, in review → "needs you" orange.
 struct SessionCard: View {
     let session: CentralSession
 
@@ -256,14 +365,20 @@ struct SessionCard: View {
                 Spacer(minLength: 6)
                 badge
             }
-            if let project = session.displayProject {
-                Text(project)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.centralPurple)
-                    .lineLimit(1)
+            StatusLine(session: session)
+            HStack(spacing: 6) {
+                if let device = session.device, !device.isEmpty {
+                    DeviceChip(device: device)
+                }
+                if let project = session.displayProject {
+                    Text(project)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.centralPurple)
+                        .lineLimit(1)
+                }
             }
-            if let summary = session.summary, !summary.isEmpty {
-                Text(summary)
+            if let line = session.recapPreview ?? session.summary, !line.isEmpty {
+                Text(line)
                     .font(.footnote)
                     .foregroundColor(.jarvisMuted)
                     .lineLimit(2)
@@ -292,6 +407,95 @@ struct SessionCard: View {
             .font(.system(size: 11, weight: .semibold, design: .monospaced))
             .foregroundColor(color)
             .lineLimit(1)
+    }
+}
+
+struct DeviceChip: View {
+    let device: String
+
+    var body: some View {
+        Text(device)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.jarvisText)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.white.opacity(0.08)))
+    }
+}
+
+/// Recap sheet: what the session is doing + short plain bullets ("I did…",
+/// "Needs you: …"). Reads the shared SessionsModel, so the 5 s poll keeps it
+/// live; "Open chat" opens the thread on top.
+struct RecapView: View {
+    @ObservedObject var model: SessionsModel
+    let sessionID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var openChat: ChatTarget?
+
+    private var session: CentralSession? {
+        model.sessions.first { $0.sessionId == sessionID }
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let session = session {
+                        Text(session.displayTask)
+                            .font(.title3.weight(.semibold))
+                            .foregroundColor(.jarvisText)
+                        StatusLine(session: session)
+                        HStack(spacing: 6) {
+                            if let device = session.device, !device.isEmpty {
+                                DeviceChip(device: device)
+                            }
+                            if let project = session.displayProject {
+                                Text(project)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.centralPurple)
+                            }
+                        }
+                        let bullets = session.recap ?? []
+                        if bullets.isEmpty {
+                            Text(session.summary ?? "No recap yet.")
+                                .font(.body)
+                                .foregroundColor(.jarvisMuted)
+                        } else {
+                            ForEach(Array(bullets.enumerated()), id: \.offset) { _, line in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("•").foregroundColor(.jarvisMuted)
+                                    Text(line)
+                                        .font(.body)
+                                        .foregroundColor(line.hasPrefix("Needs you") ? .jarvisAccent : .jarvisText)
+                                }
+                            }
+                        }
+                        Button {
+                            openChat = ChatTarget(sessionID: session.sessionId, title: session.displayTask)
+                        } label: {
+                            Label("Open chat", systemImage: "bubble.left.and.bubble.right")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .padding(.top, 8)
+                    } else {
+                        Text("This session is gone.")
+                            .foregroundColor(.jarvisMuted)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("Recap")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .sheet(item: $openChat) { ChatView(target: $0) }
     }
 }
 
