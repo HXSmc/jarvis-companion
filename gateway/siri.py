@@ -51,8 +51,9 @@ SHARED_TOKEN_TIMEOUT_SECONDS = 25.0
 _SHARED_TOKEN_TIMEOUT_REPLY = "That's taking a while, try asking again."
 _SHARED_TOKEN_NO_ANSWER_REPLY = "I don't know. For tasks, use the Jarvis app."
 
-# Voice turns share one router thread unless the client names its own.
-VOICE_THREAD_ID = "phone-voice"
+# Each voice/home-screen turn opens its own router thread (so a new prompt never
+# lands in the previous turn's session) unless the client names one; retries stay
+# idempotent through msg_id, which the router dedupes before any thread lookup.
 _THREAD_RE = re.compile(central.ID_PATTERN)
 
 # At most 2 concurrent router calls — a third gets an immediate busy reply
@@ -147,7 +148,7 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
     try:
         body = await request.json()
         text = str(body.get("text") or "")
-        thread_id = str(body.get("thread_id") or VOICE_THREAD_ID)
+        thread_id = str(body.get("thread_id") or f"voice-{uuid.uuid4().hex}")
         msg_id = str(body.get("msg_id") or uuid.uuid4().hex)
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail='expected JSON body {"text": "..."}')

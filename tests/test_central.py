@@ -325,7 +325,7 @@ def test_siri_fallback_routes_to_router():
     sent = router_stub.seen[-1]
     assert sent["path"] == "/route"
     assert sent["body"]["source"] == "voice"
-    assert sent["body"]["thread_id"] == "phone-voice"
+    assert re.fullmatch(r"voice-[0-9a-f]{32}", sent["body"]["thread_id"])
     assert re.fullmatch(r"[0-9a-f]{32}", sent["body"]["msg_id"])
 
 
