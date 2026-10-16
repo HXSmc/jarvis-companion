@@ -63,6 +63,7 @@
   <span class="title">AGENCY FLOOR</span>
   <span class="badge" id="running"><span class="dot" style="color:var(--emerald)">●</span> 0 RUNNING</span>
   <span class="badge" id="conn"><span class="dot" style="color:var(--dim)">●</span> connecting</span>
+  <span class="badge" id="watchdog-banner" style="display:none; border-color:var(--red); color:var(--red);">⚠ WATCHDOG STALE</span>
 </header>
 <button id="overview">OVERVIEW</button>
 <div id="toast"></div>
@@ -98,11 +99,14 @@
     EXPLORER: { top: "#d4b94a", hair: "#3a2a1a", glyph: "doc" },
     WORKER: { top: "#6b7a99", hair: "#2a2a2a", glyph: "code" },
     MARKETER: { top: "#5a6b8a", hair: "#2fb0c4", glyph: "doc" },
-    GLM_HUB: { top: "#f2a33a", hair: "#1e1e1e", glyph: "code" },
+    // Contract role (fable2-watchdog-roles-app-side.md): GLM rows are labelled
+    // GLM worker, never "hub" — they were deliberate smoke tests, the phone
+    // can't pick GLM. (Was GLM_HUB; renamed, same colours.)
+    GLM_WORKER: { top: "#f2a33a", hair: "#1e1e1e", glyph: "code" },
     OWNER: { top: "#e5e7eb", hair: "#1e1e1e", glyph: "chat" },
   };
   const PERSONA_ROLE = {
-    hub: "GLM_HUB", builder: "BUILDER", scout: "SCOUT", researcher: "RESEARCHER", reviewer: "REVIEWER",
+    hub: "GLM_WORKER", builder: "BUILDER", scout: "SCOUT", researcher: "RESEARCHER", reviewer: "REVIEWER",
     fixer: "FIXER", verifier: "VERIFIER", security: "SECURITY", designer: "DESIGNER", spec: "SPEC_WRITER",
     explorer: "EXPLORER", worker: "WORKER", marketer: "MARKETER", "design-builder": "DESIGNER",
   };
@@ -110,9 +114,13 @@
   const PHASE_COLOR = { in_progress: "#34d399", in_review: "#fbbf24", done: "#4b4f5a" };
   const C = { emerald: "#34d399", amber: "#fbbf24", cyan: "#22d3ee", red: "#f87171", ink: "#d9dce3", dim: "#7d828f" };
 
+  // Ask 3: prefer the router's own `role` (not confirmed live yet, see
+  // .orchestrator/reports/watchdog-roles-app-side.md); roleOf() is the
+  // fallback for a session the router hasn't labelled, or an older router.
   function roleOf(s) {
+    if (s.role && ROLES[s.role]) return s.role;
     const t = ((s.title || "") + " " + (s.task || "")).toLowerCase();
-    if (s.kind === "glm" && !/review|research/.test(t)) return "GLM_HUB";
+    if (s.kind === "glm" && !/review|research/.test(t)) return "GLM_WORKER";
     const rules = [
       [/review|audit/, "REVIEWER"], [/secur/, "SECURITY"], [/verif|test/, "VERIFIER"],
       [/research|investigat|explor|find/, "RESEARCHER"], [/fix|bug|debug/, "FIXER"],
@@ -121,6 +129,12 @@
     ];
     for (const [re, r] of rules) if (re.test(t)) return r;
     return "BUILDER";
+  }
+  // ARCHITECT and SPEC_WRITER are both labelled "Planner" in the UI (ask 2).
+  function roleLabel(role) {
+    if (role === "ARCHITECT" || role === "SPEC_WRITER") return "PLANNER";
+    if (role === "GLM_WORKER") return "GLM WORKER";
+    return role.replace("_", " ");
   }
   function projectOf(s) {
     if (s.project) return String(s.project);
@@ -187,29 +201,34 @@
         const role = roleOf(s);
         upsertDesk(id, {
           kind: "session", x: px + 22 + (j % 2) * 70, y: py + 22 + Math.floor(j / 2) * 70,
-          role, tag: role.replace("_", " ") + " · " + name, session: s, phase: s.phase || "done",
+          role, tag: roleLabel(role) + " · " + name, session: s, phase: s.phase || "done",
           pod: name,
         }, now);
       });
     });
     // Mac wing: fixed slot 0 of the ring (top). Each hub a desk, its agents as subagent desks.
+    // Caps raised (was 4 hubs / 5 agents): the live Mac snapshot has carried 5
+    // interactive hubs (fable, opus, opus 2, opus 3, fable 2) since the
+    // central-chat cutover, and a hub busy with a build can have 20+ agents —
+    // the old 4-hub cap silently dropped one owner session from the Floor.
     if (hubs.length) {
       const a = -Math.PI / 2;
-      const rows = Math.min(hubs.length, 4);
+      const hubCap = 10, agentCap = 8;
+      const rows = Math.min(hubs.length, hubCap);
       const w = 230, d = rows * 64 + 26;
       const px = Math.cos(a) * R - w / 2, py = Math.sin(a) * R - d / 2;
       pods.push({ name: "MAC · " + (macDevice || "AGENTIC-OS").toUpperCase(), x: px, y: py, w, d, color: "#22d3ee", mac: true });
       seen.add(MAC_ID);
       upsertDesk(MAC_ID, { kind: "anchor", x: px + w / 2, y: py + d / 2, hidden: true }, now);
-      hubs.slice(0, 4).forEach((h, i) => {
+      hubs.slice(0, hubCap).forEach((h, i) => {
         const id = "hub:" + h.key;
         seen.add(id);
         const hx = px + 18, hy = py + 18 + i * 64;
         upsertDesk(id, {
-          kind: "hub", x: hx, y: hy, role: h.engine === "glm" ? "GLM_HUB" : "ARCHITECT",
+          kind: "hub", x: hx, y: hy, role: h.engine === "glm" ? "GLM_WORKER" : "ARCHITECT",
           tag: "HUB · " + (h.dirLabel || "?"), hub: h, phase: h.active ? "in_progress" : "done",
         }, now);
-        (h.agents || []).slice(0, 5).forEach((ag, k) => {
+        (h.agents || []).slice(0, agentCap).forEach((ag, k) => {
           const aid = "agent:" + h.key + ":" + ag.id;
           seen.add(aid);
           upsertDesk(aid, {
@@ -405,15 +424,39 @@
     ctx.globalAlpha = 1;
   }
 
+  // Ask 2: role sprites, lazily loaded + cached by role from the gateway's
+  // own pixel-grid source of truth (gateway/sprites.py). One <img> per role
+  // for the life of the page — the route is 24h-cacheable and tiny.
+  const spriteImages = new Map();
+  function spriteImage(role) {
+    let img = spriteImages.get(role);
+    if (!img) {
+      img = new Image();
+      img.src = BASE + "/central/sprites/" + role + ".svg";
+      spriteImages.set(role, img);
+    }
+    return img;
+  }
+
   function drawAvatar(d, sx, sy, k, dim) {
     const r = ROLES[d.role] || ROLES.WORKER;
     ctx.globalAlpha = dim ? 0.45 : 1;
-    const tw = 13 * k, th = 15 * k;
-    if (r.pants) { ctx.fillStyle = r.pants; rrect(sx - tw / 2, sy - th * 0.35, tw, th * 0.35, 3 * k); ctx.fill(); }
-    ctx.fillStyle = r.top; rrect(sx - tw / 2, sy - th, tw, th * (r.pants ? 0.7 : 1), 5 * k); ctx.fill();
-    const hy = sy - th - 6 * k;
-    ctx.fillStyle = r.skin || SKIN; ctx.beginPath(); ctx.arc(sx, hy, 5.5 * k, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = r.hair; ctx.beginPath(); ctx.arc(sx, hy - 1.2 * k, 5.6 * k, Math.PI, 0); ctx.fill();
+    const img = spriteImage(d.role || "WORKER");
+    if (img.complete && img.naturalWidth > 0) {
+      const iw = 15 * k, ih = 17 * k;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, sx - iw / 2, sy - ih, iw, ih);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      // Fallback while the sprite image loads (first frame or two only, then
+      // cached) — the old flat-colour body, so a desk is never blank.
+      const tw = 13 * k, th = 15 * k;
+      if (r.pants) { ctx.fillStyle = r.pants; rrect(sx - tw / 2, sy - th * 0.35, tw, th * 0.35, 3 * k); ctx.fill(); }
+      ctx.fillStyle = r.top; rrect(sx - tw / 2, sy - th, tw, th * (r.pants ? 0.7 : 1), 5 * k); ctx.fill();
+      const hy = sy - th - 6 * k;
+      ctx.fillStyle = r.skin || SKIN; ctx.beginPath(); ctx.arc(sx, hy, 5.5 * k, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = r.hair; ctx.beginPath(); ctx.arc(sx, hy - 1.2 * k, 5.6 * k, Math.PI, 0); ctx.fill();
+    }
     ctx.globalAlpha = 1;
   }
 
@@ -459,11 +502,16 @@
     ctx.fillStyle = "#5c6273"; ctx.fillRect(m[0] - 0.75 * cam.s, m[1] - 3 * cam.s * sc, 1.5 * cam.s, 3 * cam.s * sc);
     const glyphColor = done ? C.dim : phase === "in_review" ? C.amber : d.kind === "owner" ? C.cyan : C.emerald;
     if (mw > 6) drawGlyph((ROLES[d.role] || ROLES.WORKER).glyph, m[0] - mw / 2 + 1, m[1] - mh - 3 * cam.s * sc + 1, mw - 2, mh - 2, t, d.seed, glyphColor);
-    // Pill tag above the head.
+    // Pill tag above the head. A session the watchdog has flagged (health
+    // "attention") overrides the usual phase colour with a red "⚠" badge —
+    // this is the one signal the ask cares most about surfacing (ask 3).
+    const attention = d.session && d.session.health === "attention";
     const tag = scr(d.x + w * 0.3, d.y - 6 * sc, z + (d.small ? 40 : 52));
-    const tagColor = phase === "in_progress" ? C.emerald : phase === "in_review" ? C.amber : phase === "error" ? C.red : "#3c404b";
+    const tagColor = attention ? C.red
+      : phase === "in_progress" ? C.emerald : phase === "in_review" ? C.amber : phase === "error" ? C.red : "#3c404b";
+    const tagText = attention ? "⚠ " + d.tag : d.tag;
     ctx.globalAlpha = k * (done ? 0.7 : 1);
-    if (cam.s * sc > 0.32 || focusId === d.id) pill(d.tag, tag[0], tag[1], tagColor, Math.max(0.75, cam.s * sc));
+    if (cam.s * sc > 0.32 || focusId === d.id) pill(tagText, tag[0], tag[1], tagColor, Math.max(0.75, cam.s * sc));
     ctx.restore();
     // Hit area in screen space, for taps.
     const c = scr(d.x + w / 2, d.y + dd / 2, h);
@@ -656,7 +704,10 @@
       document.getElementById("s-meta").textContent = [s.device, d.pod, s.kind, (s.phase || "").replace("_", " ")].filter(Boolean).join(" · ");
       if (s.recap && s.recap.length) kv("RECAP", s.recap.map((r) => "\u2022 " + r).join("\n"));
       else kv("SUMMARY", s.summary);
-      kv("STATE", s.state); kv("UPDATED", s.updated_at);
+      kv("ROLE", roleLabel(roleOf(s)));
+      kv("STATE", s.state); kv("LIFECYCLE", s.lifecycle); kv("UPDATED", s.updated_at);
+      if (s.health === "attention") kv("\u26a0 ATTENTION", s.attention_reason || "flagged by the watchdog");
+      if (s.phase === "done" && s.done_verdict === "suspect") kv("\u26a0 CHECK THIS DONE", s.done_verdict_reason || "verdict marked suspect");
       const lines = feedLines.get(s.session_id) || [];
       if (lines.length) {
         body.append(el("div", "k", "LAST FEED"));
@@ -704,17 +755,43 @@
     return r.json();
   }
   let sessionsOk = true;
+  // Ask 3: hide exited/stopped desks — a session the router has closed out
+  // has nothing left to watch, and left on the Floor it would just look like
+  // a desk that's gone quiet forever instead of one that finished and left.
+  const HIDDEN_LIFECYCLE = /^(exited|stopped)$/;
   async function refresh() {
-    const [s, a] = await Promise.allSettled([getJSON("/central/sessions"), getJSON("/central/agents")]);
+    const [s, a, w] = await Promise.allSettled([
+      getJSON("/central/sessions"), getJSON("/central/agents"), getJSON("/central/watchdog"),
+    ]);
     // The gateway marks sessions idle 30+ min (UTC, server side); needs-you sessions never are.
-    if (s.status === "fulfilled" && Array.isArray(s.value)) { sessions = s.value.filter((x) => !x.floor_hidden); sessionsOk = true; }
-    else sessionsOk = false;
+    if (s.status === "fulfilled" && Array.isArray(s.value)) {
+      sessions = s.value.filter((x) => !x.floor_hidden && !HIDDEN_LIFECYCLE.test(x.lifecycle || ""));
+      sessionsOk = true;
+    } else sessionsOk = false;
     if (a.status === "fulfilled" && a.value && Array.isArray(a.value.hubs)) { hubs = a.value.hubs; macDevice = a.value.device; }
+    watchdog = w.status === "fulfilled" && w.value ? w.value : null;
     document.getElementById("toast").textContent = !sessionsOk && !sessions.length ? "ROUTER UNREACHABLE" : "";
+    renderWatchdogBanner();
     layout();
     renderSheet();
   }
   setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 10000);
+
+  // Ask 3: "watchdog stale" banner once the router's own sweep (session
+  // ce03d92a) is live but has gone quiet — distinct from "not shipped yet"
+  // (GET /central/watchdog still 404s as of this build, so `watchdog.available`
+  // stays false and no banner shows; this is a silent, not an error, state).
+  let watchdog = null;
+  function renderWatchdogBanner() {
+    const el = document.getElementById("watchdog-banner");
+    if (!watchdog || !watchdog.available) { el.style.display = "none"; return; }
+    if (watchdog.stale) {
+      el.textContent = "WATCHDOG STALE" + (watchdog.age_s != null ? " · " + Math.round(watchdog.age_s) + "s" : "");
+      el.style.display = "";
+    } else {
+      el.style.display = "none";
+    }
+  }
 
   const OWNER_SOURCES = /^(app|owner|phone|siri|whatsapp|ios|user)$/i;
   function endpoint(v, fallback) {

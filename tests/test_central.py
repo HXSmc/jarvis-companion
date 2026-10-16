@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -37,6 +38,7 @@ def stub_router(monkeypatch: pytest.MonkeyPatch):
     )
     router_stub.seen.clear()
     monkeypatch.setattr(router_stub, "fail_status", None)
+    monkeypatch.setattr(router_stub, "watchdog_available", False)
 
     import collections
 
@@ -201,6 +203,51 @@ def test_feed_sse_passthrough():
     assert resp.status_code == 200
     assert '"type": "spawn"' in resp.text
     assert router_stub.seen[-1]["path"] == "/feed"
+
+
+# --- /central/watchdog (router session ce03d92a; not live yet) -------------------
+
+def test_watchdog_unavailable_when_router_404s():
+    resp = _call("GET", "/central/watchdog", headers=IOS)
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "available": False, "stale": None, "age_s": None,
+        "last_sweep_at": None, "sweep_errors_last_hour": None, "alerts": [],
+    }
+
+
+def test_watchdog_down_is_also_unavailable(monkeypatch):
+    monkeypatch.setattr(router_stub, "fail_status", 500)
+    resp = _call("GET", "/central/watchdog", headers=IOS)
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False
+
+
+def test_watchdog_available_and_fresh(monkeypatch):
+    monkeypatch.setattr(router_stub, "watchdog_available", True)
+    now = datetime(2026, 10, 16, 10, 2, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(central, "_now", lambda: now)
+    resp = _call("GET", "/central/watchdog", headers=IOS)
+    body = resp.json()
+    assert body["available"] is True
+    assert body["last_sweep_at"] == router_stub.WATCHDOG["last_sweep_at"]
+    assert body["age_s"] == pytest.approx(120.0)
+    assert body["stale"] is False
+
+
+def test_watchdog_available_but_stale(monkeypatch):
+    monkeypatch.setattr(router_stub, "watchdog_available", True)
+    now = datetime(2026, 10, 16, 10, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(central, "_now", lambda: now)
+    resp = _call("GET", "/central/watchdog", headers=IOS)
+    body = resp.json()
+    assert body["available"] is True
+    assert body["age_s"] == pytest.approx(600.0)
+    assert body["stale"] is True
+
+
+def test_watchdog_needs_ios_token():
+    assert _call("GET", "/central/watchdog").status_code == 401
 
 
 # --- router failures -------------------------------------------------------------

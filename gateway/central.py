@@ -44,10 +44,11 @@ from pathlib import Path as FilePath
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import config
+from gateway import sprites
 from gateway.auth import require_bearer_any
 from mac.voice import brain as _brain
 
@@ -75,10 +76,21 @@ _ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "opti
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at",
     "project", "task", "summary", "phase", "last_activity_at", "health",
+    # Ledger fields (session e7c7438a, live): dropped before this pass added
+    # them to the allowlist, so the Floor/board never saw them.
+    "purpose", "spawned_by", "parent_session_id", "lane", "lifecycle",
+    "blocked_reason", "done_reason", "throwaway", "current_step_index",
+    "last_failed_step", "engine",
+    # Watchdog + role fields (router session ce03d92a, NOT confirmed live as
+    # of this pass — see .orchestrator/reports/watchdog-roles-app-side.md).
+    # Listed here so they pass through the day the router starts sending
+    # them; until then _pick() just never finds the key and drops it.
+    "role", "attention_reason", "done_verdict", "done_verdict_reason",
 )
 _PHASES = ("in_progress", "in_review", "done")
-# Used only when the router sends no `health` yet (pre-patch router); done -> None.
-_HEALTH_FALLBACK = {"in_progress": "working", "in_review": "waiting_for_owner"}
+# New lifecycle health enum (contract): working | quiet | waiting | idle |
+# done | attention | failed. Used only when the router sends no `health` yet.
+_HEALTH_FALLBACK = {"in_progress": "working", "in_review": "waiting"}
 # Used only when the router sends no valid `phase`; an unknown state is in_progress.
 _PHASE_FALLBACK = {
     "running": "in_progress", "needs_input": "in_review",
@@ -113,7 +125,7 @@ public_router = APIRouter()
 FLOOR_HTML = FilePath(__file__).resolve().parent / "static" / "floor.html"
 FLOOR_CSP = (
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-    "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    "connect-src 'self'; img-src data: 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
 AGENTIC_OS_URL_DEFAULT = "http://127.0.0.1:8787"
@@ -121,6 +133,48 @@ AGENTIC_OS_TOKEN_PATH = FilePath.home() / ".config" / "agentic-os" / "token"
 AGENTIC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 _HUB_KEYS = ("key", "dirLabel", "engine", "active", "lastTs")
 _AGENT_KEYS = ("id", "persona", "engine", "label", "active", "status")
+
+# Split deploy (gateway on the mini PC): agentic-os's dashboard only runs on
+# the Mac at 127.0.0.1:8787, same reason gateway/screen.py proxies
+# /screen/mac/* back to the Mac. MAC_GATEWAY_URL unset = this process runs on
+# the Mac and can reach agentic-os directly; set = forward to the Mac's own
+# /central/agents (which does the direct call) with the ios_token.
+MAC_GATEWAY_ENV = "MAC_GATEWAY_URL"
+MAC_PROXY_TIMEOUT = httpx.Timeout(8.0, connect=3.0)
+
+
+def _mac_gateway() -> str | None:
+    return os.environ.get(MAC_GATEWAY_ENV, "").rstrip("/") or None
+
+
+def _mac_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """Outbound client to the Mac gateway (tests swap in an ASGI transport here)."""
+    return httpx.AsyncClient(timeout=timeout)
+
+
+def _ios_token() -> str | None:
+    """The ios_token bearer used to call the Mac gateway (tests stub this)."""
+    return config.get_token(name="ios_token")
+
+
+async def _mac_agents() -> dict:
+    """GET the Mac gateway's own /central/agents (direct agentic-os call); empty on any failure."""
+    empty = {"device": None, "hubs": []}
+    token = _ios_token()
+    if not token:
+        return empty
+    try:
+        async with _mac_client(MAC_PROXY_TIMEOUT) as client:
+            resp = await client.get(
+                f"{_mac_gateway()}/central/agents", headers={"Authorization": f"Bearer {token}"}
+            )
+        data = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("mac gateway /central/agents failed: %s", type(exc).__name__)
+        return empty
+    if not isinstance(data, dict) or not isinstance(data.get("hubs"), list):
+        return empty
+    return {"device": data.get("device") if isinstance(data.get("device"), str) else None, "hubs": data["hubs"]}
 
 
 class RouterError(Exception):
@@ -255,8 +309,15 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
         out["doing"] = out.get("title") or out.get("task") or out.get("session_id")
         out["recap"] = []
     ts = _parse_ts(out.get("last_activity_at"))
+    # Never hide a session that needs the owner: the old "in review" signal,
+    # the legacy literal "waiting_for_owner" health value (pre-rename router),
+    # the new health enum's waiting/attention, plus a done session whose
+    # done_verdict says the DONE might be false (done_verdict == "suspect").
     needs_owner = (
-        out.get("state") == "needs_input" or out["phase"] == "in_review" or out["health"] == "waiting_for_owner"
+        out.get("state") == "needs_input"
+        or out["phase"] == "in_review"
+        or out["health"] in ("waiting", "attention", "waiting_for_owner")
+        or (out["phase"] == "done" and out.get("done_verdict") == "suspect")
     )
     out["floor_hidden"] = bool(ts and not needs_owner and (now or _now()) - ts >= FLOOR_IDLE)
     return out
@@ -450,6 +511,42 @@ async def sessions() -> list[dict]:
     return out
 
 
+# Not shipped by the router as of this pass (router session ce03d92a; GET
+# /watchdog answers 404) — WATCHDOG_STALE_S + this route exist so the Floor's
+# banner lights up the day it does, without another deploy.
+WATCHDOG_STALE_S = 180
+_EMPTY_WATCHDOG = {
+    "available": False, "stale": None, "age_s": None,
+    "last_sweep_at": None, "sweep_errors_last_hour": None, "alerts": [],
+}
+
+
+@router.get("/central/watchdog")
+async def watchdog() -> dict:
+    """Router watchdog sweep status, with staleness computed here (the box's
+    clock matches the router's; the phone's may not). A router that doesn't
+    serve /watchdog yet (404) or is unreachable both read as "unavailable" —
+    distinct from "available but stale", which is the actual alert state.
+    """
+    try:
+        data = await _router_json("GET", "/watchdog")
+    except RouterError:
+        return dict(_EMPTY_WATCHDOG)
+    if not isinstance(data, dict):
+        return dict(_EMPTY_WATCHDOG)
+    last_sweep = _parse_ts(data.get("last_sweep_at"))
+    age_s = (_now() - last_sweep).total_seconds() if last_sweep else None
+    alerts = data.get("alerts")
+    return {
+        "available": True,
+        "last_sweep_at": data.get("last_sweep_at"),
+        "sweep_errors_last_hour": data.get("sweep_errors_last_hour"),
+        "alerts": [a for a in alerts if isinstance(a, dict)] if isinstance(alerts, list) else [],
+        "age_s": age_s,
+        "stale": age_s is not None and age_s > WATCHDOG_STALE_S,
+    }
+
+
 @router.post("/central/clear-done")
 async def clear_done() -> dict:
     """Hide every session that is done now; one that becomes active again reappears."""
@@ -545,6 +642,41 @@ async def floor() -> HTMLResponse:
     )
 
 
+# Role sprites (Ask 2): one pixel grid per role (gateway/sprites.py is the
+# single source of truth), served two ways — SVG for the Floor's <img>/canvas
+# use, a plain colour grid as JSON for the iOS Sessions board (SwiftUI Canvas
+# can't decode SVG from the network). Public like /central/floor: an <img> or
+# fetch from the Floor/board can't attach a bearer, and a sprite carries no
+# data or secret. `role` is looked up in sprites.ROLES (no path join, no file
+# access), falling back to WORKER's sprite for anything unknown — the route
+# itself never 404s so a stale/unexpected role string can't blank a card.
+SPRITE_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
+
+
+@public_router.get("/central/sprites/{role}.svg")
+async def sprite_svg(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> Response:
+    looked_up = role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    return Response(
+        sprites.svg_for(looked_up), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS
+    )
+
+
+@public_router.get("/central/sprites/{role}.json")
+async def sprite_grid(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> JSONResponse:
+    looked_up = role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    grid = sprites.grid_for(looked_up)
+    return JSONResponse(
+        {"w": sprites.GRID_W, "h": sprites.GRID_H, "role": looked_up, "rows": grid},
+        headers=SPRITE_CACHE_HEADERS,
+    )
+
+
+@public_router.get("/central/sprites")
+async def sprite_roles() -> dict:
+    """The role list, so a client can prefetch/cache every sprite up front."""
+    return {"roles": list(sprites.ROLES)}
+
+
 def agentic_os_base() -> str:
     return os.environ.get("AGENTIC_OS_URL", AGENTIC_OS_URL_DEFAULT).rstrip("/")
 
@@ -571,7 +703,14 @@ def _hub(item: dict) -> dict:
 
 @router.get("/central/agents")
 async def agents() -> dict:
-    """The Mac's hub sessions + their agents from agentic-os, trimmed; down -> no hubs."""
+    """The Mac's hub sessions + their agents from agentic-os, trimmed; down -> no hubs.
+
+    When this process runs on the box (MAC_GATEWAY_URL set), agentic-os is not
+    reachable locally — forward to the Mac gateway's own /central/agents
+    instead of calling agentic-os directly.
+    """
+    if _mac_gateway():
+        return await _mac_agents()
     empty = {"device": None, "hubs": []}
     token = agentic_os_token()
     if not token:

@@ -147,6 +147,83 @@ def test_agentic_os_token_missing_file(monkeypatch, tmp_path):
     assert central.agentic_os_token() is None
 
 
+# --- /central/agents, split deploy: box forwards to the Mac gateway -------------
+
+def _fake_mac_gateway(seen: list[dict], body=None, status: int = 200):
+    mac = FastAPI()
+
+    @mac.get("/central/agents")
+    async def agents_(request: Request):
+        seen.append(dict(request.headers))
+        return JSONResponse(SNAPSHOT_TRIMMED if body is None else body, status_code=status)
+
+    return mac
+
+
+SNAPSHOT_TRIMMED = {
+    "device": "mac-studio",
+    "hubs": [{
+        "key": "mac-studio:abc", "dirLabel": "jarvis", "engine": "claude", "active": True,
+        "lastTs": 1760000000000,
+        "agents": [{"id": "a1", "persona": "builder", "engine": "glm", "label": "spoke-1",
+                    "active": True, "status": "running"}],
+    }],
+}
+
+
+def test_agents_forwards_to_mac_gateway_when_split_deploy(monkeypatch):
+    seen: list[dict] = []
+    monkeypatch.setenv(central.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(
+        central, "_mac_client",
+        lambda timeout: httpx.AsyncClient(transport=httpx.ASGITransport(app=_fake_mac_gateway(seen)), timeout=timeout),
+    )
+    resp = _get("/central/agents", headers=IOS)
+    assert resp.status_code == 200
+    assert resp.json() == SNAPSHOT_TRIMMED
+    # Forwarded with the ios_token, never the agentic-os secret or the shared token.
+    assert seen[0]["authorization"] == f"Bearer {IOS_TOKEN}"
+    # agentic-os is never called directly in split-deploy mode.
+    assert fake_state["seen"] == []
+
+
+def test_agents_mac_gateway_down_is_empty(monkeypatch):
+    monkeypatch.setenv(central.MAC_GATEWAY_ENV, "http://mac.test")
+
+    def refuse(request):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(
+        central, "_mac_client",
+        lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(refuse), timeout=timeout),
+    )
+    assert _get("/central/agents", headers=IOS).json() == {"device": None, "hubs": []}
+
+
+def test_agents_mac_gateway_bad_body_is_empty(monkeypatch):
+    seen: list[dict] = []
+    monkeypatch.setenv(central.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(
+        central, "_mac_client",
+        lambda timeout: httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=_fake_mac_gateway(seen, body={"nope": True})), timeout=timeout
+        ),
+    )
+    assert _get("/central/agents", headers=IOS).json() == {"device": None, "hubs": []}
+
+
+def test_agents_mac_gateway_no_ios_token_is_empty_without_call(monkeypatch):
+    seen: list[dict] = []
+    monkeypatch.setenv(central.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(central, "_ios_token", lambda: None)
+    monkeypatch.setattr(
+        central, "_mac_client",
+        lambda timeout: httpx.AsyncClient(transport=httpx.ASGITransport(app=_fake_mac_gateway(seen)), timeout=timeout),
+    )
+    assert _get("/central/agents", headers=IOS).json() == {"device": None, "hubs": []}
+    assert seen == []
+
+
 def test_agentic_secret_never_in_response_or_logs(caplog, monkeypatch):
     caplog.set_level(logging.DEBUG)
     ok = _get("/central/agents", headers=IOS)

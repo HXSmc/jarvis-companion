@@ -99,8 +99,57 @@ struct CentralSession: Identifiable, Decodable, Equatable {
     let recap: [String]?
     let lastActivityAt: String?
     let health: String?
+    // Watchdog + role fields (router session ce03d92a; NOT confirmed live as
+    // of this build — see .orchestrator/reports/watchdog-roles-app-side.md).
+    // All optional: Codable silently leaves them nil until the router sends
+    // them, same as any other field an older router omits.
+    let role: String?
+    let attentionReason: String?
+    let doneVerdict: String?
+    let doneVerdictReason: String?
+    let lifecycle: String?
+    let purpose: String?
 
     var id: String { sessionId }
+
+    /// Contract roles (fable2-watchdog-roles-app-side.md): the sprite route's
+    /// allowlist (gateway/sprites.py ROLES) falls back to WORKER for anything
+    /// else, so any string here is safe to pass straight through.
+    static let knownRoles: Set<String> = [
+        "ARCHITECT", "RESEARCHER", "REVIEWER", "BUILDER", "SCOUT", "FIXER", "VERIFIER",
+        "SECURITY", "DESIGNER", "MARKETER", "SPEC_WRITER", "GLM_WORKER", "EXPLORER", "WORKER", "OWNER",
+    ]
+
+    /// Prefer the router's own `role`; fall back to the same keyword heuristic
+    /// as the Floor's roleOf() (gateway/static/floor.html) when it's missing
+    /// or not one of the contract's roles. GLM rows are labelled GLM worker,
+    /// never "hub" — they were deliberate smoke tests, the phone can't pick GLM.
+    var resolvedRole: String {
+        if let role = role, Self.knownRoles.contains(role) { return role }
+        let text = ((title ?? "") + " " + (task ?? "")).lowercased()
+        if kind == "glm" && !(text.contains("review") || text.contains("research")) { return "GLM_WORKER" }
+        let rules: [(String, String)] = [
+            ("review", "REVIEWER"), ("audit", "REVIEWER"), ("secur", "SECURITY"),
+            ("verif", "VERIFIER"), ("test", "VERIFIER"),
+            ("research", "RESEARCHER"), ("investigat", "RESEARCHER"), ("explor", "RESEARCHER"), ("find", "RESEARCHER"),
+            ("fix", "FIXER"), ("bug", "FIXER"), ("debug", "FIXER"),
+            ("design", "DESIGNER"), ("layout", "DESIGNER"),
+            ("market", "MARKETER"), ("seo", "MARKETER"), ("copy", "MARKETER"), ("launch", "MARKETER"),
+            ("spec", "ARCHITECT"), ("plan", "ARCHITECT"), ("architect", "ARCHITECT"),
+            ("note", "SPEC_WRITER"), ("doc", "SPEC_WRITER"), ("write", "SPEC_WRITER"),
+        ]
+        for (needle, role) in rules where text.contains(needle) { return role }
+        return "BUILDER"
+    }
+
+    /// ARCHITECT and SPEC_WRITER are both labelled "Planner" in the UI (ask 2).
+    var resolvedRoleLabel: String {
+        switch resolvedRole {
+        case "ARCHITECT", "SPEC_WRITER": return "Planner"
+        case "GLM_WORKER": return "GLM worker"
+        default: return resolvedRole.capitalized
+        }
+    }
     var displayTask: String {
         for text in [doing, title, task] {
             if let text = text, !text.isEmpty { return text }
@@ -123,15 +172,32 @@ struct CentralSession: Identifiable, Decodable, Equatable {
     /// and `last_activity_at` win; older routers fall back to phase + updated_at.
     func statusLine(now: Date) -> (text: String, color: Color)? {
         let ago = CentralTime.parse(lastActivityAt ?? updatedAt).map { CentralTime.ago($0, now: now) }
-        let fallback = phase == "in_review" ? "waiting_for_owner" : phase == "in_progress" ? "working" : nil
+        let fallback = phase == "in_review" ? "waiting" : phase == "in_progress" ? "working" : nil
+        // New health enum: working | quiet | waiting | idle | done | attention | failed
+        // (router session ce03d92a). "waiting_for_owner"/"stalled" are the old
+        // values, kept so an older router's cache doesn't go blank mid-rollout.
         switch health ?? fallback ?? "" {
-        case "waiting_for_owner":
+        case "attention":
+            return (attentionReason.map { "Needs attention: \($0)" } ?? "Needs attention", .jarvisDanger)
+        case "waiting", "waiting_for_owner":
             return ("Waiting for you", .jarvisAccent)
-        case "stalled":
+        case "stalled", "failed":
             return (ago.map { "Stalled, no activity \($0)" } ?? "Stalled", .jarvisDanger)
+        case "quiet":
+            // Busy but silent, NOT stuck — this is the "fixes DONE card showing
+            // 'Working, last activity...'" case from the contract: a quiet
+            // session never shows "Working" so it stops looking stalled.
+            return (ago.map { "Quiet, last activity \($0) ago" } ?? "Quiet", .jarvisMuted)
+        case "idle":
+            return ("Idle", .jarvisMuted)
         case "working":
             return (ago.map { "Working, last activity \($0) ago" } ?? "Working", .centralGreen)
         default:
+            // A done session whose done_verdict says the DONE might be false
+            // still gets a status line even though "done" otherwise shows none.
+            if phase == "done" && doneVerdict == "suspect" {
+                return (doneVerdictReason.map { "Check this DONE: \($0)" } ?? "Check this DONE", .jarvisDanger)
+            }
             return nil
         }
     }
@@ -236,14 +302,20 @@ struct SessionsBoard: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private struct Column {
-        let phase: String
+        let key: String
         let label: String
+        let matches: (CentralSession) -> Bool
     }
 
+    // ATTENTION pulls out of whichever phase column a session would otherwise
+    // sit in — health == "attention" is more urgent than a plain in_progress/
+    // in_review bucket, so it gets its own lane instead of hiding inside one
+    // of those (ask 4: "attention column/badge").
     private static let columns = [
-        Column(phase: "in_progress", label: "IN PROGRESS"),
-        Column(phase: "in_review", label: "IN REVIEW"),
-        Column(phase: "done", label: "DONE"),
+        Column(key: "in_progress", label: "IN PROGRESS") { $0.phase == "in_progress" && $0.health != "attention" },
+        Column(key: "in_review", label: "IN REVIEW") { $0.phase == "in_review" && $0.health != "attention" },
+        Column(key: "attention", label: "ATTENTION") { $0.health == "attention" },
+        Column(key: "done", label: "DONE") { $0.phase == "done" },
     ]
 
     var body: some View {
@@ -276,8 +348,8 @@ struct SessionsBoard: View {
             GeometryReader { geo in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 12) {
-                        ForEach(Self.columns, id: \.phase) { column in
-                            self.column(column.phase, label: column.label)
+                        ForEach(Self.columns, id: \.key) { column in
+                            self.column(column)
                                 .frame(width: geo.size.width * 0.85)
                         }
                     }
@@ -297,10 +369,10 @@ struct SessionsBoard: View {
         .sheet(item: $openRecap) { RecapView(model: model, sessionID: $0.id) }
     }
 
-    private func column(_ phase: String, label: String) -> some View {
-        let items = model.sessions.filter { $0.phase == phase }
+    private func column(_ column: Column) -> some View {
+        let items = model.sessions.filter(column.matches)
         return VStack(alignment: .leading, spacing: 8) {
-            Text("\(label) · \(items.count)")
+            Text("\(column.label) · \(items.count)")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .tracking(1)
                 .foregroundColor(.jarvisMuted)
@@ -351,13 +423,16 @@ private struct ColumnTargets: ViewModifier {
 
 /// Card: what it's doing (bold), device chip + project (mono purple), one
 /// plain recap line (else the summary, 2 lines); radius 12 + 1 px border.
-/// done → "done ✓" green, in review → "needs you" orange.
+/// done → "done ✓" green, in review → "needs you" orange, attention → red,
+/// a done session with done_verdict "suspect" → amber "check" instead of ✓.
 struct SessionCard: View {
     let session: CentralSession
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
+                RoleSprite(role: session.resolvedRole)
+                    .accessibilityLabel(session.resolvedRoleLabel)
                 Text(session.displayTask)
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(.jarvisText)
@@ -393,10 +468,16 @@ struct SessionCard: View {
 
     @ViewBuilder
     private var badge: some View {
-        if session.state == "failed" {
+        if session.health == "attention" {
+            badgeText("attention", color: .jarvisDanger)
+        } else if session.state == "failed" || session.health == "failed" {
             badgeText("failed", color: .jarvisDanger)
         } else if session.phase == "done" {
-            badgeText("done ✓", color: .centralGreen)
+            if session.doneVerdict == "suspect" {
+                badgeText("done? check", color: .jarvisDanger)
+            } else {
+                badgeText("done ✓", color: .centralGreen)
+            }
         } else if session.phase == "in_review" {
             badgeText("needs you", color: .jarvisAccent)
         }
@@ -420,6 +501,85 @@ struct DeviceChip: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Capsule().fill(Color.white.opacity(0.08)))
+    }
+}
+
+// MARK: - Role sprites (ask 2)
+//
+// gateway/sprites.py is the single source of truth for the pixel grid; the
+// Floor (web canvas) loads its SVG, but SwiftUI can't decode SVG fetched from
+// the network, so the board instead fetches the plain colour-grid JSON twin
+// at GET /central/sprites/{role}.json and draws it cell by cell with Canvas.
+
+extension Color {
+    /// "#RRGGBB" only (what gateway/sprites.py emits) — nil for anything else.
+    init?(hex: String) {
+        var s = hex
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
+        self.init(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+    }
+}
+
+struct SpriteGrid: Decodable {
+    let w: Int
+    let h: Int
+    let role: String
+    let rows: [[String?]]
+}
+
+/// Process-lifetime cache: every role's grid is small and immutable (the
+/// gateway serves it with a 24h Cache-Control too), so one fetch per role
+/// per app launch is enough — no need to refetch per card.
+@MainActor
+final class SpriteCache: ObservableObject {
+    static let shared = SpriteCache()
+    @Published private(set) var grids: [String: SpriteGrid] = [:]
+    private var inflight: Set<String> = []
+
+    func load(_ role: String) {
+        guard grids[role] == nil, !inflight.contains(role) else { return }
+        inflight.insert(role)
+        Task {
+            defer { inflight.remove(role) }
+            guard let request = try? Central.request("/central/sprites/\(role).json") else { return }
+            guard let data = try? await Central.data(request) else { return }
+            guard let grid = try? JSONDecoder().decode(SpriteGrid.self, from: data) else { return }
+            grids[role] = grid
+        }
+    }
+}
+
+/// One role's pixel sprite, drawn at card-icon size. Falls back to a plain
+/// tinted square while the grid is loading (first appearance only — cached
+/// after that), never to a blank space, so a slow/offline gateway doesn't
+/// make role identity disappear.
+struct RoleSprite: View {
+    let role: String
+    @ObservedObject private var cache = SpriteCache.shared
+
+    var body: some View {
+        Canvas { context, size in
+            guard let grid = cache.grids[role] else {
+                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.jarvisMuted.opacity(0.3)))
+                return
+            }
+            let cw = size.width / CGFloat(grid.w)
+            let ch = size.height / CGFloat(grid.h)
+            for (y, row) in grid.rows.enumerated() {
+                for (x, hex) in row.enumerated() {
+                    guard let hex = hex, let color = Color(hex: hex) else { continue }
+                    let rect = CGRect(x: CGFloat(x) * cw, y: CGFloat(y) * ch, width: cw + 0.5, height: ch + 0.5)
+                    context.fill(Path(rect), with: .color(color))
+                }
+            }
+        }
+        .frame(width: 20, height: 22)
+        .onAppear { cache.load(role) }
     }
 }
 

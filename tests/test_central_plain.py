@@ -275,7 +275,9 @@ def test_activity_and_health_fallback_for_old_router(monkeypatch):
     data = {s["session_id"]: (s["last_activity_at"], s["health"]) for s in _sessions(monkeypatch, items)}
     assert data == {
         "run": ("2026-10-15T11:00:00Z", "working"),
-        "ask": ("2026-10-15T10:00:00Z", "waiting_for_owner"),
+        # Contract rename (router session ce03d92a): the in_review fallback is
+        # now "waiting", not the old literal "waiting_for_owner".
+        "ask": ("2026-10-15T10:00:00Z", "waiting"),
         "done": ("2026-10-15T12:00:00Z", None),
         "bare": (None, "working"),
     }
@@ -293,3 +295,66 @@ def test_floor_idle_uses_last_activity(monkeypatch):
     ]
     data = {s["session_id"]: s["floor_hidden"] for s in _sessions(monkeypatch, items)}
     assert data == {"busy": False, "wait": False, "old": True}
+
+
+# --- ledger + watchdog/role fields pass through (ask 1/3) -------------------------
+
+def test_ledger_fields_pass_through(monkeypatch):
+    """Session e7c7438a's ledger fields (live on the router today) must reach
+    the Floor/board — they used to be stripped by the old _SESSION_KEYS."""
+    items = [{
+        "session_id": "s1", "state": "running", "updated_at": "2026-10-15T12:00:00Z",
+        "purpose": "fix the login bug", "spawned_by": "owner_phone", "parent_session_id": None,
+        "lane": "owned", "lifecycle": "working", "blocked_reason": None, "done_reason": None,
+        "throwaway": False, "current_step_index": 2, "last_failed_step": None, "engine": "claude",
+    }]
+    out = _sessions(monkeypatch, items)[0]
+    assert out["purpose"] == "fix the login bug"
+    assert out["spawned_by"] == "owner_phone"
+    assert out["lane"] == "owned"
+    assert out["lifecycle"] == "working"
+    assert out["current_step_index"] == 2
+    assert out["engine"] == "claude"
+
+
+def test_watchdog_role_fields_pass_through_once_live(monkeypatch):
+    """Not confirmed live on the router yet (see watchdog-roles-app-side.md
+    report) — this proves the gateway is ready the day they are, with a
+    fixture standing in for the router."""
+    items = [{
+        "session_id": "s1", "state": "running", "updated_at": "2026-10-15T12:00:00Z",
+        "role": "SECURITY", "attention_reason": "no activity in 20 minutes",
+        "done_verdict": "suspect", "done_verdict_reason": "no tests ran",
+    }]
+    out = _sessions(monkeypatch, items)[0]
+    assert out["role"] == "SECURITY"
+    assert out["attention_reason"] == "no activity in 20 minutes"
+    assert out["done_verdict"] == "suspect"
+    assert out["done_verdict_reason"] == "no tests ran"
+
+
+def test_attention_health_never_floor_hidden(monkeypatch):
+    items = [{
+        "session_id": "s1", "state": "running", "health": "attention",
+        "last_activity_at": "2026-10-15T11:00:00Z",  # 1h idle, well past FLOOR_IDLE
+    }]
+    out = _sessions(monkeypatch, items)[0]
+    assert out["floor_hidden"] is False
+
+
+def test_suspect_done_never_floor_hidden(monkeypatch):
+    items = [{
+        "session_id": "s1", "state": "done", "phase": "done", "done_verdict": "suspect",
+        "last_activity_at": "2026-10-15T11:00:00Z",
+    }]
+    out = _sessions(monkeypatch, items)[0]
+    assert out["floor_hidden"] is False
+
+
+def test_genuine_done_still_hides_as_usual(monkeypatch):
+    items = [{
+        "session_id": "s1", "state": "done", "phase": "done", "done_verdict": "genuine",
+        "last_activity_at": "2026-10-15T11:00:00Z",
+    }]
+    out = _sessions(monkeypatch, items)[0]
+    assert out["floor_hidden"] is True
