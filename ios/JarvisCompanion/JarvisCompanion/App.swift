@@ -1150,30 +1150,52 @@ struct ContentView: View {
     }
 
     private var typedRow: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .bottom, spacing: 8) {
+            attachMenu
+            // Vertical axis: long text wraps (up to 6 lines, then scrolls);
+            // Return adds a line break, the arrow sends. `?…` dispatches to
+            // quick-ask (spec §22), plain text to the full brain.
             TextField(
                 "or type…",
                 text: typedBinding,
-                prompt: Text("or type…").foregroundColor(.jarvisMuted)
+                prompt: Text("or type…").foregroundColor(.jarvisMuted),
+                axis: .vertical
             )
+                .lineLimit(1...6)
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
+                .padding(.vertical, 11)
                 .frame(minHeight: 44)
                 .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 .keyboardType(.default)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.sentences)
-                .submitLabel(.send)
                 .focused($typedFieldFocused)
-                .onSubmit {
-                    // Manual send only while idle: the recognizer owns the
-                    // field during a hold (criterion 7). `?…` dispatches to
-                    // quick-ask (spec §22), plain text to the full brain.
-                    if !dictation.isListening { model.sendTyped() }
-                }
             sendButton
         }
+    }
+
+    /// Files go through the chat sheet's upload path: a new thread opens with
+    /// the typed text as its draft and the chosen picker already up.
+    private var attachMenu: some View {
+        Menu {
+            Button { openChatToAttach(.photos) } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+            Button { openChatToAttach(.files) } label: { Label("Files", systemImage: "doc") }
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.system(size: 22))
+                .foregroundColor(.jarvisAccent)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .disabled(!model.askReady || model.isSending || dictation.isListening)
+        .opacity(model.askReady && !model.isSending && !dictation.isListening ? 1.0 : 0.35)
+        .accessibilityLabel("Attach")
+    }
+
+    private func openChatToAttach(_ pick: AttachPick) {
+        model.openChat = ChatTarget(sessionID: nil, title: "New chat", draft: model.typedText, pick: pick)
     }
 
     /// While held, the field mirrors the live partial transcript (behavior

@@ -258,7 +258,12 @@ struct ChatTarget: Identifiable {
     let id = UUID()
     let sessionID: String?
     let title: String
+    /// Home's paperclip: the text typed so far, and which picker to open first.
+    var draft = ""
+    var pick: AttachPick?
 }
+
+enum AttachPick { case photos, files }
 
 @MainActor
 final class SessionsModel: ObservableObject {
@@ -1050,9 +1055,12 @@ struct ChatView: View {
     @State private var showPhotos = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showFiles = false
+    private let pick: AttachPick?
 
     init(target: ChatTarget) {
         _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title))
+        _draft = State(initialValue: target.draft)
+        pick = target.pick
     }
 
     var body: some View {
@@ -1104,6 +1112,15 @@ struct ChatView: View {
         .preferredColorScheme(.dark)
         .onAppear { model.open() }
         .onDisappear { model.close() }
+        .task {
+            guard let pick = pick else { return }
+            // A picker presented while the sheet is still sliding in gets dropped.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            switch pick {
+            case .photos: showPhotos = true
+            case .files: showFiles = true
+            }
+        }
         .photosPicker(isPresented: $showPhotos, selection: $photoItems,
                       maxSelectionCount: ChatAttachment.maxCount, matching: .images)
         .onChange(of: photoItems) { items in
