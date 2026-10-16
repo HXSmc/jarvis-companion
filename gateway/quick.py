@@ -444,6 +444,7 @@ def _claude_web_answer(q: str, timeout_s: float = WEB_TIMEOUT_SECONDS) -> tuple[
         "--mcp-config", '{"mcpServers":{}}',
         "--strict-mcp-config",
         "--setting-sources", "",
+        "--no-session-persistence",
         "--append-system-prompt", TERSE_INSTRUCTION,
         "--max-turns", "3",
     ]

@@ -61,7 +61,7 @@ def test_no_auth_still_401(shared_tokens: None) -> None:
 
 
 def test_siri_never_reaches_router(shared_tokens: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from gateway import siri
+    from gateway import quick, siri
 
     calls: list[str] = []
 
@@ -69,10 +69,14 @@ def test_siri_never_reaches_router(shared_tokens: None, monkeypatch: pytest.Monk
         calls.append(text)
         return {"reply": "routed"}
 
+    async def fake_ask(q: str, brain: str = "auto") -> quick.QuickAnswer:
+        return quick.QuickAnswer("fine", "web", 1, None)
+
     monkeypatch.setattr(siri, "_router_reply", spy)
+    monkeypatch.setattr(quick, "ask", fake_ask)
     resp = _request("POST", "/siri/hey", json={"text": "deploy the thing"})
     assert resp.status_code == 200
-    assert resp.json() == {"reply": siri._SHARED_TOKEN_REPLY}
+    assert resp.json() == {"reply": "fine"}
     assert calls == []
 
 
