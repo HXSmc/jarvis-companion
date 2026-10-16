@@ -9,8 +9,9 @@ logged, echoed, or returned. Router failures surface as a 502 with a short
 generic detail (never the upstream body).
 
 Plain words (round 3): each session also carries `device` (constant "Mini PC"),
-`doing` (one plain line) and `recap` (short plain bullets) made by a cheap
-OpenRouter model from the latest summary, plus `floor_hidden` (idle 30+ min,
+`doing` (one plain line) and `recap` (short plain bullets) made by a local
+`claude -p` call (Haiku, the owner's Claude subscription — never OpenRouter,
+never an API key) from the latest summary, plus `floor_hidden` (idle 30+ min,
 UTC, never for a session that needs the owner). The router's `last_activity_at`
 and `health` pass through unchanged; when missing they fall back to
 `updated_at` and to the phase (working / waiting_for_owner / null). The model runs in the
@@ -33,6 +34,9 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -44,8 +48,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import config
-from gateway import quick
 from gateway.auth import require_bearer_any
+from mac.voice import brain as _brain
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +88,10 @@ _PHASE_FALLBACK = {
 DEVICE = "Mini PC"
 FLOOR_IDLE = timedelta(minutes=30)
 STATE_PATH = FilePath.home() / ".jarvis" / "central_state.json"
-SUMMARY_MODEL_DEFAULT = "anthropic/claude-haiku-5.5"
-PLAIN_TIMEOUT_SECONDS = 20.0
+# launchd's PATH may lack `claude` (it isn't a login shell) — resolve once at
+# import time, falling back to the known absolute path from `which claude`.
+_CLAUDE_BIN = shutil.which("claude") or "/Users/<user>/.local/bin/claude"
+PLAIN_TIMEOUT_SECONDS = 60.0
 PLAIN_RETRY_SECONDS = 600  # a failed generation for one summary is not retried sooner
 DOING_MAX = 80
 RECAP_MAX_ITEMS = 6
@@ -303,27 +309,58 @@ def _clean_plain(text: str) -> dict | None:
     return {"doing": doing, "recap": recap[:RECAP_MAX_ITEMS]}
 
 
-def _generate_plain(session: dict) -> dict | None:
-    """Blocking: one OpenRouter call -> {"doing", "recap"}; None when unconfigured or unusable."""
-    settings = quick._settings()
-    key = (settings.get("openrouter_key") or "").strip()
-    if not key:
+def _run_claude_plain(prompt: str, timeout_s: float) -> str | None:
+    """One blocking `claude -p` call (Haiku, owner's subscription) -> raw stdout, or None.
+
+    Same hardened shape as mac/voice/brain.run_claude and
+    gateway/quick.py's _claude_web_answer: prompt via stdin only (never
+    argv), no tools/MCP/user settings, scratch cwd, minimal env, the shared
+    slim config dir (~/.claude-jarvis-brain) for subscription auth — this
+    Mac's ANTHROPIC_API_KEY is dead, so the subprocess env drops it (and
+    ANTHROPIC_BASE_URL) entirely rather than ever trying it. Killed on
+    timeout. The seam tests monkeypatch.
+    """
+    argv = [
+        _CLAUDE_BIN, "-p",
+        "--model", "haiku",
+        "--tools", "",
+        "--mcp-config", '{"mcpServers":{}}',
+        "--strict-mcp-config",
+        "--setting-sources", "",
+        "--no-session-persistence",
+        "--append-system-prompt", PLAIN_INSTRUCTION,
+    ]
+    env = {key: os.environ[key] for key in _brain._BRAIN_ENV_KEYS if key in os.environ}
+    env["CLAUDE_CONFIG_DIR"] = str(_brain.BRAIN_CONFIG_DIR)
+    scratch = tempfile.mkdtemp(prefix="jarvis-plain-")
+    try:
+        proc = subprocess.run(
+            argv,
+            input=prompt,
+            capture_output=True, text=True,
+            cwd=scratch, env=env,
+            timeout=timeout_s,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None  # missing binary, or killed by the timeout
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if proc.returncode != 0:
         return None
-    model = (settings.get("summary_model") or "").strip() or SUMMARY_MODEL_DEFAULT
+    return proc.stdout.strip() or None
+
+
+def _generate_plain(session: dict) -> dict | None:
+    """Blocking: one `claude -p` call -> {"doing", "recap"}; None when unusable."""
     facts = "\n".join(
         f"{label}: {session[k]}" for label, k in (("Title", "title"), ("Task", "task"), ("State", "state"))
         if isinstance(session.get(k), str) and session[k]
     )
-    payload = {
-        "model": model,
-        "max_tokens": 400,
-        "messages": [
-            {"role": "system", "content": PLAIN_INSTRUCTION},
-            {"role": "user", "content": f"{facts}\nLatest summary:\n{session['summary'][:4000]}"},
-        ],
-    }
-    data = quick._openrouter(quick._CHAT_URL, payload, key=key, timeout_s=PLAIN_TIMEOUT_SECONDS)
-    return _clean_plain(quick._content_text(data))
+    prompt = f"{facts}\nLatest summary:\n{session['summary'][:4000]}"
+    text = _run_claude_plain(prompt, PLAIN_TIMEOUT_SECONDS)
+    if text is None:
+        return None
+    return _clean_plain(text)
 
 
 async def _plain_worker(sid: str, digest: str, session: dict) -> None:

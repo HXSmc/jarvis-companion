@@ -148,33 +148,56 @@ def test_clean_plain_validates_model_reply():
 
 
 def test_generate_plain_payload(monkeypatch):
-    from gateway import quick
-
-    monkeypatch.setattr(quick, "_settings", lambda: {"openrouter_key": "k", "summary_model": "m/x"})
     sent = {}
 
-    def fake(url, payload, *, key, timeout_s):
-        sent.update(url=url, payload=payload, key=key)
-        return {"choices": [{"message": {"content": '{"doing": "Fixing login", "recap": ["I did it"]}'}}]}
+    def fake(prompt, timeout_s):
+        sent.update(prompt=prompt, timeout_s=timeout_s)
+        return '{"doing": "Fixing login", "recap": ["I did it"]}'
 
-    monkeypatch.setattr(quick, "_openrouter", fake)
+    monkeypatch.setattr(central, "_run_claude_plain", fake)
     out = REAL_GENERATE({"session_id": "s", "title": "Fix login", "summary": "Patching auth"})
     assert out == {"doing": "Fixing login", "recap": ["I did it"]}
-    assert sent["url"] == quick._CHAT_URL and sent["key"] == "k"
-    assert sent["payload"]["model"] == "m/x"
-    assert "Patching auth" in sent["payload"]["messages"][1]["content"]
+    assert sent["timeout_s"] == central.PLAIN_TIMEOUT_SECONDS
+    assert "Patching auth" in sent["prompt"]
 
 
-def test_generate_plain_default_model_and_no_key(monkeypatch):
-    from gateway import quick
+def test_generate_plain_no_reply_is_unusable(monkeypatch):
+    monkeypatch.setattr(central, "_run_claude_plain", lambda prompt, timeout_s: None)
+    assert REAL_GENERATE({"summary": "x"}) is None
+    monkeypatch.setattr(central, "_run_claude_plain", lambda prompt, timeout_s: "not json")
+    assert REAL_GENERATE({"summary": "x"}) is None  # unparseable reply -> unusable
 
-    sent = {}
-    monkeypatch.setattr(quick, "_openrouter", lambda url, payload, **kw: sent.update(payload) or {})
-    monkeypatch.setattr(quick, "_settings", lambda: {})
-    assert REAL_GENERATE({"summary": "x"}) is None and sent == {}
-    monkeypatch.setattr(quick, "_settings", lambda: {"openrouter_key": "k"})
-    assert REAL_GENERATE({"summary": "x"}) is None  # empty reply -> unusable
-    assert sent["model"] == central.SUMMARY_MODEL_DEFAULT
+
+def test_run_claude_plain_argv_and_env(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, *, input, capture_output, text, cwd, env, timeout):
+        captured.update(argv=argv, input=input, cwd=cwd, env=env, timeout=timeout)
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+
+        return Proc()
+
+    monkeypatch.setattr(central.subprocess, "run", fake_run)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-never-be-passed-through")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://openrouter.ai/should-not-leak")
+    out = central._run_claude_plain("hello", 60.0)
+    assert out == "ok"
+    assert captured["argv"][0] == central._CLAUDE_BIN
+    assert "--model" in captured["argv"] and "haiku" in captured["argv"]
+    assert "--setting-sources" in captured["argv"]
+    assert "--strict-mcp-config" in captured["argv"]
+    # No resumable transcript is ever written for the scratch cwd (confirmed
+    # live: without this flag, mac/voice/brain.py's and gateway/quick.py's
+    # equivalent calls each leave a <uuid>.jsonl behind under the brain
+    # config dir's projects/ for their own scratch cwd).
+    assert "--no-session-persistence" in captured["argv"]
+    assert captured["env"].get("ANTHROPIC_API_KEY") is None
+    assert captured["env"].get("ANTHROPIC_BASE_URL") is None
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(central._brain.BRAIN_CONFIG_DIR)
+    assert captured["input"] == "hello" and captured["timeout"] == 60.0
 
 
 # --- clear done ---------------------------------------------------------------
