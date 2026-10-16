@@ -22,6 +22,12 @@ seen: list[dict] = []
 fail_status: int | None = None
 FAIL_BODY = "upstream internal detail that must never reach the phone"
 
+# GET /watchdog (router session ce03d92a): not yet live on the real router as
+# of this pass (it answers 404). Defaults to the same 404 here; a test flips
+# watchdog_available to exercise the "available" shape ahead of that landing.
+watchdog_available = False
+WATCHDOG = {"last_sweep_at": "2026-10-16T10:00:00Z", "sweep_errors_last_hour": 0, "alerts": []}
+
 SESSIONS = [
     {"session_id": "s-run", "kind": "claude", "title": "Fix login", "state": "running",
      "cwd": "/home/<user>/work/app", "updated_at": "2026-10-15T10:00:00Z",
@@ -95,6 +101,15 @@ async def events(sid: str, request: Request):
         return err
     last = request.headers.get("last-event-id")
     return Response(sse_body(sid, int(last) if last else 0), media_type="text/event-stream")
+
+
+@app.get("/watchdog")
+async def watchdog(request: Request):
+    if (err := await _record(request)) is not None:
+        return err
+    if not watchdog_available:
+        return Response(status_code=404, content='{"detail":"Not Found"}', media_type="application/json")
+    return WATCHDOG
 
 
 @app.get("/feed")

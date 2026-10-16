@@ -9,8 +9,9 @@ logged, echoed, or returned. Router failures surface as a 502 with a short
 generic detail (never the upstream body).
 
 Plain words (round 3): each session also carries `device` (constant "Mini PC"),
-`doing` (one plain line) and `recap` (short plain bullets) made by a cheap
-OpenRouter model from the latest summary, plus `floor_hidden` (idle 30+ min,
+`doing` (one plain line) and `recap` (short plain bullets) made by a local
+`claude -p` call (Haiku, the owner's Claude subscription — never OpenRouter,
+never an API key) from the latest summary, plus `floor_hidden` (idle 30+ min,
 UTC, never for a session that needs the owner). The router's `last_activity_at`
 and `health` pass through unchanged; when missing they fall back to
 `updated_at` and to the phase (working / waiting_for_owner / null). The model runs in the
@@ -33,6 +34,9 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -40,12 +44,13 @@ from pathlib import Path as FilePath
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import config
-from gateway import quick
+from gateway import sprites
 from gateway.auth import require_bearer_any
+from mac.voice import brain as _brain
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +76,21 @@ _ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "opti
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at",
     "project", "task", "summary", "phase", "last_activity_at", "health",
+    # Ledger fields (session e7c7438a, live): dropped before this pass added
+    # them to the allowlist, so the Floor/board never saw them.
+    "purpose", "spawned_by", "parent_session_id", "lane", "lifecycle",
+    "blocked_reason", "done_reason", "throwaway", "current_step_index",
+    "last_failed_step", "engine",
+    # Watchdog + role fields (router session ce03d92a, NOT confirmed live as
+    # of this pass — see .orchestrator/reports/watchdog-roles-app-side.md).
+    # Listed here so they pass through the day the router starts sending
+    # them; until then _pick() just never finds the key and drops it.
+    "role", "attention_reason", "done_verdict", "done_verdict_reason",
 )
 _PHASES = ("in_progress", "in_review", "done")
-# Used only when the router sends no `health` yet (pre-patch router); done -> None.
-_HEALTH_FALLBACK = {"in_progress": "working", "in_review": "waiting_for_owner"}
+# New lifecycle health enum (contract): working | quiet | waiting | idle |
+# done | attention | failed. Used only when the router sends no `health` yet.
+_HEALTH_FALLBACK = {"in_progress": "working", "in_review": "waiting"}
 # Used only when the router sends no valid `phase`; an unknown state is in_progress.
 _PHASE_FALLBACK = {
     "running": "in_progress", "needs_input": "in_review",
@@ -84,8 +100,10 @@ _PHASE_FALLBACK = {
 DEVICE = "Mini PC"
 FLOOR_IDLE = timedelta(minutes=30)
 STATE_PATH = FilePath.home() / ".jarvis" / "central_state.json"
-SUMMARY_MODEL_DEFAULT = "anthropic/claude-haiku-5.5"
-PLAIN_TIMEOUT_SECONDS = 20.0
+# launchd's PATH may lack `claude` (it isn't a login shell) — resolve once at
+# import time, falling back to the known absolute path from `which claude`.
+_CLAUDE_BIN = shutil.which("claude") or "/Users/<user>/.local/bin/claude"
+PLAIN_TIMEOUT_SECONDS = 60.0
 PLAIN_RETRY_SECONDS = 600  # a failed generation for one summary is not retried sooner
 DOING_MAX = 80
 RECAP_MAX_ITEMS = 6
@@ -107,7 +125,7 @@ public_router = APIRouter()
 FLOOR_HTML = FilePath(__file__).resolve().parent / "static" / "floor.html"
 FLOOR_CSP = (
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-    "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    "connect-src 'self'; img-src data: 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
 AGENTIC_OS_URL_DEFAULT = "http://127.0.0.1:8787"
@@ -115,6 +133,48 @@ AGENTIC_OS_TOKEN_PATH = FilePath.home() / ".config" / "agentic-os" / "token"
 AGENTIC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 _HUB_KEYS = ("key", "dirLabel", "engine", "active", "lastTs")
 _AGENT_KEYS = ("id", "persona", "engine", "label", "active", "status")
+
+# Split deploy (gateway on the mini PC): agentic-os's dashboard only runs on
+# the Mac at 127.0.0.1:8787, same reason gateway/screen.py proxies
+# /screen/mac/* back to the Mac. MAC_GATEWAY_URL unset = this process runs on
+# the Mac and can reach agentic-os directly; set = forward to the Mac's own
+# /central/agents (which does the direct call) with the ios_token.
+MAC_GATEWAY_ENV = "MAC_GATEWAY_URL"
+MAC_PROXY_TIMEOUT = httpx.Timeout(8.0, connect=3.0)
+
+
+def _mac_gateway() -> str | None:
+    return os.environ.get(MAC_GATEWAY_ENV, "").rstrip("/") or None
+
+
+def _mac_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    """Outbound client to the Mac gateway (tests swap in an ASGI transport here)."""
+    return httpx.AsyncClient(timeout=timeout)
+
+
+def _ios_token() -> str | None:
+    """The ios_token bearer used to call the Mac gateway (tests stub this)."""
+    return config.get_token(name="ios_token")
+
+
+async def _mac_agents() -> dict:
+    """GET the Mac gateway's own /central/agents (direct agentic-os call); empty on any failure."""
+    empty = {"device": None, "hubs": []}
+    token = _ios_token()
+    if not token:
+        return empty
+    try:
+        async with _mac_client(MAC_PROXY_TIMEOUT) as client:
+            resp = await client.get(
+                f"{_mac_gateway()}/central/agents", headers={"Authorization": f"Bearer {token}"}
+            )
+        data = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("mac gateway /central/agents failed: %s", type(exc).__name__)
+        return empty
+    if not isinstance(data, dict) or not isinstance(data.get("hubs"), list):
+        return empty
+    return {"device": data.get("device") if isinstance(data.get("device"), str) else None, "hubs": data["hubs"]}
 
 
 class RouterError(Exception):
@@ -249,8 +309,15 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
         out["doing"] = out.get("title") or out.get("task") or out.get("session_id")
         out["recap"] = []
     ts = _parse_ts(out.get("last_activity_at"))
+    # Never hide a session that needs the owner: the old "in review" signal,
+    # the legacy literal "waiting_for_owner" health value (pre-rename router),
+    # the new health enum's waiting/attention, plus a done session whose
+    # done_verdict says the DONE might be false (done_verdict == "suspect").
     needs_owner = (
-        out.get("state") == "needs_input" or out["phase"] == "in_review" or out["health"] == "waiting_for_owner"
+        out.get("state") == "needs_input"
+        or out["phase"] == "in_review"
+        or out["health"] in ("waiting", "attention", "waiting_for_owner")
+        or (out["phase"] == "done" and out.get("done_verdict") == "suspect")
     )
     out["floor_hidden"] = bool(ts and not needs_owner and (now or _now()) - ts >= FLOOR_IDLE)
     return out
@@ -303,27 +370,58 @@ def _clean_plain(text: str) -> dict | None:
     return {"doing": doing, "recap": recap[:RECAP_MAX_ITEMS]}
 
 
-def _generate_plain(session: dict) -> dict | None:
-    """Blocking: one OpenRouter call -> {"doing", "recap"}; None when unconfigured or unusable."""
-    settings = quick._settings()
-    key = (settings.get("openrouter_key") or "").strip()
-    if not key:
+def _run_claude_plain(prompt: str, timeout_s: float) -> str | None:
+    """One blocking `claude -p` call (Haiku, owner's subscription) -> raw stdout, or None.
+
+    Same hardened shape as mac/voice/brain.run_claude and
+    gateway/quick.py's _claude_web_answer: prompt via stdin only (never
+    argv), no tools/MCP/user settings, scratch cwd, minimal env, the shared
+    slim config dir (~/.claude-jarvis-brain) for subscription auth — this
+    Mac's ANTHROPIC_API_KEY is dead, so the subprocess env drops it (and
+    ANTHROPIC_BASE_URL) entirely rather than ever trying it. Killed on
+    timeout. The seam tests monkeypatch.
+    """
+    argv = [
+        _CLAUDE_BIN, "-p",
+        "--model", "haiku",
+        "--tools", "",
+        "--mcp-config", '{"mcpServers":{}}',
+        "--strict-mcp-config",
+        "--setting-sources", "",
+        "--no-session-persistence",
+        "--append-system-prompt", PLAIN_INSTRUCTION,
+    ]
+    env = {key: os.environ[key] for key in _brain._BRAIN_ENV_KEYS if key in os.environ}
+    env["CLAUDE_CONFIG_DIR"] = str(_brain.BRAIN_CONFIG_DIR)
+    scratch = tempfile.mkdtemp(prefix="jarvis-plain-")
+    try:
+        proc = subprocess.run(
+            argv,
+            input=prompt,
+            capture_output=True, text=True,
+            cwd=scratch, env=env,
+            timeout=timeout_s,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None  # missing binary, or killed by the timeout
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if proc.returncode != 0:
         return None
-    model = (settings.get("summary_model") or "").strip() or SUMMARY_MODEL_DEFAULT
+    return proc.stdout.strip() or None
+
+
+def _generate_plain(session: dict) -> dict | None:
+    """Blocking: one `claude -p` call -> {"doing", "recap"}; None when unusable."""
     facts = "\n".join(
         f"{label}: {session[k]}" for label, k in (("Title", "title"), ("Task", "task"), ("State", "state"))
         if isinstance(session.get(k), str) and session[k]
     )
-    payload = {
-        "model": model,
-        "max_tokens": 400,
-        "messages": [
-            {"role": "system", "content": PLAIN_INSTRUCTION},
-            {"role": "user", "content": f"{facts}\nLatest summary:\n{session['summary'][:4000]}"},
-        ],
-    }
-    data = quick._openrouter(quick._CHAT_URL, payload, key=key, timeout_s=PLAIN_TIMEOUT_SECONDS)
-    return _clean_plain(quick._content_text(data))
+    prompt = f"{facts}\nLatest summary:\n{session['summary'][:4000]}"
+    text = _run_claude_plain(prompt, PLAIN_TIMEOUT_SECONDS)
+    if text is None:
+        return None
+    return _clean_plain(text)
 
 
 async def _plain_worker(sid: str, digest: str, session: dict) -> None:
@@ -411,6 +509,42 @@ async def sessions() -> list[dict]:
     _known_ids.update(s["session_id"] for s in out if isinstance(s.get("session_id"), str))
     _schedule_plain(raw, state["plain"])
     return out
+
+
+# Not shipped by the router as of this pass (router session ce03d92a; GET
+# /watchdog answers 404) — WATCHDOG_STALE_S + this route exist so the Floor's
+# banner lights up the day it does, without another deploy.
+WATCHDOG_STALE_S = 180
+_EMPTY_WATCHDOG = {
+    "available": False, "stale": None, "age_s": None,
+    "last_sweep_at": None, "sweep_errors_last_hour": None, "alerts": [],
+}
+
+
+@router.get("/central/watchdog")
+async def watchdog() -> dict:
+    """Router watchdog sweep status, with staleness computed here (the box's
+    clock matches the router's; the phone's may not). A router that doesn't
+    serve /watchdog yet (404) or is unreachable both read as "unavailable" —
+    distinct from "available but stale", which is the actual alert state.
+    """
+    try:
+        data = await _router_json("GET", "/watchdog")
+    except RouterError:
+        return dict(_EMPTY_WATCHDOG)
+    if not isinstance(data, dict):
+        return dict(_EMPTY_WATCHDOG)
+    last_sweep = _parse_ts(data.get("last_sweep_at"))
+    age_s = (_now() - last_sweep).total_seconds() if last_sweep else None
+    alerts = data.get("alerts")
+    return {
+        "available": True,
+        "last_sweep_at": data.get("last_sweep_at"),
+        "sweep_errors_last_hour": data.get("sweep_errors_last_hour"),
+        "alerts": [a for a in alerts if isinstance(a, dict)] if isinstance(alerts, list) else [],
+        "age_s": age_s,
+        "stale": age_s is not None and age_s > WATCHDOG_STALE_S,
+    }
 
 
 @router.post("/central/clear-done")
@@ -508,6 +642,41 @@ async def floor() -> HTMLResponse:
     )
 
 
+# Role sprites (Ask 2): one pixel grid per role (gateway/sprites.py is the
+# single source of truth), served two ways — SVG for the Floor's <img>/canvas
+# use, a plain colour grid as JSON for the iOS Sessions board (SwiftUI Canvas
+# can't decode SVG from the network). Public like /central/floor: an <img> or
+# fetch from the Floor/board can't attach a bearer, and a sprite carries no
+# data or secret. `role` is looked up in sprites.ROLES (no path join, no file
+# access), falling back to WORKER's sprite for anything unknown — the route
+# itself never 404s so a stale/unexpected role string can't blank a card.
+SPRITE_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
+
+
+@public_router.get("/central/sprites/{role}.svg")
+async def sprite_svg(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> Response:
+    looked_up = role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    return Response(
+        sprites.svg_for(looked_up), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS
+    )
+
+
+@public_router.get("/central/sprites/{role}.json")
+async def sprite_grid(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> JSONResponse:
+    looked_up = role.upper() if role.upper() in sprites.ROLES else "WORKER"
+    grid = sprites.grid_for(looked_up)
+    return JSONResponse(
+        {"w": sprites.GRID_W, "h": sprites.GRID_H, "role": looked_up, "rows": grid},
+        headers=SPRITE_CACHE_HEADERS,
+    )
+
+
+@public_router.get("/central/sprites")
+async def sprite_roles() -> dict:
+    """The role list, so a client can prefetch/cache every sprite up front."""
+    return {"roles": list(sprites.ROLES)}
+
+
 def agentic_os_base() -> str:
     return os.environ.get("AGENTIC_OS_URL", AGENTIC_OS_URL_DEFAULT).rstrip("/")
 
@@ -534,7 +703,14 @@ def _hub(item: dict) -> dict:
 
 @router.get("/central/agents")
 async def agents() -> dict:
-    """The Mac's hub sessions + their agents from agentic-os, trimmed; down -> no hubs."""
+    """The Mac's hub sessions + their agents from agentic-os, trimmed; down -> no hubs.
+
+    When this process runs on the box (MAC_GATEWAY_URL set), agentic-os is not
+    reachable locally — forward to the Mac gateway's own /central/agents
+    instead of calling agentic-os directly.
+    """
+    if _mac_gateway():
+        return await _mac_agents()
     empty = {"device": None, "hubs": []}
     token = agentic_os_token()
     if not token:

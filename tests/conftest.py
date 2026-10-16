@@ -15,6 +15,24 @@ import websockets
 
 from common import config
 
+# Off macOS (the mini PC box) the Quartz driver can't load: ctypes raises
+# OSError, which the per-file ModuleNotFoundError stubs don't catch. Install the
+# same stub here first; on the Mac the real driver imports and wins.
+try:
+    from mac.screen import driver as _mac_driver  # noqa: F401
+except OSError:
+    import types
+
+    _mac_driver = types.ModuleType("mac.screen.driver")
+    _mac_driver.capture_jpeg = lambda w, q: (b"", w, q)
+    _mac_driver.send_events = lambda events: None
+    _mac_driver.tcc_ok = lambda: True
+    _mac_driver.display_asleep = lambda: False
+    _pkg = types.ModuleType("mac.screen")
+    _pkg.driver = _mac_driver
+    sys.modules["mac.screen"] = _pkg
+    sys.modules["mac.screen.driver"] = _mac_driver
+
 TOKEN = "jarvis_test_token_123"
 IOS_TOKEN = "jarvis_ios_test_token_456"
 AUTH_HEADER = {"Authorization": f"Bearer {TOKEN}"}
