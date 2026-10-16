@@ -107,3 +107,15 @@ def test_static_file_missing_falls_back_to_generator(tmp_path, monkeypatch):
     resp = _get("/central/sprites/BUILDER.svg")
     assert resp.status_code == 200
     assert resp.text == sprites.svg_for("BUILDER")
+
+
+def test_static_1x_png_bare_filename_matches_fable2_naming(tmp_path, monkeypatch):
+    """fable 2's build_sprites.py names the 1x file `{role}.png` (bare, no
+    `@1x` suffix) — only @2x/@3x carry a scale suffix. Confirmed live against
+    her worktree (jarvis-companion-sprites/gateway/static/sprites/) 2026-10-16."""
+    real_png = b"\x89PNG\r\n\x1a\nreal-1x-art-bare-filename"
+    (tmp_path / "BUILDER.png").write_bytes(real_png)
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER@1x.png")
+    assert resp.status_code == 200
+    assert resp.content == real_png

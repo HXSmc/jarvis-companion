@@ -674,14 +674,25 @@ async def sprite_svg(role: str = Path(pattern=r"^[A-Za-z_]{1,32}$")) -> Response
     return Response(sprites.svg_for(looked_up), media_type="image/svg+xml", headers=SPRITE_CACHE_HEADERS)
 
 
+def _sprite_png_candidates(role: str, scale: str) -> tuple[str, ...]:
+    """fable 2's build_sprites.py names the 1x file `{role}.png` (bare, no
+    `@1x`) and only `@2x`/`@3x` carry a scale suffix. Check that real name
+    first; `{role}@1x.png` stays a defensive second match in case that ever
+    changes, so this route doesn't silently fall back to the generator."""
+    if scale == "1":
+        return (f"{role}.png", f"{role}@1x.png")
+    return (f"{role}@{scale}x.png",)
+
+
 @public_router.get("/central/sprites/{role}@{scale}x.png")
 async def sprite_png(
     role: str = Path(pattern=r"^[A-Za-z_]{1,32}$"), scale: str = Path(pattern=r"^[123]$")
 ) -> Response:
     looked_up = _sprite_role(role)
-    art_file = SPRITES_STATIC_DIR / f"{looked_up}@{scale}x.png"
-    if art_file.is_file():
-        return Response(art_file.read_bytes(), media_type="image/png", headers=SPRITE_CACHE_HEADERS)
+    for name in _sprite_png_candidates(looked_up, scale):
+        art_file = SPRITES_STATIC_DIR / name
+        if art_file.is_file():
+            return Response(art_file.read_bytes(), media_type="image/png", headers=SPRITE_CACHE_HEADERS)
     return Response(
         sprites.png_bytes_for(looked_up, sprites.PNG_SCALES[f"{scale}x"]),
         media_type="image/png", headers=SPRITE_CACHE_HEADERS,
