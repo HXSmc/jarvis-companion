@@ -19,8 +19,16 @@ without hand-drawing 13 separate full sprites.
 
 from __future__ import annotations
 
+import struct
+import zlib
+
 GRID_W = 16
 GRID_H = 18
+# Apple asset-catalog scale convention: @1x is the logical/design size, @2x
+# and @3x are exact integer multiples for retina. Each grid cell is this many
+# raw pixels at @1x (so @1x comes out 48x54, @2x 96x108, @3x 144x162).
+PNG_SCALE_1X = 3
+PNG_SCALES = {"1x": PNG_SCALE_1X, "2x": PNG_SCALE_1X * 2, "3x": PNG_SCALE_1X * 3}
 
 # Same hex values as gateway/static/floor.html's ROLES map (kept in sync by
 # hand; the two can't literally share a constant across Python/JS). Palette
@@ -212,3 +220,31 @@ def svg_for(role: str) -> str:
             x += run
     parts.append("</svg>")
     return "".join(parts)
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+
+def png_bytes_for(role: str, scale: int) -> bytes:
+    """Rasterize the grid to an uncompressed-filter RGBA PNG, `scale` raw
+    pixels per grid cell. Hand-rolled (stdlib zlib + struct only, no Pillow —
+    pyproject.toml gates Pillow to win32) so this is the fallback used when
+    gateway/static/sprites/ doesn't have a real @Nx.png for the role yet
+    (that directory is fable 2's worktree, not touched here)."""
+    grid = grid_for(role)
+    w, h = GRID_W * scale, GRID_H * scale
+    raw = bytearray()
+    for row in grid:
+        pixel_row = bytearray()
+        for color in row:
+            if color is None:
+                pixel_row += b"\x00\x00\x00\x00"
+            else:
+                v = int(color[1:], 16)
+                pixel_row += bytes(((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF, 255))
+        scaled_row = b"\x00" + pixel_row * scale  # filter type 0 (none) per scanline
+        raw += scaled_row * scale
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)  # 8-bit depth, colour type 6 = RGBA
+    idat = zlib.compress(bytes(raw), 9)
+    return b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")

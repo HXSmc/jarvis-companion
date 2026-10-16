@@ -1,5 +1,11 @@
-"""Role sprites (Ask 2): public (no bearer) SVG + JSON grid per role, served
-from gateway/sprites.py's single pixel-grid source of truth."""
+"""Role sprites (Ask 2): public (no bearer) SVG + PNG per role.
+
+Ownership split (fable 2, 2026-10-16): the real art lives under
+gateway/static/sprites/ (fable 2's own worktree/branch, never touched here).
+This module's route serves a static file from there when one exists, and
+falls back to gateway/sprites.py's procedural generator otherwise — these
+tests cover both paths.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +14,7 @@ import asyncio
 import httpx
 import pytest
 
-from gateway import sprites
+from gateway import central, sprites
 
 
 def _get(path: str, headers: dict | None = None) -> httpx.Response:
@@ -28,30 +34,34 @@ def test_sprites_served_without_auth():
     assert resp.text.startswith("<svg")
 
 
-def test_sprite_json_served_without_auth():
-    resp = _get("/central/sprites/BUILDER.json")
+def test_sprite_png_served_without_auth():
+    resp = _get("/central/sprites/BUILDER@2x.png")
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["role"] == "BUILDER"
-    assert body["w"] == sprites.GRID_W and body["h"] == sprites.GRID_H
-    assert len(body["rows"]) == sprites.GRID_H
-    assert len(body["rows"][0]) == sprites.GRID_W
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.parametrize("scale", ["1", "2", "3"])
+def test_every_scale_served(scale):
+    resp = _get(f"/central/sprites/BUILDER@{scale}x.png")
+    assert resp.status_code == 200 and resp.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 @pytest.mark.parametrize("role", sprites.ROLES)
 def test_every_contract_role_has_a_sprite(role):
     svg = _get(f"/central/sprites/{role}.svg")
-    j = _get(f"/central/sprites/{role}.json")
+    png = _get(f"/central/sprites/{role}@2x.png")
     assert svg.status_code == 200 and svg.text.startswith("<svg")
-    assert j.status_code == 200 and j.json()["role"] == role
+    assert png.status_code == 200 and png.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_unknown_role_falls_back_to_worker_not_404():
     svg = _get("/central/sprites/NOPE_NOT_A_ROLE.svg")
     assert svg.status_code == 200
     assert svg.text == sprites.svg_for("WORKER")
-    j = _get("/central/sprites/NOPE_NOT_A_ROLE.json")
-    assert j.status_code == 200 and j.json()["role"] == "WORKER"
+    png = _get("/central/sprites/NOPE_NOT_A_ROLE@1x.png")
+    assert png.status_code == 200
+    assert png.content == sprites.png_bytes_for("WORKER", sprites.PNG_SCALES["1x"])
 
 
 def test_sprite_route_is_cacheable():
@@ -70,3 +80,30 @@ def test_sprites_roles_listing():
         "SECURITY", "DESIGNER", "MARKETER", "SPEC_WRITER", "GLM_WORKER",
     ):
         assert role in body["roles"]
+
+
+# --- fable 2's static art, once it lands, wins over the generator -----------------
+
+def test_static_svg_file_wins_over_generator(tmp_path, monkeypatch):
+    (tmp_path / "BUILDER.svg").write_text("<svg data-source='fable2-art'></svg>")
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER.svg")
+    assert resp.status_code == 200
+    assert "fable2-art" in resp.text
+
+
+def test_static_png_file_wins_over_generator(tmp_path, monkeypatch):
+    real_png = b"\x89PNG\r\n\x1a\nnot-really-a-real-png-but-thats-fine-for-this-test"
+    (tmp_path / "BUILDER@2x.png").write_bytes(real_png)
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER@2x.png")
+    assert resp.status_code == 200
+    assert resp.content == real_png
+
+
+def test_static_file_missing_falls_back_to_generator(tmp_path, monkeypatch):
+    # tmp_path exists but has no sprite files in it at all.
+    monkeypatch.setattr(central, "SPRITES_STATIC_DIR", tmp_path)
+    resp = _get("/central/sprites/BUILDER.svg")
+    assert resp.status_code == 200
+    assert resp.text == sprites.svg_for("BUILDER")

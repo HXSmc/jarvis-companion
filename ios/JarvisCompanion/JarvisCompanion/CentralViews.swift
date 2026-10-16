@@ -506,80 +506,30 @@ struct DeviceChip: View {
 
 // MARK: - Role sprites (ask 2)
 //
-// gateway/sprites.py is the single source of truth for the pixel grid; the
-// Floor (web canvas) loads its SVG, but SwiftUI can't decode SVG fetched from
-// the network, so the board instead fetches the plain colour-grid JSON twin
-// at GET /central/sprites/{role}.json and draws it cell by cell with Canvas.
+// Ownership split (fable 2, 2026-10-16): the real art (per-role SVG + PNG
+// @1x/2x/3x) is fable 2's own worktree (gateway/static/sprites/, branch
+// `sprites`), not touched here. SwiftUI's AsyncImage can't decode SVG, so the
+// board loads the @2x PNG — the gateway serves fable 2's real file once
+// merged, or a generated placeholder (gateway/sprites.py) until then; either
+// way this is just a URL to AsyncImage, no app-side rendering of the grid.
+// GET /central/sprites/{role}@2x.png carries no data or secret (same as
+// /central/floor), so no bearer header is needed here.
 
-extension Color {
-    /// "#RRGGBB" only (what gateway/sprites.py emits) — nil for anything else.
-    init?(hex: String) {
-        var s = hex
-        if s.hasPrefix("#") { s.removeFirst() }
-        guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
-        self.init(
-            red: Double((value >> 16) & 0xFF) / 255,
-            green: Double((value >> 8) & 0xFF) / 255,
-            blue: Double(value & 0xFF) / 255
-        )
-    }
-}
-
-struct SpriteGrid: Decodable {
-    let w: Int
-    let h: Int
-    let role: String
-    let rows: [[String?]]
-}
-
-/// Process-lifetime cache: every role's grid is small and immutable (the
-/// gateway serves it with a 24h Cache-Control too), so one fetch per role
-/// per app launch is enough — no need to refetch per card.
-@MainActor
-final class SpriteCache: ObservableObject {
-    static let shared = SpriteCache()
-    @Published private(set) var grids: [String: SpriteGrid] = [:]
-    private var inflight: Set<String> = []
-
-    func load(_ role: String) {
-        guard grids[role] == nil, !inflight.contains(role) else { return }
-        inflight.insert(role)
-        Task {
-            defer { inflight.remove(role) }
-            guard let request = try? Central.request("/central/sprites/\(role).json") else { return }
-            guard let data = try? await Central.data(request) else { return }
-            guard let grid = try? JSONDecoder().decode(SpriteGrid.self, from: data) else { return }
-            grids[role] = grid
-        }
-    }
-}
-
-/// One role's pixel sprite, drawn at card-icon size. Falls back to a plain
-/// tinted square while the grid is loading (first appearance only — cached
-/// after that), never to a blank space, so a slow/offline gateway doesn't
-/// make role identity disappear.
 struct RoleSprite: View {
     let role: String
-    @ObservedObject private var cache = SpriteCache.shared
 
     var body: some View {
-        Canvas { context, size in
-            guard let grid = cache.grids[role] else {
-                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.jarvisMuted.opacity(0.3)))
-                return
-            }
-            let cw = size.width / CGFloat(grid.w)
-            let ch = size.height / CGFloat(grid.h)
-            for (y, row) in grid.rows.enumerated() {
-                for (x, hex) in row.enumerated() {
-                    guard let hex = hex, let color = Color(hex: hex) else { continue }
-                    let rect = CGRect(x: CGFloat(x) * cw, y: CGFloat(y) * ch, width: cw + 0.5, height: ch + 0.5)
-                    context.fill(Path(rect), with: .color(color))
-                }
+        AsyncImage(url: AppModel.gatewayEndpoint("/central/sprites/\(role)@2x.png")) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().interpolation(.none).aspectRatio(contentMode: .fit)
+            default:
+                // Loading, no gateway URL configured yet, or the fetch failed —
+                // never a blank space, so role identity never just disappears.
+                RoundedRectangle(cornerRadius: 3).fill(Color.jarvisMuted.opacity(0.3))
             }
         }
         .frame(width: 20, height: 22)
-        .onAppear { cache.load(role) }
     }
 }
 
