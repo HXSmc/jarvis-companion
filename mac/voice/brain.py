@@ -141,8 +141,7 @@ def _claude_bridge(transcript: str, timeout_s: int) -> str | None:
 def reply(transcript: str, timeout_s: int = 60) -> str:
     """Transcript → reply: allowlisted gateway command first, claude -p otherwise."""
     cmd = voice_router.route(transcript)
-    # rustdesk_* is answered by gateway/siri.py, never by the windows agent.
-    if cmd is not None and not cmd.startswith("rustdesk_"):
+    if cmd is not None:
         try:
             data = _gateway_command(cmd)
         except ConnectionError as exc:
