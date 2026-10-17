@@ -274,3 +274,22 @@ def test_agentic_secret_never_in_response_or_logs(caplog, monkeypatch):
     assert AGENTIC_SECRET not in ok.text + down.text
     assert caplog.records, "expected some log output to check"
     assert AGENTIC_SECRET not in caplog.text
+
+
+def test_agents_mac_gateway_empty_sentinel_keeps_last_snapshot(monkeypatch):
+    # The Mac's own agentic-os call failing comes back as 200 {"device": null,
+    # "hubs": []}; that must not wipe the cached Mac office.
+    seen: list[dict] = []
+    monkeypatch.setenv(central.MAC_GATEWAY_ENV, "http://mac.test")
+    body: dict = {}
+
+    def client(timeout):
+        app = _fake_mac_gateway(seen, body=body.get("v"))
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), timeout=timeout)
+
+    monkeypatch.setattr(central, "_mac_client", client)
+    assert _get("/central/agents", headers=IOS).json() == SNAPSHOT_TRIMMED
+    body["v"] = {"device": None, "hubs": []}
+    resp = _get("/central/agents", headers=IOS).json()
+    assert resp["stale"] is True and resp["device"] == "mac-studio"
+    assert [h["key"] for h in resp["hubs"]] == ["mac-studio:abc"]
