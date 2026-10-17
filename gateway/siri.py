@@ -25,7 +25,7 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from common import config
-from gateway import central, quick, screen, wake
+from gateway import central, notify, quick, screen, wake
 from gateway.auth import _bearer_matches, ios_token_is_shared, require_bearer_any
 from gateway.registry import roles
 from mac.voice import router as voice_router
@@ -39,8 +39,9 @@ router = APIRouter()
 ROUTER_TIMEOUT_SECONDS = 27
 
 # The router may still finish after our deadline, so never say "try again"
-# (a retry with a new msg_id could start the task twice).
-_TIMEOUT_REPLY = "Started, check the app."
+# (a retry with a new msg_id could start the task twice); _deliver_late
+# sends the answer on when it lands.
+_TIMEOUT_REPLY = "Still thinking. The answer will come to the app and WhatsApp."
 # Same cap as central.ChatBody.text.
 MAX_TEXT_CHARS = 4000
 _ROUTER_DOWN_REPLY = "The mini PC router is unavailable, try again."
@@ -121,18 +122,59 @@ async def _router_reply(text: str, thread_id: str, msg_id: str) -> dict:
     needs_input prompt, else the session title. action/session_id/title (and
     prompt/options on needs_input) are passed through for the phone.
     """
+    task = asyncio.ensure_future(central.route(thread_id, msg_id, text, "voice"))
     try:
-        data = await asyncio.wait_for(
-            central.route(thread_id, msg_id, text, "voice"),
-            timeout=ROUTER_TIMEOUT_SECONDS,
-        )
+        data = await asyncio.wait_for(asyncio.shield(task), timeout=ROUTER_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
+        # The router keeps going; hand its answer to the owner when it lands.
+        late = asyncio.ensure_future(_deliver_late(task, text, thread_id, msg_id))
+        _late_tasks.add(late)
+        late.add_done_callback(_late_tasks.discard)
         return {"reply": _TIMEOUT_REPLY}
     except Exception:
         return {"reply": _ROUTER_DOWN_REPLY}
     out = {k: data[k] for k in ("action", "session_id", "kind", "title", "prompt", "options") if k in data}
-    out["reply"] = str(data.get("reply") or data.get("prompt") or data.get("title") or "On it.")
+    out["reply"] = _speakable(data)
     return out
+
+
+def _speakable(data: dict) -> str:
+    return str(data.get("reply") or data.get("prompt") or data.get("title") or "On it.")
+
+
+# Late answers: strong refs so the tasks aren't garbage-collected mid-flight.
+_late_tasks: set[asyncio.Future] = set()
+# Retries reuse msg_id, so the router returns the stored answer instead of
+# routing twice; stay well under its 600 s pending-row takeover.
+LATE_ANSWER_MAX_SECONDS = 300
+LATE_RETRY_SECONDS = 5
+
+
+async def _deliver_late(task: asyncio.Future, text: str, thread_id: str, msg_id: str) -> None:
+    """Wait out a router call that missed the request deadline, then send its answer to the app + WhatsApp."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + LATE_ANSWER_MAX_SECONDS
+    try:
+        data = await task
+    except Exception:  # the gateway's own read timeout fired; the router still finishes
+        data = None
+    while data is None and loop.time() < deadline:
+        await asyncio.sleep(LATE_RETRY_SECONDS)
+        try:
+            data = await central.route(thread_id, msg_id, text, "voice")
+        except Exception:
+            data = None
+    if data is None:
+        return
+    question = " ".join(text.split())[:80]
+    reply = _speakable(data)
+    sid = data.get("session_id") if isinstance(data.get("session_id"), str) else None
+    if data.get("action") == "answered":
+        title, body = f"Answer: {question}", reply
+    else:
+        title, body = f"Started: {data.get('title') or question}", "Open the chat in the Jarvis app to follow it."
+    await notify.push_app("answer", title, body, sid)
+    await notify.whatsapp_owner(f"{title}\n\n{body}", f"[jarvis] {title}")
 
 
 # The Shortcut sends the shared token; the iPhone app sends `ios_token`.

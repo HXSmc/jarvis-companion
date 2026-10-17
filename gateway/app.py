@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -40,7 +41,12 @@ def warn_if_ios_token_shared() -> bool:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     warn_if_ios_token_shared()
+    # Box only (the router lives there): a Mac gateway running the same code
+    # must not watch too, or every crossroads would notify twice.
+    watcher = asyncio.create_task(notify.crossroads_watcher()) if central._mac_gateway() else None
     yield
+    if watcher:
+        watcher.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -51,7 +57,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents, central, inbox, quick, screen, vnc, wake
+from gateway import agents, central, inbox, notify, quick, screen, vnc, wake
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
