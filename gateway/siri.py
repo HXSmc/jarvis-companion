@@ -32,9 +32,11 @@ from mac.voice import router as voice_router
 
 router = APIRouter()
 
-# Hard cap on a router call; on expiry the endpoint returns the canned reply
-# instead of hanging the Shortcut.
-ROUTER_TIMEOUT_SECONDS = 15
+# Hard cap on a router call; on expiry the endpoint returns the canned reply.
+# Only the iPhone app (ios_token) reaches the router here, and it waits 30 s
+# (App.swift ask()); the router's classify alone takes 8-25 s, so 15 s threw
+# away direct answers that landed a few seconds later.
+ROUTER_TIMEOUT_SECONDS = 27
 
 # The router may still finish after our deadline, so never say "try again"
 # (a retry with a new msg_id could start the task twice).
