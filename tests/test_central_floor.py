@@ -58,6 +58,7 @@ def stub(monkeypatch: pytest.MonkeyPatch):
     tokens = {"token": TOKEN, "ios_token": IOS_TOKEN}
     monkeypatch.setattr(config, "get_token", lambda path=None, name="token": tokens.get(name))
     monkeypatch.setattr(central, "agentic_os_token", lambda: AGENTIC_SECRET)
+    monkeypatch.setattr(central, "_last_agents", {"data": None, "at": 0.0})
     monkeypatch.setattr(central, "agentic_os_base", lambda: "http://agentic.test")
     monkeypatch.setattr(
         central, "_agentic_client",
@@ -133,6 +134,40 @@ def test_agents_down_is_empty(monkeypatch):
         lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(refuse), timeout=timeout),
     )
     assert _get("/central/agents", headers=IOS).json() == {"device": None, "hubs": []}
+
+
+def _refuse_agentic(monkeypatch):
+    def refuse(request):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(
+        central, "_agentic_client",
+        lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(refuse), timeout=timeout),
+    )
+
+
+def test_agents_down_after_good_serves_last_snapshot_idle(monkeypatch):
+    assert _get("/central/agents", headers=IOS).json()["hubs"][0]["active"] is True
+    _refuse_agentic(monkeypatch)
+    body = _get("/central/agents", headers=IOS).json()
+    assert body["stale"] is True and body["age_s"] >= 0
+    assert body["device"] == "mac-studio"
+    hub = body["hubs"][0]
+    assert hub["key"] == "mac-studio:abc" and hub["active"] is False
+    assert [a["active"] for a in hub["agents"]] == [False]
+
+
+def test_agents_last_snapshot_expires(monkeypatch):
+    _get("/central/agents", headers=IOS)
+    _refuse_agentic(monkeypatch)
+    central._last_agents["at"] -= central.AGENTS_KEEP_S + 1
+    assert _get("/central/agents", headers=IOS).json() == {"device": None, "hubs": []}
+
+
+def test_agents_genuinely_empty_is_not_replaced_by_cache():
+    _get("/central/agents", headers=IOS)
+    fake_state.update(body={"sessions": {"device": "mac-studio", "hubs": []}})
+    assert _get("/central/agents", headers=IOS).json() == {"device": "mac-studio", "hubs": []}
 
 
 def test_agents_no_token_file_is_empty_without_call(monkeypatch):

@@ -161,12 +161,11 @@ def _ios_token() -> str | None:
     return config.get_token(name="ios_token")
 
 
-async def _mac_agents() -> dict:
-    """GET the Mac gateway's own /central/agents (direct agentic-os call); empty on any failure."""
-    empty = {"device": None, "hubs": []}
+async def _mac_agents() -> dict | None:
+    """GET the Mac gateway's own /central/agents (direct agentic-os call); None on any failure."""
     token = _ios_token()
     if not token:
-        return empty
+        return None
     try:
         async with _mac_client(MAC_PROXY_TIMEOUT) as client:
             resp = await client.get(
@@ -175,10 +174,13 @@ async def _mac_agents() -> dict:
         data = resp.json() if resp.status_code == 200 else None
     except (httpx.HTTPError, ValueError) as exc:
         logger.info("mac gateway /central/agents failed: %s", type(exc).__name__)
-        return empty
+        return None
     if not isinstance(data, dict) or not isinstance(data.get("hubs"), list):
-        return empty
-    return {"device": data.get("device") if isinstance(data.get("device"), str) else None, "hubs": data["hubs"]}
+        return None
+    out = {"device": data.get("device") if isinstance(data.get("device"), str) else None, "hubs": data["hubs"]}
+    if data.get("stale") is True:
+        out["stale"] = True
+    return out
 
 
 class RouterError(Exception):
@@ -801,20 +803,20 @@ def _hub(item: dict) -> dict:
     return out
 
 
-@router.get("/central/agents")
-async def agents() -> dict:
-    """The Mac's hub sessions + their agents from agentic-os, trimmed; down -> no hubs.
+# Last good Mac snapshot. The Mac sleeps / drops off the tailnet often; without
+# this the Floor's Mac office vanished on the first failed poll and never came
+# back until the Mac woke. Served (hubs marked idle, stale=True) for this long.
+AGENTS_KEEP_S = 12 * 3600
+_last_agents: dict = {"data": None, "at": 0.0}
 
-    When this process runs on the box (MAC_GATEWAY_URL set), agentic-os is not
-    reachable locally — forward to the Mac gateway's own /central/agents
-    instead of calling agentic-os directly.
-    """
+
+async def _fetch_agents() -> dict | None:
+    """One live snapshot: Mac gateway in box mode, agentic-os directly on the Mac; None = unreachable."""
     if _mac_gateway():
         return await _mac_agents()
-    empty = {"device": None, "hubs": []}
     token = agentic_os_token()
     if not token:
-        return empty
+        return None
     try:
         async with _agentic_client(AGENTIC_TIMEOUT) as client:
             resp = await client.get(
@@ -823,13 +825,40 @@ async def agents() -> dict:
         data = resp.json() if resp.status_code == 200 else None
     except (httpx.HTTPError, ValueError) as exc:
         logger.info("agentic-os snapshot failed: %s", type(exc).__name__)
-        return empty
+        return None
     sessions = data.get("sessions") if isinstance(data, dict) else None
     if not isinstance(sessions, dict):
-        return empty
+        return None
     hubs = sessions.get("hubs")
     device = sessions.get("device")
     return {
         "device": device if isinstance(device, str) else None,
         "hubs": [_hub(h) for h in hubs if isinstance(h, dict)] if isinstance(hubs, list) else [],
+    }
+
+
+@router.get("/central/agents")
+async def agents() -> dict:
+    """The Mac's hub sessions + their agents from agentic-os, trimmed.
+
+    When this process runs on the box (MAC_GATEWAY_URL set), agentic-os is not
+    reachable locally — forward to the Mac gateway's own /central/agents
+    instead of calling agentic-os directly. Unreachable -> the last good
+    snapshot (up to AGENTS_KEEP_S old) with every hub/agent idle and
+    stale=True + age_s, else no hubs.
+    """
+    data = await _fetch_agents()
+    now = time.monotonic()
+    if data is not None and not data.get("stale"):
+        _last_agents.update(data=data, at=now)
+        return data
+    cached, age = _last_agents["data"], now - _last_agents["at"]
+    if cached is None or age > AGENTS_KEEP_S:
+        return data or {"device": None, "hubs": []}
+    idle = lambda item: {**item, "active": False}  # noqa: E731
+    return {
+        "device": cached["device"],
+        "hubs": [{**idle(h), "agents": [idle(a) for a in h.get("agents") or []]} for h in cached["hubs"]],
+        "stale": True,
+        "age_s": int(age),
     }

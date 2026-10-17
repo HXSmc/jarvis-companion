@@ -162,7 +162,7 @@
   }
 
   // --- world state ------------------------------------------------------------
-  let sessions = [], hubs = [], macDevice = null;
+  let sessions = [], hubs = [], macDevice = null, macStaleS = null;
   const desks = new Map();      // id -> desk {id, kind, x, y, born, dying, ...}
   const pods = [];              // {name, x, y, w, d, color}
   const feedLines = new Map();  // session id -> [{ts, type, text}]
@@ -180,7 +180,9 @@
     pods.length = 0;
     // Pods: one per project, on a ring around the brain.
     const byProject = new Map();
+    const macSessions = sessions.filter(isMac);
     for (const s of sessions) {
+      if (isMac(s)) continue;
       const p = projectOf(s);
       if (!byProject.has(p)) byProject.set(p, []);
       byProject.get(p).push(s);
@@ -195,6 +197,7 @@
       const w = cols * 70 + 30, d = rows * 70 + 30;
       const px = Math.cos(a) * R - w / 2, py = Math.sin(a) * R - d / 2;
       pods.push({ name: name.toUpperCase(), x: px, y: py, w, d, color: POD_COLORS[i % POD_COLORS.length] });
+      const office = [px + w / 2, py + d / 2];
       list.forEach((s, j) => {
         const id = s.session_id;
         seen.add(id);
@@ -202,31 +205,39 @@
         upsertDesk(id, {
           kind: "session", x: px + 22 + (j % 2) * 70, y: py + 22 + Math.floor(j / 2) * 70,
           role, tag: roleLabel(role) + " · " + name, session: s, phase: s.phase || "done",
-          pod: name,
+          pod: name, office,
         }, now);
       });
     });
-    // Mac wing: fixed slot 0 of the ring (top). Each hub a desk, its agents as subagent desks.
+    // Mac office: its own space behind the brain (slot 0 of the ring, pushed
+    // out so it never overlaps the brain). It holds the Mac's agentic-os hubs
+    // (one row each, subagents along the row) and any router session whose
+    // device is the Mac (hook-reported). Every desk inside is fed through the
+    // office anchor, and subagents through their hub ("the office sends").
     // Caps raised (was 4 hubs / 5 agents): the live Mac snapshot has carried 5
-    // interactive hubs (fable, opus, opus 2, opus 3, fable 2) since the
-    // central-chat cutover, and a hub busy with a build can have 20+ agents —
-    // the old 4-hub cap silently dropped one owner session from the Floor.
-    if (hubs.length) {
-      const a = -Math.PI / 2;
-      const hubCap = 10, agentCap = 8;
-      const rows = Math.min(hubs.length, hubCap);
-      const w = 230, d = rows * 64 + 26;
-      const px = Math.cos(a) * R - w / 2, py = Math.sin(a) * R - d / 2;
-      pods.push({ name: "MAC · " + (macDevice || "AGENTIC-OS").toUpperCase(), x: px, y: py, w, d, color: "#22d3ee", mac: true });
+    // interactive hubs since the central-chat cutover.
+    if (hubs.length || macSessions.length) {
+      const hubCap = 10, agentCap = 8, perRow = 3;
+      const shown = hubs.slice(0, hubCap);
+      const maxAgents = Math.min(agentCap, Math.max(0, ...shown.map((h) => (h.agents || []).length)));
+      const sessRows = Math.ceil(macSessions.length / perRow);
+      const rows = shown.length + sessRows;
+      const w = Math.max(230, 18 + 58 + maxAgents * 32 + 24), d = rows * 64 + 26;
+      const dist = Math.max(R, 190 + d / 2);
+      const px = -w / 2, py = -dist - d / 2;
+      const office = [px + w / 2, py + d / 2];
+      const stale = macStaleS != null ? " · OFFLINE " + ago(macStaleS) : "";
+      pods.push({ name: "MAC · " + (macDevice || "OFFICE").toUpperCase() + stale, x: px, y: py, w, d, color: "#22d3ee", mac: true });
       seen.add(MAC_ID);
-      upsertDesk(MAC_ID, { kind: "anchor", x: px + w / 2, y: py + d / 2, hidden: true }, now);
-      hubs.slice(0, hubCap).forEach((h, i) => {
+      upsertDesk(MAC_ID, { kind: "anchor", x: office[0], y: office[1], hidden: true }, now);
+      shown.forEach((h, i) => {
         const id = "hub:" + h.key;
         seen.add(id);
         const hx = px + 18, hy = py + 18 + i * 64;
         upsertDesk(id, {
           kind: "hub", x: hx, y: hy, role: h.engine === "glm" ? "GLM_WORKER" : "ARCHITECT",
-          tag: "HUB · " + (h.dirLabel || "?"), hub: h, phase: h.active ? "in_progress" : "done",
+          tag: "HUB [" + String(i + 1).padStart(2, "0") + "] · " + (h.dirLabel || "?"), hub: h,
+          phase: h.active ? "in_progress" : "done", office,
         }, now);
         (h.agents || []).slice(0, agentCap).forEach((ag, k) => {
           const aid = "agent:" + h.key + ":" + ag.id;
@@ -237,6 +248,15 @@
             agent: ag, phase: ag.active ? "in_progress" : ag.status === "failed" ? "error" : "done",
           }, now);
         });
+      });
+      macSessions.forEach((s, j) => {
+        const id = s.session_id;
+        seen.add(id);
+        const role = roleOf(s);
+        upsertDesk(id, {
+          kind: "session", x: px + 18 + (j % perRow) * 70, y: py + 18 + (shown.length + Math.floor(j / perRow)) * 64,
+          role, tag: roleLabel(role) + " · MAC", session: s, phase: s.phase || "done", pod: "mac", office,
+        }, now);
       });
     }
     // Owner's phone desk at the near edge.
@@ -254,6 +274,8 @@
     if (d) { Object.assign(d, props); d.dying = 0; return; }
     desks.set(id, Object.assign({ id, born: now, dying: 0, seed: hash(id) }, props));
   }
+  function isMac(s) { return /^mac\b/i.test(String(s.device || "")); }
+  function ago(sec) { return sec < 90 ? Math.round(sec) + "S" : sec < 5400 ? Math.round(sec / 60) + "M" : Math.round(sec / 3600) + "H"; }
   function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
 
   function bounds() {
@@ -373,10 +395,17 @@
   function spokeEnd(d) { return d.kind === "anchor" ? [d.x, d.y, 4] : [d.x + 17, d.y + 11, 14]; }
   function drawSpokes() {
     ctx.lineWidth = 1;
+    // Brain feeds each office; each office feeds its own desks.
+    for (const p of pods) {
+      if (p.mac) continue;  // the Mac office's dashed spoke comes from its anchor desk
+      const a = scr(0, 0, 10), b = scr(p.x + p.w / 2, p.y + p.d / 2, 4);
+      ctx.strokeStyle = "rgba(255,255,255,0.09)";
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
     for (const d of desks.values()) {
       if (d.kind === "sub") continue;
-      const a = scr(0, 0, 10), e = spokeEnd(d), b = scr(e[0], e[1], 4);
-      ctx.strokeStyle = d.kind === "anchor" ? "rgba(34,211,238,0.35)" : "rgba(255,255,255,0.07)";
+      const o = d.office || [0, 0], a = scr(o[0], o[1], d.office ? 4 : 10), e = spokeEnd(d), b = scr(e[0], e[1], 4);
+      ctx.strokeStyle = d.kind === "anchor" ? "rgba(34,211,238,0.35)" : d.office ? "rgba(34,211,238,0.12)" : "rgba(255,255,255,0.07)";
       ctx.setLineDash(d.kind === "anchor" ? [4, 4] : []);
       ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
     }
@@ -530,7 +559,8 @@
       : phase === "in_progress" ? C.emerald : phase === "in_review" ? C.amber : phase === "error" ? C.red : "#3c404b";
     const tagText = attention ? "⚠ " + d.tag : d.tag;
     ctx.globalAlpha = k * (done ? 0.7 : 1);
-    if (cam.s * sc > 0.32 || focusId === d.id) pill(tagText, tag[0], tag[1], tagColor, Math.max(0.75, cam.s * sc));
+    const showTag = d.small ? cam.s > 1.15 || focusId === d.id || focusId === d.parent : cam.s * sc > 0.32 || focusId === d.id;
+    if (showTag) pill(tagText, tag[0], tag[1], tagColor, Math.max(0.75, cam.s * sc));
     ctx.restore();
     // Hit area in screen space, for taps.
     const c = scr(d.x + w / 2, d.y + dd / 2, h);
@@ -548,9 +578,22 @@
   function sendPacket(fromId, toId, color, label, arc) {
     const a = deskPoint(fromId), b = deskPoint(toId);
     if (!a || !b) return;
-    const pts = arc ? [a, b] : (fromId === "__brain" || toId === "__brain") ? [a, b] : [a, [0, 0, 44], b];
+    // Into an office desk: brain -> office -> (hub ->) desk, so the office is
+    // what hands the work to its session/agent.
+    const via = arc || toId === "__brain" ? [] : relay(toId);
+    const pts = arc ? [a, b] : fromId === "__brain" || toId === "__brain" ? [a, ...via, b] : [a, [0, 0, 44], ...via, b];
     packets.push({ pts, t: 0, dur: arc ? 1600 : 1100 * (pts.length - 1), color, label, to: toId, arc: !!arc, born: performance.now() });
     if (packets.length > 60) packets.shift();
+  }
+  function relay(id) {
+    const d = desks.get(id);
+    if (!d) return [];
+    const p = d.kind === "sub" ? desks.get(d.parent) : null;
+    const o = (p || d).office;
+    const hop = [];
+    if (o) hop.push([o[0], o[1], 16]);
+    if (p) { const e = spokeEnd(p); hop.push([e[0], e[1], 16]); }
+    return hop;
   }
   function along(p, u) {
     if (p.arc) {
@@ -616,7 +659,7 @@
     if (t - lastAmbient > 1400) {
       lastAmbient = t;
       const live = [...desks.values()].filter((d) => d.phase === "in_progress" && !d.hidden && !d.dying && d.kind !== "owner");
-      if (live.length) { const d = live[(Math.random() * live.length) | 0]; sendPacket("__brain", d.kind === "sub" ? d.parent : d.id, d.kind === "sub" || d.kind === "hub" ? C.cyan : C.emerald); }
+      if (live.length) { const d = live[(Math.random() * live.length) | 0]; sendPacket("__brain", d.id, d.kind === "sub" || d.kind === "hub" ? C.cyan : C.emerald); }
     }
     for (const [id, d] of desks) if (d.dying && t - d.dying > 500) desks.delete(id);
     draw(t, dt);
@@ -734,6 +777,7 @@
         for (const l of lines.slice(-6)) f.append(el("div", null, l.type + (l.text ? " · " + l.text : "")));
         body.append(f);
       }
+      if (isMac(s)) { kv("NOTE", "Mac sessions are view-only here"); return; }
       const b = el("button", "primary", "OPEN CHAT");
       b.addEventListener("click", () => {
         const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis;
@@ -787,7 +831,10 @@
       sessions = s.value.filter((x) => !x.floor_hidden && !HIDDEN_LIFECYCLE.test(x.lifecycle || ""));
       sessionsOk = true;
     } else sessionsOk = false;
-    if (a.status === "fulfilled" && a.value && Array.isArray(a.value.hubs)) { hubs = a.value.hubs; macDevice = a.value.device; }
+    if (a.status === "fulfilled" && a.value && Array.isArray(a.value.hubs)) {
+      hubs = a.value.hubs; macDevice = a.value.device;
+      macStaleS = a.value.stale ? Number(a.value.age_s) || 0 : null;
+    }
     watchdog = w.status === "fulfilled" && w.value ? w.value : null;
     document.getElementById("toast").textContent = !sessionsOk && !sessions.length ? "ROUTER UNREACHABLE" : "";
     renderWatchdogBanner();
