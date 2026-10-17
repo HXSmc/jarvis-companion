@@ -1313,7 +1313,7 @@ struct AttachmentChip: View {
 }
 
 /// A Jarvis reply rendered as markdown: ChatMarkdown splits the blocks
-/// (headings, bullets, numbered items, code fences, rules) and each block's
+/// (headings, bullets, numbered items, code fences, rules, tables) and each block's
 /// inline marks (**bold**, *italic*, `code`, links) go through
 /// AttributedString's inline parser, so no raw `**` shows in the chat.
 struct MarkdownText: View {
@@ -1353,6 +1353,27 @@ struct MarkdownText: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.jarvisSurface))
         case .rule:
             Rectangle().fill(Color.jarvisMuted.opacity(0.4)).frame(height: 1)
+        case .table(let header, let rows):
+            // Columns are capped so long cells wrap; wide tables scroll sideways.
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow {
+                        ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
+                            Text(Self.inline(cell)).font(.subheadline.bold()).frame(maxWidth: 240, alignment: .leading)
+                        }
+                    }
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        Divider().gridCellUnsizedAxes(.horizontal)
+                        GridRow {
+                            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                Text(Self.inline(cell)).font(.subheadline).frame(maxWidth: 240, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+                .padding(10)
+            }
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.jarvisSurface))
         }
     }
 

@@ -29,6 +29,19 @@ enum ChatMarkdownTest {
         check("unclosed fence", ChatMarkdown.blocks("```\nx"), [.code("x")])
         check("rule", ChatMarkdown.blocks("a\n---\nb"), [.paragraph("a"), .rule, .paragraph("b")])
         check("empty", ChatMarkdown.blocks(""), [])
+        check("table", ChatMarkdown.blocks("intro\n| Need | Pick |\n|---|:--:|\n| **Cloud** | Sonnet |\n| Riyadh | Qwen |\n\nafter"),
+              [.paragraph("intro"),
+               .table(header: ["Need", "Pick"], rows: [["**Cloud**", "Sonnet"], ["Riyadh", "Qwen"]]),
+               .paragraph("after")])
+        check("table ends at line without pipe", ChatMarkdown.blocks("| a | b |\n|---|---|\n| 1 | 2 |\nplain"),
+              [.table(header: ["a", "b"], rows: [["1", "2"]]), .paragraph("plain")])
+        check("no outer pipes, ragged rows pad and cut", ChatMarkdown.blocks("a | b\n--- | ---\n1 |\n1 | 2 | 3"),
+              [.table(header: ["a", "b"], rows: [["1", ""], ["1", "2"]])])
+        check("escaped pipe stays in cell", ChatMarkdown.blocks("| a | b |\n|---|---|\n| x \\| y | z |"),
+              [.table(header: ["a", "b"], rows: [["x | y", "z"]])])
+        check("pipe line without delimiter is text", ChatMarkdown.blocks("a | b\nc"), [.paragraph("a | b\nc")])
+        check("column count mismatch is not a table", ChatMarkdown.blocks("| a | b |\n|---|"),
+              [.paragraph("| a | b |\n|---|")])
 
         // Linux Foundation has no markdown AttributedString; this half runs on the Mac.
         #if canImport(Darwin)
