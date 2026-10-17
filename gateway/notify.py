@@ -123,7 +123,7 @@ def _owner_session(s: dict) -> bool:
     return (
         s.get("spawned_by") != "unknown"
         and not s.get("parent_session_id")
-        and not s.get("device")
+        and not str(s.get("device") or "").lower().startswith("mac")  # every box row says "Mini PC"
         and not s.get("throwaway")
     )
 
