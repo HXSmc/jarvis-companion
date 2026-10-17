@@ -182,7 +182,13 @@ async def _mac_agents() -> dict | None:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("hubs"), list):
         return None
-    out = {"device": data.get("device") if isinstance(data.get("device"), str) else None, "hubs": data["hubs"]}
+    device = data.get("device") if isinstance(data.get("device"), str) else None
+    # The Mac answers 200 {"device": null, "hubs": []} when ITS agentic-os call
+    # fails; that is "unreachable", not a fresh empty snapshot, so the last good
+    # snapshot keeps being served instead of the Mac office vanishing.
+    if device is None and not data["hubs"]:
+        return None
+    out = {"device": device, "hubs": data["hubs"]}
     if data.get("stale") is True:
         out["stale"] = True
     return out
