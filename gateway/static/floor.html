@@ -216,7 +216,8 @@
     // office anchor, and subagents through their hub ("the office sends").
     // Caps raised (was 4 hubs / 5 agents): the live Mac snapshot has carried 5
     // interactive hubs since the central-chat cutover.
-    if (hubs.length || macSessions.length) {
+    // macDevice: a Mac that is up with no hubs keeps its (empty) office.
+    if (hubs.length || macSessions.length || macDevice) {
       const hubCap = 10, agentCap = 8, perRow = 3;
       const shown = hubs.slice(0, hubCap);
       const maxAgents = Math.min(agentCap, Math.max(0, ...shown.map((h) => (h.agents || []).length)));
