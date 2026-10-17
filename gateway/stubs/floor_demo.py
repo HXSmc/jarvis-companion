@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI
@@ -34,6 +35,9 @@ SESSIONS = [
     {"session_id": "s-ui", "kind": "glm", "title": "Landing page layout", "state": "running", "project": "<name>",
      "task": "Build hero section", "summary": "Spoke writing components", "phase": "in_progress",
      "updated_at": "2026-10-15T09:50:00Z"},
+    {"session_id": "s-mac", "kind": "claude", "title": "Mac hook session", "state": "running", "project": "<user>",
+     "device": "Mac", "task": "Tidy Downloads", "summary": "Reported by the Mac session hook", "phase": "in_progress",
+     "updated_at": "2026-10-15T09:58:00Z"},
     {"session_id": "s-old", "kind": "claude", "title": "Notes cleanup", "state": "done", "project": "vault",
      "task": "Tidy daily notes", "summary": "Done", "phase": "done", "updated_at": "2026-10-15T08:00:00Z"},
 ]
@@ -45,6 +49,10 @@ SNAPSHOT = {"sessions": {"device": "mac-studio", "hubs": [
          {"id": "a2", "persona": "reviewer", "engine": "claude", "label": "code-reviewer", "active": True, "status": "running"},
          {"id": "a3", "persona": "researcher", "engine": "agy", "label": "docs lookup", "active": False, "status": "done"},
      ]},
+    {"key": "mac:3", "dirLabel": "<user>", "engine": "claude", "active": True, "lastTs": 1760521000000,
+     "agents": [{"id": f"c{i}", "persona": p, "engine": "glm", "label": f"spoke-{i}", "active": i % 3 != 0,
+                 "status": "running" if i % 3 else "done"}
+                for i, p in enumerate(["builder", "scout", "reviewer", "fixer", "verifier", "designer", "explorer", "worker"], 1)]},
     {"key": "mac:2", "dirLabel": "agentic-os", "engine": "claude", "active": False, "lastTs": 1760510000000,
      "agents": [{"id": "b1", "persona": "verifier", "engine": "claude", "label": "verifier", "active": False, "status": "done"}]},
 ]}}
@@ -64,7 +72,9 @@ agentic = FastAPI()
 
 @router.get("/sessions")
 async def sessions():
-    return JSONResponse(SESSIONS)
+    # Fresh timestamps so the gateway's 30-min idle rule never hides the demo rows.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return JSONResponse([{**s, "updated_at": now} for s in SESSIONS])
 
 
 @router.get("/feed")
