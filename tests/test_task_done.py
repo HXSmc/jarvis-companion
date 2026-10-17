@@ -163,9 +163,18 @@ def test_different_sessions_each_notify_once(gateway_server, store_home: Path, p
 
 
 def test_box_mode_forwards_exactly_once(monkeypatch: pytest.MonkeyPatch, store_home: Path) -> None:
+    from gateway import notify
+
     _box_stub(monkeypatch)
     seen: list[dict] = []
     _box(monkeypatch, seen)
+    notes: list[tuple] = []
+
+    async def push_app(*args):
+        notes.append(args)
+        return True
+
+    monkeypatch.setattr(notify, "push_app", push_app)
 
     resp = asyncio.run(
         _mac_post("/inbox/task-done", json={"session_id": "s1", "purpose": "task A"}, headers=IOS_AUTH_HEADER)
@@ -181,6 +190,7 @@ def test_box_mode_forwards_exactly_once(monkeypatch: pytest.MonkeyPatch, store_h
     assert len(seen) == 1, seen  # second call: 0 forwards (local dedupe)
     assert seen[0] == {"session_id": "s1", "purpose": "task A"}
     assert list(_seen(store_home)) == ["s1"]
+    assert notes == [("done", "Done: task A", "Finished. Open the chat to see the result.", "s1")]  # one app note
 
 
 def test_box_mode_mac_down_503_then_retry(monkeypatch: pytest.MonkeyPatch, store_home: Path) -> None:

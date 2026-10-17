@@ -8,9 +8,10 @@ Two channels:
 Two producers:
 - siri.py: a home-screen question whose router answer lands after the
   request already returned ("late answer") -> app + WhatsApp.
-- crossroads_watcher(): an owner-started router session that stops and waits
-  for the owner (blocked on a question, or its turn ended) -> app, and
-  WhatsApp only when the app isn't connected.
+- crossroads_watcher(): an owner-started router session blocked on a
+  question for the owner -> app, and WhatsApp only when the app isn't
+  connected. (A fully finished task is inbox.task_done's job: WhatsApp via
+  the router ledger, plus an app note.)
 
 WhatsApp: on the box (MAC_GATEWAY_URL set) via the box's own mcp-whatsapp
 daemon over MCP HTTP (the box never writes jarvis-phone queue files); on the
@@ -113,9 +114,7 @@ async def whatsapp_owner(text: str, subject: str) -> bool:
 # --- crossroads ---------------------------------------------------------------
 
 CROSSROADS_POLL_SECONDS = 15
-# Router session states (public /sessions): "waiting" health = blocked on a
-# question/permission; running -> idle = the turn ended and it waits on the owner.
-_LIVE = {"running"}
+# Router public /sessions: health "waiting" = blocked on a question/permission.
 
 
 def _owner_session(s: dict) -> bool:
@@ -147,8 +146,6 @@ def crossroads(prev: dict[str, tuple], sessions: list[dict]) -> list[tuple[str, 
         summary = str(s.get("summary") or "").strip()
         if cur[1] == "waiting" and before[1] != "waiting":
             out.append(("crossroads", f"Needs your decision: {title}", summary or "It is waiting for your answer.", sid))
-        elif cur[0] == "idle" and before[0] in _LIVE:
-            out.append(("turn", f"Waiting for you: {title}", summary or "It finished its turn.", sid))
     return out
 
 
