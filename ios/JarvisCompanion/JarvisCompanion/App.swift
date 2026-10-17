@@ -939,8 +939,13 @@ struct ContentView: View {
                 switch homeView {
                 case .controls:
                     conversation
-                    chips
-                    micSection
+                    // While typing, the chips and mic step aside so the
+                    // multi-line field has room to grow instead of being
+                    // squeezed back to one line (older lines scrolled away).
+                    if !typedFieldFocused {
+                        chips
+                        micSection
+                    }
                     if !model.attachments.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
@@ -1238,6 +1243,7 @@ struct ContentView: View {
                 axis: .vertical
             )
                 .lineLimit(1...6)
+                .fixedSize(horizontal: false, vertical: true)
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
@@ -1289,6 +1295,7 @@ struct ContentView: View {
 
     private var sendButton: some View {
         Button {
+            typedFieldFocused = false  // drop the keyboard once the prompt is sent
             model.sendTyped()
         } label: {
             Group {

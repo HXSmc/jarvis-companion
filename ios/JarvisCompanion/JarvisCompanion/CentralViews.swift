@@ -1049,6 +1049,7 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var showPhotos = false
     @State private var showFiles = false
+    @FocusState private var draftFocused: Bool
 
     init(target: ChatTarget) {
         _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title))
@@ -1206,6 +1207,8 @@ struct ChatView: View {
             // Return adds a line break, the arrow button sends.
             TextField("message…", text: $draft, prompt: Text("message…").foregroundColor(.jarvisMuted), axis: .vertical)
                 .lineLimit(1...6)
+                .fixedSize(horizontal: false, vertical: true)
+                .focused($draftFocused)
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
@@ -1235,6 +1238,7 @@ struct ChatView: View {
         guard !model.isSending, !empty || !model.attachments.isEmpty else { return }
         model.send(draft)
         draft = ""
+        draftFocused = false  // drop the keyboard once the message is sent
     }
 }
 
