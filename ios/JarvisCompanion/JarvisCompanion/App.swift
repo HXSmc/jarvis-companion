@@ -777,6 +777,11 @@ final class AppModel: ObservableObject {
         // the audio-keepalive WS gets reclaimed; submitting while foregrounded
         // would be pointless (the live WS already delivers inbox_new).
         if phase == .background { InboxNotifier.scheduleBackgroundRefresh() }
+        // Foreground kick: a socket that died while backgrounded (or during
+        // a sleep/wake of the gateway's box) used to show "disconnected"
+        // forever since nothing ever re-checked it. Catch it within seconds
+        // of coming back to the app instead of waiting on the heartbeat.
+        if phase == .active { bridge.foregrounded() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {
