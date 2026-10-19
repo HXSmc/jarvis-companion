@@ -238,10 +238,11 @@ def _post(ev: dict, bounds: CGRect) -> None:
                right=(t == "right" or ev.get("button") == "right"))
     elif t == "drag":
         _drag(to_points(ev["x"], ev["y"], bounds),
-              to_points(ev["x"] + ev.get("dx", 0.0), ev["y"] + ev.get("dy", 0.0),
+              to_points(ev["x"] + (ev.get("dx") or 0.0), ev["y"] + (ev.get("dy") or 0.0),
                         bounds))
     elif t == "scroll":
-        _scroll(ev.get("dy", 0.0), ev.get("dx", 0.0))
+        # model_dump() sends unset dx/dy as None, so .get(k, 0.0) is not enough
+        _scroll(ev.get("dy") or 0.0, ev.get("dx") or 0.0)
     elif t == "text":
         _type_text(ev["text"])
     elif t == "key":
