@@ -112,7 +112,7 @@ final class WebBridge: NSObject, ObservableObject {
     private var nextID = 0
     private var pending: [String: (Bool, [String: Any]) -> Void] = [:]
     private var pathMonitor: NWPathMonitor?
-    private var pathWasSatisfied = true
+    private var lastSatisfiedPath: NWPath?
 
     /// Build the `/ws?role=ios` URL; https/http flip to wss/ws. The token rides
     /// the Authorization header, not the query string.
@@ -224,9 +224,11 @@ final class WebBridge: NSObject, ObservableObject {
         }
     }
 
-    /// NWPathMonitor, kept small: on a transition INTO `.satisfied` (Wi-Fi ↔
-    /// cellular handoff, or the Tailscale VPN coming back), kick a
-    /// reconnect the same way foregrounding does.
+    /// NWPathMonitor, kept small: kick a reconnect the same way foregrounding
+    /// does whenever the SATISFIED path actually changes — not just on
+    /// not-satisfied → satisfied. Wi-Fi ↔ cellular handoffs and the
+    /// Tailscale VPN coming back usually stay `.satisfied` throughout; only
+    /// the interfaces change, so gating on the status alone would miss both.
     private func startPathMonitoring() {
         guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
@@ -234,9 +236,12 @@ final class WebBridge: NSObject, ObservableObject {
         monitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let satisfied = path.status == .satisfied
-                if satisfied && !self.pathWasSatisfied { self.foregrounded() }
-                self.pathWasSatisfied = satisfied
+                guard path.status == .satisfied else {
+                    self.lastSatisfiedPath = nil
+                    return
+                }
+                if let last = self.lastSatisfiedPath, last != path { self.foregrounded() }
+                self.lastSatisfiedPath = path
             }
         }
         monitor.start(queue: .main)
