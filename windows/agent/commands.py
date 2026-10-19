@@ -67,6 +67,10 @@ VK = {
     "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
     "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
     **{f"f{i}": 0x70 + i - 1 for i in range(1, 13)},  # f1-f12 = gateway's key set
+    **{c: ord(c.upper()) for c in "abcdefghijklmnopqrstuvwxyz0123456789"},  # VK_A.., VK_0..
+    # US-layout VK_OEM_* codes for the gateway's punctuation keys
+    ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF,
+    "`": 0xC0, "[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
 }
 VK_MODS = {"cmd": 0x5B, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}  # cmd = Win key
 
