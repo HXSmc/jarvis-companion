@@ -22,6 +22,8 @@ struct HardwareModeView: View {
     @State private var lastHeard = ""
     @State private var lastChange: Date?
     @State private var lastWatch = Date.distantPast
+    /// The last few JPEGs sent, by frame id: the tracker starts on the one the brain saw.
+    @State private var sentFrames: [Int: Data] = [:]
     @FocusState private var typing: Bool
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -44,6 +46,11 @@ struct HardwareModeView: View {
                 if lost && hw.overlay != nil {
                     pill("Lost the part. Point at it again and say \"where\"", color: .orange)
                 }
+                if started && !hw.connected && hw.status != "Connecting…" {
+                    Button { _ = hw.connect(task: task) } label: {
+                        pill("\(hw.status) · tap to reconnect", color: .orange)
+                    }
+                }
                 if !camera.authorized {
                     pill("Camera is off: allow it in Settings", color: .red)
                 }
@@ -57,7 +64,7 @@ struct HardwareModeView: View {
             // Background frames: only when the picture changed. No model call.
             guard hw.connected else { return }
             if let jpeg = camera.jpeg(onlyIfChanged: true) {
-                hw.sendFrame(jpeg)
+                send(jpeg)
                 lastChange = Date()
             } else {
                 watchIfSettled()
@@ -66,7 +73,7 @@ struct HardwareModeView: View {
         .onChange(of: voice.heard) { heard in
             // Prefetch: ship a fresh frame the moment speech starts.
             if hw.connected, !heard.isEmpty, heard.split(separator: " ").count == 1, let jpeg = camera.jpeg() {
-                hw.sendFrame(jpeg)
+                send(jpeg)
             }
         }
         .preferredColorScheme(.dark)
@@ -192,7 +199,12 @@ struct HardwareModeView: View {
         hw.onOverlay = { overlay in
             tracked = nil
             lost = false
-            if let overlay { tracker.seed(overlay.rect) } else { tracker.clear() }
+            if let overlay {
+                let seen = overlay.frameId.flatMap { sentFrames[$0] }.flatMap { CIImage(data: $0) }
+                tracker.seed(overlay.rect, on: seen)
+            } else {
+                tracker.clear()
+            }
         }
         hw.onReady = {
             sendFreshFrame()
@@ -206,6 +218,13 @@ struct HardwareModeView: View {
 
     private func tearDown() {
         if let sid = sessionId, started { reportBack(to: sid) }
+        // Break the closure -> view -> object cycles so the camera, audio engine and socket are freed.
+        hw.onSay = nil
+        hw.onOverlay = nil
+        hw.onReady = nil
+        voice.onUtterance = nil
+        camera.onPixelBuffer = nil
+        tracker?.onUpdate = nil
         hw.disconnect()
         voice.stop()
         camera.setTorch(false)
@@ -215,13 +234,19 @@ struct HardwareModeView: View {
 
     private func begin() {
         typing = false
+        guard hw.connect(task: task) else { return }  // stays on the start panel; status says why
         started = true
-        hw.connect(task: task)
         voice.start()
     }
 
+    private func send(_ jpeg: Data) {
+        let id = hw.sendFrame(jpeg)
+        sentFrames[id] = jpeg
+        sentFrames = sentFrames.filter { $0.key > id - 4 }
+    }
+
     private func sendFreshFrame() {
-        if let jpeg = camera.jpeg() { hw.sendFrame(jpeg) }
+        if let jpeg = camera.jpeg() { send(jpeg) }
     }
 
     private func handle(_ text: String) {

@@ -37,35 +37,45 @@ final class HWSession: ObservableObject {
     var onReady: (() -> Void)?
 
     private var socket: URLSessionWebSocketTask?
-    private let urlSession = URLSession(configuration: .default)
+    private var urlSession: URLSession?
     private var taskText = ""
     private var nextFrameId = 1
     private var saidThisTurn = false
     private var quietTurn = false
 
-    func connect(task: String) {
+    /// False when the gateway URL is unusable (nothing was started).
+    @discardableResult
+    func connect(task: String) -> Bool {
         taskText = task
         guard let https = AppModel.gatewayEndpoint("/hwmode/ws"),
               var comps = URLComponents(url: https, resolvingAgainstBaseURL: false) else {
             status = "Set the gateway URL (https) in Settings"
-            return
+            return false
         }
         comps.scheme = "wss"
-        guard let url = comps.url else { return }
+        guard let url = comps.url else { return false }
+        disconnect()
+        status = "Connecting…"
         var request = URLRequest(url: url)
         request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
-        let ws = urlSession.webSocketTask(with: request)
+        let session = URLSession(configuration: .default)
+        urlSession = session
+        let ws = session.webSocketTask(with: request)
         ws.maximumMessageSize = 8 * 1024 * 1024
         socket = ws
         ws.resume()
         receive(on: ws)
         send(["type": "start", "task": task])
+        return true
     }
 
     func disconnect() {
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
         connected = false
+        thinking = false
     }
 
     /// Sends a camera frame; returns its id so a later overlay can be matched to it.
@@ -143,8 +153,10 @@ final class HWSession: ObservableObject {
                                         frameId: (m["frame_id"] as? NSNumber)?.intValue)
             onOverlay?(overlay)
         case "error":
+            let error = (m["error"] as? String) ?? "error"
+            guard error != "busy" else { return }  // the answer already in flight still arrives
             thinking = false
-            status = (m["error"] as? String) ?? "error"
+            status = error
         default:
             break
         }

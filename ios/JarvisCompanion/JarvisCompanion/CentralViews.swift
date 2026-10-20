@@ -290,8 +290,10 @@ final class SessionsModel: ObservableObject {
             sessions = try decoder.decode([CentralSession].self, from: data)
             error = nil
             // Optional: an older gateway without /hwmode just shows no buttons.
-            let requests = try? await Central.json(Central.request("/hwmode/requests"))
-            hardwareRequests = requests?.compactMapValues { $0 as? String } ?? [:]
+            // A failed fetch keeps the buttons we had instead of flickering them off.
+            if let requests = try? await Central.json(Central.request("/hwmode/requests", timeout: 5)) {
+                hardwareRequests = requests.compactMapValues { $0 as? String }
+            }
         } catch is CancellationError {
             return
         } catch {

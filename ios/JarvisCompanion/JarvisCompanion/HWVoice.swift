@@ -30,11 +30,16 @@ final class HWVoice: ObservableObject {
     private var recognition: SFSpeechRecognitionTask?
     private var silenceTimer: Timer?
     private var pendingBuffers = 0
-    private var bargedIn = false
+    /// Bumped on every stop: late buffers / completions from an older utterance are ignored.
+    private var generation = 0
+    private var stopped = false
+    private var failures = 0
 
     func start() {
+        stopped = false
         SFSpeechRecognizer.requestAuthorization { @Sendable status in
             Task { @MainActor in
+                guard !self.stopped else { return }  // the screen closed while the prompt was up
                 guard status == .authorized else {
                     self.error = "Speech recognition is off: allow it in Settings"
                     return
@@ -45,32 +50,34 @@ final class HWVoice: ObservableObject {
     }
 
     func stop() {
+        stopped = true
+        listening = false
         silenceTimer?.invalidate()
         recognition?.cancel()
         recognition = nil
         request = nil
+        generation += 1
         synth.stopSpeaking(at: .immediate)
         player.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        listening = false
         speaking = false
         KeepAlive.endListening()  // back to the app's normal playback session
     }
 
     func speak(_ text: String) {
         stopSpeaking()
-        bargedIn = false
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
-        speaking = true
+        let gen = generation
         synth.write(utterance) { @Sendable [weak self] buffer in
             guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else { return }
-            Task { @MainActor in self?.schedule(pcm) }
+            Task { @MainActor in self?.schedule(pcm, generation: gen) }
         }
     }
 
     func stopSpeaking() {
+        generation += 1
         synth.stopSpeaking(at: .immediate)
         player.stop()
         pendingBuffers = 0
@@ -78,12 +85,13 @@ final class HWVoice: ObservableObject {
         if engine.isRunning { player.play() }
     }
 
-    private func schedule(_ pcm: AVAudioPCMBuffer) {
-        guard engine.isRunning, !bargedIn, let converted = convert(pcm) else { return }
+    private func schedule(_ pcm: AVAudioPCMBuffer, generation gen: Int) {
+        guard gen == generation, engine.isRunning, let converted = convert(pcm) else { return }
         pendingBuffers += 1
+        speaking = true
         player.scheduleBuffer(converted) { @Sendable [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, gen == self.generation else { return }
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
                 if self.pendingBuffers == 0 { self.speaking = false }
             }
@@ -134,6 +142,7 @@ final class HWVoice: ObservableObject {
     }
 
     private func beginRecognition() {
+        guard listening else { return }
         recognition?.cancel()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -146,20 +155,37 @@ final class HWVoice: ObservableObject {
                 if let result {
                     self.partial(result.bestTranscription.formattedString)
                 }
-                if error != nil || result?.isFinal == true {
-                    // Recognition tasks end on their own (about a minute); keep listening.
-                    if self.listening { self.beginRecognition() }
+                guard error != nil || result?.isFinal == true else { return }
+                if !self.heard.isEmpty {
+                    self.finishUtterance()  // don't lose words when a task ends on its own
+                } else if error != nil {
+                    self.retryAfterFailure()
+                } else {
+                    self.beginRecognition()  // tasks end on their own (about a minute)
                 }
             }
         }
     }
 
+    /// Back off when recognition keeps failing (Siri off, no speech assets) instead of spinning.
+    private func retryAfterFailure() {
+        failures += 1
+        guard failures <= 5 else {
+            error = "Speech recognition keeps failing. Type instead, or check Siri & Dictation."
+            return
+        }
+        let delay = min(0.5 * pow(2, Double(failures)), 10)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            Task { @MainActor in self?.beginRecognition() }
+        }
+    }
+
     private func partial(_ text: String) {
         guard !text.isEmpty else { return }
+        failures = 0
         heard = text
         // Barge-in: real words while Jarvis talks cut it off.
         if speaking, text.split(separator: " ").count >= 2 || text.count >= 5 {
-            bargedIn = true
             stopSpeaking()
         }
         silenceTimer?.invalidate()
@@ -169,6 +195,7 @@ final class HWVoice: ObservableObject {
     }
 
     private func finishUtterance() {
+        silenceTimer?.invalidate()
         let text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
         heard = ""
         request?.endAudio()
