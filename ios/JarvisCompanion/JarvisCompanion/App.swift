@@ -953,6 +953,7 @@ struct ContentView: View {
     @AppStorage("homeView") private var homeView: HomeView = .controls
     @State private var showPhotos = false
     @State private var showFiles = false
+    @State private var showHardware = false
 
     var body: some View {
         ZStack {
@@ -1025,6 +1026,18 @@ struct ContentView: View {
             .accessibilityLabel("Home view: \(homeView.label)")
             Spacer(minLength: 8)
             statusPill
+            Button {
+                showHardware = true
+            } label: {
+                Image(systemName: "wrench.and.screwdriver")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(.jarvisMuted)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Hardware Mode")
+            // On the button, not the root: the root already presents a full-screen cover.
+            .fullScreenCover(isPresented: $showHardware) { HardwareModeView() }
             Button {
                 model.showInbox = true
             } label: {

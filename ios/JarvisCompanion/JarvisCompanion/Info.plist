@@ -47,6 +47,8 @@
 	<key>NSUserNotificationsUsageDescription</key>
 	<string>Notifies you when a handoff arrives from the Mac.</string>
 	<!-- hold-to-talk dictation: mic capture + speech recognition (Phase 0 spec) -->
+	<key>NSCameraUsageDescription</key>
+	<string>Hardware Mode shows the camera to Jarvis on your own computer so it can point at the part to touch.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Holding the mic button records your voice so Jarvis can hear your request.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
