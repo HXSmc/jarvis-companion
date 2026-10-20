@@ -279,6 +279,8 @@ struct ChatTarget: Identifiable {
 final class SessionsModel: ObservableObject {
     @Published var sessions: [CentralSession] = []
     @Published var error: String?
+    /// session id -> physical task the session asked the owner to do (Hardware Mode).
+    @Published var hardwareRequests: [String: String] = [:]
 
     func refresh() async {
         do {
@@ -287,6 +289,11 @@ final class SessionsModel: ObservableObject {
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             sessions = try decoder.decode([CentralSession].self, from: data)
             error = nil
+            // Optional: an older gateway without /hwmode just shows no buttons.
+            // A failed fetch keeps the buttons we had instead of flickering them off.
+            if let requests = try? await Central.json(Central.request("/hwmode/requests", timeout: 5)) {
+                hardwareRequests = requests.compactMapValues { $0 as? String }
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -316,6 +323,7 @@ struct SessionsBoard: View {
     @StateObject private var model = SessionsModel()
     @State private var openChat: ChatTarget?
     @State private var openRecap: RecapTarget?
+    @State private var openHardware: HWTarget?
     @Environment(\.scenePhase) private var scenePhase
 
     private struct Column {
@@ -384,6 +392,7 @@ struct SessionsBoard: View {
         }
         .sheet(item: $openChat) { ChatView(target: $0) }
         .sheet(item: $openRecap) { RecapView(model: model, sessionID: $0.id) }
+        .fullScreenCover(item: $openHardware) { HardwareModeView(initialTask: $0.task, sessionId: $0.id) }
     }
 
     private func column(_ column: Column) -> some View {
@@ -402,6 +411,18 @@ struct SessionsBoard: View {
                             SessionCard(session: session)
                         }
                         .buttonStyle(.plain)
+                        if let task = model.hardwareRequests[session.sessionId] {
+                            Button {
+                                openHardware = HWTarget(id: session.sessionId, task: task)
+                            } label: {
+                                Label("Open Hardware Mode", systemImage: "wrench.and.screwdriver")
+                                    .font(.subheadline.weight(.bold))
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.yellow))
+                                    .foregroundColor(.black)
+                            }
+                            .accessibilityHint(task)
+                        }
                     }
                     if items.isEmpty {
                         Text("nothing here")

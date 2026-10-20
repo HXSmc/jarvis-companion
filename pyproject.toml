@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["common", "gateway", "mac", "mac.voice", "mac.mirroring", "mac.screen", "windows", "windows.agent", "passwords"]
+packages = ["common", "gateway", "hwmode", "mac", "mac.voice", "mac.mirroring", "mac.screen", "windows", "windows.agent", "passwords"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

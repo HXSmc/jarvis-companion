@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Ask the owner to do a physical step with Hardware Mode (phone camera + AR guidance).
+
+usage: jarvis-hw-request "what needs doing, e.g. reseat the SATA data cable on the SSD"
+       [--session ID]   default: $CLAUDE_CODE_SESSION_ID (the calling Claude session)
+
+Puts an "Open Hardware Mode" button on this session's card in the Jarvis app.
+When the owner hangs up, the app posts a summary back into this session.
+The shared gateway token is read in-process from the vault and never printed.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR", "/home/<user>/jarvis-gateway"))
+from common import config  # noqa: E402
+
+args = sys.argv[1:]
+session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+if args[:1] == ["--session"] and len(args) >= 2:
+    session, args = args[1], args[2:]
+task = " ".join(args).strip()
+if not task or not session or task in ("-h", "--help"):
+    sys.exit(__doc__)
+token = config.get_token()
+if not token:
+    sys.exit("no gateway token in the vault")
+req = urllib.request.Request("http://127.0.0.1:8788/hwmode/request", method="POST",
+                             data=json.dumps({"session_id": session, "task": task}).encode(),
+                             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+try:
+    urllib.request.urlopen(req, timeout=15).read()
+except urllib.error.HTTPError as e:
+    sys.exit(f"gateway answered {e.code}: {e.read()[:200].decode(errors='replace')}")
+print(f"Hardware Mode request posted for session {session}. The owner will see a button on the session card.")

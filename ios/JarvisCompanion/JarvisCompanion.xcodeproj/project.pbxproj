@@ -17,6 +17,10 @@
 		5A0B1C2D3E4F5061726A7392 /* CentralViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7391 /* CentralViews.swift */; };
 		5A0B1C2D3E4F5061726A73A2 /* ChatChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73A1 /* ChatChip.swift */; };
 		5A0B1C2D3E4F5061726A73B2 /* ChatMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73B1 /* ChatMarkdown.swift */; };
+		5A0B1C2D3E4F5061726A73F2 /* HardwareModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73F1 /* HardwareModeView.swift */; };
+		5A0B1C2D3E4F5061726A73E2 /* HWVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73E1 /* HWVoice.swift */; };
+		5A0B1C2D3E4F5061726A73D2 /* HWCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73D1 /* HWCamera.swift */; };
+		5A0B1C2D3E4F5061726A73C2 /* HWSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73C1 /* HWSession.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +33,10 @@
 		5A0B1C2D3E4F5061726A7391 /* CentralViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CentralViews.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A73A1 /* ChatChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatChip.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A73B1 /* ChatMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMarkdown.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A73F1 /* HardwareModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardwareModeView.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A73E1 /* HWVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWVoice.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A73D1 /* HWCamera.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWCamera.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A73C1 /* HWSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWSession.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7315 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7316 /* JarvisCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -65,6 +73,10 @@
 				5A0B1C2D3E4F5061726A7391 /* CentralViews.swift */,
 				5A0B1C2D3E4F5061726A73A1 /* ChatChip.swift */,
 				5A0B1C2D3E4F5061726A73B1 /* ChatMarkdown.swift */,
+				5A0B1C2D3E4F5061726A73F1 /* HardwareModeView.swift */,
+				5A0B1C2D3E4F5061726A73E1 /* HWVoice.swift */,
+				5A0B1C2D3E4F5061726A73D1 /* HWCamera.swift */,
+				5A0B1C2D3E4F5061726A73C1 /* HWSession.swift */,
 				5A0B1C2D3E4F5061726A7315 /* Info.plist */,
 				5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */,
 			);
@@ -152,6 +164,10 @@
 				5A0B1C2D3E4F5061726A7392 /* CentralViews.swift in Sources */,
 				5A0B1C2D3E4F5061726A73A2 /* ChatChip.swift in Sources */,
 				5A0B1C2D3E4F5061726A73B2 /* ChatMarkdown.swift in Sources */,
+				5A0B1C2D3E4F5061726A73F2 /* HardwareModeView.swift in Sources */,
+				5A0B1C2D3E4F5061726A73E2 /* HWVoice.swift in Sources */,
+				5A0B1C2D3E4F5061726A73D2 /* HWCamera.swift in Sources */,
+				5A0B1C2D3E4F5061726A73C2 /* HWSession.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
