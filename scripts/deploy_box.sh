@@ -13,8 +13,14 @@
 # sessions per .orchestrator/reports/gateway-move-recon.md section 6.
 set -euo pipefail
 
-BOX_HOST="<box-host>"
-BOX_DIR="/home/<user>/jarvis-gateway"
+# Deployment-private values come from .env next to the repo root (see
+# .env.example); missing vars abort here, named, never defaulted.
+ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+BOX_HOST="${JARVIS_BOX_HOST:?JARVIS_BOX_HOST is not set (copy .env.example to .env)}"
+# Neutral default keeps the literal $HOME so it expands on the box (ssh).
+BOX_DIR="${JARVIS_BOX_DIR:-\$HOME/jarvis-gateway}"
 UNIT="jarvis-gateway.service"
 
 echo "[1/4] push Mac main -> box:box-deploy (fast-forward only)"

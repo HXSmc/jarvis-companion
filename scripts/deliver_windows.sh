@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Deliver the Jarvis Windows agent bundle to the PC "<user>" over Taildrop
+# Deliver the Jarvis Windows agent bundle to the PC over Taildrop
 # (DESIGN.md "Delivery / install paths"). Default is the one-click source zip
 # from scripts/build_release.sh (windows/install.ps1 sets everything up on the
 # PC); the legacy self-built .exe still works when passed explicitly.
 set -euo pipefail
+
+# Deployment-private taildrop target comes from .env next to the repo root
+# (see .env.example); missing var aborts here, named, never defaulted.
+ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
 ZIP="${1:-dist/jarvis-windows-agent.zip}"
 
@@ -16,8 +21,9 @@ fi
 
 command -v tailscale >/dev/null 2>&1 || { echo "error: tailscale CLI not found in PATH" >&2; exit 1; }
 
-echo "Sending $(basename "$ZIP") to <user> ..."
-tailscale file cp "$ZIP" <user>:
+WINPC="${JARVIS_WINPC_TAILDROP:?JARVIS_WINPC_TAILDROP is not set (the tailnet device name, see .env.example)}"
+echo "Sending $(basename "$ZIP") to $WINPC ..."
+tailscale file cp "$ZIP" "$WINPC":
 
 if [[ "$ZIP" == *.zip ]]; then
     cat <<'EOF'

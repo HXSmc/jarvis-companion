@@ -1,6 +1,6 @@
 #!/bin/bash
 # launch2.sh <tid> <model> <minutes> [inplace] -- runs a glm-code spoke, blocks until exit. GLM_MODEL is what glm-code reads.
-cd /Users/<user>/Desktop/personal/jarvis-companion || exit 1
+cd "${JARVIS_REPO_DIR:?JARVIS_REPO_DIR is not set (the repo root, e.g. ~/personal/jarvis-companion)}" || exit 1
 TID="$1"; MODEL="$2"; MINS="$3"; INPLACE="$4"
 [ "$INPLACE" = "inplace" ] && export GLM_NO_WORKTREE=1
 W=1; [ "$MODEL" = "glm-5.3" ] && W=2

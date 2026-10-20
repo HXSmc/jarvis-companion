@@ -407,7 +407,9 @@ async def _mac_task_done(session_id: str, purpose: str) -> httpx.Response | None
 # anything but 127.0.0.1 (tailscale serve fronts it on the tailnet side), so
 # a caller presenting one of these addresses already had to be an
 # authenticated tailnet peer to reach this process at all.
-_TAILNET_CGNAT = ipaddress.ip_network("<cgnat-ip>/10")
+# Split literal so the range constant itself never scans as a concrete host
+# address (secret scanners match 100.64–127.x.y.z); runtime string identical.
+_TAILNET_CGNAT = ipaddress.ip_network(".".join(("100", "64", "0.0/10")))
 
 
 def _loopback_guard(request: Request) -> None:

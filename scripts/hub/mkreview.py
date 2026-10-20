@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """mkreview.py <story-id> <build-tid> -> review+verify spec for a fresh glm-5.3 spoke run IN PLACE after spoke-wt apply; prints tid"""
-import json, sys, time, random, pathlib, re
+import json, sys, time, random, pathlib, re, os
 sid, btid = sys.argv[1], sys.argv[2]
-root = pathlib.Path('/Users/<user>/Desktop/personal/jarvis-companion')
+root = pathlib.Path(os.environ.get('JARVIS_REPO_DIR')
+                    or sys.exit('JARVIS_REPO_DIR is not set (the repo root)'))
 prd = json.load(open(root/'.orchestrator/state/prd.json'))
 st = next(s for s in prd['stories'] if s['id'] == sid)
 tid = f"t{int(time.time())}{random.randint(0,32767)}-review"

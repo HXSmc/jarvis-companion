@@ -58,7 +58,6 @@ from mac.voice import brain as _brain
 
 logger = logging.getLogger(__name__)
 
-ROUTER_BASE_DEFAULT = "https://minipc.<tailnet>.<tld>:8801"
 ROUTER_TOKEN_NAME = "MINIPC_ROUTER_TOKEN"
 
 # Plain JSON calls: a /route may spawn a session, so allow it a little longer.
@@ -105,8 +104,10 @@ DEVICE = "Mini PC"
 FLOOR_IDLE = timedelta(minutes=30)
 STATE_PATH = FilePath.home() / ".jarvis" / "central_state.json"
 # launchd's PATH may lack `claude` (it isn't a login shell) — resolve once at
-# import time, falling back to the known absolute path from `which claude`.
-_CLAUDE_BIN = shutil.which("claude") or "/Users/<user>/.local/bin/claude"
+# import time; JARVIS_CLAUDE_BIN overrides, else `which`, else ~/.local/bin.
+_CLAUDE_BIN = (os.environ.get("JARVIS_CLAUDE_BIN")
+               or shutil.which("claude")
+               or os.path.expanduser("~/.local/bin/claude"))
 PLAIN_TIMEOUT_SECONDS = 60.0
 PLAIN_RETRY_SECONDS = 600  # a failed generation for one summary is not retried sooner
 DOING_MAX = 80
@@ -188,7 +189,12 @@ class RouterError(Exception):
 
 
 def router_base() -> str:
-    return os.environ.get("MINIPC_ROUTER_URL", ROUTER_BASE_DEFAULT).rstrip("/")
+    # No hardcoded default: the router URL is deployment-private. Missing var
+    # fails loudly here (named), not as a confusing connection error later.
+    value = os.environ.get("MINIPC_ROUTER_URL", "").strip().rstrip("/")
+    if not value:
+        raise RouterError("MINIPC_ROUTER_URL is not set (copy .env.example to .env)")
+    return value
 
 
 def router_token() -> str | None:

@@ -35,8 +35,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/screen/minipc")
 
-MINIPC_NOVNC_BASE = os.environ.get("MINIPC_NOVNC_BASE", "https://minipc.<tailnet>.<tld>:8802")
-MINIPC_VNC_WS = os.environ.get("MINIPC_VNC_WS", "wss://minipc.<tailnet>.<tld>:8802/websockify")
+# Deployment-private upstream URLs: env only (see .env.example), no hardcoded
+# default. Unset -> None, and every consumer fails loudly naming the var.
+MINIPC_NOVNC_BASE = os.environ.get("MINIPC_NOVNC_BASE", "").strip().rstrip("/") or None
+MINIPC_VNC_WS = os.environ.get("MINIPC_VNC_WS", "").strip() or None
 
 HANDSHAKE_TIMEOUT = 10.0  # seconds, per RFB handshake phase
 MAX_VNC_SESSIONS = 2  # concurrent /screen/minipc/ws sessions; extra -> 4004
@@ -62,6 +64,9 @@ _cache: dict[str, bytes] = {}
 
 async def online() -> bool:
     """HTTPS HEAD of the noVNC page; False on any exception."""
+    if not MINIPC_NOVNC_BASE:
+        logger.error("online: MINIPC_NOVNC_BASE is not set (copy .env.example to .env)")
+        return False
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             resp = await client.head(f"{MINIPC_NOVNC_BASE}/vnc.html")
@@ -76,6 +81,12 @@ async def _fetch(path: str) -> tuple[int, bytes]:
         return resp.status_code, resp.content
 
 
+def _require_novnc_base() -> None:
+    if not MINIPC_NOVNC_BASE:
+        raise HTTPException(status_code=503,
+                            detail="MINIPC_NOVNC_BASE is not set (copy .env.example to .env)")
+
+
 @router.get("/novnc/{path:path}")
 async def novnc_asset(request: Request, path: str) -> Response:
     screen._require(request)
@@ -86,6 +97,7 @@ async def novnc_asset(request: Request, path: str) -> Response:
         raise HTTPException(status_code=404, detail=NOVNC_NOT_FOUND)
     if path in _cache:
         return Response(_cache[path], media_type="text/javascript")
+    _require_novnc_base()
     try:
         status, body = await _fetch(path)
     except Exception:
@@ -140,6 +152,10 @@ async def vnc_ws(ws: WebSocket) -> None:
         password = vnc_password()
         if password is None:
             await ws.close(code=4003)
+            return
+        if not MINIPC_VNC_WS:
+            logger.error("vnc_ws: MINIPC_VNC_WS is not set (copy .env.example to .env)")
+            await ws.close(code=4002)
             return
         try:
             up = await websockets.connect(MINIPC_VNC_WS, subprotocols=["binary"], open_timeout=5)

@@ -14,7 +14,7 @@ import sys
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR", "/home/<user>/jarvis-gateway"))
+sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR") or os.path.expanduser("~/jarvis-gateway"))
 from common import config  # noqa: E402
 
 args = sys.argv[1:]

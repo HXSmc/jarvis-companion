@@ -29,9 +29,11 @@ def test_notify_gateway_calls_mac_and_box(monkeypatch):
 
     monkeypatch.delenv("JARVIS_VENDOR_WATCH_NO_NOTIFY", raising=False)
     monkeypatch.delenv("JARVIS_VENDOR_WATCH_NO_BOX_NOTIFY", raising=False)
+    # BOX notify URL is env-driven now — set it so the box leg is exercised
+    monkeypatch.setattr(vendor_watch, "BOX_GATEWAY_NOTIFY_URL", "http://box.test/inbox/notify")
     with patch.object(vendor_watch.urllib.request, "urlopen", fake_urlopen):
         vendor_watch.notify_gateway("tok", 2, 5)
-    assert seen == [vendor_watch.GATEWAY_NOTIFY_URL, vendor_watch.BOX_GATEWAY_NOTIFY_URL]
+    assert seen == [vendor_watch.GATEWAY_NOTIFY_URL, "http://box.test/inbox/notify"]
 
 
 def test_notify_gateway_box_opt_out(monkeypatch):

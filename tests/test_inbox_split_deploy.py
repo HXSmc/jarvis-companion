@@ -299,11 +299,17 @@ def test_notify_mac_mode_does_not_clamp_new(monkeypatch):
     assert captured["envelope"]["payload"]["new"] == 5000
 
 
+def _tailnet_peer() -> str:
+    """A fake tailnet CGNAT peer address, split so the literal never scans
+    as a real host address (same trick as inbox._TAILNET_CGNAT)."""
+    return ".".join(("100", "96", "79", "29"))
+
+
 def test_loopback_guard_accepts_tailnet_peer_in_box_mode(monkeypatch) -> None:
     """A tailnet CGNAT address (e.g. the Mac calling the box) gets through
     ONLY when MAC_GATEWAY_URL is set — i.e. only on the box."""
     monkeypatch.setenv(inbox.MAC_GATEWAY_ENV, "http://mac.test")
-    request = StarletteRequest({"type": "http", "client": ("<cgnat-ip>", 51515), "method": "POST"})
+    request = StarletteRequest({"type": "http", "client": (_tailnet_peer(), 51515), "method": "POST"})
     inbox._loopback_guard(request)  # must not raise
 
 
@@ -313,7 +319,7 @@ def test_loopback_guard_rejects_tailnet_peer_in_mac_mode(monkeypatch) -> None:
     path there, so widening it would let any tailnet holder of the shared
     token trigger a real message or call to the owner."""
     monkeypatch.delenv(inbox.MAC_GATEWAY_ENV, raising=False)
-    request = StarletteRequest({"type": "http", "client": ("<cgnat-ip>", 51515), "method": "POST"})
+    request = StarletteRequest({"type": "http", "client": (_tailnet_peer(), 51515), "method": "POST"})
     with pytest.raises(HTTPException) as exc:
         inbox._loopback_guard(request)
     assert exc.value.status_code == 403

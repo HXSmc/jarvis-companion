@@ -708,11 +708,13 @@ def test_extract_question_trailing_clause() -> None:
     assert _extract_question("who are the co-founders of <name>") == "who are the co-founders of <name>"
 
 
-def test_resolve_project_aliases() -> None:
+def test_resolve_project_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     """STT variants sharing the first 3 chars + ratio ≥0.5 resolve to the project
     token; 'towed' never does; my/the/our project → the default project."""
+    import gateway.quick as quick
     from gateway.quick import _resolve_project
 
+    monkeypatch.setattr(quick, "DEFAULT_PROJECT", "<project>")  # env-driven now
     tokens = {"<project>", "notekit"}
     assert "<project>" in _resolve_project("who are the co-founders of <name>", tokens).lower()
     towed = _resolve_project("who are the co-founders of towed", tokens).lower()
