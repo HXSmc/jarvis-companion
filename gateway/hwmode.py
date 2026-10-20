@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -32,7 +33,7 @@ import shutil
 import struct
 import time
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from gateway.auth import require_bearer, require_bearer_any
@@ -46,6 +47,10 @@ MAX_FRAME_BYTES = 4 * 1024 * 1024
 # Restart the session after this many turns: every turn resends earlier images.
 MAX_TURNS = 20
 REQUEST_TTL_S = 12 * 3600
+MAX_REQUESTS = 50
+# Each live connection is one `claude` process on this box.
+MAX_CONNECTIONS = 2
+_live_conns = 0
 # session_id -> {"task": str, "at": epoch seconds}; in memory: a gateway restart drops them.
 _requests: dict[str, dict] = {}
 _SAY_RE = re.compile(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -89,7 +94,11 @@ class _Conn:
             self.session.close()
             self.session = None
 
-    async def start(self, task: str, model: str, announce: bool = True) -> None:
+    async def start(self, task: str, model: str) -> None:
+        async with self.busy:
+            await self._start(task, model, announce=True)
+
+    async def _start(self, task: str, model: str, announce: bool) -> None:
         self._close_session()
         self.task, self.model = task, model if model in ("sonnet", "haiku") else "sonnet"
         self.session = await asyncio.to_thread(LeanSession, self.model, claude_bin=_claude_bin())
@@ -100,7 +109,7 @@ class _Conn:
         async with self.busy:
             if self.session is None or self.session.turns >= MAX_TURNS:
                 carry = f"Task: {self.task}. " if self.task else ""
-                await self.start(self.task, self.model, announce=False)
+                await self._start(self.task, self.model, announce=False)
                 text = carry + text
             jpeg = self.frame if use_frame else None
             frame_id = self.frame_id if use_frame else None
@@ -127,7 +136,10 @@ class _Conn:
     async def handle(self, msg: dict) -> None:
         kind = msg.get("type")
         if kind == "frame":
-            data = base64.b64decode(msg.get("jpeg") or "", validate=False)
+            try:
+                data = base64.b64decode(str(msg.get("jpeg") or ""))
+            except (binascii.Error, ValueError):
+                data = b""
             if not data or len(data) > MAX_FRAME_BYTES or jpeg_size(data) is None:
                 await self.send({"type": "error", "error": "bad frame"})
                 return
@@ -138,6 +150,9 @@ class _Conn:
             text = str(msg.get("text") or "").strip()[:2000]
             if not text:
                 await self.send({"type": "error", "error": "empty question"})
+                return
+            if self.tasks:  # one question at a time; a flood must not queue model turns
+                await self.send({"type": "error", "error": "busy"})
                 return
             # Answer in the background so frames keep flowing while the brain thinks.
             t = asyncio.create_task(self._ask_safely(text, bool(msg.get("frame", True))))
@@ -157,16 +172,24 @@ class _Conn:
             except Exception:
                 pass
 
-    def close(self) -> None:
-        self._close_session()
+    async def close(self) -> None:
+        for t in self.tasks:
+            t.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await asyncio.to_thread(self._close_session)
 
 
 @router.websocket("/hwmode/ws")
 async def hwmode_ws(websocket: WebSocket) -> None:
+    global _live_conns
     if not _authorized(websocket, IOS_ROLE):
         await websocket.close(code=1008)
         return
+    if _live_conns >= MAX_CONNECTIONS:
+        await websocket.close(code=1013)  # try again later
+        return
     await websocket.accept()
+    _live_conns += 1
     conn = _Conn(websocket)
     try:
         while True:
@@ -189,7 +212,8 @@ async def hwmode_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        await asyncio.to_thread(conn.close)
+        _live_conns -= 1
+        await conn.close()
 
 
 class HardwareRequest(BaseModel):
@@ -205,8 +229,15 @@ def _live_requests() -> dict[str, dict]:
 
 
 @router.post("/hwmode/request", dependencies=[Depends(require_bearer)])
-async def post_request(req: HardwareRequest) -> dict:
-    _live_requests()[req.session_id] = {"task": req.task, "at": time.time()}
+async def post_request(req: HardwareRequest, request: Request) -> dict:
+    # Only the local CLI may post: tailnet callers arrive with their real address
+    # (uvicorn --proxy-headers behind tailscale serve), so the shared token alone is not enough.
+    if (request.client.host if request.client else None) not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="local callers only")
+    live = _live_requests()
+    if req.session_id not in live and len(live) >= MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="too many open requests")
+    live[req.session_id] = {"task": req.task, "at": time.time()}
     return {"ok": True}
 
 

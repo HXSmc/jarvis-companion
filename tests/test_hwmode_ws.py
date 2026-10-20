@@ -126,3 +126,30 @@ def test_session_restart_after_max_turns_is_silent(gateway_server, fake_claude, 
                     kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(2)]
                     assert kinds == ["say", "reply"]
     asyncio.run(run())
+
+
+def test_second_ask_while_busy_is_refused(gateway_server, fake_claude, monkeypatch):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                await ws.recv()
+                await ws.send(json.dumps({"type": "ask", "text": "one", "frame": False}))
+                await ws.send(json.dumps({"type": "ask", "text": "two", "frame": False}))
+                kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(3)]
+                assert sorted(kinds) == ["error", "reply", "say"]
+    asyncio.run(run())
+
+
+def test_request_cap(gateway_server, monkeypatch):
+    import httpx
+    from gateway import hwmode
+    hwmode._requests.clear()
+    monkeypatch.setattr(hwmode, "MAX_REQUESTS", 2)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            codes = [(await http.post("/hwmode/request", json={"session_id": f"s{i}", "task": "x"}, headers=AUTH_HEADER)).status_code
+                     for i in range(3)]
+            assert codes == [200, 200, 429]
+    asyncio.run(run())

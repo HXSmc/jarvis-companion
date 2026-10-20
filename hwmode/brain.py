@@ -101,4 +101,7 @@ class LeanSession:
         if self.proc.poll() is None:
             self.proc.stdin.close()
             self.proc.terminate()
-            self.proc.wait(timeout=10)
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
