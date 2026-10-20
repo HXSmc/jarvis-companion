@@ -13,22 +13,46 @@ link; email instead while the overnight marker is set) and, when the caller
 flags the mail urgent, a jarvis-phone event. The jarvis-phone root is
 overridable via ``JARVIS_PHONE_DIR``; every enqueue failure is logged and
 swallowed — notify must never raise.
+
+Split deploy (gateway on the mini PC): J1's watcher (``scripts/vendor_watch.py``)
+only ever runs on the Mac (it's the only machine with example MCP access), so
+the box's own local store is always empty. When ``MAC_GATEWAY_URL`` is set
+(box mode, same env + pattern as ``gateway/central.py`` and ``gateway/screen.py``),
+``GET /inbox`` and the mark-read route forward to the Mac's own copy of those
+routes with the ios_token instead of reading the local (empty) store.
+``POST /inbox/notify`` stays local even in box mode — its job there is to
+wake whichever "ios" websocket is connected to THIS gateway instance — but it
+skips the guaranteed-path enqueue (the Mac's own local notify call already
+ran that) and pulls the real unread count from the Mac instead of the local
+store.
+
+``POST /inbox/task-done`` (both modes): the router ledger's one-shot "a
+top-level task finished" poke — exactly ONE owner message (WhatsApp/email via
+the jarvis-phone drainer, NEVER an event/call), deduped on session_id in a
+state file next to the store. Box mode forwards to the Mac, which does the
+enqueue (the box never writes to jarvis-phone dirs).
 """
 
 from __future__ import annotations
 
 import fcntl
+import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 import time
+import urllib.parse
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, Field
 
+from common import config
 from gateway import registry
 from gateway.auth import require_bearer_any
 
@@ -37,7 +61,14 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _STORE_NAME = "inbox.json"
+_TASK_DONE_SEEN = "task-done-seen.json"
 _PHONE_DIR_DEFAULT = "~/Desktop/personal/jarvis-phone"
+
+# Inbox item ids are example message IDs as stored by scripts/vendor_watch.py
+# (`h["ID"]`): url-safe alphanumerics plus `-` and `_`. Anything else can only
+# be a probe — reject it before it is ever interpolated into a forwarded URL
+# (`notify?`/`notify#` pivot onto other routes, `..` climbs the path).
+_ITEM_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def _store_dir() -> Path:
@@ -100,6 +131,44 @@ def _mark_read(item_id: str) -> bool:
             )
             os.replace(tmp, path)
             return True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _task_done_seen(session_id: str) -> bool:
+    """True if this session already produced its one task-done message."""
+    try:
+        data = json.loads((_store_dir() / _TASK_DONE_SEEN).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and session_id in data
+
+
+def _task_done_record(session_id: str) -> None:
+    """Persist session_id -> now under the same fcntl + atomic-write idiom
+    as _mark_read. Callers record ONLY after the enqueue/forward succeeded,
+    so a failed attempt stays retryable."""
+    directory = _store_dir()
+    lock_path = directory / f"{_TASK_DONE_SEEN}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            path = directory / _TASK_DONE_SEEN
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                raw = None
+            try:
+                data = json.loads(raw) if raw else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data[session_id] = _now_iso()
+            tmp = directory / f"{_TASK_DONE_SEEN}.tmp.{os.getpid()}"
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -181,18 +250,14 @@ def _unread_vendors(items: list[dict], count: int) -> list[str]:
     return vendors[:count]
 
 
-def _enqueue_outbound(new: int, items: list[dict]) -> None:
-    """One guaranteed-path message: WhatsApp normally, email while overnight."""
+def _enqueue_owner_text(text: str, subject: str) -> bool:
+    """One owner message via the jarvis-phone drainer: WhatsApp normally,
+    email while the overnight marker is set. False = not enqueued (no phone
+    dir, no owner contact, or IO error) — callers treat that as retryable."""
     directory = _phone_dir()
-    if directory is None or new <= 0:
-        return
+    if directory is None:
+        return False
     phone, email = _owner_contact(directory)
-    text = f"{new} new vendor email(s)"
-    vendors = ", ".join(_unread_vendors(items, new))
-    if vendors:
-        text += f": {vendors}"
-    text += ". Open jarvis://inbox"
-    subject = f"[jarvis] vendor inbox: {new} new"
     if (directory / "queue" / "OVERNIGHT").exists() and email:
         payload = {
             "channel": "email",
@@ -207,8 +272,21 @@ def _enqueue_outbound(new: int, items: list[dict]) -> None:
         }
     else:
         logger.warning("inbox: no owner contact (owner.json), message skipped")
+        return False
+    return _enqueue(directory / "queue" / "outbound" / _queue_file(), payload)
+
+
+def _enqueue_outbound(new: int, items: list[dict]) -> None:
+    """One guaranteed-path message: WhatsApp normally, email while overnight."""
+    if new <= 0:
         return
-    _enqueue(directory / "queue" / "outbound" / _queue_file(), payload)
+    text = f"{new} new vendor email(s)"
+    vendors = ", ".join(_unread_vendors(items, new))
+    if vendors:
+        text += f": {vendors}"
+    text += ". Open jarvis://inbox"
+    subject = f"[jarvis] vendor inbox: {new} new"
+    _enqueue_owner_text(text, subject)
 
 
 def _enqueue_urgent_event(new: int, items: list[dict], body: dict) -> None:
@@ -252,15 +330,120 @@ def _enqueue_guaranteed(new: int, items: list[dict], body: dict) -> None:
         logger.warning("inbox: guaranteed-path enqueue failed", exc_info=True)
 
 
+# Split deploy: MAC_GATEWAY_URL set = this process runs on the box, the
+# vendor-watch store lives on the Mac instead. Same env + helper shape as
+# gateway/central.py and gateway/screen.py.
+MAC_GATEWAY_ENV = "MAC_GATEWAY_URL"
+MAC_PROXY_TIMEOUT = httpx.Timeout(8.0, connect=3.0)
+
+
+def _mac_gateway() -> str | None:
+    return os.environ.get(MAC_GATEWAY_ENV, "").rstrip("/") or None
+
+
+def _mac_client() -> httpx.AsyncClient:
+    """Outbound client to the Mac gateway (tests swap in an ASGI transport here)."""
+    return httpx.AsyncClient(timeout=MAC_PROXY_TIMEOUT)
+
+
+def _ios_token() -> str | None:
+    return config.get_token(name="ios_token")
+
+
+async def _mac_get_inbox() -> dict | None:
+    """GET the Mac gateway's own /inbox; None on any failure (down, no token, bad body)."""
+    token = _ios_token()
+    if not token:
+        return None
+    try:
+        async with _mac_client() as client:
+            resp = await client.get(
+                f"{_mac_gateway()}/inbox", headers={"Authorization": f"Bearer {token}"}
+            )
+        data = resp.json() if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("mac gateway /inbox failed: %s", type(exc).__name__)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return None
+    return data
+
+
+async def _mac_mark_read(item_id: str) -> httpx.Response | None:
+    """POST the Mac gateway's own mark-read route; None = unreachable/no token."""
+    token = _ios_token()
+    if not token:
+        return None
+    try:
+        async with _mac_client() as client:
+            return await client.post(
+                f"{_mac_gateway()}/inbox/{urllib.parse.quote(item_id, safe='')}/read",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.info("mac gateway /inbox/%s/read failed: %s", item_id, type(exc).__name__)
+        return None
+
+
+async def _mac_task_done(session_id: str, purpose: str) -> httpx.Response | None:
+    """POST the Mac gateway's own task-done route; None = unreachable/no token."""
+    token = _ios_token()
+    if not token:
+        return None
+    try:
+        async with _mac_client() as client:
+            return await client.post(
+                f"{_mac_gateway()}/inbox/task-done",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"session_id": session_id, "purpose": purpose},
+            )
+    except httpx.HTTPError as exc:
+        logger.info("mac gateway /inbox/task-done failed: %s", type(exc).__name__)
+        return None
+
+
+# Tailscale's CGNAT range (https://tailscale.com/kb/1015/100.x-addresses) —
+# every tailnet node gets one of these, and this port is never bound to
+# anything but 127.0.0.1 (tailscale serve fronts it on the tailnet side), so
+# a caller presenting one of these addresses already had to be an
+# authenticated tailnet peer to reach this process at all.
+_TAILNET_CGNAT = ipaddress.ip_network("<cgnat-ip>/10")
+
+
 def _loopback_guard(request: Request) -> None:
-    """/inbox/notify is a localhost-only trigger: anything but 127.0.0.1 gets 403."""
+    """/inbox/notify: localhost always gets through; a tailnet peer ONLY in
+    box mode (MAC_GATEWAY_URL set). Anything else 403s.
+
+    Confirmed empirically (2026-10-16): tailscale serve forwards the REAL
+    remote tailnet address here, not 127.0.0.1 — so this is what lets the
+    Mac's mail watcher reach the box's copy of this route cross-host over
+    the tailnet. The tailnet allowance is scoped to box mode ONLY: on the
+    Mac this route still runs the guaranteed WhatsApp/email enqueue (and,
+    with ``urgent: true``, a call_eligible event) — relaxing the guard
+    there would let any tailnet peer holding the shared token (which is
+    more widely held than ios_token: the PC agent config, the iCloud
+    Shortcut) trigger a real message or phone call to the owner. The
+    bearer-token check (Depends above) is still the real access control
+    either way; this guard is the extra "never the public internet" belt,
+    and in Mac mode it stays as strict as it always was.
+    """
     host = request.client.host if request.client else None
-    if host != "127.0.0.1":
-        raise HTTPException(status_code=403, detail="loopback only")
+    if host == "127.0.0.1":
+        return
+    if _mac_gateway():  # box mode only — see docstring
+        try:
+            if host and ipaddress.ip_address(host) in _TAILNET_CGNAT:
+                return
+        except ValueError:
+            pass
+    raise HTTPException(status_code=403, detail="loopback only")
 
 
 @router.get("/inbox", dependencies=[Depends(require_bearer_any("ios_token"))])
 async def get_inbox() -> dict:
+    if _mac_gateway():
+        data = await _mac_get_inbox()
+        return data if data is not None else {"items": [], "unread": 0}
     items = _newest_first(_load_items())
     return {"items": items, "unread": _unread_count(items)}
 
@@ -269,23 +452,97 @@ async def get_inbox() -> dict:
     "/inbox/{item_id}/read", dependencies=[Depends(require_bearer_any("ios_token"))]
 )
 async def mark_read(item_id: str) -> dict:
+    # Store ids are always regex-clean (see _ITEM_ID_RE), so this 404s local
+    # lookups no differently — but in box mode it fires BEFORE the forward, so
+    # a probe like /inbox/notify%3F/read can never pivot onto another Mac route.
+    if not _ITEM_ID_RE.fullmatch(item_id):
+        raise HTTPException(status_code=404, detail="unknown inbox item")
+    if _mac_gateway():
+        resp = await _mac_mark_read(item_id)
+        if resp is None:
+            raise HTTPException(status_code=503, detail="mac offline")
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="unknown inbox item")
+        try:
+            return resp.json()
+        except ValueError:
+            raise HTTPException(status_code=503, detail="mac offline") from None
     if not _mark_read(item_id):
         raise HTTPException(status_code=404, detail="unknown inbox item")
     items = _load_items()
     return {"ok": True, "unread": _unread_count(items)}
 
 
+class TaskDoneBody(BaseModel):
+    session_id: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+
+
 @router.post(
-    "/inbox/notify", dependencies=[Depends(require_bearer_any("ios_token", "token"))]
+    "/inbox/task-done",
+    dependencies=[Depends(require_bearer_any("ios_token", "token"))],
 )
+async def task_done(body: TaskDoneBody) -> dict:
+    """Router ledger: a top-level task reached DONE — tell the owner ONCE.
+
+    Deduped on session_id (state file next to the store); the id is recorded
+    only after the enqueue/forward succeeds, so a failed attempt stays
+    retryable — router retries and re-transitions produce exactly one
+    message. No loopback guard (same posture as mark_read: the box's forward
+    arrives cross-host over the tailnet; the bearer check is the access
+    control). This route NEVER enqueues a jarvis-phone event (call) —
+    WhatsApp/email message only, via the existing drainer. In box mode the
+    POST forwards to the Mac, which does the enqueue (the box never writes
+    to jarvis-phone dirs); Mac unreachable/non-2xx -> 503, not recorded.
+    """
+    session_id = body.session_id
+    purpose = body.purpose[:200]
+    if _task_done_seen(session_id):
+        return {"ok": True, "notified": False}
+    if _mac_gateway():
+        resp = await _mac_task_done(session_id, purpose)
+        if resp is None or resp.status_code >= 400:
+            raise HTTPException(status_code=503, detail="mac offline")
+        _task_done_record(session_id)
+        try:
+            return resp.json()
+        except ValueError:
+            return {"ok": True, "notified": True}
+    if not _enqueue_owner_text(
+        f"✅ {purpose} is done", f"[jarvis] task done: {purpose}"
+    ):
+        raise HTTPException(status_code=503, detail="enqueue failed")
+    _task_done_record(session_id)
+    return {"ok": True, "notified": True}
+
+
+# /inbox/notify auth: box mode is ios_token-ONLY — the shared token is more
+# widely held (PC agent config, the iCloud Shortcut) and must not reach the
+# box's copy of this route. Mac mode keeps accepting either token: J1's
+# watcher holds the shared token and the Mac's notify also runs the
+# guaranteed-path enqueue.
+_NOTIFY_AUTH_BOX = require_bearer_any("ios_token")
+_NOTIFY_AUTH_ANY = require_bearer_any("ios_token", "token")
+
+
+async def _notify_auth(authorization: str | None = Header(default=None)) -> None:
+    await (_NOTIFY_AUTH_BOX if _mac_gateway() else _NOTIFY_AUTH_ANY)(authorization)
+
+
+@router.post("/inbox/notify", dependencies=[Depends(_notify_auth)])
 async def notify(request: Request) -> dict:
-    """Local watcher (J1/J3) pokes new mail: recount unread, push `inbox_new` to ios.
+    """Watcher (J1/J3) pokes new mail: recount unread, push `inbox_new` to ios.
 
     Body ``{"new": int, "unread": int, "urgent": bool}`` (all optional) — the
-    unread count in the pushed payload is always recounted from the store,
-    never trusted from the body. ``new > 0`` also fires the guaranteed path
-    (jarvis-phone WhatsApp/email + urgent event); enqueue failures never fail
-    the request. No ios socket connected (or send failure) still replies 200
+    unread count in the pushed payload is always recounted (from the local
+    store, or from the Mac's own /inbox in box mode — see module docstring),
+    never trusted from the body. In box mode the route takes the ios_token
+    only (see _notify_auth) and clamps ``new`` to 0..1000. ``new > 0`` also
+    fires the guaranteed path
+    (jarvis-phone WhatsApp/email + urgent event) — but ONLY in Mac mode; in
+    box mode the Mac's own local notify call already ran that, so running it
+    again here would double-send. Enqueue failures never fail the request.
+    No ios socket connected (or send failure) still replies 200
     ``{"ok": true, "delivered": false}`` — notify must never raise.
     """
     _loopback_guard(request)
@@ -296,12 +553,18 @@ async def notify(request: Request) -> dict:
     if not isinstance(body, dict):
         body = {}
     new = body.get("new")
-    items = _load_items()
-    unread = _unread_count(items)
+    if _mac_gateway():
+        if isinstance(new, int):
+            new = max(0, min(1000, new))  # clamp the counter relayed to ios
+        mac_data = await _mac_get_inbox()
+        unread = mac_data.get("unread", 0) if isinstance(mac_data, dict) else 0
+    else:
+        items = _load_items()
+        unread = _unread_count(items)
+        _enqueue_guaranteed(new if isinstance(new, int) else 0, items, body)
     payload: dict = {"unread": unread}
     if isinstance(new, int):
         payload["new"] = new
-    _enqueue_guaranteed(new if isinstance(new, int) else 0, items, body)
     try:
         delivered = await registry.send_to_role(
             "ios",

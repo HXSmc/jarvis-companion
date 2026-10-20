@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from common import config
 from gateway import agents, registry, wake
-from gateway.auth import require_bearer
+from gateway.auth import ios_token_is_shared, require_bearer
 from gateway.flows import flight, signin
 
 logger = logging.getLogger(__name__)
@@ -69,9 +69,12 @@ _HANDLERS = {"handoff_open": _handle_handoff_open, "hello": wake.handle_hello}
 
 
 def _expected_token(role: str) -> str | None:
-    """The vault token bound to `role`: ios_token for ios, shared token otherwise."""
+    """The vault token bound to `role`: ios_token for ios, shared token otherwise.
+
+    None (reject) for ios while ios_token equals the shared token.
+    """
     if role == IOS_ROLE:
-        return config.get_token(name="ios_token")
+        return None if ios_token_is_shared() else config.get_token(name="ios_token")
     return config.get_token()
 
 

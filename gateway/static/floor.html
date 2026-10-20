@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Agency Floor</title>
+<!--
+  Agency Floor: isometric live view of the mini PC router's sessions, the Mac's
+  agentic-os hubs, and the feed traffic between them. Self-contained (no build,
+  no external assets). Data comes from /central/sessions, /central/agents and
+  /central/feed using the bearer the iOS app injects as window.__JARVIS before
+  load; the page itself carries no data and no secret.
+-->
+<style>
+  :root {
+    --bg: #17181c; --ink: #d9dce3; --dim: #7d828f; --line: #2a2c33;
+    --emerald: #34d399; --amber: #fbbf24; --cyan: #22d3ee; --red: #f87171;
+    --sheet: rgba(28, 30, 36, 0.96);
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 12px var(--mono); overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+  header {
+    position: fixed; top: 0; left: 0; right: 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: calc(env(safe-area-inset-top) + 10px) 16px 10px; pointer-events: none;
+    background: linear-gradient(var(--bg) 40%, transparent);
+  }
+  header .title { letter-spacing: 0.18em; font-weight: 600; margin-right: auto; }
+  .badge { border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; background: rgba(23,24,28,.8); letter-spacing: .08em; font-size: 11px; }
+  .badge .dot { font-size: 10px; }
+  #overview {
+    position: fixed; right: 16px; top: calc(env(safe-area-inset-top) + 50px); z-index: 2; pointer-events: auto;
+    font: 600 11px var(--mono); letter-spacing: .14em; color: var(--ink); background: rgba(23,24,28,.9);
+    border: 1px solid var(--cyan); border-radius: 999px; padding: 9px 14px; display: none;
+  }
+  #sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; max-height: 58%; overflow: auto; padding: 16px 16px calc(env(safe-area-inset-bottom) + 16px);
+    background: var(--sheet); border-top: 1px solid var(--line); border-radius: 14px 14px 0 0;
+    transform: translateY(105%); transition: transform .25s ease;
+  }
+  #sheet.open { transform: none; }
+  @media (min-width: 700px) {
+    #sheet { left: auto; top: 0; width: 340px; max-height: none; border-radius: 0; border-top: 0; border-left: 1px solid var(--line);
+      padding-top: calc(env(safe-area-inset-top) + 56px); transform: translateX(105%); }
+  }
+  #sheet h2 { font-size: 14px; margin: 0 28px 4px 0; letter-spacing: .04em; }
+  #sheet .meta { color: var(--dim); margin-bottom: 12px; }
+  #sheet .k { color: var(--dim); font-size: 10px; letter-spacing: .14em; margin-top: 10px; }
+  #sheet .v { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+  #sheet .feed div { border-left: 2px solid var(--line); padding: 2px 0 2px 8px; margin: 4px 0; color: var(--ink); }
+  #sheet .actions { margin-top: 14px; display: flex; gap: 8px; }
+  #sheet button { font: 600 11px var(--mono); letter-spacing: .12em; border-radius: 8px; padding: 9px 12px; border: 1px solid var(--line); background: #22242b; color: var(--ink); }
+  #sheet button.primary { border-color: var(--emerald); color: var(--emerald); }
+  #close { position: absolute; top: 12px; right: 12px; }
+  @media (min-width: 700px) { #close { top: calc(env(safe-area-inset-top) + 52px); } }
+  #toast { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); color: var(--dim); letter-spacing: .12em; pointer-events: none; text-align: center; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<header>
+  <span class="title">AGENCY FLOOR</span>
+  <span class="badge" id="running"><span class="dot" style="color:var(--emerald)">●</span> 0 RUNNING</span>
+  <span class="badge" id="conn"><span class="dot" style="color:var(--dim)">●</span> connecting</span>
+  <span class="badge" id="watchdog-banner" style="display:none; border-color:var(--red); color:var(--red);">⚠ WATCHDOG STALE</span>
+</header>
+<button id="overview">OVERVIEW</button>
+<div id="toast"></div>
+<aside id="sheet" aria-live="polite">
+  <button id="close" aria-label="Close">✕</button>
+  <h2 id="s-title"></h2>
+  <div class="meta" id="s-meta"></div>
+  <div id="s-body"></div>
+  <div class="actions" id="s-actions"></div>
+</aside>
+<script>
+"use strict";
+(() => {
+  // --- config / auth ---------------------------------------------------------
+  // Injected by the iOS app (WKUserScript at document start). Never stored, never in a URL.
+  const J = window.__JARVIS || {};
+  const BASE = (J.base || "").replace(/\/$/, "");
+  const authHeaders = (extra) => Object.assign(J.token ? { Authorization: "Bearer " + J.token } : {}, extra || {});
+
+  // --- palette (sprite colours shared with agentic-os OfficeFloor) ------------
+  const SKIN = "#e8c39e";
+  const ROLES = {
+    ARCHITECT: { top: "#a78bfa", hair: "#cfd2d8", glyph: "doc" },
+    RESEARCHER: { top: "#2f8f7a", hair: "#e8913a", glyph: "doc" },
+    REVIEWER: { top: "#2f5fb0", hair: "#7a4e28", glyph: "check" },
+    BUILDER: { top: "#e8622f", hair: "#141414", skin: "#8a5a3c", glyph: "code" },
+    SCOUT: { top: "#9aa0ad", hair: "#3a3a3a", glyph: "doc" },
+    FIXER: { top: "#c94a3c", hair: "#2a2a2a", glyph: "code" },
+    VERIFIER: { top: "#3fae5a", hair: "#5a3a22", glyph: "check" },
+    SECURITY: { top: "#2c2c3a", hair: "#141414", pants: "#c9a227", glyph: "check" },
+    DESIGNER: { top: "#d4528e", hair: "#2a1a12", glyph: "code" },
+    SPEC_WRITER: { top: "#d4b483", hair: "#5a3a22", glyph: "doc" },
+    EXPLORER: { top: "#d4b94a", hair: "#3a2a1a", glyph: "doc" },
+    WORKER: { top: "#6b7a99", hair: "#2a2a2a", glyph: "code" },
+    MARKETER: { top: "#5a6b8a", hair: "#2fb0c4", glyph: "doc" },
+    // Contract role (fable2-watchdog-roles-app-side.md): GLM rows are labelled
+    // GLM worker, never "hub" — they were deliberate smoke tests, the phone
+    // can't pick GLM. (Was GLM_HUB; renamed, same colours.)
+    GLM_WORKER: { top: "#f2a33a", hair: "#1e1e1e", glyph: "code" },
+    OWNER: { top: "#e5e7eb", hair: "#1e1e1e", glyph: "chat" },
+  };
+  const PERSONA_ROLE = {
+    hub: "GLM_WORKER", builder: "BUILDER", scout: "SCOUT", researcher: "RESEARCHER", reviewer: "REVIEWER",
+    fixer: "FIXER", verifier: "VERIFIER", security: "SECURITY", designer: "DESIGNER", spec: "SPEC_WRITER",
+    explorer: "EXPLORER", worker: "WORKER", marketer: "MARKETER", "design-builder": "DESIGNER",
+  };
+  const POD_COLORS = ["#8b84b8", "#6b7a99", "#b8963e", "#3d8a85"];
+  const PHASE_COLOR = { in_progress: "#34d399", in_review: "#fbbf24", done: "#4b4f5a" };
+  const C = { emerald: "#34d399", amber: "#fbbf24", cyan: "#22d3ee", red: "#f87171", ink: "#d9dce3", dim: "#7d828f" };
+
+  // Ask 3: prefer the router's own `role` (not confirmed live yet, see
+  // .orchestrator/reports/watchdog-roles-app-side.md); roleOf() is the
+  // fallback for a session the router hasn't labelled, or an older router.
+  function roleOf(s) {
+    if (s.role && ROLES[s.role]) return s.role;
+    const t = ((s.title || "") + " " + (s.task || "")).toLowerCase();
+    if (s.kind === "glm" && !/review|research/.test(t)) return "GLM_WORKER";
+    const rules = [
+      [/review|audit/, "REVIEWER"], [/secur/, "SECURITY"], [/verif|test/, "VERIFIER"],
+      [/research|investigat|explor|find/, "RESEARCHER"], [/fix|bug|debug/, "FIXER"],
+      [/design|ui\b|layout/, "DESIGNER"], [/market|seo|copy|launch/, "MARKETER"],
+      [/spec|plan|architect/, "ARCHITECT"], [/note|doc|write/, "SPEC_WRITER"],
+    ];
+    for (const [re, r] of rules) if (re.test(t)) return r;
+    return "BUILDER";
+  }
+  // ARCHITECT and SPEC_WRITER are both labelled "Planner" in the UI (ask 2).
+  function roleLabel(role) {
+    if (role === "ARCHITECT" || role === "SPEC_WRITER") return "PLANNER";
+    if (role === "GLM_WORKER") return "GLM WORKER";
+    return role.replace("_", " ");
+  }
+  function projectOf(s) {
+    if (s.project) return String(s.project);
+    const parts = String(s.cwd || "").split("/").filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "misc";
+  }
+
+  // --- canvas / camera -------------------------------------------------------
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  let W = 0, H = 0, DPR = 1;
+  const cam = { x: 0, y: 0, s: 1 };          // screen = (iso - cam.xy) * s + centre
+  const camTo = { x: 0, y: 0, s: 1 };
+  let userMoved = false, focusId = null;
+  const ISO_X = Math.cos(Math.PI / 6), ISO_Y = 0.5;
+  const iso = (x, y, z) => [(x - y) * ISO_X, (x + y) * ISO_Y - (z || 0)];
+  const scr = (x, y, z) => { const p = iso(x, y, z); return [(p[0] - cam.x) * cam.s + W / 2, (p[1] - cam.y) * cam.s + H / 2 + 20]; };
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 3);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    if (!userMoved && !focusId) fitOverview(true);
+    dirty = true;
+  }
+
+  // --- world state ------------------------------------------------------------
+  let sessions = [], hubs = [], macDevice = null, macStaleS = null;
+  const desks = new Map();      // id -> desk {id, kind, x, y, born, dying, ...}
+  const pods = [];              // {name, x, y, w, d, color}
+  const feedLines = new Map();  // session id -> [{ts, type, text}]
+  const packets = [];           // {pts, t, dur, color, label, arc}
+  const flashes = new Map();    // desk id -> {color, until}
+  const labels = [];            // {x, y, z, text, born, color}
+  let brainCount = 0, dirty = true;
+  const BRAIN = { x: 0, y: 0 };
+  const OWNER_ID = "__owner";
+  const MAC_ID = "__mac";
+
+  function layout() {
+    const now = performance.now();
+    const seen = new Set([OWNER_ID]);
+    pods.length = 0;
+    // Pods: one per project, on a ring around the brain.
+    const byProject = new Map();
+    const macSessions = sessions.filter(isMac);
+    for (const s of sessions) {
+      if (isMac(s)) continue;
+      const p = projectOf(s);
+      if (!byProject.has(p)) byProject.set(p, []);
+      byProject.get(p).push(s);
+    }
+    const names = [...byProject.keys()].sort();
+    const ringN = names.length + 1;               // +1 slot reserved for the Mac wing
+    const R = 230 + Math.max(0, ringN - 4) * 30;
+    names.forEach((name, i) => {
+      const a = -Math.PI / 2 + (i + 1) * (2 * Math.PI / ringN);
+      const list = byProject.get(name);
+      const cols = Math.min(2, list.length), rows = Math.ceil(list.length / 2);
+      const w = cols * 70 + 30, d = rows * 70 + 30;
+      const px = Math.cos(a) * R - w / 2, py = Math.sin(a) * R - d / 2;
+      pods.push({ name: name.toUpperCase(), x: px, y: py, w, d, color: POD_COLORS[i % POD_COLORS.length] });
+      const office = [px + w / 2, py + d / 2];
+      list.forEach((s, j) => {
+        const id = s.session_id;
+        seen.add(id);
+        const role = roleOf(s);
+        upsertDesk(id, {
+          kind: "session", x: px + 22 + (j % 2) * 70, y: py + 22 + Math.floor(j / 2) * 70,
+          role, tag: roleLabel(role) + " · " + name, session: s, phase: s.phase || "done",
+          pod: name, office,
+        }, now);
+      });
+    });
+    // Mac office: its own space behind the brain (slot 0 of the ring, pushed
+    // out so it never overlaps the brain). It holds the Mac's agentic-os hubs
+    // (one row each, subagents along the row) and any router session whose
+    // device is the Mac (hook-reported). Every desk inside is fed through the
+    // office anchor, and subagents through their hub ("the office sends").
+    // Caps raised (was 4 hubs / 5 agents): the live Mac snapshot has carried 5
+    // interactive hubs since the central-chat cutover.
+    if (hubs.length || macSessions.length) {
+      const hubCap = 10, agentCap = 8, perRow = 3;
+      const shown = hubs.slice(0, hubCap);
+      const maxAgents = Math.min(agentCap, Math.max(0, ...shown.map((h) => (h.agents || []).length)));
+      const sessRows = Math.ceil(macSessions.length / perRow);
+      const rows = shown.length + sessRows;
+      const w = Math.max(230, 18 + 58 + maxAgents * 32 + 24), d = rows * 64 + 26;
+      const dist = Math.max(R, 190 + d / 2);
+      const px = -w / 2, py = -dist - d / 2;
+      const office = [px + w / 2, py + d / 2];
+      const stale = macStaleS != null ? " · OFFLINE " + ago(macStaleS) : "";
+      pods.push({ name: "MAC · " + (macDevice || "OFFICE").toUpperCase() + stale, x: px, y: py, w, d, color: "#22d3ee", mac: true });
+      seen.add(MAC_ID);
+      upsertDesk(MAC_ID, { kind: "anchor", x: office[0], y: office[1], hidden: true }, now);
+      shown.forEach((h, i) => {
+        const id = "hub:" + h.key;
+        seen.add(id);
+        const hx = px + 18, hy = py + 18 + i * 64;
+        upsertDesk(id, {
+          kind: "hub", x: hx, y: hy, role: h.engine === "glm" ? "GLM_WORKER" : "ARCHITECT",
+          tag: "HUB [" + String(i + 1).padStart(2, "0") + "] · " + (h.dirLabel || "?"), hub: h,
+          phase: h.active ? "in_progress" : "done", office,
+        }, now);
+        (h.agents || []).slice(0, agentCap).forEach((ag, k) => {
+          const aid = "agent:" + h.key + ":" + ag.id;
+          seen.add(aid);
+          upsertDesk(aid, {
+            kind: "sub", x: hx + 58 + k * 32, y: hy + 6, small: true, parent: id,
+            role: PERSONA_ROLE[ag.persona] || "WORKER", tag: "SUBAGENT [" + String(k + 1).padStart(2, "0") + "]",
+            agent: ag, phase: ag.active ? "in_progress" : ag.status === "failed" ? "error" : "done",
+          }, now);
+        });
+      });
+      macSessions.forEach((s, j) => {
+        const id = s.session_id;
+        seen.add(id);
+        const role = roleOf(s);
+        upsertDesk(id, {
+          kind: "session", x: px + 18 + (j % perRow) * 70, y: py + 18 + (shown.length + Math.floor(j / perRow)) * 64,
+          role, tag: roleLabel(role) + " · MAC", session: s, phase: s.phase || "done", pod: "mac", office,
+        }, now);
+      });
+    }
+    // Owner's phone desk at the near edge.
+    upsertDesk(OWNER_ID, { kind: "owner", x: R * 0.71 + 120, y: R * 0.71 + 120, role: "OWNER", tag: "OWNER · PHONE", phase: "in_progress" }, now);
+    for (const [id, d] of desks) if (!seen.has(id) && !d.dying) d.dying = now;
+    brainCount = sessions.length;
+    const running = sessions.filter((s) => s.phase === "in_progress").length;
+    setBadge("running", C.emerald, running + " RUNNING");
+    if (!userMoved && !focusId) fitOverview(false);
+    dirty = true;
+  }
+
+  function upsertDesk(id, props, now) {
+    const d = desks.get(id);
+    if (d) { Object.assign(d, props); d.dying = 0; return; }
+    desks.set(id, Object.assign({ id, born: now, dying: 0, seed: hash(id) }, props));
+  }
+  function isMac(s) { return /^mac\b/i.test(String(s.device || "")); }
+  function ago(sec) { return sec < 90 ? Math.round(sec) + "S" : sec < 5400 ? Math.round(sec / 60) + "M" : Math.round(sec / 3600) + "H"; }
+  function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
+
+  function bounds() {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const add = (x, y, z) => { const p = iso(x, y, z); x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); };
+    add(-60, -60, 90); add(60, 60, 0);
+    for (const p of pods) { add(p.x, p.y, 40); add(p.x + p.w, p.y + p.d, 0); add(p.x + p.w, p.y, 0); add(p.x, p.y + p.d, 0); }
+    for (const d of desks.values()) { add(d.x, d.y, 70); add(d.x + 40, d.y + 30, 0); }
+    return { x0, y0, x1, y1 };
+  }
+  function fitOverview(snap) {
+    const b = bounds();
+    const top = 70, pad = 20;
+    const s = Math.min((W - pad * 2) / (b.x1 - b.x0), (H - top - pad * 2) / (b.y1 - b.y0), 2.2);
+    camTo.s = Math.max(0.2, s);
+    camTo.x = (b.x0 + b.x1) / 2;
+    camTo.y = (b.y0 + b.y1) / 2 - 10 / camTo.s;
+    if (snap) Object.assign(cam, camTo);
+  }
+  function focusDesk(d) {
+    focusId = d.id;
+    const p = iso(d.x + 17, d.y + 11, 20);
+    camTo.s = Math.min(2.4, Math.max(1.6, Math.min(W, H) / 200));
+    const narrow = W < 700;
+    // Leave room for the sheet: bottom drawer on phones, right panel on wide screens.
+    camTo.x = p[0] + (narrow ? 0 : 170 / camTo.s);
+    camTo.y = p[1] + (narrow ? H * 0.22 / camTo.s : 0);
+    document.getElementById("overview").style.display = "block";
+    dirty = true;
+  }
+  function overview() {
+    focusId = null; userMoved = false;
+    closeSheet();
+    fitOverview(false);
+    document.getElementById("overview").style.display = "none";
+    dirty = true;
+  }
+
+  // --- drawing primitives -----------------------------------------------------
+  function poly(pts, fill, stroke) {
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
+  }
+  function shade(hex, k) {
+    const n = parseInt(hex.slice(1), 16);
+    const f = (v) => Math.max(0, Math.min(255, Math.round(v * k)));
+    return "rgb(" + f(n >> 16) + "," + f((n >> 8) & 255) + "," + f(n & 255) + ")";
+  }
+  function box(x, y, z, w, d, h, color, alpha) {
+    ctx.globalAlpha = alpha == null ? 1 : alpha;
+    const t = [scr(x, y, z + h), scr(x + w, y, z + h), scr(x + w, y + d, z + h), scr(x, y + d, z + h)];
+    const b2 = scr(x + w, y + d, z), b1 = scr(x + w, y, z), b3 = scr(x, y + d, z);
+    poly([t[3], t[2], b2, b3], shade(color, 0.62));   // front-left face (y + d)
+    poly([t[1], t[2], b2, b1], shade(color, 0.8));    // front-right face (x + w)
+    poly(t, color);
+    ctx.globalAlpha = 1;
+  }
+  function rrect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+  function pill(text, sx, sy, color, scale) {
+    scale = Math.min(scale, 1.3);
+    const fs = Math.max(7, 8.5 * scale);
+    ctx.font = "600 " + fs + "px ui-monospace, Menlo, monospace";
+    const tw = ctx.measureText(text).width, ph = fs + 6 * scale, pw = tw + 12 * scale;
+    rrect(sx - pw / 2, sy - ph / 2, pw, ph, ph / 2);
+    ctx.fillStyle = "rgba(20,21,25,0.88)"; ctx.fill();
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = C.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(text, sx, sy + 0.5);
+  }
+  const ease = (t) => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
+
+  function drawGrid() {
+    ctx.strokeStyle = "rgba(255,255,255,0.035)"; ctx.lineWidth = 1;
+    const span = 520, step = 40;
+    for (let i = -span; i <= span; i += step) {
+      let a = scr(i, -span, 0), b = scr(i, span, 0);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      a = scr(-span, i, 0); b = scr(span, i, 0);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
+  function drawPod(p) {
+    box(p.x, p.y, 0, p.w, p.d, 3, p.color, p.mac ? 0.18 : 0.26);
+  }
+  function drawPodLabel(p) {
+    const corner = scr(p.x, p.y + p.d, 3);
+    ctx.font = "600 " + Math.max(8, 9 * cam.s) + "px ui-monospace, Menlo, monospace";
+    ctx.fillStyle = p.color; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(p.name, corner[0] + 4, corner[1] + 4);
+  }
+  function drawBrain(t) {
+    const pulse = 0.5 + 0.5 * Math.sin(t / 700);
+    box(-52, -52, 0, 104, 104, 10, "#2b2e38");
+    box(-38, -38, 10, 76, 76, 34, "#353947");
+    // glowing top
+    const top = [scr(-38, -38, 44), scr(38, -38, 44), scr(38, 38, 44), scr(-38, 38, 44)];
+    ctx.globalAlpha = 0.35 + 0.35 * pulse; poly(top, C.cyan); ctx.globalAlpha = 1;
+    poly(top, null, "rgba(34,211,238,0.9)");
+    const c = scr(0, 0, 44);
+    const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 70 * cam.s);
+    g.addColorStop(0, "rgba(34,211,238," + (0.18 + 0.12 * pulse) + ")"); g.addColorStop(1, "rgba(34,211,238,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(c[0], c[1], 70 * cam.s, 0, Math.PI * 2); ctx.fill();
+    const l = scr(0, 0, 100);
+    pill("MINI PC · BRAIN", l[0], l[1], C.cyan, Math.max(0.9, cam.s));
+    ctx.font = "600 " + Math.max(8, 9 * cam.s) + "px ui-monospace, Menlo, monospace";
+    ctx.fillStyle = C.dim; ctx.textAlign = "center";
+    ctx.fillText(brainCount + " SESSIONS", l[0], l[1] + 15 * Math.max(0.9, cam.s));
+  }
+
+  function spokeEnd(d) { return d.kind === "anchor" ? [d.x, d.y, 4] : [d.x + 17, d.y + 11, 14]; }
+  function drawSpokes() {
+    ctx.lineWidth = 1;
+    // Brain feeds each office; each office feeds its own desks.
+    for (const p of pods) {
+      if (p.mac) continue;  // the Mac office's dashed spoke comes from its anchor desk
+      const a = scr(0, 0, 10), b = scr(p.x + p.w / 2, p.y + p.d / 2, 4);
+      ctx.strokeStyle = "rgba(255,255,255,0.09)";
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+    for (const d of desks.values()) {
+      if (d.kind === "sub") continue;
+      const o = d.office || [0, 0], a = scr(o[0], o[1], d.office ? 4 : 10), e = spokeEnd(d), b = scr(e[0], e[1], 4);
+      ctx.strokeStyle = d.kind === "anchor" ? "rgba(34,211,238,0.35)" : d.office ? "rgba(34,211,238,0.12)" : "rgba(255,255,255,0.07)";
+      ctx.setLineDash(d.kind === "anchor" ? [4, 4] : []);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    // Sub-agents hang off their hub desk.
+    for (const d of desks.values()) {
+      if (d.kind !== "sub") continue;
+      const p = desks.get(d.parent); if (!p) continue;
+      const a = scr(p.x + 34, p.y + 11, 8), b = scr(d.x + 10, d.y + 7, 6);
+      ctx.strokeStyle = "rgba(34,211,238,0.18)";
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
+
+  function drawGlyph(kind, sx, sy, w, h, t, seed, color) {
+    ctx.fillStyle = color;
+    const lines = 4, lh = h / (lines + 1);
+    if (kind === "code") {
+      for (let i = 0; i < lines; i++) {
+        const indent = ((seed >> i) & 1) * w * 0.15;
+        const len = (0.3 + ((seed >> (i * 3)) % 5) / 10) * w;
+        const shift = (Math.floor(t / 900) + i) % lines === 0 ? 0.6 : 1;
+        ctx.globalAlpha = 0.9 * shift;
+        ctx.fillRect(sx + 2 + indent, sy + lh * (i + 0.6), Math.min(w - 4 - indent, len), Math.max(1, lh * 0.45));
+      }
+    } else if (kind === "check") {
+      for (let i = 0; i < 3; i++) {
+        const done = i < 1 + (Math.floor(t / 1400) + (seed & 3)) % 3;
+        ctx.globalAlpha = 0.95;
+        ctx.fillRect(sx + 2, sy + lh * (i + 0.7), lh * 0.6, lh * 0.6);
+        if (!done) { ctx.fillStyle = "#0e1013"; ctx.fillRect(sx + 2.6, sy + lh * (i + 0.7) + 0.6, lh * 0.6 - 1.2, lh * 0.6 - 1.2); ctx.fillStyle = color; }
+        ctx.globalAlpha = 0.6;
+        ctx.fillRect(sx + 2 + lh, sy + lh * (i + 0.8), w * 0.55, Math.max(1, lh * 0.4));
+      }
+    } else if (kind === "chat") {
+      ctx.globalAlpha = 0.9;
+      rrect(sx + 2, sy + 2, w * 0.6, h * 0.32, 2); ctx.fill();
+      ctx.globalAlpha = 0.55;
+      rrect(sx + w * 0.35, sy + h * 0.5, w * 0.6 - 2, h * 0.32, 2); ctx.fill();
+    } else {
+      ctx.globalAlpha = 0.9; ctx.fillRect(sx + 2, sy + lh * 0.5, w * 0.5, Math.max(1, lh * 0.6));
+      ctx.globalAlpha = 0.5;
+      for (let i = 1; i < lines; i++) ctx.fillRect(sx + 2, sy + lh * (i + 0.6), w - 4 - ((seed >> i) & 3) * 2, Math.max(1, lh * 0.35));
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Ask 2: role sprites, lazily loaded + cached by role from the gateway's
+  // own pixel-grid source of truth (gateway/sprites.py). One <img> per role
+  // for the life of the page — the route is 24h-cacheable and tiny.
+  const spriteImages = new Map();
+  function spriteImage(role) {
+    let img = spriteImages.get(role);
+    if (!img) {
+      img = new Image();
+      img.src = BASE + "/central/sprites/" + role + ".svg";
+      spriteImages.set(role, img);
+    }
+    return img;
+  }
+
+  // fable 2's build_sprites.py (gateway/static/sprites/) draws the shared
+  // body (head+torso) centred at x=13 of a 32-wide canvas, with the per-role
+  // prop extending the bounding box out to x~30 on the right — so the body's
+  // own centre sits left of the canvas's geometric centre (~41%, not 50%).
+  // Anchoring on the canvas centre pulled every character ~13% off its desk
+  // (fable 2, 2026-10-16). A single uniform scale (not a fixed destination
+  // w/h) also fixes the non-uniform stretch that caused: it previously forced
+  // every sprite into a hardcoded 15x17 box regardless of the source image's
+  // real pixel size — fine for this file's own ~16x18 fallback grid, visibly
+  // squished for her real 32x32 (square) art.
+  const SPRITE_ANCHOR_X = 0.41;
+  const SPRITE_TARGET_H = 17; // on-screen height in desk units; width follows the image's own aspect ratio
+
+  function drawAvatar(d, sx, sy, k, dim) {
+    const r = ROLES[d.role] || ROLES.WORKER;
+    ctx.globalAlpha = dim ? 0.45 : 1;
+    const img = spriteImage(d.role || "WORKER");
+    if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      const scale = (SPRITE_TARGET_H * k) / img.naturalHeight;
+      const iw = img.naturalWidth * scale, ih = img.naturalHeight * scale;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, sx - iw * SPRITE_ANCHOR_X, sy - ih, iw, ih);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      // Fallback while the sprite image loads (first frame or two only, then
+      // cached) — the old flat-colour body, so a desk is never blank.
+      const tw = 13 * k, th = 15 * k;
+      if (r.pants) { ctx.fillStyle = r.pants; rrect(sx - tw / 2, sy - th * 0.35, tw, th * 0.35, 3 * k); ctx.fill(); }
+      ctx.fillStyle = r.top; rrect(sx - tw / 2, sy - th, tw, th * (r.pants ? 0.7 : 1), 5 * k); ctx.fill();
+      const hy = sy - th - 6 * k;
+      ctx.fillStyle = r.skin || SKIN; ctx.beginPath(); ctx.arc(sx, hy, 5.5 * k, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = r.hair; ctx.beginPath(); ctx.arc(sx, hy - 1.2 * k, 5.6 * k, Math.PI, 0); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawPillar(d, color, t) {
+    const base = scr(d.x + 17, d.y + 11, 14), k = cam.s;
+    const h = (d.small ? 70 : 120) * k, w = (d.small ? 16 : 26) * k;
+    const flick = 0.85 + 0.15 * Math.sin(t / 400 + d.seed);
+    const g = ctx.createLinearGradient(0, base[1], 0, base[1] - h);
+    g.addColorStop(0, hexA(color, 0.32 * flick)); g.addColorStop(1, hexA(color, 0));
+    ctx.fillStyle = g; ctx.fillRect(base[0] - w / 2, base[1] - h, w, h);
+    ctx.fillStyle = hexA(color, 0.25 * flick);
+    ctx.beginPath(); ctx.ellipse(base[0], base[1], w * 0.75, w * 0.38, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")"; }
+
+  function drawDesk(d, t) {
+    if (d.hidden) return;
+    const age = (t - d.born) / 450;
+    let k = ease(age);
+    if (d.dying) k = 1 - ease((t - d.dying) / 450);
+    if (k <= 0.01) return;
+    const sc = d.small ? 0.6 : 1;
+    const w = 34 * sc, dd = 22 * sc, h = 14 * sc;
+    const phase = d.phase;
+    const done = phase === "done";
+    const fl = flashes.get(d.id);
+    const pillarColor = fl && fl.until > t ? fl.color : phase === "in_progress" ? C.emerald : phase === "in_review" ? C.amber : phase === "error" ? C.red : null;
+    if (pillarColor) drawPillar(d, pillarColor, t);
+    // Spawn: rise from the floor while fading in.
+    const z = (1 - k) * -10;
+    ctx.save();
+    // Desk box first, avatar after: drawing the sprite before the desk let
+    // the desk's front face paint over the sprite's lower half (legs/feet)
+    // since canvas 2D has no real z-buffer, just paint order (fable 2,
+    // 2026-10-16). The avatar is always painted last among these two so the
+    // full sprite stays visible above the desk front.
+    ctx.globalAlpha = k;
+    box(d.x, d.y, z, w, dd, h, done ? "#3a3d47" : "#565b6b", k);
+    ctx.globalAlpha = k;
+    const av = scr(d.x + w * 0.3, d.y - 6 * sc, z + 4);
+    drawAvatar(d, av[0], av[1], cam.s * sc * k, done);
+    // Monitor: a billboard on the back edge of the desk top, glyph from the role.
+    const m = scr(d.x + w * 0.62, d.y + 2 * sc, z + h);
+    const mw = 15 * sc * cam.s, mh = 11 * sc * cam.s;
+    ctx.globalAlpha = k;
+    ctx.fillStyle = "#0e1013"; rrect(m[0] - mw / 2, m[1] - mh - 3 * cam.s * sc, mw, mh, 1.5 * cam.s); ctx.fill();
+    ctx.strokeStyle = "#5c6273"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = "#5c6273"; ctx.fillRect(m[0] - 0.75 * cam.s, m[1] - 3 * cam.s * sc, 1.5 * cam.s, 3 * cam.s * sc);
+    const glyphColor = done ? C.dim : phase === "in_review" ? C.amber : d.kind === "owner" ? C.cyan : C.emerald;
+    if (mw > 6) drawGlyph((ROLES[d.role] || ROLES.WORKER).glyph, m[0] - mw / 2 + 1, m[1] - mh - 3 * cam.s * sc + 1, mw - 2, mh - 2, t, d.seed, glyphColor);
+    // Pill tag above the head. A session the watchdog has flagged (health
+    // "attention") overrides the usual phase colour with a red "⚠" badge —
+    // this is the one signal the ask cares most about surfacing (ask 3).
+    const attention = d.session && d.session.health === "attention";
+    const tag = scr(d.x + w * 0.3, d.y - 6 * sc, z + (d.small ? 40 : 52));
+    const tagColor = attention ? C.red
+      : phase === "in_progress" ? C.emerald : phase === "in_review" ? C.amber : phase === "error" ? C.red : "#3c404b";
+    const tagText = attention ? "⚠ " + d.tag : d.tag;
+    ctx.globalAlpha = k * (done ? 0.7 : 1);
+    const showTag = d.small ? cam.s > 1.15 || focusId === d.id || focusId === d.parent : cam.s * sc > 0.32 || focusId === d.id;
+    if (showTag) pill(tagText, tag[0], tag[1], tagColor, Math.max(0.75, cam.s * sc));
+    ctx.restore();
+    // Hit area in screen space, for taps.
+    const c = scr(d.x + w / 2, d.y + dd / 2, h);
+    d.hit = [c[0], c[1] - 14 * cam.s * sc, 34 * cam.s * sc + 10];
+  }
+
+  // --- packets / arcs / labels ------------------------------------------------
+  function deskPoint(id) {
+    if (id === "__brain") return [0, 0, 44];
+    const d = desks.get(id);
+    if (!d) return null;
+    const e = spokeEnd(d);
+    return [e[0], e[1], 16];
+  }
+  function sendPacket(fromId, toId, color, label, arc) {
+    const a = deskPoint(fromId), b = deskPoint(toId);
+    if (!a || !b) return;
+    // Into an office desk: brain -> office -> (hub ->) desk, so the office is
+    // what hands the work to its session/agent.
+    const via = arc || toId === "__brain" ? [] : relay(toId);
+    const pts = arc ? [a, b] : fromId === "__brain" || toId === "__brain" ? [a, ...via, b] : [a, [0, 0, 44], ...via, b];
+    packets.push({ pts, t: 0, dur: arc ? 1600 : 1100 * (pts.length - 1), color, label, to: toId, arc: !!arc, born: performance.now() });
+    if (packets.length > 60) packets.shift();
+  }
+  function relay(id) {
+    const d = desks.get(id);
+    if (!d) return [];
+    const p = d.kind === "sub" ? desks.get(d.parent) : null;
+    const o = (p || d).office;
+    const hop = [];
+    if (o) hop.push([o[0], o[1], 16]);
+    if (p) { const e = spokeEnd(p); hop.push([e[0], e[1], 16]); }
+    return hop;
+  }
+  function along(p, u) {
+    if (p.arc) {
+      const [a, b] = p.pts, z = 90 + Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.25;
+      return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u + 4 * z * u * (1 - u)];
+    }
+    const segs = p.pts.length - 1, f = Math.min(segs - 1e-6, u * segs), i = Math.floor(f), r = f - i;
+    const a = p.pts[i], b = p.pts[i + 1];
+    return [a[0] + (b[0] - a[0]) * r, a[1] + (b[1] - a[1]) * r, a[2] + (b[2] - a[2]) * r];
+  }
+  function drawPackets(t, dt) {
+    for (let i = packets.length - 1; i >= 0; i--) {
+      const p = packets[i];
+      p.t += dt;
+      const u = p.t / p.dur;
+      if (p.arc) {
+        // Dashed parabola stays visible while the packet flies, then fades.
+        const fade = u > 1 ? Math.max(0, 1 - (u - 1) * 1.5) : 1;
+        ctx.setLineDash([4, 5]); ctx.lineDashOffset = -t / 40; ctx.strokeStyle = hexA(p.color, 0.55 * fade); ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        for (let s = 0; s <= 24; s++) { const q = along(p, s / 24), sp = scr(q[0], q[1], q[2]); s ? ctx.lineTo(sp[0], sp[1]) : ctx.moveTo(sp[0], sp[1]); }
+        ctx.stroke(); ctx.setLineDash([]);
+        if (u > 1.7) { packets.splice(i, 1); continue; }
+      } else if (u > 1) { packets.splice(i, 1); continue; }
+      if (u <= 1) {
+        const q = along(p, ease(u)), s = scr(q[0], q[1], q[2]);
+        const g = ctx.createRadialGradient(s[0], s[1], 0, s[0], s[1], 9 * cam.s);
+        g.addColorStop(0, hexA(p.color, 0.95)); g.addColorStop(1, hexA(p.color, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s[0], s[1], 9 * cam.s, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(s[0], s[1], 1.6 * Math.max(1, cam.s), 0, Math.PI * 2); ctx.fill();
+      }
+      if (!p.landed && u >= 1) {
+        p.landed = true;
+        if (p.label) { const e = deskPoint(p.to); if (e) labels.push({ x: e[0], y: e[1], text: p.label, born: t, color: p.color }); }
+      }
+    }
+  }
+  function drawLabels(t) {
+    for (let i = labels.length - 1; i >= 0; i--) {
+      const l = labels[i], age = (t - l.born) / 2600;
+      if (age > 1) { labels.splice(i, 1); continue; }
+      const s = scr(l.x, l.y, (l.x === 0 && l.y === 0 ? 120 : 70) + age * 40);
+      ctx.globalAlpha = 1 - age * age;
+      pill(l.text, s[0], s[1], l.color, Math.max(0.8, cam.s * 0.9));
+      ctx.globalAlpha = 1;
+    }
+    if (labels.length > 12) labels.splice(0, labels.length - 12);
+  }
+
+  // --- frame loop: 30 fps cap, only while visible -----------------------------
+  let raf = 0, last = 0, lastAmbient = 0;
+  function frame(t) {
+    raf = 0;
+    if (document.visibilityState !== "visible") return;
+    raf = requestAnimationFrame(frame);
+    if (t - last < 1000 / 30 - 1) return;
+    const dt = Math.min(100, last ? t - last : 16);
+    last = t;
+    // camera glide
+    const a = 1 - Math.pow(0.001, dt / 1000);
+    cam.x += (camTo.x - cam.x) * a; cam.y += (camTo.y - cam.y) * a; cam.s += (camTo.s - cam.s) * a;
+    // ambient traffic: brain -> a random active desk
+    if (t - lastAmbient > 1400) {
+      lastAmbient = t;
+      const live = [...desks.values()].filter((d) => d.phase === "in_progress" && !d.hidden && !d.dying && d.kind !== "owner");
+      if (live.length) { const d = live[(Math.random() * live.length) | 0]; sendPacket("__brain", d.id, d.kind === "sub" || d.kind === "hub" ? C.cyan : C.emerald); }
+    }
+    for (const [id, d] of desks) if (d.dying && t - d.dying > 500) desks.delete(id);
+    draw(t, dt);
+  }
+  function start() { if (!raf && document.visibilityState === "visible") { last = 0; raf = requestAnimationFrame(frame); } }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { start(); refresh(); } });
+
+  function draw(t, dt) {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = "#17181c"; ctx.fillRect(0, 0, W, H);
+    drawGrid();
+    for (const p of pods) drawPod(p);
+    drawSpokes();
+    // Painter's order: back (small x+y) to front; the brain sorts at its centre.
+    const items = [...desks.values()].map((d) => [d.x + d.y, () => drawDesk(d, t)]);
+    items.push([0, () => drawBrain(t)]);
+    items.sort((p, q) => p[0] - q[0]).forEach((it) => it[1]());
+    for (const p of pods) drawPodLabel(p);
+    drawPackets(t, dt);
+    drawLabels(t);
+  }
+
+  // --- input: tap, pan, pinch, wheel ------------------------------------------
+  const ptrs = new Map();
+  let gesture = null;
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    gesture = snapshotGesture();
+    gesture.tap = ptrs.size === 1 ? [e.clientX, e.clientY, performance.now()] : null;
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!ptrs.has(e.pointerId) || !gesture) return;
+    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    const g = snapshotGesture();
+    if (gesture.tap && Math.hypot(e.clientX - gesture.tap[0], e.clientY - gesture.tap[1]) < 8) return;
+    gesture.tap = null;
+    let s = cam.s;
+    if (g.n === 2 && gesture.n === 2 && gesture.dist > 0) s = Math.max(0.25, Math.min(5, gesture.s * g.dist / gesture.dist));
+    // Keep the world point under the gesture centre fixed.
+    const wx = (gesture.cx - W / 2) / gesture.s + gesture.camX, wy = (gesture.cy - H / 2 - 20) / gesture.s + gesture.camY;
+    cam.s = camTo.s = s;
+    cam.x = camTo.x = wx - (g.cx - W / 2) / s;
+    cam.y = camTo.y = wy - (g.cy - H / 2 - 20) / s;
+    userMoved = true;
+    document.getElementById("overview").style.display = "block";
+  });
+  const end = (e) => {
+    const tap = gesture && gesture.tap;
+    ptrs.delete(e.pointerId);
+    gesture = ptrs.size ? snapshotGesture() : null;
+    if (tap && e.type === "pointerup" && performance.now() - tap[2] < 500) onTap(e.clientX, e.clientY);
+  };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const s = Math.max(0.25, Math.min(5, camTo.s * Math.exp(-e.deltaY * 0.0015)));
+    const wx = (e.clientX - W / 2) / cam.s + cam.x, wy = (e.clientY - H / 2 - 20) / cam.s + cam.y;
+    cam.s = camTo.s = s;
+    cam.x = camTo.x = wx - (e.clientX - W / 2) / s;
+    cam.y = camTo.y = wy - (e.clientY - H / 2 - 20) / s;
+    userMoved = true;
+    document.getElementById("overview").style.display = "block";
+  }, { passive: false });
+  function snapshotGesture() {
+    const p = [...ptrs.values()], n = p.length;
+    const cx = p.reduce((a, q) => a + q[0], 0) / (n || 1), cy = p.reduce((a, q) => a + q[1], 0) / (n || 1);
+    const dist = n >= 2 ? Math.hypot(p[0][0] - p[1][0], p[0][1] - p[1][1]) : 0;
+    return { n, cx, cy, dist, s: cam.s, camX: cam.x, camY: cam.y };
+  }
+  function onTap(x, y) {
+    let best = null, bd = Infinity;
+    for (const d of desks.values()) {
+      if (!d.hit || d.dying) continue;
+      const dist = Math.hypot(x - d.hit[0], y - d.hit[1]);
+      if (dist < d.hit[2] && dist < bd) { best = d; bd = dist; }
+    }
+    if (best) { focusDesk(best); openSheet(best); }
+    else if (focusId) closeSheet();
+  }
+  document.getElementById("overview").addEventListener("click", overview);
+  document.getElementById("close").addEventListener("click", closeSheet);
+
+  // --- side sheet ---------------------------------------------------------------
+  const sheet = document.getElementById("sheet");
+  let sheetId = null;
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function openSheet(d) {
+    sheetId = d.id;
+    renderSheet();
+    sheet.classList.add("open");
+  }
+  function closeSheet() { sheet.classList.remove("open"); sheetId = null; }
+  function renderSheet() {
+    const d = sheetId && desks.get(sheetId);
+    if (!d) return;
+    const body = document.getElementById("s-body"), actions = document.getElementById("s-actions");
+    body.replaceChildren(); actions.replaceChildren();
+    const kv = (k, v) => { if (v == null || v === "") return; body.append(el("div", "k", k), el("div", "v", String(v))); };
+    if (d.kind === "session") {
+      const s = d.session;
+      document.getElementById("s-title").textContent = s.doing || s.title || s.session_id;
+      document.getElementById("s-meta").textContent = [s.device, d.pod, s.kind, (s.phase || "").replace("_", " ")].filter(Boolean).join(" · ");
+      if (s.recap && s.recap.length) kv("RECAP", s.recap.map((r) => "\u2022 " + r).join("\n"));
+      else kv("SUMMARY", s.summary);
+      kv("ROLE", roleLabel(roleOf(s)));
+      kv("STATE", s.state); kv("LIFECYCLE", s.lifecycle); kv("UPDATED", s.updated_at);
+      if (s.health === "attention") kv("\u26a0 ATTENTION", s.attention_reason || "flagged by the watchdog");
+      if (s.phase === "done" && s.done_verdict === "suspect") kv("\u26a0 CHECK THIS DONE", s.done_verdict_reason || "verdict marked suspect");
+      const lines = feedLines.get(s.session_id) || [];
+      if (lines.length) {
+        body.append(el("div", "k", "LAST FEED"));
+        const f = el("div", "feed");
+        for (const l of lines.slice(-6)) f.append(el("div", null, l.type + (l.text ? " · " + l.text : "")));
+        body.append(f);
+      }
+      if (isMac(s)) { kv("NOTE", "Mac sessions are view-only here"); return; }
+      const b = el("button", "primary", "OPEN CHAT");
+      b.addEventListener("click", () => {
+        const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.jarvis;
+        if (h) h.postMessage({ type: "openChat", session_id: s.session_id, title: s.doing || s.title || s.task || "Chat" });
+      });
+      actions.append(b);
+    } else if (d.kind === "hub") {
+      const h = d.hub;
+      document.getElementById("s-title").textContent = "Hub · " + (h.dirLabel || "?");
+      document.getElementById("s-meta").textContent = [macDevice, h.engine, h.active ? "active" : "idle"].filter(Boolean).join(" · ");
+      kv("LAST ACTIVITY", h.lastTs ? new Date(h.lastTs).toLocaleString() : null);
+      const ag = h.agents || [];
+      if (ag.length) {
+        body.append(el("div", "k", "AGENTS"));
+        const f = el("div", "feed");
+        for (const a of ag) f.append(el("div", null, [a.persona, a.engine, a.status, a.label].filter(Boolean).join(" · ")));
+        body.append(f);
+      }
+    } else if (d.kind === "sub") {
+      const a = d.agent;
+      document.getElementById("s-title").textContent = a.label || a.id;
+      document.getElementById("s-meta").textContent = ["subagent", a.persona, a.engine, a.status].filter(Boolean).join(" · ");
+    } else {
+      document.getElementById("s-title").textContent = "Owner · Phone";
+      document.getElementById("s-meta").textContent = "you — messages from the app, Siri and WhatsApp start here";
+    }
+  }
+
+  // --- data -------------------------------------------------------------------
+  function setBadge(id, color, text) {
+    const b = document.getElementById(id);
+    const dot = el("span", "dot", "●"); dot.style.color = color;
+    b.replaceChildren(dot, document.createTextNode(" " + text));
+  }
+  async function getJSON(path) {
+    const r = await fetch(BASE + path, { headers: authHeaders(), cache: "no-store" });
+    if (!r.ok) throw new Error(path + " " + r.status);
+    return r.json();
+  }
+  let sessionsOk = true;
+  // Ask 3: hide exited/stopped desks — a session the router has closed out
+  // has nothing left to watch, and left on the Floor it would just look like
+  // a desk that's gone quiet forever instead of one that finished and left.
+  const HIDDEN_LIFECYCLE = /^(exited|stopped)$/;
+  async function refresh() {
+    const [s, a, w] = await Promise.allSettled([
+      getJSON("/central/sessions"), getJSON("/central/agents"), getJSON("/central/watchdog"),
+    ]);
+    // The gateway marks sessions idle 30+ min (UTC, server side); needs-you sessions never are.
+    if (s.status === "fulfilled" && Array.isArray(s.value)) {
+      sessions = s.value.filter((x) => !x.floor_hidden && !HIDDEN_LIFECYCLE.test(x.lifecycle || ""));
+      sessionsOk = true;
+    } else sessionsOk = false;
+    if (a.status === "fulfilled" && a.value && Array.isArray(a.value.hubs)) {
+      hubs = a.value.hubs; macDevice = a.value.device;
+      macStaleS = a.value.stale ? Number(a.value.age_s) || 0 : null;
+    }
+    watchdog = w.status === "fulfilled" && w.value ? w.value : null;
+    document.getElementById("toast").textContent = !sessionsOk && !sessions.length ? "ROUTER UNREACHABLE" : "";
+    renderWatchdogBanner();
+    layout();
+    renderSheet();
+  }
+  setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 10000);
+
+  // Ask 3: "watchdog stale" banner once the router's own sweep (session
+  // ce03d92a) is live but has gone quiet — distinct from "not shipped yet"
+  // (GET /central/watchdog still 404s as of this build, so `watchdog.available`
+  // stays false and no banner shows; this is a silent, not an error, state).
+  let watchdog = null;
+  function renderWatchdogBanner() {
+    const el = document.getElementById("watchdog-banner");
+    if (!watchdog || !watchdog.available) { el.style.display = "none"; return; }
+    if (watchdog.stale) {
+      el.textContent = "WATCHDOG STALE" + (watchdog.age_s != null ? " · " + Math.round(watchdog.age_s) + "s" : "");
+      el.style.display = "";
+    } else {
+      el.style.display = "none";
+    }
+  }
+
+  const OWNER_SOURCES = /^(app|owner|phone|siri|whatsapp|ios|user)$/i;
+  function endpoint(v, fallback) {
+    if (v == null || v === "") return fallback;
+    v = String(v);
+    if (desks.has(v)) return v;
+    if (OWNER_SOURCES.test(v)) return OWNER_ID;
+    return "__brain";
+  }
+  function onFeed(ev) {
+    const sid = ev.session_id;
+    if (sid) {
+      const arr = feedLines.get(sid) || [];
+      arr.push({ ts: ev.ts, type: ev.type || "event", text: (ev.text || "").slice(0, 160) });
+      if (arr.length > 20) arr.shift();
+      feedLines.set(sid, arr);
+    }
+    if (sid && !desks.has(sid)) { refresh(); }
+    const target = sid && desks.has(sid) ? sid : "__brain";
+    const from = endpoint(ev.from, ev.type === "spawn" ? OWNER_ID : "__brain");
+    let to = ev.to && desks.has(String(ev.to)) ? String(ev.to) : endpoint(ev.to, target);
+    if (to === "__brain" && target !== "__brain" && from !== target) to = target;
+    const type = ev.type || "";
+    const color = type === "error" ? C.red : type === "done" ? C.emerald : from === OWNER_ID ? C.amber : C.cyan;
+    const label = (ev.text || type).replace(/\s+/g, " ").slice(0, 28);
+    const deskToDesk = from !== "__brain" && from !== OWNER_ID && to !== "__brain" && to !== OWNER_ID && from !== to;
+    if (from !== to) sendPacket(from, to, color, label, deskToDesk);
+    if (/^(status|done|error)$/.test(type) && desks.has(target)) {
+      flashes.set(target, { color: type === "error" ? C.red : type === "done" ? C.emerald : C.cyan, until: performance.now() + 1800 });
+    }
+    if (sheetId === sid) renderSheet();
+  }
+
+  // SSE over fetch + ReadableStream (EventSource cannot send the bearer header).
+  let lastEventId = null, backoff = 1000;
+  async function feedLoop() {
+    for (;;) {
+      if (document.visibilityState !== "visible") { await waitVisible(); }
+      try {
+        const r = await fetch(BASE + "/central/feed", {
+          headers: authHeaders(Object.assign({ Accept: "text/event-stream" }, lastEventId ? { "Last-Event-ID": lastEventId } : {})),
+          cache: "no-store",
+        });
+        if (!r.ok || !r.body) throw new Error("feed " + r.status);
+        setBadge("conn", C.emerald, "connected");
+        backoff = 1000;
+        const reader = r.body.getReader(), dec = new TextDecoder();
+        let buf = "", data = [];
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl).replace(/\r$/, ""); buf = buf.slice(nl + 1);
+            if (line === "") {
+              if (data.length) { try { onFeed(JSON.parse(data.join("\n"))); } catch (_) {} }
+              data = [];
+            } else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+            else if (line.startsWith("id:")) lastEventId = line.slice(3).trim();
+          }
+        }
+        setBadge("conn", C.amber, "reconnecting");
+      } catch (_) {
+        setBadge("conn", C.red, "offline");
+      }
+      await new Promise((res) => setTimeout(res, backoff));
+      backoff = Math.min(30000, backoff * 2);
+    }
+  }
+  function waitVisible() {
+    return new Promise((res) => {
+      const f = () => { if (document.visibilityState === "visible") { document.removeEventListener("visibilitychange", f); res(); } };
+      document.addEventListener("visibilitychange", f);
+    });
+  }
+
+  // Test hook for the headless screenshot run only (no data beyond screen coords).
+  if (window.__FLOOR_DEBUG) window.__floorHit = (id) => { const d = desks.get(id); return d && d.hit ? [d.hit[0], d.hit[1]] : null; };
+
+  window.addEventListener("resize", resize);
+  resize();
+  layout();
+  start();
+  refresh();
+  feedLoop();
+})();
+</script>
+</body>
+</html>

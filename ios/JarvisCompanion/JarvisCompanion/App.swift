@@ -417,6 +417,12 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var showPushedPage = false
     @Published var showInbox = false
+    /// Session the last /siri/hey answer pointed at ("Open chat" on Home).
+    @Published var lastSession: ChatTarget?
+    /// Chat sheet presented from Home.
+    @Published var openChat: ChatTarget?
+    /// Files picked on Home for the next prompt (sent with it through /chat).
+    @Published var attachments: [ChatAttachment] = []
     /// Bumped when the fullScreenCover dismisses so Home's hidden web host
     /// re-claims the shared WKWebView (see JarvisWebView).
     @Published var webHostToken = 0
@@ -451,6 +457,8 @@ final class AppModel: ObservableObject {
             if text.isEmpty {
                 // Empty/whitespace transcript: NO network request (criterion 5).
                 self.setFailure("didn't catch that")
+            } else if !self.attachments.isEmpty {
+                self.sendWithFiles(text)
             } else {
                 self.ask(text)
             }
@@ -476,6 +484,10 @@ final class AppModel: ObservableObject {
         notificationDelegate.onOpenInbox = { [weak self] in
             if let url = URL(string: "jarvis://inbox") { self?.openHandoff(url) }
         }
+        // Owner-note taps open that session's chat (Home already shows the note).
+        notificationDelegate.onOpenNote = { [weak self] sid, title in
+            if !sid.isEmpty { self?.openChat = ChatTarget(sessionID: sid, title: title) }
+        }
         UNUserNotificationCenter.current().delegate = notificationDelegate
         bridge.connect()
         // Prime the unread badge even before the sheet is ever opened.
@@ -492,6 +504,7 @@ final class AppModel: ObservableObject {
         ownerText = text
         replyText = nil
         routeTag = nil
+        lastSession = nil
         replyIsError = false
         isSending = true
         // F3: URLComponents-built endpoint — https enforced, no query or
@@ -536,6 +549,9 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.replyText = reply
+                if let sid = obj["session_id"] as? String, !sid.isEmpty {
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                }
                 self.replyIsError = false
                 self.typedText = ""
                 Haptics.success()
@@ -553,7 +569,7 @@ final class AppModel: ObservableObject {
 
     /// Shared F3 builder behind heyEndpoint(): same https enforcement and
     /// path appending, suffix picked per endpoint (/siri/hey, /ask, /pc/wake).
-    private static func gatewayEndpoint(_ suffix: String) -> URL? {
+    static func gatewayEndpoint(_ suffix: String) -> URL? {
         guard var comps = URLComponents(
             string: AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
         ), comps.scheme?.lowercased() == "https", comps.host != nil else {
@@ -571,10 +587,67 @@ final class AppModel: ObservableObject {
     /// pipeline, anything else to the full brain via ask().
     func sendTyped() {
         let text = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.hasPrefix("?") {
+        if !attachments.isEmpty {
+            sendWithFiles(text)
+        } else if text.hasPrefix("?") {
             quickAsk(text)
         } else {
             ask(text)
+        }
+    }
+
+    func addAttachment(_ file: ChatAttachment) {
+        guard attachments.count < ChatAttachment.maxCount else {
+            return setFailure("up to \(ChatAttachment.maxCount) files per message")
+        }
+        guard file.data.count <= ChatAttachment.maxBytes else {
+            return setFailure("\(file.name) is over 10 MB")
+        }
+        attachments.append(file)
+    }
+
+    func attachmentError(_ message: String) {
+        setFailure(message)
+    }
+
+    /// Prompt with files: /siri/hey takes text only, so this uploads each file
+    /// (POST /central/attachments) and posts to /chat on a fresh thread, the
+    /// same path the chat sheet uses. Uploaded ids are kept, so a resend after
+    /// a failure does not upload the same file twice.
+    func sendWithFiles(_ text: String) {
+        guard !isSending, askReady, !attachments.isEmpty else { return }
+        let names = attachments.map(\.name).joined(separator: ", ")
+        ownerText = text.isEmpty ? "📎 \(names)" : "\(text)\n📎 \(names)"
+        replyText = nil
+        routeTag = nil
+        lastSession = nil
+        replyIsError = false
+        isSending = true
+        let thread = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            defer { self.isSending = false }
+            var files = self.attachments
+            do {
+                for index in files.indices where files[index].uploadedID == nil {
+                    files[index].uploadedID = try await Central.upload(files[index])
+                }
+                let obj = try await Central.json(Central.request("/chat", method: "POST", json: [
+                    "msg_id": UUID().uuidString, "thread_id": thread, "text": text,
+                    "attachments": files.compactMap(\.uploadedID),
+                ], timeout: 45))
+                let reply = obj["reply"] as? String ?? ""
+                self.replyText = reply.isEmpty ? "sent" : reply
+                if let sid = obj["session_id"] as? String, !sid.isEmpty {
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                }
+                self.attachments = []
+                self.typedText = ""
+                Haptics.success()
+            } catch {
+                self.attachments = files
+                self.fail(error)
+            }
         }
     }
 
@@ -592,6 +665,7 @@ final class AppModel: ObservableObject {
         ownerText = text
         replyText = nil
         routeTag = nil
+        lastSession = nil
         replyIsError = false
         isSending = true
         guard let url = Self.gatewayEndpoint("/ask") else {
@@ -655,6 +729,7 @@ final class AppModel: ObservableObject {
         ownerText = nil
         replyText = "PC: waking…"
         routeTag = nil
+        lastSession = nil
         replyIsError = false
         isSending = true
         guard let url = Self.gatewayEndpoint("/pc/wake") else {
@@ -767,6 +842,11 @@ final class AppModel: ObservableObject {
         // the audio-keepalive WS gets reclaimed; submitting while foregrounded
         // would be pointless (the live WS already delivers inbox_new).
         if phase == .background { InboxNotifier.scheduleBackgroundRefresh() }
+        // Foreground kick: a socket that died while backgrounded (or during
+        // a sleep/wake of the gateway's box) used to show "disconnected"
+        // forever since nothing ever re-checked it. Catch it within seconds
+        // of coming back to the app instead of waiting on the heartbeat.
+        if phase == .active { bridge.foregrounded() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {
@@ -828,6 +908,20 @@ final class AppModel: ObservableObject {
                 )
             }
             reportResult(id: id, ok: true, data: ["unread": payload["unread"] ?? 0])
+        case "owner_note":
+            // Gateway push (gateway/notify.py): a late answer to a Home
+            // question, or a session waiting for the owner. Home shows it like
+            // a reply; a notification goes out either way.
+            let title = payload["title"] as? String ?? "Jarvis"
+            let text = payload["text"] as? String ?? ""
+            let sid = (payload["session_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ownerText = title
+            replyText = text
+            replyIsError = false
+            routeTag = nil
+            lastSession = sid.map { ChatTarget(sessionID: $0, title: title) }
+            InboxNotifier.notifyNote(title: title, body: text, sessionID: sid)
+            reportResult(id: id, ok: true, data: [:])
         default:
             reportResult(id: id, ok: false, data: ["error": "unknown command: \(type)"])
         }
@@ -855,16 +949,41 @@ struct ContentView: View {
     /// Ask-chip focus target (spec §23): tapping `Ask` puts `?` in the typed
     /// row and raises the keyboard on it.
     @FocusState private var typedFieldFocused: Bool
+    /// Wordmark menu choice: Controls (this screen), Sessions, Floor.
+    @AppStorage("homeView") private var homeView: HomeView = .controls
+    @State private var showPhotos = false
+    @State private var showFiles = false
 
     var body: some View {
         ZStack {
             Color.jarvisBackground.ignoresSafeArea()
             VStack(spacing: 24) {
                 topBar
-                conversation
-                chips
-                micSection
-                typedRow
+                switch homeView {
+                case .controls:
+                    conversation
+                    // While typing, the chips and mic step aside so the
+                    // multi-line field has room to grow instead of being
+                    // squeezed back to one line (older lines scrolled away).
+                    if !typedFieldFocused {
+                        chips
+                        micSection
+                    }
+                    if !model.attachments.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(model.attachments) { file in
+                                    AttachmentChip(file: file) { model.attachments.removeAll { $0.id == file.id } }
+                                }
+                            }
+                        }
+                    }
+                    typedRow
+                case .sessions:
+                    SessionsBoard()
+                case .floor:
+                    FloorView { model.openChat = $0 }
+                }
             }
             .padding(16)
         }
@@ -875,6 +994,11 @@ struct ContentView: View {
         .background { hiddenWebHost }
         .sheet(isPresented: $model.showSettings) { SettingsSheet(model: model) }
         .sheet(isPresented: $model.showInbox) { InboxScreen(model: model.inbox) }
+        .sheet(item: $model.openChat) { ChatView(target: $0) }
+        .attachmentPickers(photos: $showPhotos, files: $showFiles,
+                           count: { model.attachments.count },
+                           add: { model.addAttachment($0) },
+                           error: { model.attachmentError($0) })
         .fullScreenCover(isPresented: $model.showPushedPage) {
             PushedPageView(model: model, web: model.web)
         }
@@ -882,10 +1006,23 @@ struct ContentView: View {
 
     private var topBar: some View {
         HStack(spacing: 16) {
-            Text("JARVIS")
-                .font(.system(size: markSize, weight: .semibold))
-                .tracking(2.6)
+            Menu {
+                Picker("View", selection: $homeView) {
+                    ForEach(HomeView.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("JARVIS")
+                        .font(.system(size: markSize, weight: .semibold))
+                        .tracking(2.6)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: markSize * 0.8, weight: .semibold))
+                }
                 .foregroundColor(.jarvisMuted)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Home view: \(homeView.label)")
             Spacer(minLength: 8)
             statusPill
             Button {
@@ -978,6 +1115,20 @@ struct ContentView: View {
                             .foregroundColor(.jarvisMuted)
                             .textSelection(.enabled)
                     }
+                    if let session = model.lastSession {
+                        Button {
+                            model.openChat = session
+                        } label: {
+                            Text("Open chat")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundColor(.jarvisAccent)
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: 44)
+                                .background(
+                                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisAccent.opacity(0.14))
+                                )
+                        }
+                    }
                 } else if model.ownerText == nil {
                     Text("Hold the mic. Ask for your Mac or PC screen.")
                         .font(.system(size: replySize))
@@ -992,15 +1143,15 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// Chips, two rows (spec §23): the original three quick chips on top,
-    /// `Ask` (focus the typed row, `?` prefilled) + `Wake PC` below.
+    /// Chips, two rows (spec §23): screen chips Mac / PC / Mini PC on top,
+    /// Status + `Ask` (focus the typed row, `?` prefilled) + `Wake PC` below.
     private var chips: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 ForEach([
-                    Chip(label: "Mac screen", payload: "Show Mac screen"),
-                    Chip(label: "PC screen", payload: "Show PC screen"),
-                    Chip(label: "Status", payload: "Status"),
+                    Chip(label: "Mac", payload: "Show Mac screen"),
+                    Chip(label: "PC", payload: "Show PC screen"),
+                    Chip(label: "Mini PC", payload: "Show Mini PC screen"),
                 ]) { chip in
                     Button {
                         model.ask(chip.payload)
@@ -1012,6 +1163,13 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 8) {
+                Button {
+                    model.ask("Status")
+                } label: {
+                    chipLabel("Status")
+                }
+                .disabled(chipDisabled)
+                .opacity(chipDisabled ? 0.35 : 1.0)
                 Button {
                     model.typedText = "?"
                     typedFieldFocused = true
@@ -1096,30 +1254,52 @@ struct ContentView: View {
     }
 
     private var typedRow: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .bottom, spacing: 8) {
+            attachMenu
+            // Vertical axis: long text wraps (up to 6 lines, then scrolls);
+            // Return adds a line break, the arrow sends. `?…` dispatches to
+            // quick-ask (spec §22), plain text to the full brain.
             TextField(
                 "or type…",
                 text: typedBinding,
-                prompt: Text("or type…").foregroundColor(.jarvisMuted)
+                prompt: Text("or type…").foregroundColor(.jarvisMuted),
+                axis: .vertical
             )
+                .lineLimit(1...6)
+                .fixedSize(horizontal: false, vertical: true)
                 .font(.body)
                 .foregroundColor(.jarvisText)
                 .padding(.horizontal, 16)
+                .padding(.vertical, 11)
                 .frame(minHeight: 44)
                 .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
                 .keyboardType(.default)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.sentences)
-                .submitLabel(.send)
                 .focused($typedFieldFocused)
-                .onSubmit {
-                    // Manual send only while idle: the recognizer owns the
-                    // field during a hold (criterion 7). `?…` dispatches to
-                    // quick-ask (spec §22), plain text to the full brain.
-                    if !dictation.isListening { model.sendTyped() }
-                }
             sendButton
         }
+    }
+
+    private var attachMenu: some View {
+        Menu {
+            Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+            Button { showFiles = true } label: { Label("Files", systemImage: "doc") }
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.system(size: 22))
+                .foregroundColor(.jarvisAccent)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .disabled(!canAttach)
+        .opacity(canAttach ? 1.0 : 0.35)
+        .accessibilityLabel("Attach")
+    }
+
+    private var canAttach: Bool {
+        model.askReady && !model.isSending && !dictation.isListening
+            && model.attachments.count < ChatAttachment.maxCount
     }
 
     /// While held, the field mirrors the live partial transcript (behavior
@@ -1138,6 +1318,7 @@ struct ContentView: View {
 
     private var sendButton: some View {
         Button {
+            typedFieldFocused = false  // drop the keyboard once the prompt is sent
             model.sendTyped()
         } label: {
             Group {

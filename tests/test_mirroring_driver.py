@@ -10,6 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
+
+if sys.platform != "darwin":
+    pytest.skip("mac.mirroring loads Quartz via ctypes: macOS only", allow_module_level=True)
+
 from mac.mirroring.driver import _alpha_bytes_zero
 
 W, H = 16, 16  # small 32-bpp RGBA frame; alpha byte is offset 3 of each pixel

@@ -10,10 +10,15 @@ e2e test fakes both edges. Wiring the live transports is unowned glue.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 
 OFFLINE_REPLY = "the PC is off"
+
+# "mini pc", "mini-pc", "minipc", "mini pc's"; screen_minipc also needs the word "screen".
+_MINIPC_RE = re.compile(r"\bmini[\s-]?pc\b")
+_SCREEN_RE = re.compile(r"\bscreens?\b")
 
 # Checked in order; first keyword hit wins. `specs` leads so RAM/memory/CPU
 # questions about the box itself never fall through to a later intent.
@@ -28,11 +33,15 @@ _INTENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 def route(transcript: str) -> str | None:
     """Keyword intents -> allowlisted command name; None = no match (brain fallback).
 
-    The screen intents ("screen_mac"/"screen_windows") never reach the agent
+    The screen intents ("screen_mac"/"screen_windows"/"screen_minipc") never reach the agent
     path — gateway/siri.py intercepts them and launches the control page (SC7);
     they're checked before _INTENTS so no existing keyword can shadow them.
     """
     text = transcript.lower()
+    # Mini PC first: its "pc" would otherwise land on screen_windows. "show" alone
+    # is not enough ("show me the mini pc logs" is not a screen request).
+    if _MINIPC_RE.search(text) and _SCREEN_RE.search(text):
+        return "screen_minipc"
     if "screen" in text:
         if "mac" in text:
             return "screen_mac"

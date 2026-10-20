@@ -19,6 +19,9 @@
 		<string>127.0.0.1</string>
 		<string>--port</string>
 		<string>8788</string>
+		<string>--proxy-headers</string>
+		<string>--forwarded-allow-ips</string>
+		<string>127.0.0.1</string>
 		<string>--no-access-log</string>
 	</array>
 	<key>RunAtLoad</key>

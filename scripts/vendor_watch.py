@@ -27,6 +27,12 @@ VENDOR_DOMAINS = {"<vendor-domain>": "Vendor1", "<vendor-domain>": "Vendor2", "v
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 SUMMARY_MODEL = "google/gemini-2.5-flash-lite"
 GATEWAY_NOTIFY_URL = "http://127.0.0.1:8788/inbox/notify"
+# Split deploy: the phone may be pointed at the box's gateway instead of the
+# Mac's, so also poke its /inbox/notify over the tailnet (best-effort, same
+# ios_token — the box's loopback guard allows tailnet peers). This call
+# exists ONLY to wake whichever "ios" websocket is connected to the box;
+# the guaranteed WhatsApp/email path above already ran against the Mac call.
+BOX_GATEWAY_NOTIFY_URL = "https://minipc.<tailnet>.<tld>:8790/inbox/notify"
 HTTP_TIMEOUT_S = 30
 MAX_INBOX_ITEMS = 200
 MAX_RESULTS = 25
@@ -263,15 +269,20 @@ def append_resume(now_iso: str, n_new: int) -> None:
 def notify_gateway(token: str, new: int, unread: int) -> None:
     if os.environ.get("JARVIS_VENDOR_WATCH_NO_NOTIFY") or not token or new == 0:
         return
+    body = json.dumps({"new": new, "unread": unread}).encode()
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
     try:
-        req = urllib.request.Request(
-            GATEWAY_NOTIFY_URL,
-            data=json.dumps({"new": new, "unread": unread}).encode(),
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {token}"})
+        req = urllib.request.Request(GATEWAY_NOTIFY_URL, data=body, headers=headers)
         urllib.request.urlopen(req, timeout=10)
     except Exception:
         pass  # gateway down must never fail the run
+    if os.environ.get("JARVIS_VENDOR_WATCH_NO_BOX_NOTIFY"):
+        return
+    try:
+        req = urllib.request.Request(BOX_GATEWAY_NOTIFY_URL, data=body, headers=headers)
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass  # box unreachable/offline must never fail the run
 
 
 # --------------------------------------------------------------------- modes

@@ -111,6 +111,7 @@ def run_claude(text: str, timeout_s: int) -> str | None:
         "--mcp-config", '{"mcpServers":{}}',
         "--strict-mcp-config",
         "--setting-sources", "",
+        "--no-session-persistence",
         "--append-system-prompt", _SYSTEM_PROMPT,
     ]
     scratch = tempfile.mkdtemp(prefix="jarvis-brain-")

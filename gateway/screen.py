@@ -28,6 +28,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
@@ -52,6 +53,13 @@ CURSOR_JS = SCREEN_HTML.parent / "cursor.js"
 NOT_AUTHENTICATED = "not authenticated"
 SHARED_TOKEN_DETAIL = "shared token not valid for screen"
 PC_OFFLINE_DETAIL = "pc offline"
+MAC_OFFLINE_DETAIL = "mac offline"
+
+# Split deploy (gateway on the mini PC): the Quartz driver only runs on the Mac,
+# so target "mac" is forwarded to the Mac's own gateway at this URL with the
+# ios_token. Unset = this process runs on the Mac and drives it in-process.
+MAC_GATEWAY_ENV = "MAC_GATEWAY_URL"
+MAC_PROXY_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 SESSION_COOKIE = "screen_session"
 SESSION_MAX = 5
@@ -119,6 +127,44 @@ def _require(request: Request) -> str:
     if kind is None:
         raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     return kind
+
+
+def _mac_gateway() -> str | None:
+    return os.environ.get(MAC_GATEWAY_ENV, "").rstrip("/") or None
+
+
+def _mac_client() -> httpx.AsyncClient:
+    """Outbound client to the Mac gateway (tests swap in an ASGI transport here)."""
+    return httpx.AsyncClient(timeout=MAC_PROXY_TIMEOUT)
+
+
+async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
+    """Forward one /screen/mac/<path> call to the Mac gateway.
+
+    422/429 pass through with the Mac's detail; anything else that is not a
+    200/304 (Mac down, auth mismatch, driver error) is 503 "mac offline".
+    The ios_token is never logged.
+    """
+    token = config.get_token(name="ios_token")
+    if not token:
+        raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL)
+    headers = {"Authorization": f"Bearer {token}", **kwargs.pop("headers", {})}
+    try:
+        async with _mac_client() as client:
+            resp = await client.request(method, f"{_mac_gateway()}/screen/mac/{path}", headers=headers, **kwargs)
+    except httpx.HTTPError as exc:
+        logger.warning("mac gateway unreachable: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL) from None
+    if resp.status_code in (200, 304):
+        return resp
+    if resp.status_code in (422, 429):
+        try:
+            detail = resp.json().get("detail")
+        except ValueError:
+            detail = None
+        raise HTTPException(status_code=resp.status_code, detail=detail or MAC_OFFLINE_DETAIL)
+    logger.warning("mac gateway answered %d for %s", resp.status_code, path)
+    raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL)
 
 
 def _windows_online() -> None:
@@ -279,6 +325,11 @@ async def screen_launch(request: Request, body: LaunchBody) -> dict:
 @router.get("/{target}/status")
 async def screen_status(request: Request, target: Target) -> dict:
     _require(request)
+    if target == "mac" and _mac_gateway():
+        try:
+            return (await _mac_forward("GET", "status")).json()
+        except HTTPException:
+            return {"target": "mac", "online": False, "tcc_ok": None, "display_asleep": None}
     if target == "mac":
         from mac.screen import driver
         return {
@@ -301,6 +352,18 @@ async def screen_frame(
     _require(request)
     if target == "minipc":
         raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
+    if target == "mac" and _mac_gateway():
+        # The Mac computes the ETag; pass If-None-Match through so 304s survive.
+        inm = request.headers.get("if-none-match")
+        async with _frame_locks[target]:
+            resp = await _mac_forward(
+                "GET", "frame", params={"w": w, "q": q},
+                headers={"If-None-Match": inm} if inm else {},
+            )
+        etag_headers = {"ETag": resp.headers["etag"]} if "etag" in resp.headers else {}
+        if resp.status_code == 304:
+            return Response(status_code=304, headers=etag_headers)
+        return Response(content=resp.content, media_type="image/jpeg", headers=etag_headers)
     async with _frame_locks[target]:
         if target == "mac":
             from mac.screen import driver
@@ -327,7 +390,9 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
     events = [event.model_dump() for event in body.events]
     # Audit trail: target, count, event types only — never coordinates or text.
     logger.info("screen input: %s %d events %s", target, len(events), [e["type"] for e in events])
-    if target == "mac":
+    if target == "mac" and _mac_gateway():
+        await _mac_forward("POST", "input", json={"events": events})
+    elif target == "mac":
         from mac.screen import driver
         await run_in_threadpool(driver.send_events, events)
     else:
@@ -343,7 +408,9 @@ async def screen_open(request: Request, target: Target, body: OpenBody) -> dict:
     _require(request)
     if target == "minipc":
         raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
-    if target == "mac":
+    if target == "mac" and _mac_gateway():
+        await _mac_forward("POST", "open", json=body.model_dump())
+    elif target == "mac":
         proc = await run_in_threadpool(subprocess.run, ["open", "-a", body.name])
         if proc.returncode != 0:
             raise HTTPException(status_code=422, detail="app not found")
