@@ -1006,7 +1006,7 @@ struct ContentView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 8) {
             Menu {
                 Picker("View", selection: $homeView) {
                     ForEach(HomeView.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -1016,6 +1016,8 @@ struct ContentView: View {
                     Text("JARVIS")
                         .font(.system(size: markSize, weight: .semibold))
                         .tracking(2.6)
+                        .lineLimit(1)
+                        .fixedSize()  // never wrap the wordmark; the status pill gives way instead
                     Image(systemName: "chevron.down")
                         .font(.system(size: markSize * 0.8, weight: .semibold))
                 }

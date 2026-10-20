@@ -149,9 +149,10 @@ final class HWVoice: ObservableObject {
         if recognizer?.supportsOnDeviceRecognition == true { request.requiresOnDeviceRecognition = true }
         self.request = request
         heard = ""
+        let current = ObjectIdentifier(request)  // compare ids: the request itself isn't Sendable
         recognition = recognizer?.recognitionTask(with: request) { @Sendable [weak self] result, error in
             Task { @MainActor in
-                guard let self, self.request === request else { return }
+                guard let self, self.request.map(ObjectIdentifier.init) == current else { return }
                 if let result {
                     self.partial(result.bestTranscription.formattedString)
                 }
