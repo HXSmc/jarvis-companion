@@ -1,0 +1,5 @@
+title = "gitleaks config"
+
+[[allowlists]]
+description = "sha256 integrity pins for the vendored noVNC assets — 64-hex digests of public files, not secrets"
+paths = ['''gateway/static/novnc-sha256\.json''']
