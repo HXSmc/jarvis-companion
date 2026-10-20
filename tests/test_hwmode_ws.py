@@ -1,0 +1,94 @@
+"""/hwmode/ws: ios_token auth, frame + ask -> early `say` + full reply, using a fake claude CLI."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import json
+import stat
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+import websockets
+
+from conftest import AUTH_HEADER, IOS_AUTH_HEADER
+from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
+from gateway.hwmode import jpeg_size
+
+# Stands in for `claude -p --input-format stream-json ...`: answers every user line
+# with two text deltas and a result, echoing whether an image block was attached.
+FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    content = msg["message"]["content"]
+    has_img = any(c.get("type") == "image" for c in content)
+    reply = json.dumps({"say": "Press the latch.", "step": 1, "of": 2,
+                        "overlay": {"target_px": [10, 20, 30, 40], "action": "press",
+                                    "arrow_dir": [0, 1], "label": "img" if has_img else "noimg"}})
+    half = len(reply) // 2
+    for part in (reply[:half], reply[half:]):
+        print(json.dumps({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": part}}}), flush=True)
+    print(json.dumps({"type": "result", "result": reply, "usage": {}}), flush=True)
+'''
+
+
+def _tiny_jpeg(w=64, h=48) -> bytes:
+    Image = pytest.importorskip("PIL.Image")
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (30, 90, 40)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def fake_claude(tmp_path, monkeypatch):
+    path = tmp_path / "claude"
+    path.write_text(FAKE_CLAUDE)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("HWMODE_CLAUDE_BIN", str(path))
+    return path
+
+
+def test_jpeg_size_reads_sof():
+    assert jpeg_size(_tiny_jpeg(64, 48)) == (64, 48)
+    assert jpeg_size(b"not a jpeg") is None
+
+
+def test_shared_token_is_rejected(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: AUTH_HEADER}):
+                    pass
+    asyncio.run(run())
+
+
+def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "unplug SATA"}))
+                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet"}
+                jpeg = _tiny_jpeg(64, 48)
+                # Binary frame, like the iOS URLSessionWebSocketTask sends.
+                await ws.send(json.dumps({"type": "frame", "id": 7, "jpeg": base64.b64encode(jpeg).decode()}).encode())
+                await ws.send(json.dumps({"type": "ask", "text": "where is the latch?"}))
+                say = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                assert say == {"type": "say", "text": "Press the latch."}
+                assert reply["type"] == "reply" and reply["frame_id"] == 7
+                assert (reply["w"], reply["h"]) == (64, 48)
+                assert reply["data"]["overlay"]["label"] == "img"
+
+                await ws.send(json.dumps({"type": "ask", "text": "and now?", "frame": False}))
+                await ws.recv()  # say
+                reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                assert reply["frame_id"] is None and reply["data"]["overlay"]["label"] == "noimg"
+
+                await ws.send(json.dumps({"type": "frame", "id": 8, "jpeg": base64.b64encode(b"junk").decode()}))
+                assert json.loads(await ws.recv()) == {"type": "error", "error": "bad frame"}
+    asyncio.run(run())
