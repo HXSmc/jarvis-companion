@@ -45,7 +45,8 @@ def test_device_and_title_fallback_without_cache():
     data = _call("GET", "/central/sessions", headers=IOS).json()
     assert {s["device"] for s in data} == {"Mini PC"}
     assert [s["doing"] for s in data] == ["Fix login", "Deploy", "Notes"]
-    assert all(s["recap"] == [] for s in data)
+    # only the needs_input session gets a line: the router's block, never the model
+    assert [s["recap"] for s in data] == [[], ["Needs you: it is waiting for your answer in the chat."], []]
 
 
 def test_cache_hit_gives_doing_and_recap():
