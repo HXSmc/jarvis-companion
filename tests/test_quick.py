@@ -43,7 +43,7 @@ def quick_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Hermetic ask() runs: _resolve_project gets a fixed token set, never the
     # real vault's Projects glob.
     monkeypatch.setattr(
-        quick, "_project_tokens", lambda: {"<project>", "notekit", "jarvis", "companion"}
+        quick, "_project_tokens", lambda: {"nimbus", "notekit", "jarvis", "companion"}
     )
 
 
@@ -75,7 +75,7 @@ def test_route_heuristic_vault_when_hits(quick_env, monkeypatch: pytest.MonkeyPa
         raise RuntimeError("jev down")
 
     monkeypatch.setattr(quick, "_openrouter", boom)
-    assert quick.route_question("what is the <project> resend key", (3, 1)) == "vault"
+    assert quick.route_question("what is the nimbus resend key", (3, 1)) == "vault"
 
 
 def test_route_heuristic_web_when_no_hits(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,7 +123,7 @@ def test_route_jev_choice_respected(quick_env, monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(quick, "_openrouter", fake_openrouter)
     # Vault hits say vault, Jev says web — Jev wins.
-    assert quick.route_question("what is the <project> resend key", 5) == "web"
+    assert quick.route_question("what is the nimbus resend key", 5) == "web"
     assert seen["url"] == "https://openrouter.ai/api/alpha/decisions"
     assert seen["payload"]["model"] == "typesafe/jev-1.13"
     question = seen["payload"]["questions"]["route"]
@@ -136,15 +136,15 @@ def test_retrieve_finds_planted_fact(tmp_path) -> None:
 
     notes = tmp_path / "Projects"
     notes.mkdir()
-    (notes / "<project>.md").write_text(
-        "filler line\nThe <project> resend key is RESEND_KEY_XYZ in the ledger.\nfiller\n",
+    (notes / "nimbus.md").write_text(
+        "filler line\nThe nimbus resend key is RESEND_KEY_XYZ in the ledger.\nfiller\n",
         encoding="utf-8",
     )
 
-    snippets, best = retrieve("what is the <project> resend key", vault_root=tmp_path)
+    snippets, best = retrieve("what is the nimbus resend key", vault_root=tmp_path)
 
-    # 2 distinct keywords matched (<project>, resend — "key" is under the 4-letter
-    # bar), <project> in the path/name.
+    # 2 distinct keywords matched (nimbus, resend — "key" is under the 4-letter
+    # bar), nimbus in the path/name.
     assert best == (2, 1)
     assert snippets
     assert any("RESEND_KEY_XYZ" in s for s in snippets)
@@ -186,7 +186,7 @@ def test_retrieve_caps_snippets(tmp_path) -> None:
 def test_ask_vault_hit(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
     from gateway import quick
 
-    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: (["<project>: RESEND_API_KEY"], 4))
+    monkeypatch.setattr(quick, "retrieve", lambda q, vault_root=None: (["nimbus: RESEND_API_KEY"], 4))
     monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "vault")
 
     seen: dict = {}
@@ -197,7 +197,7 @@ def test_ask_vault_hit(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(quick, "_openrouter", fake_openrouter)
 
-    resp = _post({"q": "what is the <project> resend key"})
+    resp = _post({"q": "what is the nimbus resend key"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["answer"] == "RESEND_API_KEY"
@@ -223,11 +223,11 @@ def test_ask_rejects_shared_token(quick_env, monkeypatch: pytest.MonkeyPatch) ->
     from gateway import quick
 
     monkeypatch.setattr(
-        quick, "retrieve", lambda q, vault_root=None: (["<project>: RESEND_API_KEY"], 4)
+        quick, "retrieve", lambda q, vault_root=None: (["nimbus: RESEND_API_KEY"], 4)
     )
     monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "vault")
 
-    resp = _post({"q": "what is the <project> resend key"}, headers=AUTH_HEADER)
+    resp = _post({"q": "what is the nimbus resend key"}, headers=AUTH_HEADER)
 
     assert resp.status_code in (401, 403)
     assert "answer" not in resp.json()
@@ -426,7 +426,7 @@ def test_ask_openrouter_failure_falls_back_to_brain(
     _stub_cli(monkeypatch, agy_rc=1, claude_rc=1)
     monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: "stub brain answer")
 
-    resp = _post({"q": "tell me about the <project> ledger"})
+    resp = _post({"q": "tell me about the nimbus ledger"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["route"] == "brain"
@@ -667,7 +667,7 @@ def test_ask_brain_failure_sentinel(
     monkeypatch.setattr(quick, "route_question", lambda q, vault_hits: "brain")
     monkeypatch.setattr(brain, "reply", lambda transcript, timeout_s=60: failure)
 
-    resp = _post({"q": "tell me about the <project> ledger"})
+    resp = _post({"q": "tell me about the nimbus ledger"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["answer"] is None
@@ -702,10 +702,10 @@ def test_extract_question_trailing_clause() -> None:
         "doing well just keep on doing what you're doing make sure that you fix "
         "the brain issue and also check that you Jarvis phone do have brain now "
         "and can answer me questions for example can you answer me who are the "
-        "co-founders of <name>"
+        "co-founders of riaz"
     )
-    assert _extract_question(utterance) == "who are the co-founders of <name>"
-    assert _extract_question("who are the co-founders of <name>") == "who are the co-founders of <name>"
+    assert _extract_question(utterance) == "who are the co-founders of riaz"
+    assert _extract_question("who are the co-founders of riaz") == "who are the co-founders of riaz"
 
 
 def test_resolve_project_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -714,13 +714,13 @@ def test_resolve_project_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     import gateway.quick as quick
     from gateway.quick import _resolve_project
 
-    monkeypatch.setattr(quick, "DEFAULT_PROJECT", "<project>")  # env-driven now
-    tokens = {"<project>", "notekit"}
-    assert "<project>" in _resolve_project("who are the co-founders of <name>", tokens).lower()
+    monkeypatch.setattr(quick, "DEFAULT_PROJECT", "nimbus")  # env-driven now
+    tokens = {"nimbus", "notekit"}
+    assert "nimbus" in _resolve_project("who are the co-founders of nimbur", tokens).lower()
     towed = _resolve_project("who are the co-founders of towed", tokens).lower()
-    assert "towed" in towed and "<project>" not in towed
+    assert "towed" in towed and "nimbus" not in towed
     for phrase in ("my project", "the project", "our project"):
-        assert "<project>" in _resolve_project(
+        assert "nimbus" in _resolve_project(
             f"who are the co-founders of {phrase}", tokens
         ).lower()
 
@@ -758,7 +758,7 @@ def test_brain_fallback_gets_vault_snippets(quick_env, monkeypatch: pytest.Monke
 
     monkeypatch.setattr(
         quick, "retrieve",
-        lambda q, vault_root=None: (["the <project> founders are Ali, <name> and <name>"], (3, 1)),
+        lambda q, vault_root=None: (["the nimbus founders are Ali, riaz and omar"], (3, 1)),
     )
     monkeypatch.setattr(
         quick, "_openrouter",
@@ -769,15 +769,15 @@ def test_brain_fallback_gets_vault_snippets(quick_env, monkeypatch: pytest.Monke
     _stub_cli(monkeypatch, agy_rc=1, claude_rc=1)
     monkeypatch.setattr(brain, "reply", fake_reply)
 
-    resp = _post({"q": "who are the co-founders of <project>"})
+    resp = _post({"q": "who are the co-founders of nimbus"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["answer"] == "stub brain answer"
     assert body["route"] == "brain"
     assert captured, "brain.reply was never called"
-    assert "the <project> founders are Ali, <name> and <name>" in captured[0]
+    assert "the nimbus founders are Ali, riaz and omar" in captured[0]
     # _resolve_project rebuilds from the word list → normalized question text
-    assert "Question: who are the co founders of <project>" in captured[0]
+    assert "Question: who are the co founders of nimbus" in captured[0]
 
 
 def test_ask_action_checked_on_raw_utterance(quick_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -786,7 +786,7 @@ def test_ask_action_checked_on_raw_utterance(quick_env, monkeypatch: pytest.Monk
     from gateway import quick
     from mac.voice import brain
 
-    q = "send <name> an email about what we discussed"
+    q = "send riaz an email about what we discussed"
 
     def spy(text):
         raise AssertionError("extraction/resolution must not run on an action")
@@ -815,7 +815,7 @@ def test_extract_question_compound_keeps_subject() -> None:
     must not drop the "who are the co-founders" subject."""
     from gateway.quick import _extract_question
 
-    q = "who are the co-founders of <project> and when did it start"
+    q = "who are the co-founders of nimbus and when did it start"
     assert _extract_question(q) == q
 
 
@@ -828,9 +828,9 @@ def test_extract_question_noncontiguous_question_excluded() -> None:
         "doing well just keep on doing what you're doing make sure that you fix "
         "the brain issue and also check that you Jarvis phone do have brain now "
         "and can answer me questions for example can you answer me who are the "
-        "co-founders of <name>"
+        "co-founders of riaz"
     )
-    assert _extract_question(owner_call) == "who are the co-founders of <name>"
+    assert _extract_question(owner_call) == "who are the co-founders of riaz"
 
 
 def test_extract_question_keeps_tail_without_question_word() -> None:
@@ -838,18 +838,18 @@ def test_extract_question_keeps_tail_without_question_word() -> None:
     away — the text from the cut point to the END of the utterance ships."""
     from gateway.quick import _extract_question
 
-    assert _extract_question("who are <name> and <name>") == "who are <name> and <name>"
-    status = "what is the status of <project> and <name>"
+    assert _extract_question("who are riaz and riaz") == "who are riaz and riaz"
+    status = "what is the status of nimbus and riaz"
     assert _extract_question(status) == status
-    compound = "who are the co-founders of <project> and when did it start"
+    compound = "who are the co-founders of nimbus and when did it start"
     assert _extract_question(compound) == compound
     owner = (
         "doing well just keep on doing what you're doing make sure that you fix "
         "the brain issue and also check that you Jarvis phone do have brain now "
         "and can answer me questions for example can you answer me who are the "
-        "co-founders of <name>"
+        "co-founders of riaz"
     )
-    assert _extract_question(owner) == "who are the co-founders of <name>"
+    assert _extract_question(owner) == "who are the co-founders of riaz"
 
 
 def test_resolve_project_requires_project_shape() -> None:
@@ -857,10 +857,10 @@ def test_resolve_project_requires_project_shape() -> None:
     prefix-sharing, length-compatible candidate — common words never move."""
     from gateway.quick import _resolve_project
 
-    tokens = {"<project>", "notekit", "dealwatch", "audit"}
+    tokens = {"nimbus", "notekit", "dealwatch", "audit"}
     # must resolve
-    assert "<project>" in _resolve_project("who are the co-founders of <name>", tokens)
-    assert "<project>" in _resolve_project("the <name> project status", tokens)  # before "project"
+    assert "nimbus" in _resolve_project("who are the co-founders of nimbur", tokens)
+    assert "nimbus" in _resolve_project("the nimbur project status", tokens)  # before "project"
     # must NOT resolve — each comes back unchanged
     for q in (
         "take a note",                                   # "note" follows "a", not a preposition
@@ -876,10 +876,10 @@ def test_resolve_project_rewrites_only_gated_occurrence() -> None:
     position gate — its twins elsewhere in the utterance never move."""
     from gateway.quick import _resolve_project
 
-    tokens = {"<project>"}
-    q = "<name> notes and a summary of <name>"
-    # only the "<name>" after "of" resolves; the subject-position twin stays
-    assert _resolve_project(q, tokens) == "<name> notes and a summary of <project>"
+    tokens = {"nimbus"}
+    q = "nimbur notes and a summary of nimbur"
+    # only the "nimbur" after "of" resolves; the subject-position twin stays
+    assert _resolve_project(q, tokens) == "nimbur notes and a summary of nimbus"
 
 
 def test_resolve_project_never_rewrites_stopwords() -> None:

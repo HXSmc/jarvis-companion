@@ -171,7 +171,7 @@ def test_notify_rejects_non_loopback() -> None:
 
     from gateway.inbox import _loopback_guard
 
-    for host in ("<lan>.1.5", "::1", "10.0.0.5"):
+    for host in ("10.0.0.4", "::1", "10.0.0.5"):
         request = Request({"type": "http", "client": (host, 51515), "method": "POST"})
         with pytest.raises(HTTPException) as exc:
             _loopback_guard(request)

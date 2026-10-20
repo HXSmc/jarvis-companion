@@ -26,14 +26,14 @@ def _url_file(tmp_path, monkeypatch, content: str | None) -> None:
 # --- resolution order: JARVIS_GATEWAY_URL env -> file first line -> None ----
 
 def test_env_wins_over_file(monkeypatch, tmp_path):
-    _url_file(tmp_path, monkeypatch, "https://from-file.<tld>\n")
-    monkeypatch.setenv("JARVIS_GATEWAY_URL", "https://from-env.<tld>")
-    assert agent_main.load_gateway_url() == "https://from-env.<tld>"
+    _url_file(tmp_path, monkeypatch, "https://from-file.example.com\n")
+    monkeypatch.setenv("JARVIS_GATEWAY_URL", "https://from-env.example.com")
+    assert agent_main.load_gateway_url() == "https://from-env.example.com"
 
 
 def test_file_first_line_used_when_no_env(monkeypatch, tmp_path):
-    _url_file(tmp_path, monkeypatch, "https://mac.tail1234.<tld>\nsecond line ignored\n")
-    assert agent_main.load_gateway_url() == "https://mac.tail1234.<tld>"
+    _url_file(tmp_path, monkeypatch, "https://mac.tail1234.example.com\nsecond line ignored\n")
+    assert agent_main.load_gateway_url() == "https://mac.tail1234.example.com"
 
 
 def test_missing_file_and_env_is_none(monkeypatch, tmp_path):
@@ -49,11 +49,11 @@ def test_empty_file_is_none(monkeypatch, tmp_path):
 # --- _ws_url normalization --------------------------------------------------
 
 @pytest.mark.parametrize("base, expected", [
-    ("https://mac.tail1234.<tld>", "wss://mac.tail1234.<tld>/ws?role=windows"),
-    ("https://mac.tail1234.<tld>:8790/", "wss://mac.tail1234.<tld>:8790/ws?role=windows"),
-    ("http://<lan>.1.10:8788", "ws://<lan>.1.10:8788/ws?role=windows"),
+    ("https://mac.tail1234.example.com", "wss://mac.tail1234.example.com/ws?role=windows"),
+    ("https://mac.tail1234.example.com:8790/", "wss://mac.tail1234.example.com:8790/ws?role=windows"),
+    ("http://10.0.0.10:8788", "ws://10.0.0.10:8788/ws?role=windows"),
     ("ws://127.0.0.1:8788", "ws://127.0.0.1:8788/ws?role=windows"),
-    ("<lan>.1.10:8788", "ws://<lan>.1.10:8788/ws?role=windows"),  # bare host:port
+    ("10.0.0.10:8788", "ws://10.0.0.10:8788/ws?role=windows"),  # bare host:port
     ("https://host/ignore/this/path", "wss://host/ws?role=windows"),  # path dropped
 ])
 def test_ws_url_normalization(base, expected):

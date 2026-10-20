@@ -332,7 +332,7 @@ def test_loopback_guard_still_rejects_loopback_literal() -> None:
 
 def test_loopback_guard_rejects_public_address(monkeypatch) -> None:
     monkeypatch.setenv(inbox.MAC_GATEWAY_ENV, "http://mac.test")  # even in box mode
-    for host in ("8.8.8.8", "<lan>.1.5", "::1", "10.0.0.5"):
+    for host in ("8.8.8.8", "10.0.0.4", "::1", "10.0.0.5"):
         request = StarletteRequest({"type": "http", "client": (host, 51515), "method": "POST"})
         with pytest.raises(HTTPException) as exc:
             inbox._loopback_guard(request)

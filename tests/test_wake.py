@@ -83,7 +83,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[tuple[bytes, list[tuple[str, i
         return len(targets)
 
     monkeypatch.setattr(wake, "_send_packet", record)
-    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
+    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["10.0.1.255"])
     return calls
 
 
@@ -142,23 +142,23 @@ def test_wake_sends_both_targets(
     [packet, targets] = sent[0]
     assert packet == wake.magic_packet("aa:bb:cc:dd:ee:ff")
     assert ("255.255.255.255", 9) in targets
-    assert ("<lan>.1.255", 9) in targets  # directed-broadcast attempt alongside global
+    assert ("10.0.1.255", 9) in targets  # directed-broadcast attempt alongside global
 
 
 def test_wake_sends_unicast_to_pc_ip(
     stubbed_token, wake_app, monkeypatch, sent, tmp_state
 ) -> None:
-    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff", "pc_ip": "<lan>.1.117"})
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff", "pc_ip": "10.0.1.117"})
     monkeypatch.setattr(wake.registry, "roles", lambda: ["windows"])
 
     resp = _post_wake(wake_app, stubbed_token)
 
     assert resp.status_code == 200
     [packet, targets] = sent[0]
-    assert ("<lan>.1.117", 9) in targets  # unicast — the W5-proven variant
+    assert ("10.0.1.117", 9) in targets  # unicast — the W5-proven variant
     assert packet == wake.magic_packet("aa:bb:cc:dd:ee:ff")
     assert ("255.255.255.255", 9) in targets  # broadcasts kept alongside
-    assert ("<lan>.1.255", 9) in targets
+    assert ("10.0.1.255", 9) in targets
 
 
 def test_wake_no_pc_ip_broadcast_only(
@@ -170,7 +170,7 @@ def test_wake_no_pc_ip_broadcast_only(
     resp = _post_wake(wake_app, stubbed_token)
 
     assert resp.status_code == 200
-    assert sent[0][1] == [("255.255.255.255", 9), ("<lan>.1.255", 9)]  # no unicast
+    assert sent[0][1] == [("255.255.255.255", 9), ("10.0.1.255", 9)]  # no unicast
 
 
 def test_wake_malformed_pc_ip_ignored(
@@ -182,7 +182,7 @@ def test_wake_malformed_pc_ip_ignored(
     resp = _post_wake(wake_app, stubbed_token)
 
     assert resp.status_code == 200
-    assert sent[0][1] == [("255.255.255.255", 9), ("<lan>.1.255", 9)]
+    assert sent[0][1] == [("255.255.255.255", 9), ("10.0.1.255", 9)]
 
 
 def test_wake_waits_for_registry(
@@ -291,13 +291,13 @@ def test_send_packet_one_bad_target_does_not_block_the_rest(monkeypatch) -> None
     this previously made the Mac report sent:false for a batch where the
     broadcast targets (the ones that actually matter) went out fine."""
     _FakeSocket.log = []
-    _FakeSocket.fail_addr = ("<lan>.1.117", 9)
+    _FakeSocket.fail_addr = ("10.0.1.117", 9)
     monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
 
-    targets = [("255.255.255.255", 9), ("<lan>.1.255", 9), ("<lan>.1.117", 9)]
+    targets = [("255.255.255.255", 9), ("10.0.1.255", 9), ("10.0.1.117", 9)]
     assert wake._send_packet(b"packet", targets) == 2  # must not raise; counts the sends
 
-    assert _FakeSocket.log == [("255.255.255.255", 9), ("<lan>.1.255", 9)]
+    assert _FakeSocket.log == [("255.255.255.255", 9), ("10.0.1.255", 9)]
 
 
 def test_send_packet_all_targets_ok(monkeypatch) -> None:
@@ -305,7 +305,7 @@ def test_send_packet_all_targets_ok(monkeypatch) -> None:
     _FakeSocket.fail_addr = None
     monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
 
-    targets = [("255.255.255.255", 9), ("<lan>.1.255", 9)]
+    targets = [("255.255.255.255", 9), ("10.0.1.255", 9)]
     assert wake._send_packet(b"packet", targets) == 2
 
     assert _FakeSocket.log == targets
@@ -317,9 +317,9 @@ def test_wake_sent_false_when_every_target_fails(
     """I2: `sent` reflects the real per-target outcome — a batch where every
     sendto raises OSError must report sent:false, not a blanket True."""
     _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff"})
-    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
+    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["10.0.1.255"])
     _FakeSocket.log = []
-    _FakeSocket.fail_addrs = frozenset({("255.255.255.255", 9), ("<lan>.1.255", 9)})
+    _FakeSocket.fail_addrs = frozenset({("255.255.255.255", 9), ("10.0.1.255", 9)})
     monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
     monkeypatch.setattr(wake.registry, "roles", lambda: [])  # PC never comes online
 
@@ -338,7 +338,7 @@ def test_wake_sent_true_when_one_target_succeeds(
     """One successful send among failures is enough for sent:true — the dead
     target must not mask the packet that actually went out."""
     _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff"})
-    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
+    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["10.0.1.255"])
     _FakeSocket.log = []
     _FakeSocket.fail_addrs = frozenset({("255.255.255.255", 9)})
     monkeypatch.setattr(wake.socket, "socket", _FakeSocket)
@@ -350,4 +350,4 @@ def test_wake_sent_true_when_one_target_succeeds(
     body = resp.json()
     assert body["sent"] is True
     assert body["online"] is False
-    assert _FakeSocket.log == [("<lan>.1.255", 9)]  # only the healthy target
+    assert _FakeSocket.log == [("10.0.1.255", 9)]  # only the healthy target
