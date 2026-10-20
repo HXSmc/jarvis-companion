@@ -1,0 +1,102 @@
+[
+ {
+  "q": "SATA connectors motherboard",
+  "title": "File:SATA Express connectors on a computer motherboard.jpg",
+  "thumb": "https://upload.wikimedia.org/wikipedia/commons/f/f3/SATA_Express_connectors_on_a_computer_motherboard.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled",
+  "page": "https://commons.wikimedia.org/wiki/File:SATA_Express_connectors_on_a_computer_motherboard.jpg",
+  "license": "CC BY-SA 4.0",
+  "file": "p00.jpg"
+ },
+ {
+  "q": "Raspberry Pi GPIO header",
+  "title": "File:Raspberry Pi Zero WH.jpg",
+  "thumb": "https://thumb.wikimedia.org/wikipedia/commons/thumb/5/56/Raspberry_Pi_Zero_WH.jpg/1280px-Raspberry_Pi_Zero_WH.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+  "page": "https://commons.wikimedia.org/wiki/File:Raspberry_Pi_Zero_WH.jpg",
+  "license": "CC BY-SA 4.0",
+  "file": "p01.jpg"
+ },
+ {
+  "q": "USB-C port close up",
+  "title": "File:LeTV X600 USB Type C port.jpg",
+  "thumb": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/63/LeTV_X600_USB_Type_C_port.jpg/1280px-LeTV_X600_USB_Type_C_port.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+  "page": "https://commons.wikimedia.org/wiki/File:LeTV_X600_USB_Type_C_port.jpg",
+  "license": "CC BY-SA 4.0",
+  "file": "p02.jpg"
+ },
+ {
+  "q": "ATX 24-pin power connector motherboard",
+  "title": "File:ATX computer case - left - 2018-05-18.jpg",
+  "thumb": "https://thumb.wikimedia.org/wikipedia/commons/thumb/2/2a/ATX_computer_case_-_left_-_2018-05-18.jpg/1280px-ATX_computer_case_-_left_-_2018-05-18.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+  "page": "https://commons.wikimedia.org/wiki/File:ATX_computer_case_-_left_-_2018-05-18.jpg",
+  "license": "CC BY-SA 4.0",
+  "file": "p03.jpg"
+ },
+ {
+  "q": "Arduino breadboard jumper wires",
+  "title": "File:Bicycle Turn Signal Wiring Diagram.jpg",
+  "thumb": "https://upload.wikimedia.org/wikipedia/commons/b/b4/Bicycle_Turn_Signal_Wiring_Diagram.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled",
+  "page": "https://commons.wikimedia.org/wiki/File:Bicycle_Turn_Signal_Wiring_Diagram.jpg",
+  "license": "CC BY-SA 3.0",
+  "file": "p04.jpg"
+ },
+ {
+  "file": "p05.jpg",
+  "title": "File:Four SDRAM DIMM slots on a computer motherboard.jpg",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Four_SDRAM_DIMM_slots_on_a_computer_motherboard.jpg"
+ },
+ {
+  "file": "p06.jpg",
+  "title": "File:Dual channel slots.jpg",
+  "license": "Public domain",
+  "page": "https://commons.wikimedia.org/wiki/File:Dual_channel_slots.jpg"
+ },
+ {
+  "file": "p07.jpg",
+  "title": "File:Raspberry Pi 4 Model B - Side.jpg",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Raspberry_Pi_4_Model_B_-_Side.jpg"
+ },
+ {
+  "file": "p08.jpg",
+  "title": "File:Raspberry Pi 2 Model B v1.1 underside new (bg cut out).jpg",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Raspberry_Pi_2_Model_B_v1.1_underside_new_(bg_cut_out).jpg"
+ },
+ {
+  "file": "p09.jpg",
+  "title": "File:Arduino Uno - R3.jpg",
+  "license": "CC BY 2.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Arduino_Uno_-_R3.jpg"
+ },
+ {
+  "file": "p10.jpg",
+  "title": "File:Arduino UNO compatible board, CNC shield stepper motor controller",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Arduino_UNO_compatible_board,_CNC_shield_stepper_motor_controller"
+ },
+ {
+  "file": "p11.jpg",
+  "title": "File:SATA cables (2026).jpg",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:SATA_cables_(2026).jpg"
+ },
+ {
+  "file": "p12.jpg",
+  "title": "File:SATA Data Cable.jpg",
+  "license": "CC BY-SA 3.0",
+  "page": "https://commons.wikimedia.org/wiki/File:SATA_Data_Cable.jpg"
+ },
+ {
+  "file": "p13.jpg",
+  "title": "File:GIGABYTE GS-GC330UD (8357750354).jpg",
+  "license": "CC BY 2.0",
+  "page": "https://commons.wikimedia.org/wiki/File:GIGABYTE_GS-GC330UD_(8357750354).jpg"
+ },
+ {
+  "file": "p14.jpg",
+  "title": "File:ThinkPad X220 Bluetooth Daughter Card (BDC-3) and BDC slot.jpg",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:ThinkPad_X220_Bluetooth_Daughter_Card_(BDC-3)_and_BDC_slot.jpg"
+ }
+]
