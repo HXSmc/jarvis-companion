@@ -57,7 +57,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents, central, inbox, notify, quick, screen, vnc, wake
+from gateway import agents, central, hwmode, inbox, notify, quick, screen, vnc, wake
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
@@ -71,6 +71,7 @@ app.include_router(quick.router, prefix="")
 app.include_router(wake.router, prefix="")
 app.include_router(inbox.router, prefix="")
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
+app.include_router(hwmode.router)  # /hwmode/ws: phone camera frames -> lean Claude brain (ios_token only)
 app.include_router(central.public_router)  # /central/floor page only: no data, no auth
 # SCREEN_CONTROL=0 unmounts /screen/* (kill switch); default on.
 if os.environ.get("SCREEN_CONTROL", "1") != "0":
