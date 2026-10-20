@@ -110,3 +110,19 @@ def test_hardware_requests_round_trip(gateway_server):
             assert (await http.delete("/hwmode/request/abc123", headers=IOS_AUTH_HEADER)).json() == {"ok": True}
             assert (await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)).json() == {}
     asyncio.run(run())
+
+
+def test_session_restart_after_max_turns_is_silent(gateway_server, fake_claude, monkeypatch):
+    from gateway import hwmode
+    monkeypatch.setattr(hwmode, "MAX_TURNS", 1)
+
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                assert json.loads(await ws.recv())["type"] == "ready"
+                for _ in range(2):  # second ask restarts the brain: no extra "ready" may appear
+                    await ws.send(json.dumps({"type": "ask", "text": "q", "frame": False}))
+                    kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(2)]
+                    assert kinds == ["say", "reply"]
+    asyncio.run(run())

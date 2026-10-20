@@ -79,6 +79,7 @@ class _Conn:
         self.frame: bytes | None = None
         self.frame_id: int | None = None
         self.busy = asyncio.Lock()
+        self.tasks: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
 
     async def send(self, msg: dict) -> None:
         await self.ws.send_text(json.dumps(msg))
@@ -88,17 +89,18 @@ class _Conn:
             self.session.close()
             self.session = None
 
-    async def start(self, task: str, model: str) -> None:
+    async def start(self, task: str, model: str, announce: bool = True) -> None:
         self._close_session()
         self.task, self.model = task, model if model in ("sonnet", "haiku") else "sonnet"
         self.session = await asyncio.to_thread(LeanSession, self.model, claude_bin=_claude_bin())
-        await self.send({"type": "ready", "model": self.model})
+        if announce:  # the phone answers "ready" by planning the task, so only for a real start
+            await self.send({"type": "ready", "model": self.model})
 
     async def ask(self, text: str, use_frame: bool) -> None:
         async with self.busy:
             if self.session is None or self.session.turns >= MAX_TURNS:
                 carry = f"Task: {self.task}. " if self.task else ""
-                await self.start(self.task, self.model)
+                await self.start(self.task, self.model, announce=False)
                 text = carry + text
             jpeg = self.frame if use_frame else None
             frame_id = self.frame_id if use_frame else None
@@ -138,7 +140,9 @@ class _Conn:
                 await self.send({"type": "error", "error": "empty question"})
                 return
             # Answer in the background so frames keep flowing while the brain thinks.
-            asyncio.create_task(self._ask_safely(text, bool(msg.get("frame", True))))
+            t = asyncio.create_task(self._ask_safely(text, bool(msg.get("frame", True))))
+            self.tasks.add(t)
+            t.add_done_callback(self.tasks.discard)
         else:
             await self.send({"type": "error", "error": f"unknown type {kind!r}"})
 
