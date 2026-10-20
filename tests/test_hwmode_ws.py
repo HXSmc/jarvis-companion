@@ -92,3 +92,21 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
                 await ws.send(json.dumps({"type": "frame", "id": 8, "jpeg": base64.b64encode(b"junk").decode()}))
                 assert json.loads(await ws.recv()) == {"type": "error", "error": "bad frame"}
     asyncio.run(run())
+
+
+def test_hardware_requests_round_trip(gateway_server):
+    import httpx
+    from gateway import hwmode
+    hwmode._requests.clear()
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            body = {"session_id": "abc123", "task": "reseat the SATA cable on the SSD"}
+            assert (await http.post("/hwmode/request", json=body, headers=IOS_AUTH_HEADER)).status_code == 401
+            assert (await http.post("/hwmode/request", json=body, headers=AUTH_HEADER)).status_code == 200
+            assert (await http.get("/hwmode/requests", headers=AUTH_HEADER)).status_code == 401
+            r = await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)
+            assert r.json() == {"abc123": "reseat the SATA cable on the SSD"}
+            assert (await http.delete("/hwmode/request/abc123", headers=IOS_AUTH_HEADER)).json() == {"ok": True}
+            assert (await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)).json() == {}
+    asyncio.run(run())

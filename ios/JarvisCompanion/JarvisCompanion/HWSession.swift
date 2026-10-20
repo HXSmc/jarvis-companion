@@ -10,6 +10,12 @@ struct HWOverlay: Equatable {
     var frameId: Int?
 }
 
+/// A session-card request to open Hardware Mode for a Claude session.
+struct HWTarget: Identifiable {
+    let id: String  // Claude session id
+    let task: String
+}
+
 /// Hardware Mode link to the gateway's `/hwmode/ws`: frames up, spoken
 /// guidance + overlay down. The brain (a lean Claude Code session) runs on the
 /// mini PC; this class only moves messages and keeps the latest answer.
@@ -35,6 +41,7 @@ final class HWSession: ObservableObject {
     private var taskText = ""
     private var nextFrameId = 1
     private var saidThisTurn = false
+    private var quietTurn = false
 
     func connect(task: String) {
         taskText = task
@@ -70,11 +77,13 @@ final class HWSession: ObservableObject {
         return id
     }
 
-    func ask(_ text: String, withFrame: Bool = true) {
+    /// `quiet`: a watch-mode check; an empty answer changes nothing on screen.
+    func ask(_ text: String, withFrame: Bool = true, quiet: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, connected else { return }
         thinking = true
         saidThisTurn = false
+        quietTurn = quiet
         send(["type": "ask", "text": trimmed, "frame": withFrame])
     }
 
@@ -124,7 +133,9 @@ final class HWSession: ObservableObject {
                 speak("Sorry, I didn't get that. Ask me again.")
                 return
             }
-            if !saidThisTurn, let text = d["say"] as? String { speak(text) }
+            let said = ((d["say"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+            if quietTurn && said.isEmpty { return }  // watch check: all good, keep the current guidance
+            if !saidThisTurn, !said.isEmpty { speak(said) }
             step = (d["step"] as? NSNumber)?.intValue ?? step
             total = (d["of"] as? NSNumber)?.intValue ?? total
             overlay = Self.parseOverlay(d["overlay"], width: (m["w"] as? NSNumber)?.doubleValue,
@@ -140,6 +151,7 @@ final class HWSession: ObservableObject {
     }
 
     private func speak(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         saidThisTurn = true
         say = text
         onSay?(text)

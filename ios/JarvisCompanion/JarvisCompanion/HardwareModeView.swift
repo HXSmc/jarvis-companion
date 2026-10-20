@@ -5,6 +5,8 @@ import SwiftUI
 /// step card), which stay on the part as the phone moves.
 struct HardwareModeView: View {
     var initialTask: String = ""
+    /// Set when opened from a session card: the summary goes back to that session.
+    var sessionId: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var camera = HWCamera()
@@ -17,6 +19,9 @@ struct HardwareModeView: View {
     @State private var started = false
     @State private var typed = ""
     @State private var torch = false
+    @State private var lastHeard = ""
+    @State private var lastChange: Date?
+    @State private var lastWatch = Date.distantPast
     @FocusState private var typing: Bool
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -50,8 +55,13 @@ struct HardwareModeView: View {
         .onDisappear(perform: tearDown)
         .onReceive(ticker) { _ in
             // Background frames: only when the picture changed. No model call.
-            guard hw.connected, let jpeg = camera.jpeg(onlyIfChanged: true) else { return }
-            hw.sendFrame(jpeg)
+            guard hw.connected else { return }
+            if let jpeg = camera.jpeg(onlyIfChanged: true) {
+                hw.sendFrame(jpeg)
+                lastChange = Date()
+            } else {
+                watchIfSettled()
+            }
         }
         .onChange(of: voice.heard) { heard in
             // Prefetch: ship a fresh frame the moment speech starts.
@@ -195,6 +205,7 @@ struct HardwareModeView: View {
     }
 
     private func tearDown() {
+        if let sid = sessionId, started { reportBack(to: sid) }
         hw.disconnect()
         voice.stop()
         camera.setTorch(false)
@@ -222,9 +233,34 @@ struct HardwareModeView: View {
         case .torchOn?: torch = true; camera.setTorch(true)
         case .torchOff?: torch = false; camera.setTorch(false)
         case nil:
+            lastHeard = t
             voice.stopSpeaking()
             sendFreshFrame()
             hw.ask(t)
+        }
+    }
+
+    /// Watch mode: the picture changed and has been still for 2 s -> ask, at
+    /// most every 15 s, whether something is wrong or the step is done. The
+    /// brain stays silent ("say": "") when all is fine.
+    private func watchIfSettled() {
+        guard let changed = lastChange, Date().timeIntervalSince(changed) > 2,
+              Date().timeIntervalSince(lastWatch) > 15,
+              hw.total > 0, !hw.thinking, !voice.speaking, voice.heard.isEmpty else { return }
+        lastChange = nil
+        lastWatch = Date()
+        hw.ask("[watch] The picture just changed and is now still. Only if I did something wrong, or the current step is clearly finished, tell me (and give the next step). Otherwise reply with \"say\": \"\" and \"overlay\": null.", quiet: true)
+    }
+
+    /// Post a short summary into the Claude session that asked for this, and clear its request.
+    private func reportBack(to sid: String) {
+        let summary = "Hardware Mode (phone camera) finished. Task: \(task). Reached step \(hw.step) of \(hw.total). "
+            + "Last instruction: \(hw.say.isEmpty ? "none" : hw.say). "
+            + "Owner's last words: \(lastHeard.isEmpty ? "none" : lastHeard)."
+        Task {
+            _ = try? await Central.data(Central.request("/central/sessions/\(sid)/message", method: "POST",
+                                                        json: ["msg_id": UUID().uuidString, "text": summary]))
+            _ = try? await Central.data(Central.request("/hwmode/request/\(sid)", method: "DELETE"))
         }
     }
 

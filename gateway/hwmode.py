@@ -14,6 +14,11 @@ Server -> client:
   {"type": "reply", "data": {...}|null, "raw": str, "frame_id": int|null, "w": int, "h": int,
    "ttft_s": float|null, "total_s": float}
   {"type": "error", "error": str}
+
+A Claude session that needs a physical action posts `/hwmode/request`
+(shared token, from `jarvis-hw-request` on this box); the phone lists them
+(`GET /hwmode/requests`, ios_token) and shows "Open Hardware Mode" on that
+session's card, then clears it with `DELETE /hwmode/request/{session_id}`.
 """
 from __future__ import annotations
 
@@ -25,9 +30,12 @@ import os
 import re
 import shutil
 import struct
+import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
+from gateway.auth import require_bearer, require_bearer_any
 from gateway.ws import IOS_ROLE, _authorized
 from hwmode.brain import LeanSession
 
@@ -37,6 +45,9 @@ router = APIRouter()
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 # Restart the session after this many turns: every turn resends earlier images.
 MAX_TURNS = 20
+REQUEST_TTL_S = 12 * 3600
+# session_id -> {"task": str, "at": epoch seconds}; in memory: a gateway restart drops them.
+_requests: dict[str, dict] = {}
 _SAY_RE = re.compile(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
@@ -175,3 +186,31 @@ async def hwmode_ws(websocket: WebSocket) -> None:
         pass
     finally:
         await asyncio.to_thread(conn.close)
+
+
+class HardwareRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    task: str = Field(min_length=1, max_length=2000)
+
+
+def _live_requests() -> dict[str, dict]:
+    cutoff = time.time() - REQUEST_TTL_S
+    for sid in [sid for sid, r in _requests.items() if r["at"] < cutoff]:
+        del _requests[sid]
+    return _requests
+
+
+@router.post("/hwmode/request", dependencies=[Depends(require_bearer)])
+async def post_request(req: HardwareRequest) -> dict:
+    _live_requests()[req.session_id] = {"task": req.task, "at": time.time()}
+    return {"ok": True}
+
+
+@router.get("/hwmode/requests", dependencies=[Depends(require_bearer_any("ios_token"))])
+async def list_requests() -> dict:
+    return {sid: r["task"] for sid, r in _live_requests().items()}
+
+
+@router.delete("/hwmode/request/{session_id}", dependencies=[Depends(require_bearer_any("ios_token"))])
+async def clear_request(session_id: str) -> dict:
+    return {"ok": _live_requests().pop(session_id, None) is not None}
