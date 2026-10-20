@@ -196,7 +196,7 @@ struct HardwareModeView: View {
         }
         hw.onReady = {
             sendFreshFrame()
-            hw.ask("Task: \(task). Plan the steps, then guide me through step 1.")
+            hw.ask("Plan the steps, then guide me through step 1.")  // the gateway adds the task
         }
         voice.onUtterance = { handle($0) }
         if !initialTask.isEmpty {

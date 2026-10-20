@@ -27,9 +27,11 @@ for line in sys.stdin:
     msg = json.loads(line)
     content = msg["message"]["content"]
     has_img = any(c.get("type") == "image" for c in content)
+    text = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
     reply = json.dumps({"say": "Press the latch.", "step": 1, "of": 2,
                         "overlay": {"target_px": [10, 20, 30, 40], "action": "press",
-                                    "arrow_dir": [0, 1], "label": "img" if has_img else "noimg"}})
+                                    "arrow_dir": [0, 1],
+                                    "label": ("img" if has_img else "noimg") + ("+task" if text.startswith("Task: ") else "")}})
     half = len(reply) // 2
     for part in (reply[:half], reply[half:]):
         print(json.dumps({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": part}}}), flush=True)
@@ -82,7 +84,7 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
                 assert say == {"type": "say", "text": "Press the latch."}
                 assert reply["type"] == "reply" and reply["frame_id"] == 7
                 assert (reply["w"], reply["h"]) == (64, 48)
-                assert reply["data"]["overlay"]["label"] == "img"
+                assert reply["data"]["overlay"]["label"] == "img+task"  # first ask carries the task
 
                 await ws.send(json.dumps({"type": "ask", "text": "and now?", "frame": False}))
                 await ws.recv()  # say

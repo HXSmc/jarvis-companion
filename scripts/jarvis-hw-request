@@ -8,10 +8,11 @@ Puts an "Open Hardware Mode" button on this session's card in the Jarvis app.
 When the owner hangs up, the app posts a summary back into this session.
 The shared gateway token is read in-process from the vault and never printed.
 """
+import json
 import os
 import sys
-
-import httpx
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR", "/home/<user>/jarvis-gateway"))
 from common import config  # noqa: E402
@@ -26,8 +27,11 @@ if not task or not session or task in ("-h", "--help"):
 token = config.get_token()
 if not token:
     sys.exit("no gateway token in the vault")
-r = httpx.post("http://127.0.0.1:8788/hwmode/request", json={"session_id": session, "task": task},
-               headers={"Authorization": f"Bearer {token}"}, timeout=15)
-if r.status_code != 200:
-    sys.exit(f"gateway answered {r.status_code}: {r.text[:200]}")
+req = urllib.request.Request("http://127.0.0.1:8788/hwmode/request", method="POST",
+                             data=json.dumps({"session_id": session, "task": task}).encode(),
+                             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+try:
+    urllib.request.urlopen(req, timeout=15).read()
+except urllib.error.HTTPError as e:
+    sys.exit(f"gateway answered {e.code}: {e.read()[:200].decode(errors='replace')}")
 print(f"Hardware Mode request posted for session {session}. The owner will see a button on the session card.")
