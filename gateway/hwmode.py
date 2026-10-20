@@ -108,9 +108,9 @@ class _Conn:
     async def ask(self, text: str, use_frame: bool) -> None:
         async with self.busy:
             if self.session is None or self.session.turns >= MAX_TURNS:
-                carry = f"Task: {self.task}. " if self.task else ""
                 await self._start(self.task, self.model, announce=False)
-                text = carry + text
+            if self.session.turns == 0 and self.task:  # a fresh brain must know the job
+                text = f"Task: {self.task}. {text}"
             jpeg = self.frame if use_frame else None
             frame_id = self.frame_id if use_frame else None
             size = jpeg_size(jpeg) if jpeg else None
