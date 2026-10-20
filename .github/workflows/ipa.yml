@@ -25,8 +25,11 @@ jobs:
           # GENERATE_INFOPLIST_FILE=NO and this Info.plist has literal "1.0"/"1" values
           # (no $(MARKETING_VERSION) substitution), so the build-settings lever is a
           # no-op here -- PlistBuddy on the physical file is the correct lever.
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.${{ github.run_number }}" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          # +100: run_number restarted at 1 when the repo was recreated (2026-10-21);
+          # the phone already has 1.0.38, and AltStore only offers higher versions.
+          BUILD=$(( ${{ github.run_number }} + 100 ))
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.$BUILD" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST"
 
