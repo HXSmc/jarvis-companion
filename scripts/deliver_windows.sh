@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Deliver the Jarvis Windows agent bundle to the PC "<user>" over Taildrop
+# Deliver the Jarvis Windows agent bundle to the PC over Taildrop
 # (DESIGN.md "Delivery / install paths"). Default is the one-click source zip
 # from scripts/build_release.sh (windows/install.ps1 sets everything up on the
 # PC); the legacy self-built .exe still works when passed explicitly.
 set -euo pipefail
 
+ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+WINPC="${JARVIS_WINPC_TAILDROP:?JARVIS_WINPC_TAILDROP is not set (copy .env.example to .env)}"
 ZIP="${1:-dist/jarvis-windows-agent.zip}"
 
 if [[ ! -f "$ZIP" ]]; then
@@ -16,8 +20,8 @@ fi
 
 command -v tailscale >/dev/null 2>&1 || { echo "error: tailscale CLI not found in PATH" >&2; exit 1; }
 
-echo "Sending $(basename "$ZIP") to <user> ..."
-tailscale file cp "$ZIP" <user>:
+echo "Sending $(basename "$ZIP") to $WINPC ..."
+tailscale file cp "$ZIP" "$WINPC":
 
 if [[ "$ZIP" == *.zip ]]; then
     cat <<'EOF'

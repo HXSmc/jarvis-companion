@@ -8,11 +8,11 @@ handoff, vault passwords on the phone (Apple Passwords CSV + iCloud Keychain), "
 Jarvis" wake word (Mac + Windows via openWakeWord, iPhone via a Siri Shortcut), and an
 iPhone Mirroring tap-through driver.
 
-## Doc map
+## Setup
 
-- `docs/DESIGN.md` — architecture, feature flows, auth, out of scope
-- `docs/PLAN.md` — phased build tasks with acceptance commands
-- `resume.md` — current state, decisions, how to resume the build loop
+Copy `.env.example` to `.env` and fill in your deployment's URLs and accounts
+(the gateway loads it at startup; deploy scripts source it). Required vars are
+named in the error message when one is missing. Tests run without a `.env`.
 
 ## Stack
 

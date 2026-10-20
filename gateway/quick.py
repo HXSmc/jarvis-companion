@@ -155,7 +155,7 @@ def _extract_question(text: str) -> str:
 
 
 # ponytail: the owner's active company — one constant, no config, no list
-DEFAULT_PROJECT = "<project>"
+DEFAULT_PROJECT = os.environ.get("JARVIS_DEFAULT_PROJECT", "project")
 _DEFAULT_PROJECT_RE = re.compile(r"\b(?:my|the|our) project\b", re.IGNORECASE)
 _FUZZY_MIN_RATIO = 0.5
 

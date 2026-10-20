@@ -31,7 +31,8 @@ import sys
 import uuid
 from pathlib import Path
 
-DEFAULT_URL = "https://<mac-host>.<tailnet>.<tld>:8790/siri/hey"
+# The gateway /siri/hey URL is deployment-private: env or --url, no default.
+DEFAULT_URL = os.environ.get("JARVIS_SHORTCUT_URL", "")
 
 # The magic-variable placeholder: literal U+FFFC in the string, never an XML
 # entity (hex-confirmed against real exported samples in the research note).
@@ -174,6 +175,9 @@ def main(argv: list[str] | None = None) -> None:
         help="output directory (default: shortcuts/build/ next to this script)",
     )
     args = parser.parse_args(argv)
+    if not args.url:
+        sys.stderr.write("error: --url or JARVIS_SHORTCUT_URL is not set (gateway /siri/hey URL)\n")
+        raise SystemExit(1)
 
     token = _read_token()
     out_dir = Path(args.out).resolve() if args.out else Path(__file__).resolve().parent / "build"

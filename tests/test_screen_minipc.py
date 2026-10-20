@@ -101,6 +101,7 @@ def test_novnc_proxy_allowlist_and_auth(gateway_server, monkeypatch):
         "vendor/pako/pako.esm.js": hashlib.sha256(body).hexdigest(),
     }
     monkeypatch.setattr(vnc, "_sha256_manifest", manifest)
+    monkeypatch.setattr(vnc, "MINIPC_NOVNC_BASE", "https://novnc.test")  # env-driven now
 
     async def fake_fetch(path: str) -> tuple[int, bytes]:
         return 200, body
@@ -130,6 +131,7 @@ def test_novnc_proxy_allowlist_and_auth(gateway_server, monkeypatch):
 
 def test_novnc_hash_mismatch_502_not_cached(gateway_server, monkeypatch):
     monkeypatch.setattr(vnc, "_sha256_manifest", {"core/rfb.js": "0" * 64})
+    monkeypatch.setattr(vnc, "MINIPC_NOVNC_BASE", "https://novnc.test")  # env-driven now
 
     async def fake_fetch(path: str) -> tuple[int, bytes]:
         return 200, b"tampered bytes"
@@ -148,6 +150,7 @@ def test_novnc_hash_mismatch_502_not_cached(gateway_server, monkeypatch):
 
 def test_novnc_upstream_non200_and_error(gateway_server, monkeypatch):
     monkeypatch.setattr(vnc, "_sha256_manifest", {"vendor/ui.js": "0" * 64})
+    monkeypatch.setattr(vnc, "MINIPC_NOVNC_BASE", "https://novnc.test")  # env-driven now
     vnc._cache.clear()
 
     async def not_found(path: str) -> tuple[int, bytes]:

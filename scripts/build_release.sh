@@ -67,7 +67,7 @@ cat > "$DIST/INSTALL.md" <<'EOF'
    (token from the Secrets vault `## Jarvis Companion` section) → 200
 
 ## Windows PC
-1. Mac → PC (PC must be on): `tailscale file cp dist/jarvis-windows-agent.zip <user>:`
+1. Mac → PC (PC must be on): `tailscale file cp dist/jarvis-windows-agent.zip <your-pc-tailnet-device>:`
 2. On the PC (PowerShell) — the Taildrop file lands in Downloads:
    ```powershell
    Expand-Archive "$env:USERPROFILE\Downloads\jarvis-windows-agent.zip" -DestinationPath "$env:LOCALAPPDATA\jarvis\src"

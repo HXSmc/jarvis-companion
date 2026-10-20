@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """mkspec.py <story-id> <flash|5.3> <minutes>  -> writes .orchestrator/specs/<tid>.md from prd.json, prints tid"""
-import json, sys, time, random, pathlib, re
+import json, sys, time, random, pathlib, re, os
 sid, tier, mins = sys.argv[1], sys.argv[2], int(sys.argv[3])
-root = pathlib.Path('/Users/<user>/Desktop/personal/jarvis-companion')
+root = pathlib.Path(os.environ.get('JARVIS_REPO_DIR')
+                    or sys.exit('JARVIS_REPO_DIR is not set (the repo root)'))
 prd = json.load(open(root/'.orchestrator/state/prd.json'))
 st = next(s for s in prd['stories'] if s['id'] == sid)
 tid = f"t{int(time.time())}{random.randint(0,32767)}"
@@ -17,7 +18,7 @@ body = f"""{persona.read_text()}
 ## Status: not_started
 ## Context
 Repo: jarvis-companion (FastAPI gateway + Mac ctypes drivers + Windows WS agent + iOS WKWebView shell). READ FIRST, it is the rationale and names every existing helper to reuse: docs/superpowers/specs/2026-10-04-remote-screen-control-design.md (Components + Platform constraints + Security sections). Story source: `.orchestrator/state/prd.json` story {sid}. Read docs/HANDOFF.md for the repo conventions. Read every existing file the design doc names for your story BEFORE writing (reuse their functions; do not duplicate ctypes loading or auth helpers).
-If your cwd is a worktree (path under ~/.claude/orchestrator/worktrees/), the venv lives in the main checkout: run every python/pytest command as `PYTHONPATH=$PWD /Users/<user>/Desktop/personal/jarvis-companion/.venv/bin/python -m ...` from the worktree root. `.orchestrator/` is shared with the main checkout.
+If your cwd is a worktree (path under ~/.claude/orchestrator/worktrees/), the venv lives in the main checkout: run every python/pytest command as `PYTHONPATH=$PWD {root}/.venv/bin/python -m ...` from the worktree root. `.orchestrator/` is shared with the main checkout.
 ## Requirements — acceptance criteria (each independently checkable)
 {crit}
 ## Constraints
@@ -29,7 +30,7 @@ If your cwd is a worktree (path under ~/.claude/orchestrator/worktrees/), the ve
 {chr(10).join(owns)}
 ## Budget: {mins}
 ## When done (MANDATORY)
-1. Run EVERY runnable check named in the acceptance criteria and paste real output (full pytest summary line; exact status codes). Also run `PYTHONPATH=$PWD /Users/<user>/Desktop/personal/jarvis-companion/.venv/bin/python -m pytest tests windows/tests -q` and paste the summary line.
+1. Run EVERY runnable check named in the acceptance criteria and paste real output (full pytest summary line; exact status codes). Also run `PYTHONPATH=$PWD {root}/.venv/bin/python -m pytest tests windows/tests -q` and paste the summary line.
 2. Write `.orchestrator/reports/{tid}.md` with `## Status: done|failed`, files changed (git status --short), commands run with real output snippets, per-criterion ✅/❌ checklist, blockers. Final message = one line.
 """
 (root/'.orchestrator/specs'/f'{tid}.md').write_text(body)

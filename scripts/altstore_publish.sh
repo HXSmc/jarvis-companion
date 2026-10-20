@@ -15,12 +15,15 @@
 # log only, not written into source.json).
 set -euo pipefail
 
+ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
 REPO="HXSmc/jarvis-companion"
 BRANCH="ci-ipa"
 ARTIFACT_NAME="JarvisCompanion-unsigned-ipa"
 BUNDLE_ID="personal.jarvis.JarvisCompanion"
 IPA_NAME="JarvisCompanion.ipa"
-TAILNET_HOST="<mac-host>.<tailnet>.<tld>"
+TAILNET_HOST="${JARVIS_ALTSTORE_HOST:?JARVIS_ALTSTORE_HOST is not set (copy .env.example to .env)}"
 SERVE_PORT="8445"
 HTTP_LOOPBACK_PORT="8446"  # must match launchd/com.jarvis.companion.altstore-http.plist
 

@@ -4,8 +4,40 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def load_env_file(path: str | os.PathLike | None = None) -> int:
+    """Load a .env file's KEY=VALUE lines into os.environ (real env wins).
+
+    No python-dotenv dependency: the gateway needs a handful of flat keys,
+    so this tiny parser (blank/# lines skipped, one pair of matching quotes
+    stripped) is enough. Returns the number of keys loaded; 0 if no file.
+    """
+    env_path = Path(path) if path else Path(__file__).resolve().parent.parent / ".env"
+    try:
+        lines = env_path.read_text().splitlines()
+    except OSError:
+        return 0
+    loaded = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+        loaded += 1
+    return loaded
+
+
+# Runs before any gateway module reads its env vars (they all import this
+# module first); a missing .env is fine — unset vars then fail loudly at use.
+load_env_file()
 
 PORT = 8788
 

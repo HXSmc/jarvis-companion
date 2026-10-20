@@ -27,7 +27,9 @@ def _load_module():
 
 
 @pytest.fixture
-def mod():
+def mod(monkeypatch: pytest.MonkeyPatch):
+    # DEFAULT_URL is env-driven now — give tests a fake gateway URL
+    monkeypatch.setenv("JARVIS_SHORTCUT_URL", "https://gw.test:8790/siri/hey")
     return _load_module()
 
 
@@ -41,6 +43,7 @@ def token_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _build(tmp_path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Build into tmp_path with signing stubbed out; return the parsed plist."""
+    monkeypatch.setenv("JARVIS_SHORTCUT_URL", "https://gw.test:8790/siri/hey")
     mod = _load_module()
 
     def fake_run(argv, **kwargs):
@@ -129,6 +132,7 @@ def test_token_only_in_header_value(token_file, tmp_path, monkeypatch, capsys) -
 
 def test_sign_argv_absolute_paths(token_file, tmp_path, monkeypatch) -> None:
     """`shortcuts sign --mode people-who-know-me` with exact argv and absolute paths."""
+    monkeypatch.setenv("JARVIS_SHORTCUT_URL", "https://gw.test:8790/siri/hey")  # env-driven now
     mod = _load_module()
     calls: list[list[str]] = []
 
@@ -149,6 +153,7 @@ def test_sign_argv_absolute_paths(token_file, tmp_path, monkeypatch) -> None:
 
 def test_sign_skipped_without_shortcuts_cli(token_file, tmp_path, monkeypatch, capsys) -> None:
     """No `shortcuts` binary → build still succeeds, stdout has only the built path."""
+    monkeypatch.setenv("JARVIS_SHORTCUT_URL", "https://gw.test:8790/siri/hey")  # env-driven now
     mod = _load_module()
 
     def spy(argv, **kwargs):

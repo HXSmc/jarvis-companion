@@ -8,3 +8,8 @@ dist/
 .pytest_cache/
 *.egg-info/
 shortcuts/build/
+*.md
+!/README.md
+.env
+.env.*
+!.env.example
