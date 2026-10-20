@@ -72,7 +72,7 @@ _SNIPPET_BUDGET = 2500
 _MAX_NOTES = 4
 _SNIPPET_CONTEXT_LINES = 4
 
-# Function words only — domain words (jarvis, port, <project>, …) never go here.
+# Function words only — domain words (jarvis, port, nimbus, …) never go here.
 STOPWORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "of", "in", "on", "to", "for",
     "and", "or", "nor", "but", "what", "which", "who", "whom", "whose", "when",
@@ -128,7 +128,7 @@ def _extract_question(text: str) -> str:
     cut point is the question word of the LAST clause containing one, extended
     backward over contiguous question clauses — and everything from that cut
     to the END of the utterance is kept, so a trailing clause without its own
-    question word ("who are <name> and <name>", "…of <project> and <name>") is
+    question word ("who are riaz and riaz", "…of nimbus and riaz") is
     never split away. No question word → the text unchanged."""
     clauses: list[tuple[int, str]] = []  # (start offset in text, clause)
     pos = 0
@@ -180,7 +180,7 @@ def _resolve_project(q: str, tokens: set[str]) -> str:
     letters, not a stopword, not already a project token, directly after of/
     for/about/on/at/with/in or directly before "project", difflib-close
     (get_close_matches ≥ _FUZZY_MIN_RATIO), sharing the first 3 chars, and ≥2/3
-    the length of the candidate — so '<name>' → '<project>' but 'note'/'deal'/
+    the length of the candidate — so 'nimbur' → 'nimbus' but 'note'/'deal'/
     '2025'/'audio' never move. Only the gated occurrence is rewritten (rebuild
     from the word list by index), never every twin of the word."""
     q = _DEFAULT_PROJECT_RE.sub(DEFAULT_PROJECT, q)
@@ -193,8 +193,8 @@ def _resolve_project(q: str, tokens: set[str]) -> str:
                 or (i + 1 < len(words) and words[i + 1] == "project")):
             continue
         # prefix filter FIRST: the raw closest match can be a wrong-prefix token
-        # ("<name>" → example at 0.6 beats <project> at 0.545), which the prefix gate
-        # would then reject outright instead of falling through to <project>.
+        # ("nimbur" → example at 0.6 beats nimbus at 0.545), which the prefix gate
+        # would then reject outright instead of falling through to nimbus.
         sharing = sorted(p for p in tokens if p[:3] == token[:3])
         matches = difflib.get_close_matches(token, sharing, n=1, cutoff=_FUZZY_MIN_RATIO)
         if not matches:
@@ -537,9 +537,9 @@ async def ask(q: str, brain: str = "auto") -> QuickAnswer:
     start = time.monotonic()
     skip = brain == "skip"
     # Action check on the RAW utterance, before any extraction — trailing
-    # question clauses inside a command ("send <name> an email about what we
+    # question clauses inside a command ("send riaz an email about what we
     # discussed") must not turn it into a lookup.
-    # ponytail: imperative-led questions ("show me who founded <project>") route
+    # ponytail: imperative-led questions ("show me who founded nimbus") route
     # to the brain and return null under brain=skip; upgrade = tolerate a
     # trailing question clause in _is_action.
     if _is_action(q):

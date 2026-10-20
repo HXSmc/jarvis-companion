@@ -70,7 +70,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[tuple[bytes, list[tuple[str, i
     """Records (packet, targets) at the socket seam — no real packets, no ifconfig."""
     calls: list[tuple[bytes, list[tuple[str, int]]]] = []
     monkeypatch.setattr(wake, "_send_packet", lambda packet, targets: calls.append((packet, targets)))
-    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["<lan>.1.255"])
+    monkeypatch.setattr(wake, "_directed_broadcasts", lambda: ["10.0.1.255"])
     return calls
 
 
@@ -129,23 +129,23 @@ def test_wake_sends_both_targets(
     [packet, targets] = sent[0]
     assert packet == wake.magic_packet("aa:bb:cc:dd:ee:ff")
     assert ("255.255.255.255", 9) in targets
-    assert ("<lan>.1.255", 9) in targets  # directed-broadcast attempt alongside global
+    assert ("10.0.1.255", 9) in targets  # directed-broadcast attempt alongside global
 
 
 def test_wake_sends_unicast_to_pc_ip(
     stubbed_token, wake_app, monkeypatch, sent, tmp_state
 ) -> None:
-    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff", "pc_ip": "<lan>.1.117"})
+    _vault(monkeypatch, {"pc_mac": "aa:bb:cc:dd:ee:ff", "pc_ip": "10.0.1.117"})
     monkeypatch.setattr(wake.registry, "roles", lambda: ["windows"])
 
     resp = _post_wake(wake_app, stubbed_token)
 
     assert resp.status_code == 200
     [packet, targets] = sent[0]
-    assert ("<lan>.1.117", 9) in targets  # unicast — the W5-proven variant
+    assert ("10.0.1.117", 9) in targets  # unicast — the W5-proven variant
     assert packet == wake.magic_packet("aa:bb:cc:dd:ee:ff")
     assert ("255.255.255.255", 9) in targets  # broadcasts kept alongside
-    assert ("<lan>.1.255", 9) in targets
+    assert ("10.0.1.255", 9) in targets
 
 
 def test_wake_no_pc_ip_broadcast_only(
@@ -157,7 +157,7 @@ def test_wake_no_pc_ip_broadcast_only(
     resp = _post_wake(wake_app, stubbed_token)
 
     assert resp.status_code == 200
-    assert sent[0][1] == [("255.255.255.255", 9), ("<lan>.1.255", 9)]  # no unicast
+    assert sent[0][1] == [("255.255.255.255", 9), ("10.0.1.255", 9)]  # no unicast
 
 
 def test_wake_malformed_pc_ip_ignored(
@@ -169,7 +169,7 @@ def test_wake_malformed_pc_ip_ignored(
     resp = _post_wake(wake_app, stubbed_token)
 
     assert resp.status_code == 200
-    assert sent[0][1] == [("255.255.255.255", 9), ("<lan>.1.255", 9)]
+    assert sent[0][1] == [("255.255.255.255", 9), ("10.0.1.255", 9)]
 
 
 def test_wake_waits_for_registry(
