@@ -90,6 +90,9 @@ _SESSION_KEYS = (
     # Listed here so they pass through the day the router starts sending
     # them; until then _pick() just never finds the key and drops it.
     "role", "attention_reason", "done_verdict", "done_verdict_reason",
+    # The session's own pending question/permission prompt (router), the
+    # only text a "Needs you:" recap line may show.
+    "needs_prompt",
 )
 _PHASES = ("in_progress", "in_review", "done")
 # New lifecycle health enum (contract): working | quiet | waiting | idle |
@@ -117,8 +120,9 @@ PLAIN_INSTRUCTION = (
     'Reply with JSON only: {"doing": "...", "recap": ["...", "..."]}. '
     '"doing": one short line, under 70 characters, saying what it is doing right now in plain words. '
     '"recap": 1 to 5 short bullets in first person past tense, like "I fixed the login page" '
-    'or "I downloaded the photos". If the owner must act, the last bullet starts with "Needs you: ". '
-    "No jargon, no code, no file paths, no markdown."
+    'or "I downloaded the photos". Only say what the summary shows was done. Never ask the owner for '
+    "anything and never guess what the session is waiting for. The summary may be cut off: ignore an "
+    "unfinished last sentence. No jargon, no code, no file paths, no markdown."
 )
 
 router = APIRouter(dependencies=[Depends(require_bearer_any("ios_token"))])
@@ -316,10 +320,14 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
     hit = (plain or {}).get(out.get("session_id"))
     if isinstance(hit, dict) and isinstance(hit.get("doing"), str):
         out["doing"] = hit["doing"]
-        out["recap"] = [r for r in hit.get("recap") or [] if isinstance(r, str)]
+        # Model "Needs you" lines are dropped (old cache entries still hold them).
+        out["recap"] = [r for r in hit.get("recap") or [] if isinstance(r, str) and not r.startswith("Needs you")]
     else:
         out["doing"] = out.get("title") or out.get("task") or out.get("session_id")
         out["recap"] = []
+    ask = _owner_ask(out)
+    if ask:
+        out["recap"].append(ask)
     ts = _parse_ts(out.get("last_activity_at"))
     # Never hide a session that needs the owner: the old "in review" signal,
     # the legacy literal "waiting_for_owner" health value (pre-rename router),
@@ -333,6 +341,21 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
     )
     out["floor_hidden"] = bool(ts and not needs_owner and (now or _now()) - ts >= FLOOR_IDLE)
     return out
+
+
+def _owner_ask(session: dict) -> str | None:
+    """The "Needs you:" line, only while the router says the session itself is stopped on the owner.
+
+    Never from the model: it read clipped, already-answered or hub-sent text
+    as asks (cd3b9dfc, 2026-10-20). Router `attention` (watchdog guess) and a
+    still-live `blocked` row are not asks; the line clears once the router
+    leaves needs_input.
+    """
+    if session.get("state") != "needs_input" or session.get("lifecycle") not in (None, "needs_input", "blocked"):
+        return None
+    reason = session.get("needs_prompt") or session.get("blocked_reason")
+    text = " ".join(reason.split()) if isinstance(reason, str) and reason.strip() else ""
+    return f"Needs you: {text or 'it is waiting for your answer in the chat.'}"
 
 
 def _cleared(session: dict, cleared_before: datetime | None) -> bool:
@@ -426,7 +449,7 @@ def _run_claude_plain(prompt: str, timeout_s: float) -> str | None:
 def _generate_plain(session: dict) -> dict | None:
     """Blocking: one `claude -p` call -> {"doing", "recap"}; None when unusable."""
     facts = "\n".join(
-        f"{label}: {session[k]}" for label, k in (("Title", "title"), ("Task", "task"), ("State", "state"))
+        f"{label}: {session[k]}" for label, k in (("Title", "title"), ("State", "state"))
         if isinstance(session.get(k), str) and session[k]
     )
     prompt = f"{facts}\nLatest summary:\n{session['summary'][:4000]}"
