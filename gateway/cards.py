@@ -353,7 +353,11 @@ async def card_file(
            "view": view, "size": len(data), "at": _iso(_now())}
 
     def add_file(e):
-        files = e.get("files", []) + [row]
+        # A new plan.md replaces the old plan.md (a revised plan is one file, not two).
+        same = [f for f in e.get("files", []) if f.get("name") == clean_name]
+        for old in same:
+            _remove_file(sid, old)
+        files = [f for f in e.get("files", []) if f.get("name") != clean_name] + [row]
         for old in files[:-MAX_FILES]:
             _remove_file(sid, old)
         e["files"] = files[-MAX_FILES:]
