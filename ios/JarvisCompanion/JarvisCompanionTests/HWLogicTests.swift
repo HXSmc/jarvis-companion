@@ -93,4 +93,35 @@ final class HWLogicTests: XCTestCase {
         reply(nil)
         XCTAssertEqual(spoken.last, "Sorry, I didn't get that. Ask me again.")
     }
+
+    // MARK: lost part -> locate
+
+    func testLocateMovesTheBoxSilentlyAndNeverTheStep() {
+        let hw = HWSession()
+        var spoken: [String] = []
+        hw.onSay = { spoken.append($0) }
+        hw.handle(["type": "ready", "model": "sonnet"])
+        hw.ask("plan")
+        hw.handle(["type": "reply", "frame_id": 1, "w": 1024, "h": 768, "total_s": 1.0,
+                   "data": ["step": 1, "of": 4, "say": "Step 1: unplug the power cable.",
+                            "overlay": ["target_px": [300, 330, 350, 380], "action": "unplug", "label": "power cable"]]])
+        XCTAssertEqual(spoken.count, 1)
+        hw.locate("power cable")
+        hw.handle(["type": "reply", "frame_id": 2, "w": 1024, "h": 768, "total_s": 1.0,
+                   "data": ["step": 1, "of": 4, "say": "",
+                            "overlay": ["target_px": [180, 420, 230, 470], "action": "unplug", "label": "power cable"]]])
+        XCTAssertEqual(spoken.count, 1, "a found part needs no speech")
+        XCTAssertEqual(hw.overlay?.rect.minX ?? 0, 180.0 / 1024, accuracy: 1e-6, "box moved to the new spot")
+        XCTAssertEqual(hw.step, 1)
+        // out of view: no box, and it says where to aim
+        hw.locate("power cable")
+        hw.handle(["type": "reply", "frame_id": 3, "w": 1024, "h": 768, "total_s": 1.0,
+                   "data": ["step": 1, "of": 4, "say": "Point the camera at the back edge again.", "overlay": NSNull()]])
+        XCTAssertNil(hw.overlay)
+        XCTAssertEqual(spoken.last, "Point the camera at the back edge again.")
+        // a botched background reply stays silent
+        hw.locate("power cable")
+        hw.handle(["type": "reply", "data": NSNull(), "total_s": 1.0])
+        XCTAssertEqual(spoken.count, 2)
+    }
 }

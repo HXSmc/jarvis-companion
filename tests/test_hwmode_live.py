@@ -23,7 +23,7 @@ import websockets
 
 from conftest import IOS_AUTH_HEADER
 from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
-from hwmode_synth import STEPS_HINT, TASK, center_in, iou, render, video
+from hwmode_synth import MINIPC_TASK, STEPS_HINT, TASK, W, H, center_in, iou, render, render_minipc, video
 
 pytestmark = pytest.mark.skipif(os.environ.get("HWMODE_LIVE") != "1", reason="live model calls: set HWMODE_LIVE=1")
 
@@ -204,4 +204,69 @@ def test_full_repair_replay_event_order(gateway_server):
         assert seq[-1] == 2, f"did not reach the last step: {seq}"
         last = [d for k, d in phone.log if k == "reply"][-1]
         print("  final:", last.get("say"))
+    run_live(gateway_server, body)
+
+
+# ---------------------------------------------------------------- owner's case: mini PC, cables on the back
+
+LOCATE = ('[locate] I lost the highlight. Point again at the same part ({label}) in this picture. '
+          'If you see it, reply with its overlay and "say": "". If it is not in view, set overlay to null and say where to aim.')
+
+
+def _area_share(box) -> float:
+    return (box[2] - box[0]) * (box[3] - box[1]) / (W * H)
+
+
+def test_minipc_plan_boxes_one_part_not_a_whole_edge(gateway_server):
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        scene = render_minipc()
+        await phone.frame(scene.jpeg)
+        reply = await phone.ask(PLAN)
+        box = _box(reply)
+        if box is None:  # a first step with nothing to touch may have no box; then it must say where to look
+            assert reply["data"].get("say")
+            return
+        print(f"  plan box={box} share={_area_share(box):.3f}")
+        assert _area_share(box) < 0.08, f"generic box over a wide area: {box}"
+        assert any(center_in(box, t, margin=40) for t in scene.boxes.values()), f"box on no plug: {box}"
+    run_live(gateway_server, body)
+
+
+@pytest.mark.parametrize("question,part", [("Point at the power cable.", "power"),
+                                           ("Where is the HDMI cable? Show me.", "hdmi"),
+                                           ("where is the white cable", "usb")])
+def test_minipc_points_at_the_named_cable(gateway_server, question, part):
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        scene = render_minipc(noise=0.2, seed=5)
+        await phone.frame(scene.jpeg)
+        await phone.ask(PLAN)
+        reply = await phone.ask(question)
+        box = _box(reply)
+        assert box, f"no box for {question!r}: {reply['data']}"
+        truth = scene.boxes[part]
+        print(f"  box={box} truth={truth} iou={iou(box, truth):.2f}")
+        assert center_in(box, truth, margin=30), f"pointer misses the {part} plug: {box} vs {truth}"
+        assert reply["data"].get("say"), "a question must be answered out loud"
+    run_live(gateway_server, body)
+
+
+def test_minipc_locate_finds_the_plug_after_the_camera_moved(gateway_server):
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        await phone.frame(render_minipc().jpeg)
+        await phone.ask(PLAN)
+        first = await phone.ask("Point at the power cable.")
+        assert _box(first)
+        moved = render_minipc(shift=(-120, 90))  # the phone moved: everything shifted
+        await phone.frame(moved.jpeg)
+        label = (first["data"].get("overlay") or {}).get("label") or "power cable"
+        reply = await phone.ask(LOCATE.format(label=label))
+        box = _box(reply)
+        assert box, f"locate gave no box: {reply['data']}"
+        print(f"  relocated box={box} truth={moved.boxes['power']}")
+        assert center_in(box, moved.boxes["power"], margin=30)
+        assert reply["data"]["step"] == first["data"]["step"], "locate changed the step"
+        assert not reply["data"].get("say"), "a found part needs no speech"
     run_live(gateway_server, body)

@@ -39,6 +39,11 @@ final class HWVoice: ObservableObject {
     /// Bumped on every stop: late buffers / completions from an older utterance are ignored.
     private var generation = 0
     private var stopped = false
+    /// AVAudioEngine stops ITSELF on an audio configuration change (route, sample rate, voice
+    /// processing settling) and on interruptions; Apple leaves the restart to the app. Seen on
+    /// the owner's phone: "engine on" at 20 s, "engine not running" at 25 s, then silence.
+    private var observers: [NSObjectProtocol] = []
+    private var restarts: [Date] = []
     private var failures = 0
     /// Speech that arrived before the engine ran: spoken as soon as it does.
     private var pendingSpeech: String?
@@ -120,6 +125,8 @@ final class HWVoice: ObservableObject {
 
     func stop() {
         stopped = true
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
         listening = false
         silenceTimer?.invalidate()
         recognition?.cancel()
@@ -139,6 +146,7 @@ final class HWVoice: ObservableObject {
         guard engine.isRunning else {
             pendingSpeech = text
             note("speak queued: engine not running")
+            if listening { restartEngine("engine down at speak") }  // spoken as soon as it is back
             return
         }
         stopSpeaking()
@@ -237,6 +245,70 @@ final class HWVoice: ObservableObject {
         }
         listening = true
         note("engine on, voiceProcessing=\(voiceProcessing), out=\(AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue })")
+        watchEngine()
+        beginRecognition()
+        if let text = pendingSpeech {
+            pendingSpeech = nil
+            speak(text)
+        }
+    }
+
+    private func watchEngine() {
+        guard observers.isEmpty else { return }
+        let center = NotificationCenter.default
+        let reasons: [(Notification.Name, Any?, String)] = [
+            (.AVAudioEngineConfigurationChange, engine, "configuration change"),
+            (AVAudioSession.mediaServicesWereResetNotification, nil, "media services reset"),
+        ]
+        for (name, object, reason) in reasons {
+            observers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.restartEngine(reason) }
+            })
+        }
+        observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            let ended = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.ended.rawValue
+            Task { @MainActor in
+                if ended { self?.restartEngine("interruption ended") } else { self?.note("interrupted") }
+            }
+        })
+    }
+
+    /// Called every second by the screen: the notifications can be missed (or never sent).
+    func ensureRunning() {
+        if listening, !stopped, !engine.isRunning { restartEngine("watchdog") }
+    }
+
+    func restartEngine(_ reason: String) {
+        guard listening, !stopped else { return }
+        let now = Date()
+        restarts = restarts.filter { now.timeIntervalSince($0) < 60 }
+        guard restarts.count < 6 else {  // a restart loop helps nobody: say so and stop trying
+            if error == nil { fail("Audio keeps stopping. Close Hardware Mode and open it again.") }
+            return
+        }
+        restarts.append(now)
+        count("restart")
+        note("engine restart: \(reason)")
+        recognition?.cancel()
+        recognition = nil
+        request = nil
+        player.stop()
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        do {
+            try runEngine(voiceProcessing: voiceProcessing)
+        } catch {
+            note("restart with voiceProcessing=\(voiceProcessing) failed: \(error.localizedDescription)")
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
+            try? engine.inputNode.setVoiceProcessingEnabled(false)
+            do {
+                try runEngine(voiceProcessing: false)
+            } catch {
+                fail("Audio failed: \(error.localizedDescription)")
+                return
+            }
+        }
         beginRecognition()
         if let text = pendingSpeech {
             pendingSpeech = nil

@@ -126,3 +126,48 @@ if __name__ == "__main__":  # write a preview set for a human look: python3 test
     for st in ("in_port1", "unplugged", "in_port2", "in_port3"):
         (out / f"{st}.jpg").write_bytes(render(st).jpeg)
     (out / "in_port1_dim_noisy.jpg").write_bytes(render("in_port1", noise=0.5, brightness=0.45, seed=3).jpeg)
+
+
+MINIPC_TASK = "help me unscrew the mini PC to open it"
+MINIPC_PLUGS = {  # plug heads on the mini PC's back edge (x1, y1, x2, y2) at shift (0, 0)
+    "power": (300, 330, 350, 380),
+    "hdmi": (440, 335, 500, 375),
+    "usb": (580, 338, 625, 372),
+}
+
+
+def render_minipc(*, shift: tuple[int, int] = (0, 0), noise: float = 0.0, seed: int = 0) -> Scene:
+    """A drawn mini PC from above on a desk, three cables plugged into its back edge."""
+    img = Image.new("RGB", (W, H), (150, 110, 70))  # wooden desk
+    d = ImageDraw.Draw(img)
+    for i in range(0, W, 37):
+        d.line((i, 0, i + 60, H), fill=(140, 100, 62), width=3)  # wood grain
+    d.rectangle((220, 380, 760, 700), fill=(28, 28, 30), outline=(60, 60, 64), width=4)  # case top
+    d.rectangle((250, 420, 330, 470), fill=(225, 225, 215))  # sticker
+    d.text((300, 640), "MINI PC", fill=(90, 90, 95), font=_font(22))
+    cables = {"power": (20, 20, 20), "hdmi": (35, 35, 40), "usb": (230, 230, 230)}
+    for name, (x1, y1, x2, y2) in MINIPC_PLUGS.items():
+        cx = (x1 + x2) // 2
+        d.line((cx, y1, cx + (cx - 450) // 2, 40), fill=cables[name], width=14)  # cable up and away
+        d.rectangle((x1, y1, x2, y2), fill=cables[name], outline=(10, 10, 10), width=3)  # plug head
+    d.text((300, 300), "POWER", fill=(240, 240, 240), font=_font(16))
+    d.text((445, 305), "HDMI", fill=(240, 240, 240), font=_font(16))
+    d.text((585, 308), "USB", fill=(240, 240, 240), font=_font(16))
+    for sx, sy in ((235, 395), (745, 395), (235, 685), (745, 685)):  # corner screws
+        d.ellipse((sx - 7, sy - 7, sx + 7, sy + 7), fill=(150, 150, 155))
+    if shift != (0, 0):
+        img = img.transform(img.size, Image.AFFINE, (1, 0, -shift[0], 0, 1, -shift[1]), fillcolor=(150, 110, 70))
+    if noise:
+        rnd = random.Random(seed)
+        px = img.load()
+        amp = int(80 * noise)
+        for _ in range(int(W * H * 0.15)):
+            x, y = rnd.randrange(W), rnd.randrange(H)
+            r, g, b = px[x, y]
+            n = rnd.randint(-amp, amp)
+            px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)))
+    sx, sy = shift
+    boxes = {name: (x1 + sx, y1 + sy, x2 + sx, y2 + sy) for name, (x1, y1, x2, y2) in MINIPC_PLUGS.items()}
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    return Scene(buf.getvalue(), boxes, "plugged")

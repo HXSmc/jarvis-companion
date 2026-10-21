@@ -42,6 +42,7 @@ final class HWSession: ObservableObject {
     private var nextFrameId = 1
     private var saidThisTurn = false
     private var quietTurn = false
+    private var locateTurn = false
 
     /// False when the gateway URL is unusable (nothing was started).
     @discardableResult
@@ -88,13 +89,22 @@ final class HWSession: ObservableObject {
     }
 
     /// `quiet`: a watch-mode check; an empty answer changes nothing on screen.
-    func ask(_ text: String, withFrame: Bool = true, quiet: Bool = false) {
+    func ask(_ text: String, withFrame: Bool = true, quiet: Bool = false, locate: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, connected else { return }
         thinking = true
         saidThisTurn = false
         quietTurn = quiet
+        locateTurn = locate
         send(["type": "ask", "text": trimmed, "frame": withFrame])
+    }
+
+    /// The tracker lost the part: ask where `label` is in the newest frame. The answer only
+    /// moves the box (it speaks only if the part is out of view).
+    func locate(_ label: String) {
+        ask("[locate] I lost the highlight. Point again at the same part (\(label)) in this picture. "
+            + "If you see it, reply with its overlay and \"say\": \"\". If it is not in view, set overlay to null and say where to aim.",
+            quiet: true, locate: true)
     }
 
     /// Phone-side voice state, logged by the gateway (nothing comes back).
@@ -146,18 +156,27 @@ final class HWSession: ObservableObject {
             thinking = false
             lastSeconds = (m["total_s"] as? NSNumber)?.doubleValue
             guard let d = m["data"] as? [String: Any] else {
-                speak("Sorry, I didn't get that. Ask me again.")
+                if !quietTurn { speak("Sorry, I didn't get that. Ask me again.") }  // a background check stays silent
                 return
             }
             let said = ((d["say"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+            let parsed = Self.parseOverlay(d["overlay"], width: (m["w"] as? NSNumber)?.doubleValue,
+                                           height: (m["h"] as? NSNumber)?.doubleValue,
+                                           frameId: (m["frame_id"] as? NSNumber)?.intValue)
+            if locateTurn {  // only the box moves; speak only when the part is out of view
+                if !saidThisTurn, !said.isEmpty { speak(said) }
+                if parsed != nil || !said.isEmpty {
+                    overlay = parsed
+                    onOverlay?(overlay)
+                }
+                return
+            }
             if quietTurn && said.isEmpty { return }  // watch check: all good, keep the current guidance
             if !saidThisTurn, !said.isEmpty { speak(said) }
             // The gateway gates the step (done, or seen done): show what it allows.
             step = (d["step"] as? NSNumber)?.intValue ?? step
             total = (d["of"] as? NSNumber)?.intValue ?? total
-            overlay = Self.parseOverlay(d["overlay"], width: (m["w"] as? NSNumber)?.doubleValue,
-                                        height: (m["h"] as? NSNumber)?.doubleValue,
-                                        frameId: (m["frame_id"] as? NSNumber)?.intValue)
+            overlay = parsed
             onOverlay?(overlay)
         case "error":
             let error = (m["error"] as? String) ?? "error"
