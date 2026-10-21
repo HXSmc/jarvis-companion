@@ -92,7 +92,17 @@ final class HWVoiceAudioTests: XCTestCase {
         }
     }
 
+    /// Like the app, which starts listening again after a failed recognition: one retry.
     private func transcribe(_ url: URL, locale: String) async throws -> String {
+        do {
+            return try await transcribeOnce(url, locale: locale)
+        } catch let error as NSError where error.domain == "kAFAssistantErrorDomain" {
+            print("STT retry after \(error.domain) \(error.code)")
+            return try await transcribeOnce(url, locale: locale)
+        }
+    }
+
+    private func transcribeOnce(_ url: URL, locale: String) async throws -> String {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)), recognizer.isAvailable else {
             throw XCTSkip("speech recognizer \(locale) unavailable on this simulator")
         }
