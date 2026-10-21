@@ -145,3 +145,33 @@ def test_ws_watch_check_that_sees_the_step_done_may_advance(gateway_server, fake
                 await ws.send(json.dumps({"type": "ask", "text": "[watch] the picture changed", "frame": True}))
                 assert (await _reply(ws))["step"] == 2
     asyncio.run(run())
+
+
+def test_ws_locate_moves_the_box_but_never_the_step(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                await ws.recv()
+                await ws.send(json.dumps({"type": "ask", "text": "plan", "frame": False}))
+                assert (await _reply(ws))["step"] == 1
+                await ws.send(json.dumps({"type": "ask", "text": "[locate] I lost the highlight.", "frame": False}))
+                d = await _reply(ws)
+                # the fake brain tries to jump to step 2 with next-step speech: no jump, no speech, no re-ask
+                assert (d["step"], d["say"]) == (1, "")
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), 1)
+    asyncio.run(run())
+
+
+def test_ws_locate_while_busy_is_skipped(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                await ws.recv()
+                await ws.send(json.dumps({"type": "ask", "text": "plan", "frame": False}))
+                await ws.send(json.dumps({"type": "ask", "text": "[locate] lost it", "frame": False}))
+                kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(2)]
+                assert sorted(kinds) == ["error", "reply"]
+    asyncio.run(run())

@@ -263,4 +263,34 @@ final class HWVoiceAudioTests: XCTestCase {
         print("STT echo: \(heard)")
         XCTAssertTrue(HWVoice.mostlyContained(heard, in: line), "echo not caught: \(heard)")
     }
+
+    // MARK: the audio engine stops on its own: it must come back
+
+    func testEngineRestartsAndQueuedSpeechPlays() async throws {
+        let voice = HWVoice()
+        voice.start()
+        for _ in 0..<20 where !voice.listening {
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        guard voice.listening else {
+            let diag = voice.diagnostics()
+            throw XCTSkip("audio engine cannot start on this simulator: \(diag["error"] ?? "") \(diag["events"] ?? "")")
+        }
+        voice.restartEngine("test: configuration change")
+        try await Task.sleep(nanoseconds: 500_000_000)
+        var diag = voice.diagnostics()
+        print("engine restart diag: \(diag["events"] ?? "")")
+        XCTAssertEqual((diag["counts"] as? [String: Int])?["restart"], 1)
+        XCTAssertEqual(diag["engine"] as? Bool, true, "engine not running after a restart")
+        voice.ensureRunning()  // running: the watchdog must not restart again
+        diag = voice.diagnostics()
+        XCTAssertEqual((diag["counts"] as? [String: Int])?["restart"], 1)
+        voice.speak("Step 1: unplug the power cable.")
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        diag = voice.diagnostics()
+        let counts = diag["counts"] as? [String: Int] ?? [:]
+        print("speak after restart: \(counts)")
+        XCTAssertGreaterThan((counts["buffers"] ?? 0) + (counts["speakFallback"] ?? 0), 0, "nothing was played after the restart")
+        voice.stop()
+    }
 }

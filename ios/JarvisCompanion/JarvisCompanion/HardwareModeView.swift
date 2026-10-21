@@ -23,6 +23,9 @@ struct HardwareModeView: View {
     @State private var lastChange: Date?
     @State private var lastWatch = Date.distantPast
     @State private var ticks = 0
+    @State private var lastLocate = Date.distantPast
+    /// The last few JPEGs sent, by frame id: the tracker starts on the one the brain answered about.
+    @State private var sentFrames: [Int: Data] = [:]
     @FocusState private var typing: Bool
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -34,7 +37,9 @@ struct HardwareModeView: View {
             GeometryReader { geo in
                 // The brain's box always shows; tracking only keeps it on the part as the phone moves.
                 if let overlay = hw.overlay {
+                    // Lost: dimmed at the last known spot while the brain is asked to find it again.
                     HWOverlayLayer(overlay: overlay, rect: viewRect(tracked ?? overlay.rect, in: geo.size))
+                        .opacity(lost ? 0.35 : 1)
                 }
             }
             .ignoresSafeArea()
@@ -44,7 +49,7 @@ struct HardwareModeView: View {
                 if started { stepCard }
                 Spacer()
                 if lost && hw.overlay != nil {
-                    pill("Lost the part. Point at it again and say \"where\"", color: .orange)
+                    pill("Finding the part again…", color: .orange)
                 }
                 if started && !hw.connected && hw.status != "Connecting…" {
                     Button { _ = hw.connect(task: task) } label: {
@@ -61,6 +66,7 @@ struct HardwareModeView: View {
         .onAppear(perform: setUp)
         .onDisappear(perform: tearDown)
         .onReceive(ticker) { _ in
+            voice.ensureRunning()  // the audio engine can stop on its own; bring it back
             // Background frames: only when the picture changed. No model call.
             guard hw.connected else { return }
             ticks += 1
@@ -71,6 +77,7 @@ struct HardwareModeView: View {
             } else {
                 watchIfSettled()
             }
+            relocateIfLost()
         }
         .onChange(of: voice.heard) { heard in
             // Prefetch: ship a fresh frame the moment speech starts.
@@ -202,7 +209,12 @@ struct HardwareModeView: View {
             tracked = nil
             lost = false
             if let overlay {
-                tracker.seed(overlay.rect)
+                // Start tracking on the frame the brain looked at (scaled to the camera's size),
+                // so the seconds the answer took don't leave the box on the wrong spot.
+                let seen = overlay.frameId.flatMap { sentFrames[$0] }.flatMap { CIImage(data: $0) }
+                    .map { img in img.transformed(by: CGAffineTransform(scaleX: camera.frameSize.width / img.extent.width,
+                                                                         y: camera.frameSize.height / img.extent.height)) }
+                tracker.seed(overlay.rect, on: seen)
             } else {
                 tracker.clear()
             }
@@ -242,7 +254,9 @@ struct HardwareModeView: View {
     }
 
     private func send(_ jpeg: Data) {
-        hw.sendFrame(jpeg)
+        let id = hw.sendFrame(jpeg)
+        sentFrames[id] = jpeg
+        sentFrames = sentFrames.filter { $0.key > id - 4 }
     }
 
     private func sendFreshFrame() {
@@ -263,6 +277,16 @@ struct HardwareModeView: View {
             sendFreshFrame()
             hw.ask(t)
         }
+    }
+
+    /// Tracking lost the part: ask the brain where it is now, at most every 6 s. The answer
+    /// moves the box; nothing is spoken unless the part is out of view.
+    private func relocateIfLost() {
+        guard lost, let overlay = hw.overlay, !hw.thinking, !voice.speaking, voice.heard.isEmpty,
+              Date().timeIntervalSince(lastLocate) > 6 else { return }
+        lastLocate = Date()
+        sendFreshFrame()
+        hw.locate(overlay.label.isEmpty ? "the part you pointed at" : overlay.label)
     }
 
     /// Watch mode: the picture changed and has been still for 2 s -> ask, at
@@ -343,7 +367,7 @@ struct HWOverlayLayer: View {
         let len = hypot(overlay.dir.dx, overlay.dir.dy)
         guard len > 0.01 else { return nil }
         let d = CGVector(dx: overlay.dir.dx / len, dy: overlay.dir.dy / len)
-        let reach = max(60, max(rect.width, rect.height) * 1.1)
+        let reach = min(160, max(60, max(rect.width, rect.height) * 1.1))  // a wide box must not throw an arrow across the screen
         let c = CGPoint(x: rect.midX, y: rect.midY)
         let start = CGPoint(x: c.x + d.dx * reach * 0.25 * phase, y: c.y + d.dy * reach * 0.25 * phase)
         let end = CGPoint(x: c.x + d.dx * reach * (0.75 + 0.25 * phase), y: c.y + d.dy * reach * (0.75 + 0.25 * phase))

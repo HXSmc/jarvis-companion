@@ -31,7 +31,10 @@ give an overlay on it. Use null only when it is not in view, and then say where 
 Steps: move to the next step ONLY when the user says the current one is done ("done", "finished", "next"),
 or in a [watch] check when the image clearly SHOWS the step finished (then set done_seen true).
 Steps whose result can't be seen (power off, unplugged at the wall) need the user's "done".
-A question ("where is the cable?") is help with the current step, never a reason to move on."""
+A question ("where is the cable?") is help with the current step, never a reason to move on.
+The box is for ONE part: if a step touches several (e.g. "unplug every cable"), box the first one and say so.
+A [locate] message means the phone lost the part: box the same part again in the new image, with "say": ""
+(or overlay null and say where to aim if it is not in view). Never change the step for it."""
 
 LEAN_FLAGS = [
     "--tools", "",

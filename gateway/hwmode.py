@@ -65,6 +65,8 @@ _requests: dict[str, dict] = {}
 _SAY_RE = re.compile(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"')
 _STEP_RE = re.compile(r'"step"\s*:\s*(\d+)')
 WATCH_PREFIX = "[watch]"
+LOCATE_PREFIX = "[locate]"  # the phone lost the part: where is it now? (moves the box, never the step)
+BACKGROUND = (WATCH_PREFIX, LOCATE_PREFIX)
 # The user saying the current step is finished: the only spoken way to move on.
 _DONE_RE = re.compile(
     r"(ok(ay)? |yes |alright |right )?"
@@ -169,7 +171,8 @@ class _Conn:
                 await self._start(self.task, self.model, announce=False)
             asked = text
             watch = asked.startswith(WATCH_PREFIX)
-            user_done = not watch and is_done_confirmation(asked)
+            locate = asked.startswith(LOCATE_PREFIX)
+            user_done = not (watch or locate) and is_done_confirmation(asked)
             if self.session.turns == 0 and self.task:  # a fresh brain must know the job
                 where = f" We are on step {self.gate.current}." if self.gate.current else ""
                 text = f"Task: {self.task}.{where} {text}"
@@ -199,8 +202,8 @@ class _Conn:
 
             logger.info("ask frame=%s text=%r", frame_id, text[:200])
             reply = await asyncio.to_thread(self.session.ask, text, jpeg, on_text)
-            data = self._gate(reply.data, user_done, watch, jpeg is not None)
-            if data is not None and data.get("step") != (reply.data or {}).get("step") and not watch:
+            data = self._gate(reply.data, user_done, watch, jpeg is not None, locate)
+            if data is not None and data.get("step") != (reply.data or {}).get("step") and not (watch or locate):
                 # The brain tried to move on without a confirmed "done": ask it to stay.
                 cur = self.gate.current
                 logger.info("step gate: refused %s -> %s, re-asking", cur, (reply.data or {}).get("step"))
@@ -208,7 +211,7 @@ class _Conn:
                          f" and answer again: {asked}")
                 said = True  # no early speech from the retry: the final reply carries it
                 reply = await asyncio.to_thread(self.session.ask, again, jpeg, None)
-                data = self._gate(reply.data, user_done, watch, jpeg is not None)
+                data = self._gate(reply.data, user_done, watch, jpeg is not None, locate)
                 if data is not None and data.get("step") != (reply.data or {}).get("step"):
                     # Still jumping: never speak the next step's instructions on this step.
                     data = {**data, "say": f"Let's finish step {cur} first. Say done when it is.", "overlay": None}
@@ -219,7 +222,8 @@ class _Conn:
                              "w": size[0] if size else None, "h": size[1] if size else None,
                              "ttft_s": reply.ttft_s, "total_s": round(reply.total_s, 3)})
 
-    def _gate(self, data: dict | None, user_done: bool, watch: bool, has_frame: bool) -> dict | None:
+    def _gate(self, data: dict | None, user_done: bool, watch: bool, has_frame: bool,
+              locate: bool = False) -> dict | None:
         """The reply as the phone may see it: its step can only move forward on a confirmed done."""
         if not isinstance(data, dict) or "step" not in data:
             return data
@@ -230,6 +234,8 @@ class _Conn:
             return data
         if watch:  # a watch check that could not prove the step is done: stay, and stay quiet
             return {**data, "step": got, "say": "", "overlay": None}
+        if locate:  # only the box may change: keep it, drop any next-step speech
+            return {**data, "step": got, "say": ""}
         return {**data, "step": got}
 
     async def handle(self, msg: dict) -> None:
@@ -252,7 +258,7 @@ class _Conn:
                 return
             use_frame = bool(msg.get("frame", True))
             if self.tasks:  # one model turn at a time
-                if text.startswith(WATCH_PREFIX):  # a background check can just be skipped
+                if text.startswith(BACKGROUND):  # a background check can just be skipped
                     await self.send({"type": "error", "error": "busy"})
                     return
                 self.pending = (text, use_frame)  # keep only the newest user question
