@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Put things on this session's card in the Jarvis app (the owner's phone board).
+
+usage:
+  jarvis-card doing "Building the card layout"           what you are doing now, plain words
+  jarvis-card ask approve "Plan ready" [--file plan.md]  Approve + Revise buttons
+  jarvis-card ask choice "Which voice?" --option Daniel --option George
+  jarvis-card ask yesno "Restart the gateway now?"
+  jarvis-card ask checklist "Test on your phone" --item "Open the board" --item "Tap Approve"
+  jarvis-card ask preview "New header" --file shot.png    Looks good + Change it
+  jarvis-card ask info "Merged, nothing to do"           no buttons, just a note
+  jarvis-card file report.md ["title"]                   a .md/.txt/.pdf/.png/.jpg on the card
+  jarvis-card link https://claude.ai/artifact/... ["title"]
+  jarvis-card delegate CHILD_SESSION_ID "handed notifications"
+  jarvis-card clear                                      remove the open ask
+  [--session ID]  default: $CLAUDE_CODE_SESSION_ID (the calling Claude session)
+
+The owner's answer comes back into this session as a normal message.
+The shared gateway token is read in-process from the vault and never printed.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR", os.path.expanduser("~/jarvis-gateway")))
+from common import config  # noqa: E402
+
+GATEWAY = os.environ.get("JARVIS_GATEWAY_LOCAL", "http://127.0.0.1:8788")
+TYPES = {".md": "text/markdown", ".markdown": "text/markdown", ".txt": "text/plain",
+         ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def call(path, data, content_type="application/json"):
+    token = config.get_token()
+    if not token:
+        sys.exit("no gateway token in the vault")
+    req = urllib.request.Request(GATEWAY + path, method="POST", data=data,
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": content_type})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=30).read() or b"{}")
+    except urllib.error.HTTPError as e:
+        sys.exit(f"gateway answered {e.code}: {e.read()[:200].decode(errors='replace')}")
+    except urllib.error.URLError as e:
+        sys.exit(f"gateway unreachable: {e.reason}")
+
+
+def upload(session, path, title=""):
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in TYPES:
+        sys.exit("file must be .md, .txt, .pdf, .png or .jpg")
+    with open(path, "rb") as fh:
+        data = fh.read()
+    q = urllib.parse.urlencode({"session": session, "name": os.path.basename(path), "title": title})
+    return call(f"/cards/file?{q}", data, TYPES[ext])["file_id"]
+
+
+def event(**body):
+    return call("/cards/event", json.dumps(body).encode())
+
+
+def take(args, flag):
+    """Pull every `flag VALUE` pair out of args."""
+    values, rest, i = [], [], 0
+    while i < len(args):
+        if args[i] == flag and i + 1 < len(args):
+            values.append(args[i + 1])
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    return values, rest
+
+
+def main(argv):
+    args = argv[1:]
+    sessions, args = take(args, "--session")
+    session = sessions[-1] if sessions else os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not args or args[0] in ("-h", "--help") or not session:
+        sys.exit(__doc__)
+    cmd, args = args[0], args[1:]
+    if cmd == "doing" and args:
+        event(session=session, action="doing", text=" ".join(args))
+        print("card: doing line set")
+    elif cmd == "ask" and len(args) >= 2:
+        options, args = take(args, "--option")
+        items, args = take(args, "--item")
+        files, args = take(args, "--file")
+        kind, text = args[0], " ".join(args[1:])
+        file_id = upload(session, files[-1]) if files else ""
+        out = event(session=session, action="ask", kind=kind, text=text, options=options, items=items,
+                    file_id=file_id)
+        print(f"card: ask posted ({kind}, id {out.get('need_id')}). The owner's answer arrives as a message.")
+    elif cmd == "file" and args:
+        upload(session, args[0], " ".join(args[1:]))
+        print("card: file attached")
+    elif cmd == "link" and args:
+        event(session=session, action="link", url=args[0], text=" ".join(args[1:]))
+        print("card: link attached")
+    elif cmd == "delegate" and args:
+        event(session=session, action="delegate", child=args[0], text=" ".join(args[1:]))
+        print("card: delegation shown")
+    elif cmd == "clear":
+        event(session=session, action="clear")
+        print("card: ask cleared")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
