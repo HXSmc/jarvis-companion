@@ -70,6 +70,7 @@ app.include_router(agents.router)
 app.include_router(quick.router, prefix="")
 app.include_router(wake.router, prefix="")
 app.include_router(inbox.router, prefix="")
+app.include_router(notify.router)  # /notify/notes: app catch-up on missed owner notes (ios_token only)
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
 app.include_router(hwmode.router)  # /hwmode/ws: phone camera frames -> lean Claude brain (ios_token only)
 app.include_router(central.public_router)  # /central/floor page only: no data, no auth

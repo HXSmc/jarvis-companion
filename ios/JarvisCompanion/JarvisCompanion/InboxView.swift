@@ -112,7 +112,7 @@ final class InboxModel: ObservableObject {
 
     /// Same F3 builder shape as AppModel.gatewayEndpoint: https enforced,
     /// trailing slash trimmed, query/fragment dropped.
-    private static func endpoint(_ suffix: String) -> URL? {
+    static func endpoint(_ suffix: String) -> URL? {
         guard var comps = URLComponents(
             string: AppSettings.gatewayURL.trimmingCharacters(in: .whitespaces)
         ), comps.scheme?.lowercased() == "https", comps.host != nil else {
