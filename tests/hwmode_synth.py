@@ -117,27 +117,21 @@ def center_in(box, truth, margin: int = 20) -> bool:
     return truth[0] - margin <= cx <= truth[2] + margin and truth[1] - margin <= cy <= truth[3] + margin
 
 
-if __name__ == "__main__":  # write a preview set for a human look: python3 tests/hwmode_synth.py OUTDIR
-    import pathlib
-    import sys
-
-    out = pathlib.Path(sys.argv[1])
-    out.mkdir(parents=True, exist_ok=True)
-    for st in ("in_port1", "unplugged", "in_port2", "in_port3"):
-        (out / f"{st}.jpg").write_bytes(render(st).jpeg)
-    (out / "in_port1_dim_noisy.jpg").write_bytes(render("in_port1", noise=0.5, brightness=0.45, seed=3).jpeg)
-
-
 MINIPC_TASK = "help me unscrew the mini PC to open it"
 MINIPC_PLUGS = {  # plug heads on the mini PC's back edge (x1, y1, x2, y2) at shift (0, 0)
     "power": (300, 330, 350, 380),
     "hdmi": (440, 335, 500, 375),
     "usb": (580, 338, 625, 372),
 }
+MINIPC_SCREWS = {  # corner screw centers on the case top; each is drawn with radius 7
+    "screw_tl": (235, 395), "screw_tr": (745, 395), "screw_bl": (235, 685), "screw_br": (745, 685),
+}
 
 
-def render_minipc(*, shift: tuple[int, int] = (0, 0), noise: float = 0.0, seed: int = 0) -> Scene:
-    """A drawn mini PC from above on a desk, three cables plugged into its back edge."""
+def render_minipc(*, shift: tuple[int, int] = (0, 0), noise: float = 0.0, seed: int = 0,
+                  finger: str | None = None) -> Scene:
+    """A drawn mini PC from above on a desk, three cables plugged into its back edge.
+    `finger`: a drawn finger comes up from the bottom and touches that plug ("is this it?")."""
     img = Image.new("RGB", (W, H), (150, 110, 70))  # wooden desk
     d = ImageDraw.Draw(img)
     for i in range(0, W, 37):
@@ -153,8 +147,15 @@ def render_minipc(*, shift: tuple[int, int] = (0, 0), noise: float = 0.0, seed: 
     d.text((300, 300), "POWER", fill=(240, 240, 240), font=_font(16))
     d.text((445, 305), "HDMI", fill=(240, 240, 240), font=_font(16))
     d.text((585, 308), "USB", fill=(240, 240, 240), font=_font(16))
-    for sx, sy in ((235, 395), (745, 395), (235, 685), (745, 685)):  # corner screws
+    for sx, sy in MINIPC_SCREWS.values():  # corner screws
         d.ellipse((sx - 7, sy - 7, sx + 7, sy + 7), fill=(150, 150, 155))
+    if finger:
+        x1, y1, x2, y2 = MINIPC_PLUGS[finger]
+        tip = ((x1 + x2) // 2, (y1 + y2) // 2)  # the fingertip pressed on the middle of the plug
+        skin = (222, 170, 135)
+        d.line((tip[0] + 90, H, tip[0], tip[1] + 14), fill=skin, width=34)  # finger from below
+        d.ellipse((tip[0] - 17, tip[1] - 4, tip[0] + 17, tip[1] + 30), fill=skin)  # fingertip on the plug
+        d.ellipse((tip[0] - 9, tip[1] + 2, tip[0] + 9, tip[1] + 18), fill=(240, 205, 190))  # nail
     if shift != (0, 0):
         img = img.transform(img.size, Image.AFFINE, (1, 0, -shift[0], 0, 1, -shift[1]), fillcolor=(150, 110, 70))
     if noise:
@@ -168,6 +169,19 @@ def render_minipc(*, shift: tuple[int, int] = (0, 0), noise: float = 0.0, seed: 
             px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)))
     sx, sy = shift
     boxes = {name: (x1 + sx, y1 + sy, x2 + sx, y2 + sy) for name, (x1, y1, x2, y2) in MINIPC_PLUGS.items()}
+    boxes.update({name: (cx - 7 + sx, cy - 7 + sy, cx + 7 + sx, cy + 7 + sy) for name, (cx, cy) in MINIPC_SCREWS.items()})
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=80)
     return Scene(buf.getvalue(), boxes, "plugged")
+
+
+if __name__ == "__main__":  # write a preview set for a human look: python3 tests/hwmode_synth.py OUTDIR
+    import pathlib
+    import sys
+
+    out = pathlib.Path(sys.argv[1])
+    out.mkdir(parents=True, exist_ok=True)
+    for st in ("in_port1", "unplugged", "in_port2", "in_port3"):
+        (out / f"{st}.jpg").write_bytes(render(st).jpeg)
+    (out / "in_port1_dim_noisy.jpg").write_bytes(render("in_port1", noise=0.5, brightness=0.45, seed=3).jpeg)
+    (out / "minipc_finger_hdmi.jpg").write_bytes(render_minipc(finger="hdmi").jpeg)

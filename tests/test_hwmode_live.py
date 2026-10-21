@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -64,6 +66,7 @@ class Phone:
             elif msg["type"] == "reply":
                 d = msg["data"] or {}
                 self.log.append(("reply", d))
+                assert "!" not in str(d.get("say") or ""), f"Jarvis never exclaims: {d.get('say')!r}"
                 print(f"  {time.monotonic() - self.t0:5.1f}s {kind:5} {text[:34]!r:38} -> step {d.get('step')}/{d.get('of')}"
                       f" seen={d.get('done_seen')} overlay={'Y' if d.get('overlay') else '-'} say={str(d.get('say'))[:80]!r}")
                 return msg
@@ -269,4 +272,78 @@ def test_minipc_locate_finds_the_plug_after_the_camera_moved(gateway_server):
         assert center_in(box, moved.boxes["power"], margin=30)
         assert reply["data"]["step"] == first["data"]["step"], "locate changed the step"
         assert not reply["data"].get("say"), "a found part needs no speech"
+    run_live(gateway_server, body)
+
+
+# ---------------------------------------------------------------- owner's round-4 feedback (build 1.0.118)
+
+def _said(reply: dict) -> str:
+    return str((reply.get("data") or {}).get("say") or "")
+
+
+@pytest.mark.parametrize("question,screw", [("Point at the top left screw.", "screw_tl"),
+                                            ("Which screw is at the bottom right? Show me.", "screw_br")])
+def test_minipc_small_screw_is_boxed_tightly_with_the_zoom_pass(gateway_server, caplog, question, screw):
+    caplog.set_level(logging.INFO, logger="gateway.hwmode")
+
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        scene = render_minipc(noise=0.1, seed=7)
+        await phone.frame(scene.jpeg)
+        await phone.ask(PLAN)
+        reply = await phone.ask(question)
+        box = _box(reply)
+        assert box, f"no box for {question!r}: {reply['data']}"
+        truth = scene.boxes[screw]
+        print(f"  box={box} truth={truth} iou={iou(box, truth):.2f}")
+        assert center_in(box, truth, margin=15), f"pointer misses the {screw}: {box} vs {truth}"
+        assert "zoom refine" in caplog.text, "a small part must get the zoom second pass"
+    run_live(gateway_server, body)
+
+
+@pytest.mark.parametrize("finger,want", [("hdmi", "no"), ("power", "yes")])
+def test_minipc_is_this_it_looks_at_the_finger(gateway_server, finger, want):
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        await phone.frame(render_minipc().jpeg)
+        await phone.ask(PLAN)
+        scene = render_minipc(finger=finger)
+        await phone.frame(scene.jpeg)
+        reply = await phone.ask("Is this the power cable?")
+        said = _said(reply).lower()
+        assert re.search(rf"\b{want}\b", said), f"expected {want!r} for a finger on {finger}: {said!r}"
+        before = [d for k, d in phone.log if k == "reply"][-2]
+        assert said != str(before.get("say") or "").lower(), "it repeated itself instead of answering"
+        box = _box(reply)
+        assert box, f"no box: {reply['data']}"
+        print(f"  box={box} power={scene.boxes['power']}")
+        assert center_in(box, scene.boxes["power"], margin=30), "the box must land on the real power plug"
+    run_live(gateway_server, body)
+
+
+def test_minipc_side_question_mid_step_is_answered_with_a_box(gateway_server):
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        scene = render_minipc()
+        await phone.frame(scene.jpeg)
+        step = (await phone.ask(PLAN))["data"]["step"]
+        reply = await phone.ask("Wait, point at the bottom right screw.")
+        box = _box(reply)
+        assert box, f"side question ignored: {reply['data']}"
+        assert center_in(box, scene.boxes["screw_br"], margin=15), f"box {box} not on the screw"
+        assert reply["data"]["step"] == step, "a side question must not move the step"
+        assert _said(reply), "a side question is answered out loud"
+    run_live(gateway_server, body)
+
+
+def test_go_back_one_step_by_voice(gateway_server):
+    async def body(phone: Phone):
+        await phone.start(f"{TASK}. {STEPS_HINT}")
+        await phone.frame(render("in_port1").jpeg)
+        assert (await phone.ask(PLAN))["data"]["step"] == 1
+        await phone.frame(render("unplugged").jpeg)
+        assert (await phone.ask("done"))["data"]["step"] == 2
+        back = await phone.ask("go back one step")
+        assert back["data"]["step"] == 1, back["data"]
+        assert _said(back), "going back must repeat step 1 out loud"
     run_live(gateway_server, body)
