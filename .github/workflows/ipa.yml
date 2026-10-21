@@ -66,6 +66,35 @@ jobs:
           path: JarvisCompanion-unsigned.ipa
           retention-days: 14
 
+      - name: Hardware Mode tests (XCTest on the simulator)
+        # Blocking: a red test means no green run, so the AltStore publisher skips it.
+        run: |
+          set -uo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(dev["udid"] for devs in d["devices"].values() for dev in devs if dev["name"].startswith("iPhone")))')
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          echo "--- simctl privacy services on this runner:"
+          xcrun simctl help privacy 2>&1 | sed -n '/service/,$p' | head -30 || true
+          # Speech/mic/camera for the test host, so the voice-in tests run instead of skipping.
+          xcrun simctl privacy "$UDID" grant all personal.jarvis.JarvisCompanion || echo "privacy grant all: not supported here"
+          xcodebuild test \
+            -project ios/JarvisCompanion/JarvisCompanion.xcodeproj \
+            -scheme JarvisCompanion \
+            -destination "id=$UDID" \
+            -derivedDataPath build-test \
+            CODE_SIGNING_ALLOWED=NO > hwmode-tests.log 2>&1
+          status=$?
+          grep -E "Test Case|Executed|error:|skipped|Skipped|STT |TTS " hwmode-tests.log || true
+          exit $status
+
+      - name: Upload Hardware Mode test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hwmode-tests
+          path: hwmode-tests.log
+          retention-days: 14
+
       - name: Build unsigned .app for iphonesimulator (Home screenshot)
         continue-on-error: true
         run: |

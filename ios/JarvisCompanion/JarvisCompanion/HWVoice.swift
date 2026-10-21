@@ -193,7 +193,8 @@ final class HWVoice: ObservableObject {
         if !player.isPlaying { player.play() }
     }
 
-    private func convert(_ pcm: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+    /// To the player's format (22.05 kHz mono float). Internal for the audio tests.
+    func convert(_ pcm: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         if pcm.format == playFormat { return pcm }
         let key = pcm.format.description
         let converter = converters[key] ?? AVAudioConverter(from: pcm.format, to: playFormat)
@@ -371,10 +372,10 @@ enum HWLocalCommand {
     init?(_ text: String) {
         let t = text.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
         switch t {
-        case "repeat", "say again", "say that again", "again", "what": self = .repeatLast
-        case "stop", "quiet", "shut up", "pause": self = .stop
-        case "light", "light on", "torch", "torch on", "flashlight on": self = .torchOn
-        case "light off", "torch off", "flashlight off": self = .torchOff
+        case "repeat", "say again", "say that again", "again", "what", "عيد", "عيدها", "مرة ثانية": self = .repeatLast
+        case "stop", "quiet", "shut up", "pause", "وقف", "اسكت", "بس": self = .stop
+        case "light", "light on", "torch", "torch on", "flashlight on", "نور", "شغل النور", "الكشاف": self = .torchOn
+        case "light off", "torch off", "flashlight off", "طفي النور", "طف النور": self = .torchOff
         default: return nil
         }
     }

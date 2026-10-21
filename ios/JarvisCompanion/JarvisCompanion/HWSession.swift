@@ -133,7 +133,8 @@ final class HWSession: ObservableObject {
         }
     }
 
-    private func handle(_ m: [String: Any]) {
+    /// One gateway message. Internal so tests can replay scripted sessions.
+    func handle(_ m: [String: Any]) {
         switch m["type"] as? String {
         case "ready":
             connected = true

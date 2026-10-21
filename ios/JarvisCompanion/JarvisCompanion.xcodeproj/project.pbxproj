@@ -21,7 +21,19 @@
 		5A0B1C2D3E4F5061726A73E2 /* HWVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73E1 /* HWVoice.swift */; };
 		5A0B1C2D3E4F5061726A73D2 /* HWCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73D1 /* HWCamera.swift */; };
 		5A0B1C2D3E4F5061726A73C2 /* HWSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A73C1 /* HWSession.swift */; };
+		5A0B1C2D3E4F5061726A7411 /* HWLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7401 /* HWLogicTests.swift */; };
+		5A0B1C2D3E4F5061726A7412 /* HWVoiceAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5A0B1C2D3E4F5061726A7441 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5A0B1C2D3E4F5061726A7301 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5A0B1C2D3E4F5061726A7304;
+			remoteInfo = JarvisCompanion;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		5A0B1C2D3E4F5061726A7311 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
@@ -40,10 +52,20 @@
 		5A0B1C2D3E4F5061726A7315 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7316 /* JarvisCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7401 /* HWLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWLogicTests.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWVoiceAudioTests.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7403 /* JarvisCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JarvisCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		5A0B1C2D3E4F5061726A7332 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5A0B1C2D3E4F5061726A7431 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -57,6 +79,7 @@
 			isa = PBXGroup;
 			children = (
 				5A0B1C2D3E4F5061726A7317 /* JarvisCompanion */,
+				5A0B1C2D3E4F5061726A7420 /* JarvisCompanionTests */,
 				5A0B1C2D3E4F5061726A7303 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -87,8 +110,18 @@
 			isa = PBXGroup;
 			children = (
 				5A0B1C2D3E4F5061726A7316 /* JarvisCompanion.app */,
+				5A0B1C2D3E4F5061726A7403 /* JarvisCompanionTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		5A0B1C2D3E4F5061726A7420 /* JarvisCompanionTests */ = {
+			isa = PBXGroup;
+			children = (
+				5A0B1C2D3E4F5061726A7401 /* HWLogicTests.swift */,
+				5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */,
+			);
+			path = JarvisCompanionTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -110,6 +143,24 @@
 			productName = JarvisCompanion;
 			productReference = 5A0B1C2D3E4F5061726A7316 /* JarvisCompanion.app */;
 			productType = "com.apple.product-type.application";
+		};
+		5A0B1C2D3E4F5061726A7440 /* JarvisCompanionTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5A0B1C2D3E4F5061726A7450 /* Build configuration list for PBXNativeTarget "JarvisCompanionTests" */;
+			buildPhases = (
+				5A0B1C2D3E4F5061726A7430 /* Sources */,
+				5A0B1C2D3E4F5061726A7431 /* Frameworks */,
+				5A0B1C2D3E4F5061726A7432 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5A0B1C2D3E4F5061726A7442 /* PBXTargetDependency */,
+			);
+			name = JarvisCompanionTests;
+			productName = JarvisCompanionTests;
+			productReference = 5A0B1C2D3E4F5061726A7403 /* JarvisCompanionTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -135,6 +186,7 @@
 			projectRoot = "";
 			targets = (
 				5A0B1C2D3E4F5061726A7304 /* JarvisCompanion */,
+				5A0B1C2D3E4F5061726A7440 /* JarvisCompanionTests */,
 			);
 		};
 /* End PBXProject section */
@@ -145,6 +197,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				5A0B1C2D3E4F5061726A7325 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5A0B1C2D3E4F5061726A7432 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -171,7 +230,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5A0B1C2D3E4F5061726A7430 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5A0B1C2D3E4F5061726A7411 /* HWLogicTests.swift in Sources */,
+				5A0B1C2D3E4F5061726A7412 /* HWVoiceAudioTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5A0B1C2D3E4F5061726A7442 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5A0B1C2D3E4F5061726A7304 /* JarvisCompanion */;
+			targetProxy = 5A0B1C2D3E4F5061726A7441 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		5A0B1C2D3E4F5061726A7342 /* Debug */ = {
@@ -243,6 +319,48 @@
 			};
 			name = Release;
 		};
+		5A0B1C2D3E4F5061726A7451 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = personal.jarvis.JarvisCompanionTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JarvisCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/JarvisCompanion";
+			};
+			name = Debug;
+		};
+		5A0B1C2D3E4F5061726A7452 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = personal.jarvis.JarvisCompanionTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JarvisCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/JarvisCompanion";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -260,6 +378,15 @@
 			buildConfigurations = (
 				5A0B1C2D3E4F5061726A7345 /* Debug */,
 				5A0B1C2D3E4F5061726A7346 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5A0B1C2D3E4F5061726A7450 /* Build configuration list for PBXNativeTarget "JarvisCompanionTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A0B1C2D3E4F5061726A7451 /* Debug */,
+				5A0B1C2D3E4F5061726A7452 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
