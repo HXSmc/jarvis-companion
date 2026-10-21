@@ -32,17 +32,19 @@ enum InboxNotifier {
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// Gateway `owner_note` (gateway/notify.py): a late answer, or a session
-    /// at a crossroads waiting for the owner. Shown even in the foreground
-    /// (see the delegate's willPresent); a tap opens the session's chat.
-    static func notifyNote(title: String, body: String, sessionID: String?) {
+    /// Gateway `owner_note` (gateway/notify.py): a late answer, a session
+    /// that needs the owner (question, stuck, failed) or one that is done.
+    /// Shown even in the foreground (see the delegate's willPresent); a tap
+    /// opens the session's chat. The gateway `seq` is the identifier, so a
+    /// note that arrives twice replaces itself instead of stacking.
+    static func notifyNote(title: String, body: String, sessionID: String?, seq: Int? = nil) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         content.userInfo = ["note": true, "session_id": sessionID ?? "", "title": title]
         let request = UNNotificationRequest(
-            identifier: "note-\(UUID().uuidString.prefix(8))",
+            identifier: seq.map { "note-\($0)" } ?? "note-\(UUID().uuidString.prefix(8))",
             content: content,
             trigger: nil
         )
@@ -85,8 +87,81 @@ enum InboxNotifier {
             if delta > 0 {
                 notify(unread: model.inbox.unread, new: delta)
             }
-            finished()
+            catchUpNotes(finished)
         }
+    }
+
+    /// GET /notify/notes?after=<cursor>: owner notes the WebSocket missed
+    /// (phone offline, app suspended). Each is notified, oldest first, and
+    /// the cursor moves; `onDone` (main thread) fires either way.
+    static func catchUpNotes(_ onDone: (() -> Void)? = nil) {
+        guard let base = InboxModel.endpoint("/notify/notes"),
+              var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            onDone?()
+            return
+        }
+        comps.queryItems = [URLQueryItem(name: "after", value: String(NoteCursor.stored ?? 0))]
+        guard let url = comps.url else {
+            onDone?()
+            return
+        }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 20
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                defer { onDone?() }
+                guard error == nil,
+                      let http = response as? HTTPURLResponse,
+                      (200...299).contains(http.statusCode),
+                      let data = data,
+                      let notes = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
+                let (show, cursor) = NoteCursor.catchUp(notes, after: NoteCursor.stored)
+                NoteCursor.stored = cursor
+                for note in show {
+                    notifyNote(
+                        title: note["title"] as? String ?? "Jarvis",
+                        body: note["text"] as? String ?? "",
+                        sessionID: (note["session_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                        seq: note["seq"] as? Int
+                    )
+                }
+            }
+        }.resume()
+    }
+}
+
+/// The highest gateway note `seq` already shown (UserDefaults), shared by the
+/// live WebSocket push and the GET /notify/notes catch-up so neither shows a
+/// note the other already did. Pure decisions, unit-tested.
+enum NoteCursor {
+    static let key = "jarvis.noteSeq"
+
+    static var stored: Int? {
+        get { UserDefaults.standard.object(forKey: key) as? Int }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
+
+    /// Live push: show it unless its seq was already shown. A note without a
+    /// seq (older gateway) always shows and leaves the cursor alone.
+    static func live(seq: Int?, after last: Int?) -> (show: Bool, cursor: Int?) {
+        guard let seq else { return (true, last) }
+        guard let last else { return (true, seq) }
+        return (seq > last, max(seq, last))
+    }
+
+    /// Catch-up list: the notes newer than the cursor, oldest first, and the
+    /// new cursor. With no cursor yet (first run) nothing shows: the list is
+    /// history then, not news; the cursor just jumps to its newest seq.
+    static func catchUp(_ notes: [[String: Any]], after last: Int?) -> (show: [[String: Any]], cursor: Int?) {
+        let seqs = notes.compactMap { $0["seq"] as? Int }
+        // Empty on the first run: start at 0, so every later note is news.
+        guard let newest = seqs.max() else { return ([], last ?? 0) }
+        guard let last else { return ([], newest) }
+        let show = notes
+            .filter { note in (note["seq"] as? Int ?? 0) > last }
+            .sorted { ($0["seq"] as? Int ?? 0) < ($1["seq"] as? Int ?? 0) }
+        return (show, max(last, newest))
     }
 }
 

@@ -52,6 +52,8 @@ def resolve_reply(envelope: dict) -> bool:
     future (the POST returns it); anything else returns False and keeps the
     normal dispatch (generic ack / flow handler).
     """
+    if envelope.get("type") == "result" and isinstance(envelope.get("payload"), dict):
+        envelope = envelope["payload"]  # the iOS app's reply shape: {type: result, payload: {id, ok, data}}
     future = _pending_replies.get(envelope.get("id")) if "ok" in envelope else None
     if future is None or future.done():
         return False

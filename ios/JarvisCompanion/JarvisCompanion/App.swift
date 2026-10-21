@@ -847,6 +847,8 @@ final class AppModel: ObservableObject {
         // forever since nothing ever re-checked it. Catch it within seconds
         // of coming back to the app instead of waiting on the heartbeat.
         if phase == .active { bridge.foregrounded() }
+        // Owner notes the socket missed while the app was away (catch-up).
+        if phase == .active { InboxNotifier.catchUpNotes() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {
@@ -910,17 +912,23 @@ final class AppModel: ObservableObject {
             reportResult(id: id, ok: true, data: ["unread": payload["unread"] ?? 0])
         case "owner_note":
             // Gateway push (gateway/notify.py): a late answer to a Home
-            // question, or a session waiting for the owner. Home shows it like
-            // a reply; a notification goes out either way.
+            // question, a session that needs the owner, or one that is done.
+            // Home shows it like a reply; a notification goes out either way,
+            // unless the /notify/notes catch-up already showed this seq.
             let title = payload["title"] as? String ?? "Jarvis"
             let text = payload["text"] as? String ?? ""
             let sid = (payload["session_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            ownerText = title
-            replyText = text
-            replyIsError = false
-            routeTag = nil
-            lastSession = sid.map { ChatTarget(sessionID: $0, title: title) }
-            InboxNotifier.notifyNote(title: title, body: text, sessionID: sid)
+            let seq = payload["seq"] as? Int
+            let (show, cursor) = NoteCursor.live(seq: seq, after: NoteCursor.stored)
+            NoteCursor.stored = cursor
+            if show {
+                ownerText = title
+                replyText = text
+                replyIsError = false
+                routeTag = nil
+                lastSession = sid.map { ChatTarget(sessionID: $0, title: title) }
+                InboxNotifier.notifyNote(title: title, body: text, sessionID: sid, seq: seq)
+            }
             reportResult(id: id, ok: true, data: [:])
         default:
             reportResult(id: id, ok: false, data: ["error": "unknown command: \(type)"])
