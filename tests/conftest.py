@@ -92,6 +92,15 @@ def no_real_voice(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def no_real_segmenter(monkeypatch, request):
+    """Hardware Mode tests never load the box's real SAM model, unless a test asks for it (`live_mask`)."""
+    if "live_mask" in request.keywords:
+        return
+    from gateway import hwmode
+    monkeypatch.setattr(hwmode, "get_segmenter", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def isolate_central_state(monkeypatch, tmp_path):
     """No test touches ~/.jarvis/central_state.json, the vault, or a real model."""
     from gateway import central

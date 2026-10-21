@@ -1,3 +1,4 @@
+import ImageIO
 import XCTest
 @testable import JarvisCompanion
 
@@ -92,6 +93,44 @@ final class HWLogicTests: XCTestCase {
         hw.ask("huh")
         reply(nil)
         XCTAssertEqual(spoken.last, "Sorry, I didn't get that. Ask me again.")
+    }
+
+    // MARK: the part's outline (gateway mask)
+
+    func testMaskPNGBecomesATintedPartShape() throws {
+        // a 4x2 gray mask like the gateway's: top row edge (255), bottom row inside (110), last column outside
+        let w = 4, h = 2
+        let ctx = try XCTUnwrap(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                          space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue))
+        let px = try XCTUnwrap(ctx.data).assumingMemoryBound(to: UInt8.self)
+        for x in 0..<w {
+            px[x] = x == 3 ? 0 : 255
+            px[w + x] = x == 3 ? 0 : 110
+        }
+        let png = NSMutableData()
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(png as CFMutableData, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, try XCTUnwrap(ctx.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        let raw: [String: Any] = ["target_px": [10, 20, 50, 40], "label": "SATA cable",
+                                  "mask_png": (png as Data).base64EncodedString()]
+        let o = try XCTUnwrap(HWSession.parseOverlay(raw, width: 100, height: 100, frameId: 1))
+        let mask = try XCTUnwrap(o.mask, "the mask did not decode")
+        XCTAssertEqual(mask.width, 4)
+        XCTAssertEqual(mask.height, 2)
+        let pixels = try XCTUnwrap(mask.dataProvider?.data)
+        withExtendedLifetime(pixels) {  // a raw pointer into the CFData: keep it alive while reading
+            guard let b = CFDataGetBytePtr(pixels) else { return XCTFail("no pixel data") }
+            let row = mask.bytesPerRow
+            XCTAssertEqual(Int(b[3]), 255, accuracy: 3, "edge: solid")
+            XCTAssertEqual(Int(b[row + 3]), 110, accuracy: 3, "inside: see-through")
+            XCTAssertEqual(Int(b[3 * 4 + 3]), 0, "outside: clear")
+            XCTAssertEqual(Int(b[0]), 255, accuracy: 3)  // yellow at full opacity
+            XCTAssertEqual(Int(b[1]), 214, accuracy: 3)
+        }
+        // no mask, or a broken one: the plain box stays
+        XCTAssertNil(try XCTUnwrap(HWSession.parseOverlay(["target_px": [10, 20, 50, 40]], width: 100, height: 100, frameId: 1)).mask)
+        XCTAssertNil(try XCTUnwrap(HWSession.parseOverlay(["target_px": [10, 20, 50, 40], "mask_png": "bm90IGEgcG5n"],
+                                                          width: 100, height: 100, frameId: 1)).mask)
     }
 
     // MARK: Jarvis's server voice

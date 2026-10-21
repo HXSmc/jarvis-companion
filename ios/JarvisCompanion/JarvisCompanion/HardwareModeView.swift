@@ -328,8 +328,8 @@ struct HardwareModeView: View {
     }
 }
 
-/// The AR layer: highlight box, an arrow that keeps moving in the direction of
-/// the action, and an icon + label tag above the part.
+/// The AR layer: the part's painted shape (or a highlight box), an arrow that keeps
+/// moving in the direction of the action, and an icon + label tag above the part.
 struct HWOverlayLayer: View {
     let overlay: HWOverlay
     let rect: CGRect
@@ -339,9 +339,13 @@ struct HWOverlayLayer: View {
             let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2)
             ZStack {
                 Canvas { ctx, _ in
-                    let box = Path(roundedRect: rect.insetBy(dx: -4, dy: -4), cornerRadius: 6)
-                    ctx.stroke(box, with: .color(.black.opacity(0.5)), lineWidth: 6)
-                    ctx.stroke(box, with: .color(.yellow), lineWidth: 3)
+                    if let mask = overlay.mask {  // the part's own shape, painted over it
+                        ctx.draw(Image(decorative: mask, scale: 1), in: rect)
+                    } else {
+                        let box = Path(roundedRect: rect.insetBy(dx: -4, dy: -4), cornerRadius: 6)
+                        ctx.stroke(box, with: .color(.black.opacity(0.5)), lineWidth: 6)
+                        ctx.stroke(box, with: .color(.yellow), lineWidth: 3)
+                    }
                     if let arrow = arrowPath(phase: phase) {
                         ctx.stroke(arrow, with: .color(.black.opacity(0.5)), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
                         ctx.stroke(arrow, with: .color(.yellow), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
