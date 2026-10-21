@@ -76,6 +76,7 @@ def test_late_answer_gives_up_silently(sent, monkeypatch: pytest.MonkeyPatch):
 
 
 def _s(sid="s1", state="running", health="working", **kw):
+    kw.setdefault("device", "Mini PC")
     return {"session_id": sid, "title": "Fix bug", "state": state, "health": health, "summary": "Which option?", **kw}
 
 
