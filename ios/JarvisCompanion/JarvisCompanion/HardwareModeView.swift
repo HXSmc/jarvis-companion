@@ -205,6 +205,7 @@ struct HardwareModeView: View {
         self.tracker = tracker
         camera.start()
         hw.onSay = { voice.speak($0) }
+        hw.onAudio = { pcm, rate, text in voice.playPCM(pcm, rate: rate, text: text) }
         hw.onOverlay = { overlay in
             tracked = nil
             lost = false
@@ -234,6 +235,7 @@ struct HardwareModeView: View {
         if hw.connected { hw.sendDiag(voice.diagnostics()) }
         // Break the closure -> view -> object cycles so the camera, audio engine and socket are freed.
         hw.onSay = nil
+        hw.onAudio = nil
         hw.onOverlay = nil
         hw.onReady = nil
         voice.onUtterance = nil
@@ -267,7 +269,7 @@ struct HardwareModeView: View {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard started, !t.isEmpty else { return }
         switch HWLocalCommand(t) {
-        case .repeatLast?: voice.speak(hw.say)
+        case .repeatLast?: voice.repeatLine(hw.say)
         case .stop?: voice.stopSpeaking()
         case .torchOn?: torch = true; camera.setTorch(true)
         case .torchOff?: torch = false; camera.setTorch(false)
