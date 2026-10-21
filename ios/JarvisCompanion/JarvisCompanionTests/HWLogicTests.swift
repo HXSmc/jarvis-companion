@@ -144,10 +144,15 @@ final class HWLogicTests: XCTestCase {
         let bufs = HWVoice.pcmBuffers(data, rate: 24000)
         print("pcmBuffers: \(bufs.map { "\($0.frameLength)@\($0.format)" })")
         XCTAssertEqual(bufs.map { Int($0.frameLength) }, [12000, 12000, 6000])
-        guard let ch = bufs.first?.floatChannelData?[0] else { return XCTFail("no float buffer from pcmBuffers") }
-        XCTAssertEqual(ch[0], 32767.0 / 32768, accuracy: 1e-6)
-        XCTAssertEqual(ch[1], -1, accuracy: 1e-6)
+        guard let first = bufs.first, first.floatChannelData != nil else { return XCTFail("no float buffer from pcmBuffers") }
+        withExtendedLifetime(first) {  // a raw pointer into the buffer: the buffer must outlive the reads
+            let ch = first.floatChannelData![0]
+            XCTAssertEqual(ch[0], 32767.0 / 32768, accuracy: 1e-6)
+            XCTAssertEqual(ch[1], -1, accuracy: 1e-6)
+        }
+        print("pcmBuffers: samples read")
         XCTAssertTrue(HWVoice.pcmBuffers(Data(), rate: 24000).isEmpty)
+        print("pcmBuffers: empty data ok")
         XCTAssertTrue(HWSession.isArabic("خلصت"))
         XCTAssertFalse(HWSession.isArabic("SATA2, sir."))
     }
