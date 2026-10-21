@@ -37,6 +37,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from gateway import cards
 from gateway.auth import require_bearer, require_bearer_any
 from gateway.ws import IOS_ROLE, _authorized
 from hwmode.brain import LeanSession
@@ -510,10 +511,12 @@ async def post_request(req: HardwareRequest, request: Request) -> dict:
     # (uvicorn --proxy-headers behind tailscale serve), so the shared token alone is not enough.
     if (request.client.host if request.client else None) not in ("127.0.0.1", "::1"):
         raise HTTPException(status_code=403, detail="local callers only")
+    # The CLI sends the Claude session uuid; the phone's cards use the router id.
+    sid = cards.resolve_session(req.session_id) or req.session_id
     live = _live_requests()
-    if req.session_id not in live and len(live) >= MAX_REQUESTS:
+    if sid not in live and len(live) >= MAX_REQUESTS:
         raise HTTPException(status_code=429, detail="too many open requests")
-    live[req.session_id] = {"task": req.task, "at": time.time()}
+    live[sid] = {"task": req.task, "at": time.time()}
     return {"ok": True}
 
 

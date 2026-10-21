@@ -169,3 +169,20 @@ def test_request_cap(gateway_server, monkeypatch):
                      for i in range(3)]
             assert codes == [200, 200, 429]
     asyncio.run(run())
+
+
+def test_hardware_request_is_filed_under_the_router_session_id(gateway_server, monkeypatch):
+    """jarvis-hw-request sends the Claude session uuid; the phone's cards key on the router id."""
+    import httpx
+    from gateway import cards, hwmode
+    hwmode._requests.clear()
+    ids = {"dc82157b-0000-4000-8000-000000000001": "63a31002"}
+    monkeypatch.setattr(cards, "resolve_session", lambda raw: ids.get(raw))
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            for sid in ("dc82157b-0000-4000-8000-000000000001", "unknown1"):  # unknown: kept as sent
+                body = {"session_id": sid, "task": "find the SATA drive"}
+                assert (await http.post("/hwmode/request", json=body, headers=AUTH_HEADER)).status_code == 200
+            return (await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)).json()
+    assert asyncio.run(run()) == {"63a31002": "find the SATA drive", "unknown1": "find the SATA drive"}
