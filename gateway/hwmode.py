@@ -8,6 +8,7 @@ Client -> server (JSON text or binary frames):
   {"type": "start", "task": str, "model"?: "sonnet"|"haiku"}  new session for a task
   {"type": "frame", "id": int, "jpeg": base64}                   keep as the latest frame
   {"type": "ask", "text": str, "frame"?: bool}                   ask about the latest frame
+  {"type": "diag", "data": {...}}                                phone voice/audio state, logged only
 Server -> client:
   {"type": "ready", "model": str}
   {"type": "say", "text": str}                                   early speech, before the full reply
@@ -41,6 +42,14 @@ from gateway.ws import IOS_ROLE, _authorized
 from hwmode.brain import LeanSession
 
 logger = logging.getLogger(__name__)
+# uvicorn only configures its own loggers: send the hwmode trace (asks, replies,
+# phone diagnostics) to stderr, i.e. the service journal.
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("hwmode: %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 router = APIRouter()
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
@@ -54,6 +63,7 @@ _live_conns = 0
 # session_id -> {"task": str, "at": epoch seconds}; in memory: a gateway restart drops them.
 _requests: dict[str, dict] = {}
 _SAY_RE = re.compile(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"')
+WATCH_PREFIX = "[watch]"
 
 
 def _claude_bin() -> str:
@@ -84,6 +94,8 @@ class _Conn:
         self.frame: bytes | None = None
         self.frame_id: int | None = None
         self.busy = asyncio.Lock()
+        # A user question that arrived while the brain was busy: answered right after, never dropped.
+        self.pending: tuple[str, bool] | None = None
         self.tasks: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
 
     async def send(self, msg: dict) -> None:
@@ -97,6 +109,7 @@ class _Conn:
     async def start(self, task: str, model: str) -> None:
         async with self.busy:
             await self._start(task, model, announce=True)
+        logger.info("start model=%s task=%r", self.model, task[:200])
 
     async def _start(self, task: str, model: str, announce: bool) -> None:
         self._close_session()
@@ -128,7 +141,11 @@ class _Conn:
                         say = json.loads(f'"{m.group(1)}"')
                         asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
 
+            logger.info("ask frame=%s text=%r", frame_id, text[:200])
             reply = await asyncio.to_thread(self.session.ask, text, jpeg, on_text)
+            d = reply.data or {}
+            logger.info("reply %.1fs step=%s/%s say=%r", reply.total_s, d.get("step"), d.get("of"),
+                        str(d.get("say", reply.raw))[:200])
             await self.send({"type": "reply", "data": reply.data, "raw": reply.raw, "frame_id": frame_id,
                              "w": size[0] if size else None, "h": size[1] if size else None,
                              "ttft_s": reply.ttft_s, "total_s": round(reply.total_s, 3)})
@@ -151,26 +168,37 @@ class _Conn:
             if not text:
                 await self.send({"type": "error", "error": "empty question"})
                 return
-            if self.tasks:  # one question at a time; a flood must not queue model turns
-                await self.send({"type": "error", "error": "busy"})
+            use_frame = bool(msg.get("frame", True))
+            if self.tasks:  # one model turn at a time
+                if text.startswith(WATCH_PREFIX):  # a background check can just be skipped
+                    await self.send({"type": "error", "error": "busy"})
+                    return
+                self.pending = (text, use_frame)  # keep only the newest user question
+                logger.info("ask queued while busy: %r", text[:200])
                 return
             # Answer in the background so frames keep flowing while the brain thinks.
-            t = asyncio.create_task(self._ask_safely(text, bool(msg.get("frame", True))))
+            t = asyncio.create_task(self._ask_safely(text, use_frame))
             self.tasks.add(t)
             t.add_done_callback(self.tasks.discard)
+        elif kind == "diag":
+            logger.info("diag %s", json.dumps(msg.get("data"), separators=(",", ":"))[:2000])
         else:
             await self.send({"type": "error", "error": f"unknown type {kind!r}"})
 
     async def _ask_safely(self, text: str, use_frame: bool) -> None:
-        try:
-            await self.ask(text, use_frame)
-        except Exception as exc:  # brain crash must not kill the socket
-            logger.exception("hwmode: ask failed")
-            self._close_session()
+        while True:
             try:
-                await self.send({"type": "error", "error": f"brain error: {type(exc).__name__}"})
-            except Exception:
-                pass
+                await self.ask(text, use_frame)
+            except Exception as exc:  # brain crash must not kill the socket
+                logger.exception("hwmode: ask failed")
+                self._close_session()
+                try:
+                    await self.send({"type": "error", "error": f"brain error: {type(exc).__name__}"})
+                except Exception:
+                    pass
+            if self.pending is None:
+                return
+            (text, use_frame), self.pending = self.pending, None
 
     async def close(self) -> None:
         for t in self.tasks:

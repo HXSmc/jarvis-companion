@@ -25,7 +25,10 @@ Reply with ONLY one JSON object, no prose, no code fence:
    "action": "press|pull|push|slide|lift|rotate_cw|rotate_ccw|plug|unplug|look",
    "arrow_dir": [dx,dy] unit vector of the motion in image coordinates (x right, y down),
    "label": at most 4 words}}
-If the part is not visible or you are unsure, set overlay to null and say what to show you."""
+If the part is not visible or you are unsure, set overlay to null and say what to show you.
+Steps: move to the next step ONLY when the user says the current one is done ("done", "finished", "next").
+Never advance on your own, even if the picture suggests it. A question ("where is the cable?") is help with the
+current step, not a reason to move on. In a [watch] check only warn about a mistake; never change the step."""
 
 LEAN_FLAGS = [
     "--tools", "",

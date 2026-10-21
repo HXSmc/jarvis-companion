@@ -97,6 +97,11 @@ final class HWSession: ObservableObject {
         send(["type": "ask", "text": trimmed, "frame": withFrame])
     }
 
+    /// Phone-side voice state, logged by the gateway (nothing comes back).
+    func sendDiag(_ data: [String: Any]) {
+        send(["type": "diag", "data": data])
+    }
+
     private func send(_ object: [String: Any]) {
         guard let socket, let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else { return }
@@ -146,8 +151,10 @@ final class HWSession: ObservableObject {
             let said = ((d["say"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
             if quietTurn && said.isEmpty { return }  // watch check: all good, keep the current guidance
             if !saidThisTurn, !said.isEmpty { speak(said) }
-            step = (d["step"] as? NSNumber)?.intValue ?? step
-            total = (d["of"] as? NSNumber)?.intValue ?? total
+            if !quietTurn {  // only the user moves through steps; a watch check never does
+                step = (d["step"] as? NSNumber)?.intValue ?? step
+                total = (d["of"] as? NSNumber)?.intValue ?? total
+            }
             overlay = Self.parseOverlay(d["overlay"], width: (m["w"] as? NSNumber)?.doubleValue,
                                         height: (m["h"] as? NSNumber)?.doubleValue,
                                         frameId: (m["frame_id"] as? NSNumber)?.intValue)

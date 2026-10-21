@@ -34,6 +34,15 @@ final class HWVoice: ObservableObject {
     private var generation = 0
     private var stopped = false
     private var failures = 0
+    /// Speech that arrived before the engine ran: spoken as soon as it does.
+    private var pendingSpeech: String?
+    /// What Jarvis last said, and when it stopped: the mic hearing it back is not the user.
+    private var lastSpoken = ""
+    private var spokeUntil = Date.distantPast
+    private var voiceProcessing = false
+    private var counts: [String: Int] = [:]
+    private var events: [String] = []
+    private let startedAt = Date()
 
     func start() {
         stopped = false
@@ -41,12 +50,65 @@ final class HWVoice: ObservableObject {
             Task { @MainActor in
                 guard !self.stopped else { return }  // the screen closed while the prompt was up
                 guard status == .authorized else {
-                    self.error = "Speech recognition is off: allow it in Settings"
+                    self.fail("Speech recognition is off: allow it in Settings")
                     return
                 }
-                self.startEngine()
+                // Speech permission is not mic permission: without this the mic records silence.
+                AVAudioSession.sharedInstance().requestRecordPermission { @Sendable granted in
+                    Task { @MainActor in
+                        guard !self.stopped else { return }
+                        guard granted else {
+                            self.fail("Microphone is off: allow it in Settings")
+                            return
+                        }
+                        self.startEngine()
+                    }
+                }
             }
         }
+    }
+
+    /// Voice state for the gateway log, so a silent failure on the phone can be seen from the PC.
+    func diagnostics() -> [String: Any] {
+        let session = AVAudioSession.sharedInstance()
+        let mic: String
+        switch session.recordPermission {
+        case .granted: mic = "granted"
+        case .denied: mic = "denied"
+        default: mic = "undetermined"
+        }
+        return [
+            "speechAuth": SFSpeechRecognizer.authorizationStatus().rawValue,
+            "mic": mic,
+            "engine": engine.isRunning,
+            "voiceProcessing": voiceProcessing,
+            "listening": listening,
+            "speaking": speaking,
+            "category": session.category.rawValue,
+            "mode": session.mode.rawValue,
+            "outputs": session.currentRoute.outputs.map { $0.portType.rawValue },
+            "inputs": session.currentRoute.inputs.map { $0.portType.rawValue },
+            "outputVolume": session.outputVolume,
+            "recognizer": recognizer?.locale.identifier ?? "none",
+            "recognizerAvailable": recognizer?.isAvailable ?? false,
+            "error": error ?? "",
+            "counts": counts,
+            "events": events,
+        ]
+    }
+
+    private func note(_ event: String) {
+        events.append(String(format: "%.1f %@", Date().timeIntervalSince(startedAt), String(event.prefix(120))))
+        if events.count > 20 { events.removeFirst(events.count - 20) }
+    }
+
+    private func count(_ key: String) {
+        counts[key, default: 0] += 1
+    }
+
+    private func fail(_ message: String) {
+        error = message
+        note("error: \(message)")
     }
 
     func stop() {
@@ -66,7 +128,15 @@ final class HWVoice: ObservableObject {
     }
 
     func speak(_ text: String) {
+        count("speak")
+        guard engine.isRunning else {
+            pendingSpeech = text
+            note("speak queued: engine not running")
+            return
+        }
         stopSpeaking()
+        lastSpoken = text
+        spokeUntil = Date().addingTimeInterval(30)  // until the last buffer finishes
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
         let gen = generation
@@ -81,6 +151,7 @@ final class HWVoice: ObservableObject {
         synth.stopSpeaking(at: .immediate)
         player.stop()
         pendingBuffers = 0
+        if speaking { spokeUntil = Date().addingTimeInterval(1.5) }
         speaking = false
         if engine.isRunning { player.play() }
     }
@@ -88,12 +159,16 @@ final class HWVoice: ObservableObject {
     private func schedule(_ pcm: AVAudioPCMBuffer, generation gen: Int) {
         guard gen == generation, engine.isRunning, let converted = convert(pcm) else { return }
         pendingBuffers += 1
+        count("buffers")
         speaking = true
         player.scheduleBuffer(converted) { @Sendable [weak self] in
             Task { @MainActor in
                 guard let self, gen == self.generation else { return }
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
-                if self.pendingBuffers == 0 { self.speaking = false }
+                if self.pendingBuffers == 0 {
+                    self.speaking = false
+                    self.spokeUntil = Date().addingTimeInterval(1.5)  // room echo / late recognition
+                }
             }
         }
         if !player.isPlaying { player.play() }
@@ -120,33 +195,53 @@ final class HWVoice: ObservableObject {
 
     private func startEngine() {
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
-            try session.setActive(true)
-            let input = engine.inputNode
-            try input.setVoiceProcessingEnabled(true)  // echo cancel: must be set before the engine starts
-            engine.attach(player)
-            engine.connect(player, to: engine.mainMixerNode, format: playFormat)
-            let tap = self.tap  // the tap runs on the audio thread: no main-actor state in it
-            input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { @Sendable buffer, _ in
-                tap.append(buffer)
-            }
-            engine.prepare()
-            try engine.start()
-            player.play()
-            listening = true
-            beginRecognition()
+            try runEngine(voiceProcessing: true)
         } catch {
-            self.error = "Audio failed: \(error.localizedDescription)"
+            // Echo cancel is not available on every route/device: hearing and speaking matter more.
+            note("voice processing failed: \(error.localizedDescription)")
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
+            try? engine.inputNode.setVoiceProcessingEnabled(false)
+            do {
+                try runEngine(voiceProcessing: false)
+            } catch {
+                fail("Audio failed: \(error.localizedDescription)")
+                return
+            }
         }
+        listening = true
+        note("engine on, voiceProcessing=\(voiceProcessing), out=\(AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue })")
+        beginRecognition()
+        if let text = pendingSpeech {
+            pendingSpeech = nil
+            speak(text)
+        }
+    }
+
+    private func runEngine(voiceProcessing on: Bool) throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: on ? .voiceChat : .default,
+                                options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setActive(true)
+        let input = engine.inputNode
+        if on { try input.setVoiceProcessingEnabled(true) }  // echo cancel: must be set before the engine starts
+        voiceProcessing = on
+        if player.engine == nil { engine.attach(player) }
+        engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+        let tap = self.tap  // the tap runs on the audio thread: no main-actor state in it
+        input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { @Sendable buffer, _ in
+            tap.append(buffer)
+        }
+        engine.prepare()
+        try engine.start()
+        player.play()
     }
 
     private func beginRecognition() {
         guard listening else { return }
         recognition?.cancel()
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if recognizer?.supportsOnDeviceRecognition == true { request.requiresOnDeviceRecognition = true }
+        request.shouldReportPartialResults = true  // server or on-device, the same as the Home mic, which works
         self.request = request
         heard = ""
         let current = ObjectIdentifier(request)  // compare ids: the request itself isn't Sendable
@@ -159,7 +254,8 @@ final class HWVoice: ObservableObject {
                 guard error != nil || result?.isFinal == true else { return }
                 if !self.heard.isEmpty {
                     self.finishUtterance()  // don't lose words when a task ends on its own
-                } else if error != nil {
+                } else if let error {
+                    self.note("recognition error: \(error.localizedDescription)")
                     self.retryAfterFailure()
                 } else {
                     self.beginRecognition()  // tasks end on their own (about a minute)
@@ -172,7 +268,7 @@ final class HWVoice: ObservableObject {
     private func retryAfterFailure() {
         failures += 1
         guard failures <= 5 else {
-            error = "Speech recognition keeps failing. Type instead, or check Siri & Dictation."
+            fail("Speech recognition keeps failing. Type instead, or check Siri & Dictation.")
             return
         }
         let delay = min(0.5 * pow(2, Double(failures)), 10)
@@ -184,9 +280,12 @@ final class HWVoice: ObservableObject {
     private func partial(_ text: String) {
         guard !text.isEmpty else { return }
         failures = 0
+        count("partials")
         heard = text
-        // Barge-in: real words while Jarvis talks cut it off.
-        if speaking, text.split(separator: " ").count >= 2 || text.count >= 5 {
+        // Barge-in: real words while Jarvis talks cut it off, but not Jarvis's own voice coming back.
+        if speaking, text.split(separator: " ").count >= 2 || text.count >= 5, !isEcho(text) {
+            count("bargeIn")
+            note("barge-in: \(text)")
             stopSpeaking()
         }
         silenceTimer?.invalidate()
@@ -201,7 +300,33 @@ final class HWVoice: ObservableObject {
         heard = ""
         request?.endAudio()
         beginRecognition()
-        if !text.isEmpty { onUtterance?(text) }
+        guard !text.isEmpty else { return }
+        if isEcho(text) {
+            count("echoDropped")
+            note("echo dropped: \(text)")
+            return
+        }
+        count("utterances")
+        note("heard: \(text)")
+        onUtterance?(text)
+    }
+
+    /// The mic picked up Jarvis's own speech (no or weak echo cancel): most of the words are
+    /// ones Jarvis just said.
+    private func isEcho(_ text: String) -> Bool {
+        guard speaking || Date() < spokeUntil else { return false }
+        return HWVoice.mostlyContained(text, in: lastSpoken)
+    }
+
+    nonisolated static func mostlyContained(_ text: String, in spoken: String) -> Bool {
+        func words(_ s: String) -> [String] {
+            s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        }
+        let heard = words(text)
+        guard !heard.isEmpty else { return false }
+        let said = Set(words(spoken))
+        let hits = heard.filter { said.contains($0) }.count
+        return Double(hits) / Double(heard.count) >= 0.7
     }
 }
 
