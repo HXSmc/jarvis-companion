@@ -282,12 +282,26 @@ _titles: dict[str, str] = {}  # session id -> title, from the watcher's polls
 _deliveries: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
 
 
+def _card_name(sid: str | None) -> str | None:
+    """The bold line on the session's card in the app: central's plain `doing`, else the router title."""
+    if not sid:
+        return None
+    hit = central._load_state()["plain"].get(sid)
+    doing = hit.get("doing") if isinstance(hit, dict) else None
+    return doing if isinstance(doing, str) and doing.strip() else _titles.get(sid)
+
+
 async def deliver(kind: str, title: str, text: str, sid: str | None) -> None:
     """A note the owner must not miss. With ntfy set up it goes to ntfy only: the app's own
     alerts arrived in a burst on opening it (owner, 2026-10-21). The app (then WhatsApp) is the
     path when ntfy is not set up or the push fails."""
-    if _ntfy_target() is not None and await push_ntfy(kind, title, text):
-        return
+    if _ntfy_target() is not None:
+        # ntfy cuts the title to one line: lead with the card's own name so the owner
+        # knows which card rang (owner, 2026-10-21); the label moves to the message.
+        name = _card_name(sid)
+        label = title.partition(": ")[0]  # every caller builds "<label>: <session title>"
+        if await push_ntfy(kind, *((name, f"{label}: {text}") if name else (title, text))):
+            return
     if not await push_app(kind, title, text, sid, confirm=True):
         await ring(kind, title, text)
 
