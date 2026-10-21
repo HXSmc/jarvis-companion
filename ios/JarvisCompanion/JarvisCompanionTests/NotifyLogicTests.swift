@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import JarvisCompanion
 
@@ -28,5 +29,24 @@ final class NotifyLogicTests: XCTestCase {
         // nothing new
         XCTAssertTrue(NoteCursor.catchUp(notes, after: 30).show.isEmpty)
         XCTAssertEqual(NoteCursor.catchUp([], after: nil).cursor, 0)
+    }
+
+    /// Session alerts need the app awake in the background: the silent keepalive must
+    /// mix with other audio (music must not stop it) and come back after it stops.
+    func testKeepAliveMixesWithOtherAudioAndRestarts() throws {
+        KeepAlive.start()
+        guard KeepAlive.isRunning else {
+            throw XCTSkip("no audio session on this simulator")
+        }
+        XCTAssertTrue(AVAudioSession.sharedInstance().categoryOptions.contains(.mixWithOthers))
+        // what an interruption does: the player stops; the next foreground start() revives it
+        KeepAlive.stop()
+        XCTAssertFalse(KeepAlive.isRunning)
+        KeepAlive.start()
+        XCTAssertTrue(KeepAlive.isRunning, "start() must restart a stopped keepalive")
+        KeepAlive.beginListening()
+        KeepAlive.endListening()
+        XCTAssertTrue(KeepAlive.isRunning)
+        XCTAssertTrue(AVAudioSession.sharedInstance().categoryOptions.contains(.mixWithOthers))
     }
 }

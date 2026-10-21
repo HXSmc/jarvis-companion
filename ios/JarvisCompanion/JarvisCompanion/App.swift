@@ -849,6 +849,8 @@ final class AppModel: ObservableObject {
         if phase == .active { bridge.foregrounded() }
         // Owner notes the socket missed while the app was away (catch-up).
         if phase == .active { InboxNotifier.catchUpNotes() }
+        // The background keepalive dies on any audio interruption: bring it back.
+        if phase == .active { KeepAlive.start() }
     }
 
     private func handleCommand(id: String, type: String, payload: [String: Any]) {

@@ -10,22 +10,40 @@ import UserNotifications
 /// is the in-app fallback).
 enum KeepAlive {
     private static var player: AVAudioPlayer?
+    private static var observer: NSObjectProtocol?
+    /// Mixes with other apps' audio: music (Spotify) neither interrupts the
+    /// keepalive (which froze the app and silenced session alerts) nor is
+    /// stopped by Jarvis.
+    static let options: AVAudioSession.CategoryOptions = [.mixWithOthers]
 
-    /// Must run while foregrounded: iOS rejects audio-session activation from
-    /// the background. The session then persists across backgrounding.
+    static var isRunning: Bool { player?.isPlaying == true }
+
+    /// Called at launch and on every foreground: a call, Siri or a route change
+    /// stops the player, and nothing else would start it again. Activation is
+    /// most reliable foregrounded; an interruption that ends retries here too.
     static func start() {
-        guard player == nil else { return }
+        guard !isRunning else { return }
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setCategory(.playback, mode: .default, options: options)
             try session.setActive(true)
-            player = try AVAudioPlayer(data: silentWav(seconds: 1))
-            player?.numberOfLoops = -1
-            player?.volume = 0
+            if player == nil {
+                player = try AVAudioPlayer(data: silentWav(seconds: 1))
+                player?.numberOfLoops = -1
+                player?.volume = 0
+            }
             player?.play()
         } catch {
             NSLog("KeepAlive: audio session failed: %@", error.localizedDescription)
-            player = nil
+        }
+        if observer == nil {
+            observer = NotificationCenter.default.addObserver(
+                forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+            ) { note in
+                let ended = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    == AVAudioSession.InterruptionType.ended.rawValue
+                if ended { KeepAlive.start() }
+            }
         }
     }
 
@@ -46,12 +64,13 @@ enum KeepAlive {
     }
 
     /// Restore exactly what start() configured above: playback category,
-    /// default mode, no options, active. The silent player is never stopped,
+    /// default mode, mixable, active. The silent player is never stopped,
     /// so the background WS keepalive survives a listen/stop cycle intact.
     static func endListening() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, options: [])
+        try? session.setCategory(.playback, mode: .default, options: options)
         try? session.setActive(true)
+        if !isRunning { player?.play() }
     }
 
     /// Fire-and-forget permission ask (called once on first foreground launch).
