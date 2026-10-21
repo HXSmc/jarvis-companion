@@ -17,6 +17,12 @@ final class HWVoice: ObservableObject {
     /// A finished utterance (after a short pause).
     var onUtterance: ((String) -> Void)?
 
+    /// Words the recognizer should favour: short one-word commands get misheard in a noisy
+    /// room ("done" -> "John") without them. Found by the synthetic STT tests.
+    static let commandHints = ["done", "I'm done", "finished", "next", "next step", "repeat", "say again",
+                               "stop", "wait", "light on", "light off", "where is", "SATA", "cable", "port",
+                               "خلصت", "تم", "خلاص", "التالي", "عيد", "وقف"]
+
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let synth = AVSpeechSynthesizer()
@@ -262,6 +268,7 @@ final class HWVoice: ObservableObject {
         recognition?.cancel()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true  // server or on-device, the same as the Home mic, which works
+        request.contextualStrings = Self.commandHints
         self.request = request
         heard = ""
         let current = ObjectIdentifier(request)  // compare ids: the request itself isn't Sendable

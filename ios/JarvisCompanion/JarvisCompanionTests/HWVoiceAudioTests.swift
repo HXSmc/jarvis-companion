@@ -70,16 +70,20 @@ final class HWVoiceAudioTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".caf")
         var file: AVAudioFile?
         var rng = SeededNoise(state: 42)
+        var speech: Double = 0, hiss: Double = 0, n = 0
         for b in buffers {
             let out = try XCTUnwrap(voice.convert(b), "convert to the player format failed")
             if let ch = out.floatChannelData?[0] {
                 for i in 0..<Int(out.frameLength) {
-                    ch[i] = ch[i] * gain + Float.random(in: -noise...noise, using: &rng)
+                    let v = ch[i] * gain, z = Float.random(in: -noise...noise, using: &rng)
+                    speech += Double(v * v); hiss += Double(z * z); n += 1
+                    ch[i] = v + z
                 }
             }
             if file == nil { file = try AVAudioFile(forWriting: url, settings: out.format.settings) }
             try file?.write(from: out)
         }
+        if noise > 0, hiss > 0 { print(String(format: "  clip SNR %.1f dB", 10 * log10(speech / hiss))) }
         return url
     }
 
@@ -117,6 +121,7 @@ final class HWVoiceAudioTests: XCTestCase {
         }
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = false  // like the app, server or on-device
+        request.contextualStrings = HWVoice.commandHints  // the app's own recognizer hints
         return try await withCheckedThrowingContinuation { cont in
             var finished = false
             recognizer.recognitionTask(with: request) { result, error in
