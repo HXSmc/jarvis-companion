@@ -156,7 +156,7 @@ final class HWTracker {
     var onUpdate: ((CGRect?) -> Void)?
 
     private let queue: DispatchQueue
-    private let handler = VNSequenceRequestHandler()
+    private var handler = VNSequenceRequestHandler()
     private var request: VNTrackObjectRequest?
     private var shrink = CGSize(width: 1, height: 1)
     private var frameCount = 0
@@ -164,10 +164,10 @@ final class HWTracker {
 
     init(queue: DispatchQueue) { self.queue = queue }
 
-    /// `frame`: the image the brain actually looked at. Starting the tracker
-    /// there (then continuing on live frames) cancels the drift from the
-    /// seconds the answer took.
-    func seed(_ rect: CGRect, on frame: CIImage? = nil) {
+    /// Starts tracking `rect` on the live frames. A fresh sequence handler per
+    /// part: one sequence must only see same-size camera frames (seeding on the
+    /// smaller JPEG the brain saw broke tracking at once and hid the box).
+    func seed(_ rect: CGRect) {
         let tracked = CGRect(x: rect.midX - max(rect.width, Self.minSide) / 2,
                              y: rect.midY - max(rect.height, Self.minSide) / 2,
                              width: max(rect.width, Self.minSide), height: max(rect.height, Self.minSide))
@@ -179,12 +179,7 @@ final class HWTracker {
             let request = VNTrackObjectRequest(detectedObjectObservation: VNDetectedObjectObservation(boundingBox: vision))
             request.trackingLevel = .accurate
             self.shrink = ratio
-            if let frame {
-                try? self.handler.perform([request], on: frame, orientation: .up)
-                if let first = request.results?.first as? VNDetectedObjectObservation {
-                    request.inputObservation = first
-                }
-            }
+            self.handler = VNSequenceRequestHandler()
             self.request = request
         }
     }

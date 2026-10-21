@@ -23,8 +23,6 @@ struct HardwareModeView: View {
     @State private var lastChange: Date?
     @State private var lastWatch = Date.distantPast
     @State private var ticks = 0
-    /// The last few JPEGs sent, by frame id: the tracker starts on the one the brain saw.
-    @State private var sentFrames: [Int: Data] = [:]
     @FocusState private var typing: Bool
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -34,8 +32,9 @@ struct HardwareModeView: View {
             HWCameraPreview(session: camera.session).ignoresSafeArea()
             // Measured full-screen, like the preview, so boxes land on the part.
             GeometryReader { geo in
-                if let overlay = hw.overlay, let rect = tracked ?? (lost ? nil : overlay.rect) {
-                    HWOverlayLayer(overlay: overlay, rect: viewRect(rect, in: geo.size))
+                // The brain's box always shows; tracking only keeps it on the part as the phone moves.
+                if let overlay = hw.overlay {
+                    HWOverlayLayer(overlay: overlay, rect: viewRect(tracked ?? overlay.rect, in: geo.size))
                 }
             }
             .ignoresSafeArea()
@@ -203,8 +202,7 @@ struct HardwareModeView: View {
             tracked = nil
             lost = false
             if let overlay {
-                let seen = overlay.frameId.flatMap { sentFrames[$0] }.flatMap { CIImage(data: $0) }
-                tracker.seed(overlay.rect, on: seen)
+                tracker.seed(overlay.rect)
             } else {
                 tracker.clear()
             }
@@ -244,9 +242,7 @@ struct HardwareModeView: View {
     }
 
     private func send(_ jpeg: Data) {
-        let id = hw.sendFrame(jpeg)
-        sentFrames[id] = jpeg
-        sentFrames = sentFrames.filter { $0.key > id - 4 }
+        hw.sendFrame(jpeg)
     }
 
     private func sendFreshFrame() {
@@ -270,16 +266,16 @@ struct HardwareModeView: View {
     }
 
     /// Watch mode: the picture changed and has been still for 2 s -> ask, at
-    /// most every 15 s, whether something is wrong. It never moves to the next
-    /// step (only the user's "done" does). The brain stays silent ("say": "")
-    /// when all is fine.
+    /// most every 15 s, whether something is wrong or the step is visibly done.
+    /// The gateway only lets it move on when the brain marks the step as seen
+    /// done in this frame; the brain stays silent ("say": "") when all is fine.
     private func watchIfSettled() {
         guard let changed = lastChange, Date().timeIntervalSince(changed) > 2,
               Date().timeIntervalSince(lastWatch) > 15,
               hw.total > 0, !hw.thinking, !voice.speaking, voice.heard.isEmpty else { return }
         lastChange = nil
         lastWatch = Date()
-        hw.ask("[watch] The picture just changed and is now still. Only warn me if I did something wrong. Do not move to the next step. Otherwise reply with \"say\": \"\" and \"overlay\": null.", quiet: true)
+        hw.ask("[watch] The picture just changed and is now still. If the image clearly SHOWS the current step finished, set \"done_seen\": true and give the next step. If I did something wrong, warn me. Otherwise reply with \"say\": \"\" and \"overlay\": null.", quiet: true)
     }
 
     /// Post a short summary into the Claude session that asked for this, and clear its request.

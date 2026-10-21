@@ -40,6 +40,7 @@ final class HWVoice: ObservableObject {
     private var lastSpoken = ""
     private var spokeUntil = Date.distantPast
     private var voiceProcessing = false
+    private var buffersThisSpeech = 0
     private var counts: [String: Int] = [:]
     private var events: [String] = []
     private let startedAt = Date()
@@ -140,10 +141,27 @@ final class HWVoice: ObservableObject {
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
         let gen = generation
+        buffersThisSpeech = 0
         synth.write(utterance) { @Sendable [weak self] buffer in
             guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else { return }
             Task { @MainActor in self?.schedule(pcm, generation: gen) }
         }
+        // write() can hand back no audio at all; then speak through the system voice instead
+        // (loses echo cancel for this line, but the user hears it).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            Task { @MainActor in self?.speakDirectlyIfSilent(text, generation: gen) }
+        }
+    }
+
+    private func speakDirectlyIfSilent(_ text: String, generation gen: Int) {
+        guard gen == generation, buffersThisSpeech == 0, !stopped else { return }
+        count("speakFallback")
+        note("write() gave no audio: speaking directly")
+        synth.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
+        synth.speak(utterance)
+        spokeUntil = Date().addingTimeInterval(Double(text.count) / 12 + 1.5)  // ~12 chars/s, for the echo filter
     }
 
     func stopSpeaking() {
@@ -159,6 +177,7 @@ final class HWVoice: ObservableObject {
     private func schedule(_ pcm: AVAudioPCMBuffer, generation gen: Int) {
         guard gen == generation, engine.isRunning, let converted = convert(pcm) else { return }
         pendingBuffers += 1
+        buffersThisSpeech += 1
         count("buffers")
         speaking = true
         player.scheduleBuffer(converted) { @Sendable [weak self] in
