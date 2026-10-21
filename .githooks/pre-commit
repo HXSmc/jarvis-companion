@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# pre-commit — privacy guard for the public jarvis-companion repo.
+# Runs scripts/privacy-guard.sh against the staged diff, and refuses a
+# commit authored under a personal mail domain (this repo's git identity
+# must be the bot identity, see scripts/install-hooks.sh).
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+cd "$REPO_ROOT" || exit 1
+
+GUARD="$REPO_ROOT/scripts/privacy-guard.sh"
+if [[ ! -x "$GUARD" ]]; then
+  echo "pre-commit: $GUARD missing or not executable — refusing to commit without the privacy guard" >&2
+  exit 1
+fi
+
+"$GUARD"
+guard_status=$?
+
+# Author identity check: block a personal mail domain as the committing identity.
+ident="$(git var GIT_AUTHOR_IDENT 2>/dev/null || true)"
+if echo "$ident" | grep -Eqi '@(gmail|hotmail|outlook|icloud|yahoo)\.'; then
+  echo "pre-commit: BLOCKED — commit author identity looks personal (GIT_AUTHOR_IDENT: $(echo "$ident" | sed -E 's/@[^>]*/@<redacted>/')). Run scripts/install-hooks.sh to set the bot identity." >&2
+  guard_status=1
+fi
+
+exit "$guard_status"

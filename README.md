@@ -14,6 +14,11 @@ Copy `.env.example` to `.env` and fill in your deployment's URLs and accounts
 (the gateway loads it at startup; deploy scripts source it). Required vars are
 named in the error message when one is missing. Tests run without a `.env`.
 
+Privacy guard: run `scripts/install-hooks.sh` after cloning. This points git
+at `.githooks/` so every commit and push is scanned for private strings
+(`.env` values, an optional `.privacy-patterns` list, and generic host/path/key
+regexes) before it can reach the public repo.
+
 ## Stack
 
 Python 3.11+ (FastAPI + websockets gateway on 127.0.0.1:8788, `tailscale serve` for

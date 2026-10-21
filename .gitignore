@@ -13,3 +13,5 @@ shortcuts/build/
 .env
 .env.*
 !.env.example
+.privacy-patterns
+.privacy-allow

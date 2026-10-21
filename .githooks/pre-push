@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# pre-push — privacy guard for the public jarvis-companion repo.
+# For each ref being pushed, scans the commits that are new to the remote
+# (added lines, commit messages, author/committer emails) via
+# scripts/privacy-guard.sh --range A..B.
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+cd "$REPO_ROOT" || exit 1
+
+GUARD="$REPO_ROOT/scripts/privacy-guard.sh"
+if [[ ! -x "$GUARD" ]]; then
+  echo "pre-push: $GUARD missing or not executable — refusing to push without the privacy guard" >&2
+  exit 1
+fi
+
+remote_name="${1:-origin}"
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+status=0
+had_ref=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -z "$local_ref" ]] && continue
+  had_ref=1
+
+  # branch deletion: nothing new to scan
+  if [[ "$local_sha" =~ ^0+$ ]]; then
+    continue
+  fi
+
+  range=""
+  if [[ ! "$remote_sha" =~ ^0+$ ]]; then
+    # updating an existing ref on the remote
+    range="${remote_sha}..${local_sha}"
+  else
+    # brand-new ref on the remote: try the remote-tracking ref first
+    branch_name="${remote_ref#refs/heads/}"
+    tracking_ref="refs/remotes/${remote_name}/${branch_name}"
+    if git rev-parse --verify --quiet "$tracking_ref" >/dev/null; then
+      range="${tracking_ref}..${local_sha}"
+    else
+      # nothing known on any remote for this ref: scan every commit not
+      # already present on any remote-tracking branch
+      commits="$(git rev-list "$local_sha" --not --remotes 2>/dev/null)"
+      if [[ -z "$commits" ]]; then
+        continue
+      fi
+      oldest="$(echo "$commits" | tail -1)"
+      parent="$(git rev-parse --verify --quiet "${oldest}^" 2>/dev/null || true)"
+      base="${parent:-$EMPTY_TREE}"
+      range="${base}..${local_sha}"
+    fi
+  fi
+
+  echo "pre-push: scanning $range for $remote_ref" >&2
+  if ! "$GUARD" --range "$range"; then
+    status=1
+  fi
+done
+
+if [[ "$had_ref" -eq 0 ]]; then
+  # no refs on stdin (shouldn't happen for a real push) — fail safe closed
+  echo "pre-push: no refs read from stdin — refusing to push" >&2
+  exit 1
+fi
+
+exit "$status"
