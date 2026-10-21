@@ -98,6 +98,9 @@ def isolate_central_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr(central, "STATE_PATH", tmp_path / "central_state.json")
     monkeypatch.setattr(central, "_generate_plain", lambda session: None)
+    monkeypatch.setenv("JARVIS_CARDS_PATH", str(tmp_path / "cards.json"))
+    monkeypatch.setenv("JARVIS_CARD_FILES_DIR", str(tmp_path / "card_files"))
+    monkeypatch.setenv("MINIPC_ROUTER_DB", str(tmp_path / "no-router.db"))  # tests never read the live router
     monkeypatch.setattr(central, "_inflight", set())
     monkeypatch.setattr(central, "_failed", {})
     monkeypatch.setattr(central, "_known_ids", set())
