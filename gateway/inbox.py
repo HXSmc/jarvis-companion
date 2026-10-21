@@ -506,6 +506,7 @@ async def task_done(body: TaskDoneBody) -> dict:
         if resp is None or resp.status_code >= 400:
             raise HTTPException(status_code=503, detail="mac offline")
         _task_done_record(session_id)
+        await _task_done_app_note(session_id, purpose)
         try:
             return resp.json()
         except ValueError:
@@ -515,7 +516,15 @@ async def task_done(body: TaskDoneBody) -> dict:
     ):
         raise HTTPException(status_code=503, detail="enqueue failed")
     _task_done_record(session_id)
+    await _task_done_app_note(session_id, purpose)
     return {"ok": True, "notified": True}
+
+
+async def _task_done_app_note(session_id: str, purpose: str) -> None:
+    """Same finished task as an app notification (WhatsApp already went above)."""
+    from gateway import notify  # notify imports this module
+
+    await notify.push_app("done", f"Done: {purpose}", "Finished. Open the chat to see the result.", session_id)
 
 
 # /inbox/notify auth: box mode is ios_token-ONLY — the shared token is more

@@ -88,16 +88,14 @@ def test_crossroads_transitions():
     ]
     assert notify.crossroads(prev, [_s(state="needs_input", health="waiting")]) == []  # once per transition
     notify.crossroads(prev, [_s()])
-    assert notify.crossroads(prev, [_s(state="idle", health="idle")]) == [
-        ("turn", "Waiting for you: Fix bug", "Which option?", "s1")
-    ]
+    assert notify.crossroads(prev, [_s(state="idle", health="idle")]) == []  # a plain turn end is not a crossroads
 
 
 @pytest.mark.parametrize("extra", [{"spawned_by": "unknown"}, {"parent_session_id": "p"}, {"device": "Mac"}, {"throwaway": True}])
 def test_crossroads_skips_non_owner_sessions(extra):
     prev: dict = {}
     notify.crossroads(prev, [_s(**extra)])
-    assert notify.crossroads(prev, [_s(state="idle", health="idle", **extra)]) == []
+    assert notify.crossroads(prev, [_s(state="needs_input", health="waiting", **extra)]) == []
 
 
 def test_whatsapp_never_sends_under_pytest():
