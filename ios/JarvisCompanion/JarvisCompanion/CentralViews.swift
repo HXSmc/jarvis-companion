@@ -650,7 +650,9 @@ struct RecapView: View {
                                     .foregroundColor(.centralPurple)
                             }
                         }
-                        let bullets = session.recap ?? []
+                        // An open card ask shows below with its buttons; don't say it twice.
+                        let asking = session.card?.need.map { $0.answered == nil } ?? false
+                        let bullets = (session.recap ?? []).filter { !(asking && $0.hasPrefix("Needs you")) }
                         if bullets.isEmpty {
                             Text(session.summary ?? "No recap yet.")
                                 .font(.body)
