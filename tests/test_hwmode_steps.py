@@ -23,13 +23,15 @@ from gateway.hwmode import StepGate, is_done_confirmation
 
 
 @pytest.mark.parametrize("text", ["done", "Done.", "ok done", "I'm done", "finished", "next", "next step",
-                                  "it's done", "that's done", "all done", "step one done"])
+                                  "it's done", "that's done", "all done", "step one done",
+                                  "خلصت", "تم", "خلاص", "انتهيت", "التالي", "الخطوة التالية", "خلصت."])
 def test_done_confirmations(text):
     assert is_done_confirmation(text)
 
 
 @pytest.mark.parametrize("text", ["where is the cable", "is it done?", "not done yet", "how do I know when it's done",
-                                  "what's next?", "[watch] the picture changed", "", "undone"])
+                                  "what's next?", "[watch] the picture changed", "", "undone",
+                                  "خلصت؟", "وين الكيبل", "ما خلصت", "تم ايش؟"])
 def test_not_done_confirmations(text):
     assert not is_done_confirmation(text)
 

@@ -74,11 +74,19 @@ _DONE_RE = re.compile(
 )
 
 
+# Arabic: "تم", "خلصت", "خلاص", "انتهيت", "التالي", "الخطوة التالية"...
+_DONE_AR_RE = re.compile(r"(طيب |اوكي |يب )?(تم|خلاص|خلصت|خلصنا|خلص|انتهيت|انتهينا|التالي|الخطوة التالية)( خلاص| تم)?")
+
+
 def is_done_confirmation(text: str) -> bool:
-    """True for "done", "I'm finished", "next step"...; False for questions like "is it done?"."""
+    """True for "done", "I'm finished", "next step", "خلصت"...; False for questions like "is it done?"."""
+    if text.strip().endswith(("?", "\u061f")):
+        return False
     t = re.sub(r"[^a-z' ]+", " ", text.lower().replace("\u2019", "'")).strip()
-    t = re.sub(r"\s+", " ", t)
-    return not text.strip().endswith("?") and _DONE_RE.fullmatch(t) is not None
+    if _DONE_RE.fullmatch(re.sub(r"\s+", " ", t)):
+        return True
+    ar = re.sub(r"\s+", " ", re.sub(r"[^\u0621-\u064a ]+", " ", text)).strip()
+    return _DONE_AR_RE.fullmatch(ar) is not None
 
 
 class StepGate:
