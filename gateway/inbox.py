@@ -524,7 +524,7 @@ async def _task_done_app_note(session_id: str, purpose: str) -> None:
     """Same finished task as an app notification (WhatsApp already went above)."""
     from gateway import notify  # notify imports this module
 
-    await notify.push_app("done", f"Done: {purpose}", "Finished. Open the chat to see the result.", session_id)
+    notify.spawn_deliver("done", f"Done: {purpose}", "Finished. Open the chat to see the result.", session_id)
 
 
 # /inbox/notify auth: box mode is ios_token-ONLY — the shared token is more

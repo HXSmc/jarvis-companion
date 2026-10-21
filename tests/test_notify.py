@@ -239,3 +239,53 @@ def test_an_open_card_ask_means_no_second_crossroads_note(monkeypatch: pytest.Mo
     assert notify._card_need_open("s1") is True
     assert notify._card_need_open("s2") is False  # answered: the router's own question may notify
     assert notify._card_need_open("s3") is False
+
+
+def test_ntfy_push_is_utf8_json_with_the_token_and_rings_first(monkeypatch: pytest.MonkeyPatch):
+    import httpx
+
+    posts: list[tuple] = []
+
+    async def post(self, url, json=None, headers=None):
+        posts.append((url, json, headers))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    monkeypatch.setattr(notify, "_ntfy_target", lambda: ("http://ntfy.test:8090", "jarvis"))
+    monkeypatch.setenv("JARVIS_NTFY_TOKEN", "tk_test")
+    texted: list[str] = []
+
+    async def whatsapp(text, subject):
+        texted.append(subject)
+        return True
+
+    monkeypatch.setattr(notify, "whatsapp_owner", whatsapp)
+
+    async def run():
+        assert await notify.ring("card", "Needs you: Jarvis — مرحبا", "Approve the plan?") is True
+        assert await notify.ring("done", "Done: report", "") is True
+
+    asyncio.run(run())
+    (url, body, headers), (_, done, _) = posts
+    assert url == "http://ntfy.test:8090" and headers == {"Authorization": "Bearer tk_test"}
+    assert body == {"topic": "jarvis", "title": "Needs you: Jarvis — مرحبا", "message": "Approve the plan?",
+                    "tags": ["bell"], "priority": 4}
+    assert done["message"] == "Done: report" and done["priority"] == 3  # an empty text still says something
+    assert texted == []  # ntfy set up: no silent WhatsApp-to-self
+
+
+def test_without_ntfy_ring_falls_back_to_whatsapp_but_never_for_turn_ends(monkeypatch: pytest.MonkeyPatch):
+    texted: list[str] = []
+
+    async def whatsapp(text, subject):
+        texted.append(subject)
+        return True
+
+    monkeypatch.setattr(notify, "whatsapp_owner", whatsapp)
+    assert notify._ntfy_target() is None  # under pytest, always: a test never pushes for real
+
+    async def run():
+        return await notify.ring("crossroads", "Needs your decision: A", "a"), await notify.ring("done", "Done: B", "b")
+
+    assert asyncio.run(run()) == (True, False)
+    assert texted == ["[jarvis] Needs your decision: A"]
