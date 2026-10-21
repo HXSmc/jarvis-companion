@@ -127,8 +127,14 @@ final class HWVoiceAudioTests: XCTestCase {
     }
 
     private func transcribeOnce(_ url: URL, locale: String) async throws -> String {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)), recognizer.isAvailable else {
-            throw XCTSkip("speech recognizer \(locale) unavailable on this simulator")
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
+            throw XCTSkip("no speech recognizer for \(locale) on this simulator")
+        }
+        for _ in 0..<30 where !recognizer.isAvailable {  // the CI simulator's recognizer warms up slowly
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        guard recognizer.isAvailable else {
+            throw XCTSkip("speech recognizer \(locale) unavailable on this simulator after 30 s")
         }
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = false  // like the app, server or on-device
