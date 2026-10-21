@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from gateway.auth import require_bearer, require_bearer_any
 from gateway.ws import IOS_ROLE, _authorized
 from hwmode.brain import LeanSession
+from hwmode.segment import get_segmenter
 from hwmode.tts import get_voice
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,8 @@ class _Conn:
         self.tasks: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
         self.voice = get_voice()
         self.speaking: set[asyncio.Task] = set()  # voice synthesis, outside `tasks` (never "busy")
+        self.segmenter = get_segmenter()
+        self.total = 0  # the plan's step count, so a restarted brain is told it
 
     async def send(self, msg: dict) -> None:
         await self.ws.send_text(json.dumps(msg))
@@ -194,6 +197,7 @@ class _Conn:
         self.task, self.model = task, model if model in ("sonnet", "haiku") else "sonnet"
         if announce:  # a new task starts over; a silent restart (turn cap) keeps the step
             self.gate = StepGate()
+            self.total = 0
         self.session = await asyncio.to_thread(LeanSession, self.model, claude_bin=_claude_bin())
         if announce:  # the phone answers "ready" by planning the task, so only for a real start
             await self.send({"type": "ready", "model": self.model,
@@ -212,7 +216,8 @@ class _Conn:
             if back_to:  # the user asked to go back: say so to the brain, and the gate follows
                 text = f"{text} [The user wants to go back to step {back_to}. Guide step {back_to} again.]"
             if self.session.turns == 0 and self.task:  # a fresh brain must know the job
-                where = f" We are on step {self.gate.current}." if self.gate.current else ""
+                of = f" of {self.total}" if self.total else ""
+                where = f" We are on step {self.gate.current}{of}." if self.gate.current else ""
                 text = f"Task: {self.task}.{where} {text}"
             jpeg = self.frame if use_frame else None
             frame_id = self.frame_id if use_frame else None
@@ -241,8 +246,16 @@ class _Conn:
                     early.append(say)
                     asyncio.run_coroutine_threadsafe(self._speak(say), loop)
 
+            # The part's outline needs the frame encoded (~1.3 s): do it while the brain thinks.
+            embedding = (asyncio.create_task(asyncio.to_thread(self.segmenter.embed, jpeg))
+                         if self.segmenter and jpeg is not None and not watch else None)
             logger.info("ask frame=%s text=%r", frame_id, text[:200])
-            reply = await asyncio.to_thread(self.session.ask, text, jpeg, on_text)
+            try:
+                reply = await asyncio.to_thread(self.session.ask, text, jpeg, on_text)
+            except BaseException:
+                if embedding:
+                    embedding.cancel()
+                raise
             if back_to:
                 self.gate.current = back_to
                 data = {**reply.data, "step": back_to} if isinstance(reply.data, dict) else reply.data
@@ -263,6 +276,11 @@ class _Conn:
                     data = {**data, "say": f"Let's finish step {cur} first. Say done when it is.", "overlay": None}
             if data is not None and jpeg is not None and not watch:
                 data = await self._refine_small(data, jpeg)
+            if data is not None and jpeg is not None:
+                data = await self._outline(data, jpeg, embedding)
+            elif embedding:
+                embedding.cancel()
+            data = self._plan_length(data)
             d = data or {}
             logger.info("reply %.1fs step=%s/%s gate=%s say=%r", reply.total_s, d.get("step"), d.get("of"),
                         self.gate.current, str(d.get("say", reply.raw))[:200])
@@ -328,6 +346,41 @@ class _Conn:
         fine = [min(max(fine[0], 0), w), min(max(fine[1], 0), h), min(max(fine[2], 0), w), min(max(fine[3], 0), h)]
         logger.info("zoom refine %s: %s -> %s", label, [round(v) for v in box], [round(v) for v in fine])
         return {**data, "overlay": {**o, "target_px": fine}}
+
+    async def _outline(self, data: dict, jpeg: bytes, embedding: asyncio.Task | None) -> dict:
+        """The part's mask (SAM on this box) inside the brain's box, so the phone paints the part
+        itself. Any failure keeps the plain box."""
+        o = data.get("overlay")
+        px = o.get("target_px") if isinstance(o, dict) else None
+        if self.segmenter is None or not (isinstance(px, list) and len(px) == 4):
+            if embedding:
+                embedding.cancel()
+            return data
+        try:
+            box = [float(v) for v in px]
+            emb = await (embedding or asyncio.to_thread(self.segmenter.embed, jpeg))
+            m = await asyncio.to_thread(self.segmenter.mask, emb, box)
+        except Exception:
+            logger.exception("hwmode: outline failed")
+            return data
+        if m is None:
+            logger.info("outline %s: no believable mask, keeping the box", o.get("label"))
+            return data
+        logger.info("outline %s: %s -> %s score=%s", o.get("label"), [round(v) for v in box],
+                    m["target_px"], m["mask_score"])
+        return {**data, "overlay": {**o, **m}}
+
+    def _plan_length(self, data: dict | None) -> dict | None:
+        """Remember the plan's step count; fill it in when a restarted brain answers "of": 0."""
+        if not isinstance(data, dict):
+            return data
+        step, of = data.get("step"), data.get("of")
+        if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+            return data
+        if isinstance(of, int) and not isinstance(of, bool) and of >= step:
+            self.total = of
+            return data
+        return {**data, "of": self.total} if self.total >= step else data
 
     def _gate(self, data: dict | None, user_done: bool, watch: bool, has_frame: bool,
               locate: bool = False) -> dict | None:

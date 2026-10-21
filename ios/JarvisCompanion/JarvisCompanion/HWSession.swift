@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// What the brain wants drawn on the live picture. `rect` is normalized 0...1 in
 /// the image's own coordinates (origin top-left), so it maps onto any view size.
@@ -8,6 +9,42 @@ struct HWOverlay: Equatable {
     var dir: CGVector
     var label: String
     var frameId: Int?
+    /// The part's own shape inside `rect` (the gateway's mask, already tinted): painted
+    /// instead of the box when present.
+    var mask: CGImage? = nil
+
+    static func == (a: HWOverlay, b: HWOverlay) -> Bool {
+        a.rect == b.rect && a.action == b.action && a.dir == b.dir && a.label == b.label
+            && a.frameId == b.frameId && a.mask === b.mask
+    }
+}
+
+/// The gateway's mask PNG (gray: 0 outside, ~110 inside, 255 on the edge) as a highlight
+/// colour whose opacity is that gray level: a see-through part with a solid outline.
+enum HWMask {
+    static func tinted(_ png: Data, red: UInt8 = 255, green: UInt8 = 214, blue: UInt8 = 10) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(png as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let w = image.width, h = image.height
+        // Contexts own their memory (data: nil): a pointer to a Swift array would not outlive the call.
+        guard w > 0, h > 0, w * h <= 512 * 512,
+              let gray = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
+              let out = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let g = gray.data?.assumingMemoryBound(to: UInt8.self),
+              let o = out.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        gray.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        for i in 0..<(w * h) {
+            let a = UInt16(g[i])
+            o[i * 4] = UInt8(UInt16(red) * a / 255)  // premultiplied
+            o[i * 4 + 1] = UInt8(UInt16(green) * a / 255)
+            o[i * 4 + 2] = UInt8(UInt16(blue) * a / 255)
+            o[i * 4 + 3] = UInt8(a)
+        }
+        return out.makeImage()
+    }
 }
 
 /// A session-card request to open Hardware Mode for a Claude session.
@@ -250,6 +287,7 @@ final class HWSession: ObservableObject {
                          action: (o["action"] as? String) ?? "look",
                          dir: d.count == 2 ? CGVector(dx: d[0], dy: d[1]) : .zero,
                          label: (o["label"] as? String) ?? "",
-                         frameId: frameId)
+                         frameId: frameId,
+                         mask: (o["mask_png"] as? String).flatMap { Data(base64Encoded: $0) }.flatMap { HWMask.tinted($0) })
     }
 }
