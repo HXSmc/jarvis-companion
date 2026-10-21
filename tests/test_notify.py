@@ -306,7 +306,6 @@ def test_with_ntfy_set_up_alerts_skip_the_app(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(notify, "_ntfy_target", lambda: ("http://ntfy.test", "jarvis"))
     monkeypatch.setattr(notify, "push_ntfy", ntfy)
     monkeypatch.setattr(notify, "push_app", push)
-    monkeypatch.setattr(notify.central, "_load_state", lambda: {"plain": {}})
     asyncio.run(notify.deliver("done", "Done: A", "a", "s1"))
     assert rung == ["Done: A"] and app == []
 
@@ -319,7 +318,7 @@ def test_with_ntfy_set_up_alerts_skip_the_app(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_an_ntfy_note_is_titled_with_the_card_name(monkeypatch: pytest.MonkeyPatch):
-    """ntfy shows one title line: the card's bold line names which card rang; the label goes below."""
+    """ntfy shows one title line: the card's purple label names which card rang; the label goes below."""
     sent = []
 
     async def ntfy(kind, title, text):
@@ -328,12 +327,13 @@ def test_an_ntfy_note_is_titled_with_the_card_name(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(notify, "_ntfy_target", lambda: ("http://ntfy.test", "jarvis"))
     monkeypatch.setattr(notify, "push_ntfy", ntfy)
-    monkeypatch.setattr(notify.central, "_load_state",
-                        lambda: {"plain": {"s1": {"doing": "Checking phone alerts"}, "s2": {"doing": " "}}})
+    monkeypatch.setitem(notify._names, "s1", notify._project_label({"project": "", "cwd": "/w/jarvis-daf728/"}))
     monkeypatch.setitem(notify._titles, "s2", "New project task from the owner: Jarvis")
     for sid in ("s1", "s2", "s3", None):
         asyncio.run(notify.deliver("card", "Needs you: New project task from the owner: Jarvis", "Approve?", sid))
-    assert sent == [("Checking phone alerts", "Needs you: Approve?"),
+    assert notify._project_label({"project": "notekit", "cwd": "/w/x"}) == "notekit"
+    assert notify._project_label({}) is None
+    assert sent == [("jarvis-daf728", "Needs you: Approve?"),
                     ("New project task from the owner: Jarvis", "Needs you: Approve?"),
                     ("Needs you: New project task from the owner: Jarvis", "Approve?"),  # no name: unchanged
                     ("Needs you: New project task from the owner: Jarvis", "Approve?")]
