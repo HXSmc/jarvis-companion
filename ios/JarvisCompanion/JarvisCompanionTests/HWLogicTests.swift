@@ -142,8 +142,9 @@ final class HWLogicTests: XCTestCase {
         samples[1] = Int16.min
         let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
         let bufs = HWVoice.pcmBuffers(data, rate: 24000)
+        print("pcmBuffers: \(bufs.map { "\($0.frameLength)@\($0.format)" })")
         XCTAssertEqual(bufs.map { Int($0.frameLength) }, [12000, 12000, 6000])
-        let ch = bufs[0].floatChannelData![0]
+        guard let ch = bufs.first?.floatChannelData?[0] else { return XCTFail("no float buffer from pcmBuffers") }
         XCTAssertEqual(ch[0], 32767.0 / 32768, accuracy: 1e-6)
         XCTAssertEqual(ch[1], -1, accuracy: 1e-6)
         XCTAssertTrue(HWVoice.pcmBuffers(Data(), rate: 24000).isEmpty)
