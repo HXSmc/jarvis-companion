@@ -347,3 +347,49 @@ def test_go_back_one_step_by_voice(gateway_server):
         assert back["data"]["step"] == 1, back["data"]
         assert _said(back), "going back must repeat step 1 out loud"
     run_live(gateway_server, body)
+
+
+# ---------------------------------------------------------------- owner's round-5 feedback (build 1.0.122)
+
+@pytest.mark.parametrize("task", ["Help me find the SATA2 port", "Where is the HDMI cable on my mini PC?"])
+def test_a_find_task_is_one_step_with_no_extra_jobs(gateway_server, task):
+    async def body(phone: Phone):
+        await phone.start(task)
+        await phone.frame((render("in_port1") if "SATA" in task else render_minipc()).jpeg)
+        plan = (await phone.ask(PLAN))["data"]
+        print(f"  plan: {plan.get('step')}/{plan.get('of')} {plan.get('say')!r}")
+        assert plan["of"] == 1, f"a find task grew extra steps: {plan}"
+        assert _box(phone_last(phone)), "finding means pointing at it"
+        said = _said(phone_last(phone)).lower()
+        assert not any(w in said for w in ("unplug", "shut down", "power down", "open the case", "unscrew")), said
+        done = (await phone.ask("found it, thanks"))["data"]
+        assert done["step"] == 1 and done["of"] == 1, done
+        assert not any(w in _said({"data": done}).lower() for w in ("next", "step 2", "now unplug")), done
+    run_live(gateway_server, body)
+
+
+def phone_last(phone: Phone) -> dict:
+    return {"data": [d for k, d in phone.log if k == "reply"][-1]}
+
+
+@pytest.mark.live_mask
+@pytest.mark.parametrize("question,part", [("Point at the power cable.", "power"), ("Where is the USB cable?", "usb"),
+                                           ("Point at the top left screw.", "screw_tl")])
+def test_the_part_comes_back_as_a_tight_mask(gateway_server, question, part):
+    from hwmode.segment import Segmenter
+
+    if not Segmenter().available():
+        pytest.skip("SAM model not installed")
+
+    async def body(phone: Phone):
+        await phone.start(MINIPC_TASK)
+        scene = render_minipc(noise=0.1, seed=7)
+        await phone.frame(scene.jpeg)
+        await phone.ask(PLAN)
+        reply = await phone.ask(question)
+        o = reply["data"].get("overlay") or {}
+        box, truth = _box(reply), scene.boxes[part]
+        print(f"  mask={'Y' if o.get('mask_png') else '-'} score={o.get('mask_score')} box={box} truth={truth} iou={iou(box, truth):.2f}")
+        assert o.get("mask_png"), f"no mask for {part}: {o}"
+        assert center_in(box, truth, margin=15) and iou(box, truth) > 0.5, f"mask box {box} vs {truth}"
+    run_live(gateway_server, body)
