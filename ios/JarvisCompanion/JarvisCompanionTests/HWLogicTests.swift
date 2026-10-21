@@ -23,6 +23,9 @@ final class HWLogicTests: XCTestCase {
         let said = "Step 1 of 2: grip the cable plug at SATA1 and pull it straight out of the port."
         XCTAssertTrue(HWVoice.mostlyContained("grip the cable plug at SATA1", in: said))
         XCTAssertTrue(HWVoice.mostlyContained("pull it straight out of the port", in: said))
+        // what the simulator's recognizer really returned for that line (numbers spelled out, a few misheard words)
+        XCTAssertTrue(HWVoice.mostlyContained("Step one two grip the cable plug that sat one and pull it straight out of the court", in: said))
+        XCTAssertTrue(HWVoice.mostlyContained("Step one of two grip the cable plug sat one and pull it straight out of the port", in: said))
         XCTAssertFalse(HWVoice.mostlyContained("where is the SATA2 port", in: said))
         XCTAssertFalse(HWVoice.mostlyContained("wait stop", in: said))
         XCTAssertFalse(HWVoice.mostlyContained("", in: said))

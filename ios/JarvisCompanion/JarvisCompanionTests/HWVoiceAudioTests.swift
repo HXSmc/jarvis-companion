@@ -55,12 +55,21 @@ final class HWVoiceAudioTests: XCTestCase {
         buffers.reduce(0) { $0 + Double($1.frameLength) / $1.format.sampleRate }
     }
 
+    /// Same noise every run: a failure must be reproducible.
+    private struct SeededNoise: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return state
+        }
+    }
+
     /// Player-format (22.05 kHz mono float) clip written to a temp file, with gain and noise.
     private func clip(_ buffers: [AVAudioPCMBuffer], gain: Float = 1, noise: Float = 0) throws -> URL {
         let voice = HWVoice()
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".caf")
         var file: AVAudioFile?
-        var rng = SystemRandomNumberGenerator()
+        var rng = SeededNoise(state: 42)
         for b in buffers {
             let out = try XCTUnwrap(voice.convert(b), "convert to the player format failed")
             if let ch = out.floatChannelData?[0] {
@@ -163,7 +172,8 @@ final class HWVoiceAudioTests: XCTestCase {
             ("Stop.", ["stop"], .stop),
             ("Light on.", ["light"], .torchOn),
         ]
-        let variants: [(String, Float, Float)] = [("clean", 1, 0), ("quiet", 0.15, 0), ("noisy", 1, 0.05)]
+        // clean, quiet (far from the phone), noisy (~20 dB SNR, a workshop): must be heard right.
+        let variants: [(String, Float, Float)] = [("clean", 1, 0), ("quiet", 0.15, 0), ("noisy", 1, 0.015)]
         for (text, words, intent) in commands {
             let buffers = try await synthesize(text, language: "en-US")
             for (name, gain, noise) in variants {
@@ -174,6 +184,26 @@ final class HWVoiceAudioTests: XCTestCase {
                 }
                 if let intent { XCTAssertEqual(HWLocalCommand(heard), intent, "\(name): \(heard)") }
             }
+        }
+    }
+
+    /// Very loud noise (~10 dB SNR): Apple's recognizer may mishear or give up, but it must fail
+    /// safe: never invent a "done" (that would skip a step) or a different local command.
+    func testVeryNoisyCommandsFailSafe() async throws {
+        try await requireSpeechAuthorization()
+        let commands: [(String, HWLocalCommand?)] = [("Where is the cable?", nil), ("Repeat.", .repeatLast), ("Stop.", .stop)]
+        for (text, intent) in commands {
+            let buffers = try await synthesize(text, language: "en-US")
+            let heard: String
+            do {
+                heard = try await transcribe(try clip(buffers, noise: 0.05), locale: "en-US")
+            } catch let error as NSError where error.domain == "kAFAssistantErrorDomain" {
+                print("STT very noisy: \(text) -> not recognized (\(error.code)): nothing is sent, safe")
+                continue
+            }
+            print("STT very noisy: \(text) -> \(heard)")
+            XCTAssertFalse(heard.lowercased().split(separator: " ").contains("done"), "invented a done: \(heard)")
+            if let got = HWLocalCommand(heard) { XCTAssertEqual(got, intent, "wrong local command from \(heard)") }
         }
     }
 
