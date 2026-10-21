@@ -74,7 +74,7 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "unplug SATA"}))
-                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet"}
+                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet", "voice": None}
                 jpeg = _tiny_jpeg(64, 48)
                 # Binary frame, like the iOS URLSessionWebSocketTask sends.
                 await ws.send(json.dumps({"type": "frame", "id": 7, "jpeg": base64.b64encode(jpeg).decode()}).encode())

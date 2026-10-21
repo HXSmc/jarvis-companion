@@ -83,6 +83,15 @@ def gateway_server(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_voice(monkeypatch, request):
+    """Hardware Mode tests never load the box's real Kokoro voice, unless a live test asks for it."""
+    if "live_voice" in request.keywords:
+        return
+    from gateway import hwmode
+    monkeypatch.setattr(hwmode, "get_voice", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def isolate_central_state(monkeypatch, tmp_path):
     """No test touches ~/.jarvis/central_state.json, the vault, or a real model."""
     from gateway import central
