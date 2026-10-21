@@ -48,11 +48,11 @@ from pathlib import Path as FilePath
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from common import config
-from gateway import attachments, sprites
+from gateway import attachments, cards, sprites
 from gateway.auth import require_bearer_any
 from mac.voice import brain as _brain
 
@@ -123,8 +123,16 @@ PLAIN_INSTRUCTION = (
     '"recap": 1 to 5 short bullets in first person past tense, like "I fixed the login page" '
     'or "I downloaded the photos". Only say what the summary shows was done. Never ask the owner for '
     "anything and never guess what the session is waiting for. The summary may be cut off: ignore an "
-    "unfinished last sentence. No jargon, no code, no file paths, no markdown."
+    "unfinished last sentence. No jargon, no code, no file paths, no markdown. "
+    "Follow the Stage line: while working, bullets are what is finished so far and 'doing' is the "
+    "newest status line said plainly; once finished or waiting, 'doing' starts with 'Done: ' or "
+    "'Waiting: ' and bullets say only what was finished, never what it is about to do next."
 )
+# Stage line per phase; a finished card must not say "I am now ..." (owner, 2026-10-21).
+_STAGE = {"in_progress": "working", "in_review": "waiting for the owner", "done": "finished"}
+_FUTURE_RE = re.compile(r"^(now\b|next\b|i am now|i'm now|i will|i'll|i am going|i'm going|then i)", re.I)
+PLAIN_FACTS_WINDOW = timedelta(hours=48)  # older rows keep their cached lines; no event read
+PLAIN_WORKING_MIN_S = 60  # a working session's lines are remade at most once a minute
 
 router = APIRouter(dependencies=[Depends(require_bearer_any("ios_token"))])
 # The Agency Floor page holds no data or secrets (it fetches everything with the
@@ -312,7 +320,24 @@ def _summary_hash(summary: str) -> str:
     return hashlib.sha256(summary.encode()).hexdigest()[:16]
 
 
-def _session(item: dict, plain: dict | None = None, now: datetime | None = None) -> dict:
+def _plain_digest(session: dict) -> str | None:
+    """Cache key for a session's plain lines; None when there is nothing to read.
+
+    With the router's events (`_facts`, box deploy) the key is the phase plus the
+    newest status line plus the last reply, so a session that just finished gets
+    new "done" lines even when its summary did not change. Without them it is the
+    summary hash, as before.
+    """
+    facts = session.get("_facts") or {}
+    if facts.get("statuses") or facts.get("reply"):
+        status = (facts.get("statuses") or [""])[0] if session.get("phase") == "in_progress" else ""
+        return _summary_hash(f"{session.get('phase')}|{status}|{facts.get('reply_seq')}")
+    summary = session.get("summary")
+    return _summary_hash(summary) if isinstance(summary, str) and summary.strip() else None
+
+
+def _session(item: dict, plain: dict | None = None, now: datetime | None = None,
+             cards_state: dict | None = None) -> dict:
     out = _pick(item, _SESSION_KEYS)
     if out.get("phase") not in _PHASES:
         out["phase"] = _PHASE_FALLBACK.get(out.get("state"), "in_progress")
@@ -334,6 +359,15 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None)
     ask = _owner_ask(out)
     if ask:
         out["recap"].append(ask)
+    card = (cards_state or {}).get(out.get("session_id"))
+    card = card if isinstance(card, dict) else {}
+    need = card.get("need") if isinstance(card.get("need"), dict) else None
+    if need and not need.get("answered") and out["health"] not in ("working", "quiet"):
+        # The session asked through its card and stopped: it waits on the owner.
+        out["phase"] = "in_review"
+        out["health"] = "waiting"
+        if not ask:
+            out["recap"].append(f"Needs you: {need.get('question', '')}")
     ts = _parse_ts(out.get("last_activity_at"))
     # Never hide a session that needs the owner: the old "in review" signal,
     # the legacy literal "waiting_for_owner" health value (pre-rename router),
@@ -458,11 +492,24 @@ def _generate_plain(session: dict) -> dict | None:
         f"{label}: {session[k]}" for label, k in (("Title", "title"), ("State", "state"))
         if isinstance(session.get(k), str) and session[k]
     )
-    prompt = f"{facts}\nLatest summary:\n{session['summary'][:4000]}"
+    stage = _STAGE.get(session.get("phase"), "working")
+    events = session.get("_facts") or {}
+    if events.get("statuses") or events.get("reply"):
+        parts = [f"{facts}\nStage: {stage}"]
+        if stage == "working" and events.get("statuses"):
+            parts.append("Status lines, newest first:\n" + "\n".join(f"- {s}" for s in events["statuses"]))
+        if events.get("reply"):
+            parts.append("Its last message (may start mid-sentence):\n" + events["reply"][-3000:])
+        prompt = "\n".join(parts)
+    else:
+        prompt = f"{facts}\nStage: {stage}\nLatest summary:\n{(session.get('summary') or '')[:4000]}"
     text = _run_claude_plain(prompt, PLAIN_TIMEOUT_SECONDS)
     if text is None:
         return None
-    return _clean_plain(text)
+    out = _clean_plain(text)
+    if out and stage != "working":
+        out["recap"] = [r for r in out["recap"] if not _FUTURE_RE.match(r)]
+    return out
 
 
 async def _plain_worker(sid: str, digest: str, session: dict) -> None:
@@ -475,7 +522,7 @@ async def _plain_worker(sid: str, digest: str, session: dict) -> None:
         # Load + save run with no await between them, so workers never interleave on the file.
         state = _load_state()
         plain = {k: v for k, v in state["plain"].items() if k in _known_ids}
-        plain[sid] = {"hash": digest, **result}
+        plain[sid] = {"hash": digest, "at": time.time(), **result}
         state["plain"] = plain
         _save_state(state)
     except Exception as exc:  # a failed summary never breaks the gateway
@@ -492,13 +539,17 @@ def _schedule_plain(sessions: list[dict], plain: dict) -> None:
         _failed.clear()
     loop = asyncio.get_running_loop()
     for s in sessions:
-        sid, summary = s.get("session_id"), s.get("summary")
-        if not isinstance(sid, str) or not isinstance(summary, str) or not summary.strip():
+        sid = s.get("session_id")
+        digest = _plain_digest(s) if isinstance(sid, str) else None
+        if digest is None:
             continue
-        digest = _summary_hash(summary)
         hit = plain.get(sid)
         key = f"{sid}:{digest}"
         if isinstance(hit, dict) and hit.get("hash") == digest:
+            continue
+        # A working session's status moves every few seconds; remake its lines once a minute at most.
+        if (isinstance(hit, dict) and s.get("phase") == "in_progress"
+                and time.time() - float(hit.get("at") or 0) < PLAIN_WORKING_MIN_S):
             continue
         if key in _inflight or now - _failed.get(key, -PLAIN_RETRY_SECONDS) < PLAIN_RETRY_SECONDS:
             continue
@@ -563,9 +614,14 @@ async def upload_attachment(request: Request, name: str = Query(default="", max_
 async def chat(body: ChatBody) -> dict:
     text = _with_files(body)
     try:
-        return await route(body.thread_id, body.msg_id, text, "app")
+        data = await route(body.thread_id, body.msg_id, text, "app")
     except RouterError as exc:
         raise _bad_gateway(exc)
+    sid = data.get("session_id")
+    if isinstance(sid, str):
+        cards.record_message(sid, body.text or "(files)", body.msg_id,
+                             "queued" if data.get("action") == "queued" else "received", data.get("action"))
+    return data
 
 
 @router.get("/central/sessions")
@@ -577,18 +633,29 @@ async def sessions() -> list[dict]:
     if not isinstance(data, list):
         raise HTTPException(status_code=502, detail="router sent invalid json")
     state = _load_state()
+    card_state = cards.load()
     now = _now()
     cleared_before = _parse_ts(state["cleared_before"])
     items = [item for item in data if isinstance(item, dict)]
     out = []
     raw = []
     for item in items:
-        session = _session(item, state["plain"], now)
+        session = _session(item, state["plain"], now, card_state)
         if not _cleared(session, cleared_before):
             out.append(session)
-            raw.append(_pick(item, _SESSION_KEYS))
+            picked = _pick(item, _SESSION_KEYS)
+            picked["phase"] = session["phase"]
+            ts = _parse_ts(session.get("last_activity_at"))
+            if isinstance(picked.get("session_id"), str) and ts and now - ts < PLAIN_FACTS_WINDOW:
+                picked["_facts"] = cards.recent_events(picked["session_id"])
+            raw.append(picked)
+    by_id = {s["session_id"]: s for s in out if isinstance(s.get("session_id"), str)}
+    for session in out:
+        session["card"] = cards.card_for(session, by_id, card_state)
+        if session["card"]["doing"] and session["phase"] == "in_progress":
+            session["doing"] = session["card"]["doing"]  # the session's own words beat the model's
     _known_ids.clear()
-    _known_ids.update(s["session_id"] for s in out if isinstance(s.get("session_id"), str))
+    _known_ids.update(by_id)
     _schedule_plain(raw, state["plain"])
     return out
 
@@ -645,13 +712,58 @@ async def clear_done() -> dict:
 @router.post("/central/sessions/{session_id}/message")
 async def session_message(body: MessageBody, session_id: str = Path(pattern=ID_PATTERN)) -> dict:
     text = _with_files(body)
+    return await _send_to_session(session_id, body.msg_id, text, body.text or "(files)")
+
+
+async def _send_to_session(session_id: str, msg_id: str, text: str, shown: str) -> dict:
+    """Router message + the card's receipt (sent -> received/queued, or failed)."""
+    cards.record_message(session_id, shown, msg_id, "sent")
     try:
-        data = await _router_json(
-            "POST", f"/sessions/{session_id}/message", {"msg_id": body.msg_id, "text": text}
-        )
+        data = await _router_json("POST", f"/sessions/{session_id}/message", {"msg_id": msg_id, "text": text})
     except RouterError as exc:
+        cards.record_message(session_id, shown, msg_id, "failed")
         raise _bad_gateway(exc)
+    except HTTPException:
+        cards.record_message(session_id, shown, msg_id, "failed")
+        raise
+    action = data.get("action") if isinstance(data, dict) else None
+    cards.record_message(session_id, shown, msg_id, "queued" if action == "queued" else "received", action)
     return _pick(data, ("ok", "action"))
+
+
+class AnswerBody(BaseModel):
+    msg_id: str = Field(pattern=ID_PATTERN)
+    need_id: str = Field(pattern=r"^[0-9a-f]{12}$")
+    answer: str = Field(min_length=1, max_length=40)
+    note: str = Field(default="", max_length=1000)
+    checked: list[bool] = Field(default_factory=list, max_length=cards.MAX_ITEMS)
+
+
+@router.post("/central/cards/{session_id}/answer")
+async def card_answer(body: AnswerBody, session_id: str = Path(pattern=ID_PATTERN)) -> dict:
+    """A card button: the session gets one plain message saying what the owner tapped."""
+    need = (cards.load().get(session_id) or {}).get("need")
+    if not isinstance(need, dict) or need.get("id") != body.need_id:
+        raise HTTPException(status_code=404, detail="this ask is gone")
+    if need.get("answered"):
+        raise HTTPException(status_code=409, detail="already answered")
+    if not cards.valid_answer(need, body.answer):
+        raise HTTPException(status_code=422, detail="not one of the buttons")
+    text = cards.answer_text(need, body.answer, body.note, body.checked)
+    data = await _send_to_session(session_id, body.msg_id, text, body.answer)
+    cards.mark_answered(session_id, body.need_id, body.answer)
+    return data
+
+
+@router.get("/central/cards/{session_id}/files/{file_id}")
+async def card_file(session_id: str = Path(pattern=ID_PATTERN),
+                    file_id: str = Path(pattern=cards.FILE_ID_PATTERN)) -> FileResponse:
+    found = cards.file_path(session_id, file_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="file not found")
+    path, media = found
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=300",
+                                                         "X-Content-Type-Options": "nosniff"})
 
 
 @router.post("/central/sessions/{session_id}/stop")
