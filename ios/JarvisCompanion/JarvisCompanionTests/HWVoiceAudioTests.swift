@@ -72,7 +72,14 @@ final class HWVoiceAudioTests: XCTestCase {
         var rng = SeededNoise(state: 42)
         var speech: Double = 0, hiss: Double = 0, n = 0
         for b in buffers {
-            let out = try XCTUnwrap(voice.convert(b), "convert to the player format failed")
+            let converted = try XCTUnwrap(voice.convert(b), "convert to the player format failed")
+            // convert() hands back the same buffer when it is already in the player format:
+            // mix into a copy, or one variant's gain leaks into the next.
+            let out = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: converted.format, frameCapacity: converted.frameLength))
+            out.frameLength = converted.frameLength
+            if let src = converted.floatChannelData?[0], let dst = out.floatChannelData?[0] {
+                dst.update(from: src, count: Int(converted.frameLength))
+            }
             if let ch = out.floatChannelData?[0] {
                 for i in 0..<Int(out.frameLength) {
                     let v = ch[i] * gain, z = Float.random(in: -noise...noise, using: &rng)
@@ -109,9 +116,13 @@ final class HWVoiceAudioTests: XCTestCase {
     private func transcribe(_ url: URL, locale: String) async throws -> String {
         do {
             return try await transcribeOnce(url, locale: locale)
-        } catch let error as NSError where error.domain == "kAFAssistantErrorDomain" {
+        } catch let error as NSError where error.domain == "kAFAssistantErrorDomain" || error.domain == "timeout" {
             print("STT retry after \(error.domain) \(error.code)")
-            return try await transcribeOnce(url, locale: locale)
+            do {
+                return try await transcribeOnce(url, locale: locale)
+            } catch let again as NSError where again.domain == "timeout" {
+                throw XCTSkip("speech recognizer gave no result in 30 s, twice (CI network)")
+            }
         }
     }
 
@@ -138,7 +149,7 @@ final class HWVoiceAudioTests: XCTestCase {
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-                if !finished { finished = true; cont.resume(throwing: XCTSkip("speech recognizer gave no result in 30 s")) }
+                if !finished { finished = true; cont.resume(throwing: NSError(domain: "timeout", code: 30)) }
             }
         }
     }
