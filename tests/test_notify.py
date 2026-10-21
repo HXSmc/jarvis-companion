@@ -197,3 +197,45 @@ def test_resolve_reply_takes_the_ios_result_shape_only_for_a_pending_id():
     from gateway import agents
 
     assert agents.resolve_reply({"id": "ios-1", "type": "result", "payload": {"id": "note-zz", "ok": True}}) is False
+
+
+def test_a_card_ask_notifies_once_and_falls_back_to_whatsapp(monkeypatch: pytest.MonkeyPatch):
+    from gateway import cards
+
+    assert notify.on_card_need in cards.NEED_LISTENERS
+    pushed, texted = [], []
+
+    async def push(kind, title, text, sid=None, confirm=False):
+        pushed.append((kind, title, text, sid, confirm))
+        return sid == "awake"
+
+    async def whatsapp(text, subject):
+        texted.append(subject)
+        return True
+
+    monkeypatch.setattr(notify, "push_app", push)
+    monkeypatch.setattr(notify, "whatsapp_owner", whatsapp)
+    monkeypatch.setattr(notify, "_card_needs_seen", notify.deque(maxlen=200))
+    monkeypatch.setitem(notify._titles, "awake", "Session cards")
+
+    async def run():
+        need = {"id": "a1b2c3d4e5f6", "kind": "approve", "question": "Plan ready, approve?"}
+        notify.on_card_need("awake", need)
+        notify.on_card_need("awake", dict(need))  # the same ask again: no second note
+        notify.on_card_need("asleep", {"id": "0123456789ab", "kind": "yesno", "question": ""})
+        await asyncio.gather(*notify._deliveries)
+
+    asyncio.run(run())
+    assert pushed == [("card", "Needs you: Session cards", "Plan ready, approve?", "awake", True),
+                      ("card", "Needs you: a Jarvis session", "It is waiting for your answer.", "asleep", True)]
+    assert texted == ["[jarvis] Needs you: a Jarvis session"]  # only the unconfirmed one
+
+
+def test_an_open_card_ask_means_no_second_crossroads_note(monkeypatch: pytest.MonkeyPatch):
+    from gateway import cards
+
+    monkeypatch.setattr(cards, "load", lambda: {"s1": {"need": {"id": "x", "answered": None}},
+                                                "s2": {"need": {"id": "y", "answered": {"at": "t"}}}})
+    assert notify._card_need_open("s1") is True
+    assert notify._card_need_open("s2") is False  # answered: the router's own question may notify
+    assert notify._card_need_open("s3") is False

@@ -37,7 +37,7 @@ from collections import deque
 import httpx
 from fastapi import APIRouter, Depends, Query
 
-from gateway import agents, central, inbox, registry
+from gateway import agents, cards, central, inbox, registry
 from gateway.auth import require_bearer_any
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,44 @@ def crossroads(prev: dict[str, tuple], sessions: list[dict], now: float | None =
     return out
 
 
+# --- card asks (gateway/cards.py) ------------------------------------------------
+
+_card_needs_seen: deque[tuple] = deque(maxlen=200)
+_titles: dict[str, str] = {}  # session id -> title, from the watcher's polls
+_deliveries: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
+
+
+async def _deliver(kind: str, title: str, text: str, sid: str) -> None:
+    """A needs-you note: the app, or WhatsApp when the app does not confirm it."""
+    if not await push_app(kind, title, text, sid, confirm=True):
+        await whatsapp_owner(f"{title}\n\n{text}\n\nOpen the Jarvis app to reply.", f"[jarvis] {title}")
+
+
+def on_card_need(session_id: str, need: dict) -> None:
+    """cards.NEED_LISTENERS callback: one note per new ask on a session's card."""
+    key = (session_id, need.get("id"))
+    if key in _card_needs_seen:
+        return
+    _card_needs_seen.append(key)
+    title = f"Needs you: {_titles.get(session_id) or 'a Jarvis session'}"
+    text = str(need.get("question") or "").strip() or "It is waiting for your answer."
+    task = asyncio.get_running_loop().create_task(_deliver("card", title, text, session_id))
+    _deliveries.add(task)
+    task.add_done_callback(_deliveries.discard)
+
+
+def _card_need_open(sid: str) -> bool:
+    """The session's card has an unanswered ask: on_card_need already told the owner."""
+    try:
+        need = (cards.load().get(sid) or {}).get("need")
+    except Exception:
+        return False
+    return isinstance(need, dict) and not need.get("answered")
+
+
+cards.NEED_LISTENERS.append(on_card_need)
+
+
 async def crossroads_watcher() -> None:
     """Box-only poller of the router's sessions; never raises out."""
     prev: dict[str, tuple] = {}
@@ -237,7 +275,12 @@ async def crossroads_watcher() -> None:
         try:
             data = await central._router_json("GET", "/sessions")
             if isinstance(data, list):
-                for kind, title, text, sid in crossroads(prev, [s for s in data if isinstance(s, dict)]):
+                rows = [s for s in data if isinstance(s, dict)]
+                _titles.update({s["session_id"]: str(s["title"]) for s in rows
+                                if isinstance(s.get("session_id"), str) and s.get("title")})
+                for kind, title, text, sid in crossroads(prev, rows):
+                    if kind == "crossroads" and _card_need_open(sid):
+                        continue  # the card's own ask was the note
                     delivered = await push_app(kind, title, text, sid, confirm=True)
                     # A turn end is too frequent for WhatsApp; the app catches up on it.
                     if not delivered and kind != "done":
