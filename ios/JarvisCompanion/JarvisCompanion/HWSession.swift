@@ -38,7 +38,7 @@ final class HWSession: ObservableObject {
     /// The gateway voices English lines itself (`ready` names the voice).
     private(set) var serverVoice = false
     /// How long a line waits for its server audio before the phone's own voice reads it.
-    var audioWait: TimeInterval = 4
+    var audioWait: TimeInterval = 6  // seen live: audio 2.3 s after a 4 s line; long lines take longer
     var onOverlay: ((HWOverlay?) -> Void)?
     /// The brain session is up: send a frame and the first question.
     var onReady: (() -> Void)?
