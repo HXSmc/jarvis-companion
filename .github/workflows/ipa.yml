@@ -75,8 +75,15 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
           echo "--- simctl privacy services on this runner:"
           xcrun simctl help privacy 2>&1 | sed -n '/service/,$p' | head -30 || true
-          # Speech/mic/camera for the test host, so the voice-in tests run instead of skipping.
-          xcrun simctl privacy "$UDID" grant all personal.jarvis.JarvisCompanion || echo "privacy grant all: not supported here"
+          # Mic/camera for the test host. simctl has no speech-recognition service, so copy the
+          # mic grant's row in this simulator's own TCC.db as kTCCServiceSpeechRecognition and reboot it.
+          APP=personal.jarvis.JarvisCompanion
+          xcrun simctl privacy "$UDID" grant all "$APP" || echo "privacy grant all: not supported here"
+          DB="$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data/Library/TCC/TCC.db"
+          sqlite3 "$DB" "CREATE TEMP TABLE t AS SELECT * FROM access WHERE service='kTCCServiceMicrophone' AND client='$APP'; UPDATE t SET service='kTCCServiceSpeechRecognition'; INSERT OR REPLACE INTO access SELECT * FROM t;" \
+            || echo "speech grant via TCC.db failed: voice-in tests will skip"
+          sqlite3 "$DB" "SELECT service, auth_value FROM access WHERE client='$APP'" || true
+          xcrun simctl shutdown "$UDID" && xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b > /dev/null
           xcodebuild test \
             -project ios/JarvisCompanion/JarvisCompanion.xcodeproj \
             -scheme JarvisCompanion \
