@@ -1,3 +1,4 @@
+import PDFKit
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -126,6 +127,9 @@ struct CentralSession: Identifiable, Decodable, Equatable {
     let doneVerdictReason: String?
     let lifecycle: String?
     let purpose: String?
+    /// What the session put on its card with `jarvis-card` (gateway/cards.py):
+    /// an ask with buttons, files, child sessions, the owner's last message.
+    let card: CardInfo?
 
     var id: String { sessionId }
 
@@ -273,6 +277,8 @@ struct ChatTarget: Identifiable {
     let id = UUID()
     let sessionID: String?
     let title: String
+    /// Text already in the composer (card "Revise"), focused on open.
+    var draft: String = ""
 }
 
 @MainActor
@@ -301,6 +307,23 @@ final class SessionsModel: ObservableObject {
         }
     }
 
+    /// A card button: the gateway sends the session one plain message, then the card refreshes.
+    /// Returns an error line for the card, or nil when it went through.
+    func answer(sessionID: String, needID: String, answer: String, checked: [Bool] = []) async -> String? {
+        do {
+            let body: [String: Any] = ["msg_id": UUID().uuidString, "need_id": needID,
+                                       "answer": answer, "checked": checked]
+            _ = try await Central.data(Central.request("/central/cards/\(sessionID)/answer", method: "POST", json: body))
+            await refresh()
+            return nil
+        } catch is CancellationError {
+            return nil
+        } catch {
+            await refresh()
+            return error.localizedDescription
+        }
+    }
+
     /// Hide every done session (gateway stores the time); reactivated ones come back.
     func clearDone() async {
         do {
@@ -324,6 +347,7 @@ struct SessionsBoard: View {
     @State private var openChat: ChatTarget?
     @State private var openRecap: RecapTarget?
     @State private var openHardware: HWTarget?
+    @State private var openFile: CardFileTarget?
     @Environment(\.scenePhase) private var scenePhase
 
     private struct Column {
@@ -392,6 +416,7 @@ struct SessionsBoard: View {
         }
         .sheet(item: $openChat) { ChatView(target: $0) }
         .sheet(item: $openRecap) { RecapView(model: model, sessionID: $0.id) }
+        .sheet(item: $openFile) { CardFileView(target: $0) }
         .fullScreenCover(item: $openHardware) { HardwareModeView(initialTask: $0.task, sessionId: $0.id) }
     }
 
@@ -411,6 +436,12 @@ struct SessionsBoard: View {
                             SessionCard(session: session)
                         }
                         .buttonStyle(.plain)
+                        if let card = session.card, card.hasContent {
+                            CardExtras(session: session, card: card, model: model, compact: true,
+                                       openChat: { openChat = $0 },
+                                       openFile: { openFile = $0 },
+                                       openSession: { openRecap = RecapTarget(id: $0) })
+                        }
                         if let task = model.hardwareRequests[session.sessionId] {
                             Button {
                                 openHardware = HWTarget(id: session.sessionId, task: task)
@@ -588,6 +619,13 @@ struct RecapView: View {
     let sessionID: String
     @Environment(\.dismiss) private var dismiss
     @State private var openChat: ChatTarget?
+    @State private var openFile: CardFileTarget?
+    @State private var openChild: RecapTarget?
+
+    init(model: SessionsModel, sessionID: String) {
+        self.model = model
+        self.sessionID = sessionID
+    }
 
     private var session: CentralSession? {
         model.sessions.first { $0.sessionId == sessionID }
@@ -627,6 +665,12 @@ struct RecapView: View {
                                 }
                             }
                         }
+                        if let card = session.card, card.hasContent {
+                            CardExtras(session: session, card: card, model: model, compact: false,
+                                       openChat: { openChat = $0 },
+                                       openFile: { openFile = $0 },
+                                       openSession: { openChild = RecapTarget(id: $0) })
+                        }
                         Button {
                             openChat = ChatTarget(sessionID: session.sessionId, title: session.displayTask)
                         } label: {
@@ -653,6 +697,8 @@ struct RecapView: View {
             }
         }
         .sheet(item: $openChat) { ChatView(target: $0) }
+        .sheet(item: $openFile) { CardFileView(target: $0) }
+        .sheet(item: $openChild) { RecapView(model: model, sessionID: $0.id) }
     }
 }
 
@@ -1072,8 +1118,12 @@ struct ChatView: View {
     @State private var showFiles = false
     @FocusState private var draftFocused: Bool
 
+    private let startsWithDraft: Bool
+
     init(target: ChatTarget) {
         _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title))
+        _draft = State(initialValue: target.draft)
+        startsWithDraft = !target.draft.isEmpty
     }
 
     var body: some View {
@@ -1123,7 +1173,10 @@ struct ChatView: View {
         .padding(16)
         .background(Color.jarvisBackground.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .onAppear { model.open() }
+        .onAppear {
+            model.open()
+            if startsWithDraft { draftFocused = true }
+        }
         .onDisappear { model.close() }
         .attachmentPickers(photos: $showPhotos, files: $showFiles,
                            count: { model.attachments.count },
@@ -1564,4 +1617,471 @@ private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
                                didReceive message: WKScriptMessage) {
         target?.userContentController(userContentController, didReceive: message)
     }
+}
+
+// MARK: - Session cards (gateway/cards.py, owner ask 2026-10-21)
+//
+// A session declares what it needs with `jarvis-card` on the box; the gateway
+// adds it to every /central/sessions row as `card`. The board shows a compact
+// block under the card, the Recap the full one: the ask with buttons that fit
+// it, files (markdown/PDF/image), links, child sessions and the owner's last
+// message with its delivery status.
+
+struct CardInfo: Decodable, Equatable {
+    struct Answered: Decodable, Equatable {
+        let answer: String?
+        let text: String?
+        let at: String?
+    }
+
+    struct Need: Decodable, Equatable {
+        let id: String
+        let kind: String
+        let question: String
+        let options: [String]?
+        let items: [String]?
+        let fileId: String?
+        let at: String?
+        let answered: Answered?
+    }
+
+    struct File: Decodable, Equatable, Identifiable {
+        let id: String
+        let name: String?
+        let title: String?
+        let type: String?
+        let view: String?
+        let size: Int?
+
+        var label: String { title ?? name ?? "File" }
+        var icon: String {
+            switch view {
+            case "pdf": return "doc.richtext"
+            case "image": return "photo"
+            case "markdown": return "doc.text"
+            default: return "doc.plaintext"
+            }
+        }
+    }
+
+    struct Link: Decodable, Equatable {
+        let url: String
+        let title: String?
+    }
+
+    struct Child: Decodable, Equatable, Identifiable {
+        let sessionId: String
+        let what: String?
+        let title: String?
+        let phase: String?
+        let health: String?
+        let onBoard: Bool?
+
+        var id: String { sessionId }
+    }
+
+    struct Parent: Decodable, Equatable {
+        let sessionId: String
+        let title: String?
+        let onBoard: Bool?
+    }
+
+    struct Receipt: Decodable, Equatable {
+        let text: String
+        let at: String?
+        let status: String
+
+        /// sent -> received (or queued behind the current step) -> being worked on -> answered.
+        var label: (text: String, icon: String, color: Color) {
+            switch status {
+            case "sent": return ("Sending", "paperplane", .jarvisMuted)
+            case "queued": return ("Received, after the current step", "tray.full", .jarvisMuted)
+            case "working": return ("Being worked on", "gearshape", .centralGreen)
+            case "answered": return ("Answered", "checkmark.circle", .centralGreen)
+            case "failed": return ("Not delivered, send again", "exclamationmark.triangle", .jarvisDanger)
+            default: return ("Received", "checkmark", .jarvisText)
+            }
+        }
+    }
+
+    let need: Need?
+    let files: [File]?
+    let links: [Link]?
+    let children: [Child]?
+    let parent: Parent?
+    let receipt: Receipt?
+    let doing: String?
+
+    var hasContent: Bool {
+        need != nil || !(files ?? []).isEmpty || !(links ?? []).isEmpty
+            || !(children ?? []).isEmpty || parent != nil || receipt != nil
+    }
+
+    /// The buttons a session's ask gets; nil label = opens the chat composer instead.
+    static func buttons(for need: Need) -> [(label: String, sends: Bool)] {
+        switch need.kind {
+        case "approve": return [("Approve", true), ("Revise", false)]
+        case "preview": return [("Looks good", true), ("Change it", false)]
+        case "yesno": return [("Yes", true), ("No", true)]
+        case "choice": return (need.options ?? []).map { (label: $0, sends: true) } + [(label: "Something else", sends: false)]
+        case "checklist": return [("Send results", true), ("Add a note", false)]
+        default: return [("OK", true), ("Reply", false)]
+        }
+    }
+}
+
+/// Which card file is open in the viewer.
+struct CardFileTarget: Identifiable {
+    let sessionID: String
+    let file: CardInfo.File
+    var id: String { file.id }
+}
+
+struct CardExtras: View {
+    let session: CentralSession
+    let card: CardInfo
+    @ObservedObject var model: SessionsModel
+    let compact: Bool
+    let openChat: (ChatTarget) -> Void
+    let openFile: (CardFileTarget) -> Void
+    let openSession: (String) -> Void
+    @State private var sending: String?
+    @State private var error: String?
+    @State private var checked: [Bool] = []
+
+    init(session: CentralSession, card: CardInfo, model: SessionsModel, compact: Bool,
+         openChat: @escaping (ChatTarget) -> Void, openFile: @escaping (CardFileTarget) -> Void,
+         openSession: @escaping (String) -> Void) {
+        self.session = session
+        self.card = card
+        self.model = model
+        self.compact = compact
+        self.openChat = openChat
+        self.openFile = openFile
+        self.openSession = openSession
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let need = card.need {
+                needView(need)
+            }
+            let files = (card.files ?? []).filter { $0.id != card.need?.fileId || card.need?.answered != nil }
+            if !files.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(compact ? Array(files.suffix(2)) : files) { file in
+                            Button {
+                                openFile(CardFileTarget(sessionID: session.sessionId, file: file))
+                            } label: {
+                                chip(file.label, icon: file.icon)
+                            }
+                        }
+                    }
+                }
+            }
+            if !compact {
+                ForEach(Array((card.links ?? []).enumerated()), id: \.offset) { _, link in
+                    if let url = URL(string: link.url), url.scheme == "https" {
+                        Link(destination: url) { chip(link.title ?? link.url, icon: "link") }
+                    }
+                }
+            }
+            if let parent = card.parent {
+                Button {
+                    if parent.onBoard == true { openSession(parent.sessionId) }
+                } label: {
+                    relation("Part of", title: parent.title, id: parent.sessionId, icon: "arrow.turn.left.up")
+                }
+                .disabled(parent.onBoard != true)
+            }
+            let children = card.children ?? []
+            if !children.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(children.count == 1 ? "Handed to 1 session" : "Handed to \(children.count) sessions")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.jarvisMuted)
+                    ForEach(compact ? Array(children.prefix(2)) : children) { child in
+                        Button {
+                            if child.onBoard == true { openSession(child.sessionId) }
+                        } label: {
+                            relation(child.what.flatMap { $0.isEmpty ? nil : $0 } ?? "Helper",
+                                     title: child.title, id: child.sessionId,
+                                     icon: child.phase == "done" ? "checkmark.circle" : "arrow.turn.down.right")
+                        }
+                        .disabled(child.onBoard != true)
+                    }
+                }
+            }
+            if let receipt = card.receipt {
+                receiptView(receipt)
+            }
+            if let error = error {
+                Text(error).font(.footnote).foregroundColor(.jarvisDanger).lineLimit(2)
+            }
+        }
+        .padding(compact ? 10 : 0)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(compactBackground)
+    }
+
+    @ViewBuilder
+    private var compactBackground: some View {
+        if compact {
+            RoundedRectangle(cornerRadius: 10).fill(Color.jarvisSurface.opacity(0.6))
+        }
+    }
+
+    @ViewBuilder
+    private func needView(_ need: CardInfo.Need) -> some View {
+        if let answered = need.answered {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.centralGreen)
+                Text(answered.answer == "reply" ? "You replied in the chat" : "You answered: \(answered.answer ?? "")")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundColor(.jarvisText)
+                    .lineLimit(1)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(need.question, systemImage: "hand.raised.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.jarvisAccent)
+                    .lineLimit(compact ? 3 : nil)
+                if let fid = need.fileId, let file = card.files?.first(where: { $0.id == fid }) {
+                    Button {
+                        openFile(CardFileTarget(sessionID: session.sessionId, file: file))
+                    } label: {
+                        Label("Read \(file.label)", systemImage: file.icon)
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(RoundedRectangle(cornerRadius: 10).stroke(Color.jarvisAccent, lineWidth: 1))
+                            .foregroundColor(.jarvisAccent)
+                    }
+                }
+                if need.kind == "checklist" {
+                    ForEach(Array((need.items ?? []).enumerated()), id: \.offset) { index, item in
+                        Toggle(isOn: checkBinding(index)) {
+                            Text(item).font(.subheadline).foregroundColor(.jarvisText)
+                        }
+                        .toggleStyle(CheckToggleStyle())
+                    }
+                }
+                buttonRows(need)
+            }
+            .onAppear {
+                if checked.count != (need.items ?? []).count { checked = Array(repeating: false, count: (need.items ?? []).count) }
+            }
+        }
+    }
+
+    private func checkBinding(_ index: Int) -> Binding<Bool> {
+        Binding(get: { index < checked.count && checked[index] },
+                set: { value in
+                    if checked.count <= index { checked += Array(repeating: false, count: index + 1 - checked.count) }
+                    checked[index] = value
+                })
+    }
+
+    @ViewBuilder
+    private func buttonRows(_ need: CardInfo.Need) -> some View {
+        let buttons = CardInfo.buttons(for: need)
+        // Two short buttons sit side by side; longer lists (choices) stack full width.
+        if buttons.count == 2 {
+            HStack(spacing: 8) {
+                ForEach(Array(buttons.enumerated()), id: \.offset) { index, button in
+                    actionButton(need, button.label, sends: button.sends, primary: index == 0)
+                }
+            }
+        } else {
+            VStack(spacing: 8) {
+                ForEach(Array(buttons.enumerated()), id: \.offset) { _, button in
+                    actionButton(need, button.label, sends: button.sends, primary: button.sends)
+                }
+            }
+        }
+    }
+
+    private func actionButton(_ need: CardInfo.Need, _ label: String, sends: Bool, primary: Bool) -> some View {
+        Button {
+            if sends {
+                Task {
+                    sending = label
+                    error = await model.answer(sessionID: session.sessionId, needID: need.id,
+                                               answer: label, checked: checked)
+                    sending = nil
+                }
+            } else {
+                let prefix = need.kind == "approve" ? "Revise: " : need.kind == "checklist" ? "Test note: " : ""
+                openChat(ChatTarget(sessionID: session.sessionId, title: session.displayTask, draft: prefix))
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if sending == label { ProgressView().tint(primary ? Color.black : Color.jarvisAccent) }
+                Text(label).lineLimit(1)
+            }
+            .font(.subheadline.weight(.bold))
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(RoundedRectangle(cornerRadius: 10).fill(primary ? Color.jarvisAccent : Color.white.opacity(0.08)))
+            .foregroundColor(primary ? Color.black : Color.jarvisText)
+        }
+        .disabled(sending != nil)
+        .accessibilityHint(sends ? "Sends \(label) to the session" : "Opens the chat to write what to change")
+    }
+
+    private func chip(_ text: String, icon: String) -> some View {
+        Label(text, systemImage: icon)
+            .font(.footnote.weight(.medium))
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 32)
+            .background(Capsule().fill(Color.white.opacity(0.08)))
+            .foregroundColor(.jarvisText)
+    }
+
+    private func relation(_ label: String, title: String?, id: String, icon: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).foregroundColor(.centralPurple)
+            Text(label).font(.footnote.weight(.semibold)).foregroundColor(.jarvisText).lineLimit(1)
+            Text(title.flatMap { $0.isEmpty ? nil : $0 } ?? String(id.prefix(8)))
+                .font(.footnote)
+                .foregroundColor(.jarvisMuted)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.caption).foregroundColor(.jarvisMuted)
+        }
+        .frame(minHeight: 32)
+        .contentShape(Rectangle())
+    }
+
+    private func receiptView(_ receipt: CardInfo.Receipt) -> some View {
+        let label = receipt.label
+        return HStack(spacing: 6) {
+            Image(systemName: label.icon).foregroundColor(label.color).font(.caption)
+            Text("You: \u{201C}\(receipt.text)\u{201D}")
+                .font(.footnote)
+                .foregroundColor(.jarvisMuted)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(label.text)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(label.color)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Checkbox look for the "test this on your phone" list.
+struct CheckToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
+                    .foregroundColor(configuration.isOn ? .centralGreen : .jarvisMuted)
+                configuration.label
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A card file, fetched with the ios token (never a bare URL): markdown is
+/// rendered (headings, lists, tables), PDFs in PDFKit, images fit to width.
+struct CardFileView: View {
+    let target: CardFileTarget
+    @Environment(\.dismiss) private var dismiss
+    @State private var data: Data?
+    @State private var error: String?
+
+    init(target: CardFileTarget, preloaded: Data? = nil) {
+        self.target = target
+        _data = State(initialValue: preloaded)
+    }
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if let data = data {
+                    Self.content(data, view: target.file.view)
+                } else if let error = error {
+                    Text(error).foregroundColor(.jarvisDanger).padding(16)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.jarvisBackground.ignoresSafeArea())
+            .navigationTitle(target.file.label)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .task {
+            guard data == nil else { return }
+            do {
+                data = try await Central.data(Central.request(
+                    "/central/cards/\(target.sessionID)/files/\(target.file.id)", timeout: 60))
+            } catch is CancellationError {
+                return
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    @ViewBuilder
+    static func content(_ data: Data, view: String?) -> some View {
+        switch view {
+        case "pdf":
+            PDFKitView(data: data)
+        case "image":
+            if let image = UIImage(data: data) {
+                ScrollView {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
+            } else {
+                Text("This image can't be shown.").foregroundColor(.jarvisMuted)
+            }
+        case "markdown":
+            ScrollView {
+                MarkdownText(text: String(decoding: data, as: UTF8.self))
+                    .foregroundColor(.jarvisText)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        default:
+            ScrollView {
+                Text(String(decoding: data, as: UTF8.self))
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundColor(.jarvisText)
+                    .textSelection(.enabled)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+struct PDFKitView: UIViewRepresentable {
+    let data: Data
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.backgroundColor = .black
+        view.document = PDFDocument(data: data)
+        return view
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {}
 }
