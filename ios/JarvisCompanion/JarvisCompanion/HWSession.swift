@@ -151,10 +151,9 @@ final class HWSession: ObservableObject {
             let said = ((d["say"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
             if quietTurn && said.isEmpty { return }  // watch check: all good, keep the current guidance
             if !saidThisTurn, !said.isEmpty { speak(said) }
-            if !quietTurn {  // only the user moves through steps; a watch check never does
-                step = (d["step"] as? NSNumber)?.intValue ?? step
-                total = (d["of"] as? NSNumber)?.intValue ?? total
-            }
+            // The gateway gates the step (done, or seen done): show what it allows.
+            step = (d["step"] as? NSNumber)?.intValue ?? step
+            total = (d["of"] as? NSNumber)?.intValue ?? total
             overlay = Self.parseOverlay(d["overlay"], width: (m["w"] as? NSNumber)?.doubleValue,
                                         height: (m["h"] as? NSNumber)?.doubleValue,
                                         frameId: (m["frame_id"] as? NSNumber)?.intValue)

@@ -63,7 +63,41 @@ _live_conns = 0
 # session_id -> {"task": str, "at": epoch seconds}; in memory: a gateway restart drops them.
 _requests: dict[str, dict] = {}
 _SAY_RE = re.compile(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_STEP_RE = re.compile(r'"step"\s*:\s*(\d+)')
 WATCH_PREFIX = "[watch]"
+# The user saying the current step is finished: the only spoken way to move on.
+_DONE_RE = re.compile(
+    r"(ok(ay)? |yes |alright |right )?"
+    r"((i'?m|i am|it'?s|it is|that'?s|that is|all|step \w+( is)?) )?"
+    r"(done|finished|complete|completed)( now)?"
+    r"|(ok(ay)? )?next( step)?( please)?"
+)
+
+
+def is_done_confirmation(text: str) -> bool:
+    """True for "done", "I'm finished", "next step"...; False for questions like "is it done?"."""
+    t = re.sub(r"[^a-z' ]+", " ", text.lower().replace("\u2019", "'")).strip()
+    t = re.sub(r"\s+", " ", t)
+    return not text.strip().endswith("?") and _DONE_RE.fullmatch(t) is not None
+
+
+class StepGate:
+    """The step the guide is on. It may open step 1, stay, or go back freely, but it
+    moves forward only when the current step is confirmed done, and then by exactly one."""
+
+    def __init__(self) -> None:
+        self.current = 0
+
+    def allow(self, step: object, confirmed: bool) -> int:
+        if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+            return self.current
+        if self.current == 0:
+            self.current = 1  # the plan opens step 1, even if the brain thinks it is already done
+        elif step <= self.current:
+            self.current = step
+        elif confirmed:
+            self.current += 1
+        return self.current
 
 
 def _claude_bin() -> str:
@@ -94,6 +128,7 @@ class _Conn:
         self.frame: bytes | None = None
         self.frame_id: int | None = None
         self.busy = asyncio.Lock()
+        self.gate = StepGate()
         # A user question that arrived while the brain was busy: answered right after, never dropped.
         self.pending: tuple[str, bool] | None = None
         self.tasks: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
@@ -114,6 +149,8 @@ class _Conn:
     async def _start(self, task: str, model: str, announce: bool) -> None:
         self._close_session()
         self.task, self.model = task, model if model in ("sonnet", "haiku") else "sonnet"
+        if announce:  # a new task starts over; a silent restart (turn cap) keeps the step
+            self.gate = StepGate()
         self.session = await asyncio.to_thread(LeanSession, self.model, claude_bin=_claude_bin())
         if announce:  # the phone answers "ready" by planning the task, so only for a real start
             await self.send({"type": "ready", "model": self.model})
@@ -122,8 +159,12 @@ class _Conn:
         async with self.busy:
             if self.session is None or self.session.turns >= MAX_TURNS:
                 await self._start(self.task, self.model, announce=False)
+            asked = text
+            watch = asked.startswith(WATCH_PREFIX)
+            user_done = not watch and is_done_confirmation(asked)
             if self.session.turns == 0 and self.task:  # a fresh brain must know the job
-                text = f"Task: {self.task}. {text}"
+                where = f" We are on step {self.gate.current}." if self.gate.current else ""
+                text = f"Task: {self.task}.{where} {text}"
             jpeg = self.frame if use_frame else None
             frame_id = self.frame_id if use_frame else None
             size = jpeg_size(jpeg) if jpeg else None
@@ -132,23 +173,56 @@ class _Conn:
             said = False
 
             def on_text(chunk: str) -> None:
+                # Speak early only once the reply's step is known to pass the gate:
+                # a refused jump must never be heard.
                 nonlocal said
                 streamed.append(chunk)
-                if not said:
-                    m = _SAY_RE.search("".join(streamed))
-                    if m:
-                        said = True
-                        say = json.loads(f'"{m.group(1)}"')
-                        asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
+                if said:
+                    return
+                joined = "".join(streamed)
+                m_step, m_say = _STEP_RE.search(joined), _SAY_RE.search(joined)
+                if not (m_step and m_say):
+                    return
+                step, cur = int(m_step.group(1)), self.gate.current
+                if cur == 0 or step <= cur or (user_done and step == cur + 1):
+                    said = True
+                    say = json.loads(f'"{m_say.group(1)}"')
+                    asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
 
             logger.info("ask frame=%s text=%r", frame_id, text[:200])
             reply = await asyncio.to_thread(self.session.ask, text, jpeg, on_text)
-            d = reply.data or {}
-            logger.info("reply %.1fs step=%s/%s say=%r", reply.total_s, d.get("step"), d.get("of"),
-                        str(d.get("say", reply.raw))[:200])
-            await self.send({"type": "reply", "data": reply.data, "raw": reply.raw, "frame_id": frame_id,
+            data = self._gate(reply.data, user_done, watch, jpeg is not None)
+            if data is not None and data.get("step") != (reply.data or {}).get("step") and not watch:
+                # The brain tried to move on without a confirmed "done": ask it to stay.
+                cur = self.gate.current
+                logger.info("step gate: refused %s -> %s, re-asking", cur, (reply.data or {}).get("step"))
+                again = (f"The user has NOT confirmed step {cur} is done. Stay on step {cur}"
+                         f" and answer again: {asked}")
+                said = True  # no early speech from the retry: the final reply carries it
+                reply = await asyncio.to_thread(self.session.ask, again, jpeg, None)
+                data = self._gate(reply.data, user_done, watch, jpeg is not None)
+                if data is not None and data.get("step") != (reply.data or {}).get("step"):
+                    # Still jumping: never speak the next step's instructions on this step.
+                    data = {**data, "say": f"Let's finish step {cur} first. Say done when it is.", "overlay": None}
+            d = data or {}
+            logger.info("reply %.1fs step=%s/%s gate=%s say=%r", reply.total_s, d.get("step"), d.get("of"),
+                        self.gate.current, str(d.get("say", reply.raw))[:200])
+            await self.send({"type": "reply", "data": data, "raw": reply.raw, "frame_id": frame_id,
                              "w": size[0] if size else None, "h": size[1] if size else None,
                              "ttft_s": reply.ttft_s, "total_s": round(reply.total_s, 3)})
+
+    def _gate(self, data: dict | None, user_done: bool, watch: bool, has_frame: bool) -> dict | None:
+        """The reply as the phone may see it: its step can only move forward on a confirmed done."""
+        if not isinstance(data, dict) or "step" not in data:
+            return data
+        seen_done = watch and has_frame and data.get("done_seen") is True
+        want = data.get("step")
+        got = self.gate.allow(want, confirmed=user_done or seen_done)
+        if want == got:
+            return data
+        if watch:  # a watch check that could not prove the step is done: stay, and stay quiet
+            return {**data, "step": got, "say": "", "overlay": None}
+        return {**data, "step": got}
 
     async def handle(self, msg: dict) -> None:
         kind = msg.get("type")
