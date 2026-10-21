@@ -213,6 +213,19 @@ def test_oldest_file_dropped_past_the_cap(monkeypatch, tmp_path):
     assert not (tmp_path / "card_files" / "s-done" / f"{ids[0]}.md").exists()
 
 
+def test_same_name_file_replaces_the_old_one(tmp_path):
+    first = _call("POST", "/cards/file?session=s-done&name=plan.md", headers=SHARED, content=b"v1").json()["file_id"]
+    second = _call("POST", "/cards/file?session=s-done&name=plan.md", headers=SHARED, content=b"v2").json()["file_id"]
+    assert [f["id"] for f in _sessions()["s-done"]["card"]["files"]] == [second]
+    assert not (tmp_path / "card_files" / "s-done" / f"{first}.md").exists()
+
+
+def test_card_question_replaces_router_prompt_line():
+    _event({"session": "s-ask", "action": "ask", "kind": "yesno", "text": "Deploy to prod now?"})
+    recap = _sessions()["s-ask"]["recap"]
+    assert recap == ["Needs you: Deploy to prod now?"]
+
+
 def test_links_must_be_https():
     assert _event({"session": "s-done", "action": "link", "url": "http://x.test/a"}).status_code == 422
     _event({"session": "s-done", "action": "link", "url": "https://claude.ai/artifact/abc", "text": "Before/after"})

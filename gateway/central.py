@@ -366,8 +366,8 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None,
         # The session asked through its card and stopped: it waits on the owner.
         out["phase"] = "in_review"
         out["health"] = "waiting"
-        if not ask:
-            out["recap"].append(f"Needs you: {need.get('question', '')}")
+        # The card's own question is the clearest ask; it replaces the router's prompt text.
+        out["recap"] = [r for r in out["recap"] if r != ask] + [f"Needs you: {need.get('question', '')}"]
     ts = _parse_ts(out.get("last_activity_at"))
     # Never hide a session that needs the owner: the old "in review" signal,
     # the legacy literal "waiting_for_owner" health value (pre-rename router),

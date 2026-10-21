@@ -213,7 +213,9 @@ final class CardSnapshotTests: XCTestCase {
         let content = view.padding(16).frame(width: 390).background(Color.jarvisBackground)
         let probe = UIHostingController(rootView: content)
         let height = probe.sizeThatFits(in: CGSize(width: 390, height: 2000)).height
-        try draw(name, AnyView(content), size: CGSize(width: 390, height: max(80, ceil(height))))
+        // + room for the window's top safe area, which pushes the content down.
+        try draw(name, AnyView(content.frame(maxHeight: .infinity, alignment: .top).background(Color.jarvisBackground)),
+                 size: CGSize(width: 390, height: max(80, ceil(height)) + 120))
     }
 
     /// A full screen (sheets with their own scroll views), iPhone 14 size.
