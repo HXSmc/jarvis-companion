@@ -94,6 +94,63 @@ final class HWLogicTests: XCTestCase {
         XCTAssertEqual(spoken.last, "Sorry, I didn't get that. Ask me again.")
     }
 
+    // MARK: Jarvis's server voice
+
+    func testServerVoiceIsPlayedAndThePhoneVoiceIsOnlyAFallback() async throws {
+        let hw = HWSession()
+        hw.audioWait = 0.2
+        var spoken: [String] = [], played: [String] = []
+        hw.onSay = { spoken.append($0) }
+        hw.onAudio = { pcm, rate, text in
+            XCTAssertEqual(pcm.count, 4)
+            XCTAssertEqual(rate, 24000)
+            played.append(text)
+        }
+        hw.handle(["type": "ready", "model": "sonnet", "voice": "bm_daniel"])
+        let pcm = Data([1, 0, 2, 0]).base64EncodedString()
+        // the line, then its audio: Jarvis's voice, the phone stays quiet
+        hw.handle(["type": "say", "text": "Step 1 of 2: pull the plug."])
+        hw.handle(["type": "audio", "text": "Step 1 of 2: pull the plug.", "rate": 24000, "pcm": pcm])
+        XCTAssertEqual(played, ["Step 1 of 2: pull the plug."])
+        XCTAssertEqual(hw.say, "Step 1 of 2: pull the plug.")
+        // audio that comes before its line still plays when the line does
+        hw.handle(["type": "audio", "text": "Good.", "rate": 24000, "pcm": pcm])
+        hw.handle(["type": "say", "text": "Good."])
+        XCTAssertEqual(played.last, "Good.")
+        // Arabic is the phone's job at once
+        hw.handle(["type": "say", "text": "اسحب الكابل"])
+        XCTAssertEqual(spoken, ["اسحب الكابل"])
+        // no audio in time: the phone reads it, and the late audio is not played on top
+        hw.handle(["type": "say", "text": "Now plug it into SATA2."])
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(spoken.last, "Now plug it into SATA2.")
+        hw.handle(["type": "audio", "text": "Now plug it into SATA2.", "rate": 24000, "pcm": pcm])
+        XCTAssertEqual(played.count, 2)
+        XCTAssertEqual(spoken.count, 2)
+        // without a server voice every line is the phone's
+        let plain = HWSession()
+        var plainSpoken: [String] = []
+        plain.onSay = { plainSpoken.append($0) }
+        plain.handle(["type": "ready", "model": "sonnet", "voice": NSNull()])
+        plain.handle(["type": "say", "text": "Hello."])
+        XCTAssertEqual(plainSpoken, ["Hello."])
+    }
+
+    func testServerPCMBecomesHalfSecondFloatBuffers() {
+        var samples: [Int16] = (0..<30000).map { Int16(truncatingIfNeeded: $0) }
+        samples[0] = Int16.max
+        samples[1] = Int16.min
+        let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        let bufs = HWVoice.pcmBuffers(data, rate: 24000)
+        XCTAssertEqual(bufs.map { Int($0.frameLength) }, [12000, 12000, 6000])
+        let ch = bufs[0].floatChannelData![0]
+        XCTAssertEqual(ch[0], 32767.0 / 32768, accuracy: 1e-6)
+        XCTAssertEqual(ch[1], -1, accuracy: 1e-6)
+        XCTAssertTrue(HWVoice.pcmBuffers(Data(), rate: 24000).isEmpty)
+        XCTAssertTrue(HWSession.isArabic("خلصت"))
+        XCTAssertFalse(HWSession.isArabic("SATA2, sir."))
+    }
+
     // MARK: lost part -> locate
 
     func testLocateMovesTheBoxSilentlyAndNeverTheStep() {

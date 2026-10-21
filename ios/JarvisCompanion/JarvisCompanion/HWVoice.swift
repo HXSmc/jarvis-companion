@@ -47,6 +47,9 @@ final class HWVoice: ObservableObject {
     private var failures = 0
     /// Speech that arrived before the engine ran: spoken as soon as it does.
     private var pendingSpeech: String?
+    private var pendingAudio: (Data, Double, String)?
+    /// Jarvis's last server-voiced line, so "repeat" plays the same voice again.
+    private var lastAudio: (Data, Double, String)?
     /// What Jarvis last said, and when it stopped: the mic hearing it back is not the user.
     private var lastSpoken = ""
     private var spokeUntil = Date.distantPast
@@ -141,10 +144,68 @@ final class HWVoice: ObservableObject {
         KeepAlive.endListening()  // back to the app's normal playback session
     }
 
+    private func playPending() {
+        if case let (pcm, rate, text)? = pendingAudio {
+            pendingAudio = nil
+            playPCM(pcm, rate: rate, text: text)
+        } else if let text = pendingSpeech {
+            pendingSpeech = nil
+            speak(text)
+        }
+    }
+
+    /// Jarvis's own voice from the gateway (16-bit mono PCM), through the same player as
+    /// speak(), so echo cancel and barge-in work the same.
+    func playPCM(_ data: Data, rate: Double, text: String) {
+        count("playPCM")
+        lastAudio = (data, rate, text)
+        guard engine.isRunning else {
+            pendingAudio = (data, rate, text)
+            pendingSpeech = nil
+            note("audio queued: engine not running")
+            if listening { restartEngine("engine down at playPCM") }
+            return
+        }
+        stopSpeaking()
+        lastSpoken = text
+        spokeUntil = Date().addingTimeInterval(30)  // until the last buffer finishes
+        for pcm in Self.pcmBuffers(data, rate: rate) {
+            schedule(pcm, generation: generation)
+        }
+    }
+
+    /// "Repeat": the server voice again when it read `text`, else the phone's voice.
+    func repeatLine(_ text: String) {
+        if case let (pcm, rate, said)? = lastAudio, said == text {
+            playPCM(pcm, rate: rate, text: said)
+        } else {
+            speak(text)
+        }
+    }
+
+    /// Int16 mono PCM -> half-second float buffers (convert() streams them to the player rate).
+    nonisolated static func pcmBuffers(_ data: Data, rate: Double) -> [AVAudioPCMBuffer] {
+        guard rate > 0, let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate,
+                                                   channels: 1, interleaved: false) else { return [] }
+        let samples = data.withUnsafeBytes { raw in
+            (0..<raw.count / 2).map { raw.loadUnaligned(fromByteOffset: $0 * 2, as: Int16.self) }
+        }
+        let chunk = max(1, Int(rate / 2))
+        return stride(from: 0, to: samples.count, by: chunk).compactMap { start in
+            let n = min(chunk, samples.count - start)
+            guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n)),
+                  let ch = buf.floatChannelData?[0] else { return nil }
+            buf.frameLength = AVAudioFrameCount(n)
+            for i in 0..<n { ch[i] = Float(Int16(littleEndian: samples[start + i])) / 32768 }
+            return buf
+        }
+    }
+
     func speak(_ text: String) {
         count("speak")
         guard engine.isRunning else {
             pendingSpeech = text
+            pendingAudio = nil
             note("speak queued: engine not running")
             if listening { restartEngine("engine down at speak") }  // spoken as soon as it is back
             return
@@ -247,10 +308,7 @@ final class HWVoice: ObservableObject {
         note("engine on, voiceProcessing=\(voiceProcessing), out=\(AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue })")
         watchEngine()
         beginRecognition()
-        if let text = pendingSpeech {
-            pendingSpeech = nil
-            speak(text)
-        }
+        playPending()
     }
 
     private func watchEngine() {
@@ -310,10 +368,7 @@ final class HWVoice: ObservableObject {
             }
         }
         beginRecognition()
-        if let text = pendingSpeech {
-            pendingSpeech = nil
-            speak(text)
-        }
+        playPending()
     }
 
     private func runEngine(voiceProcessing on: Bool) throws {

@@ -30,8 +30,15 @@ final class HWSession: ObservableObject {
     @Published var thinking = false
     @Published var lastSeconds: Double?
 
-    /// Called with each spoken line (early `say`, or the reply's when no early one came).
+    /// Called with each spoken line (early `say`, or the reply's when no early one came) that the
+    /// phone voices itself: Arabic, no server voice, or the server audio did not come in time.
     var onSay: ((String) -> Void)?
+    /// Jarvis's own voice for a line, from the gateway: 16-bit mono PCM, sample rate, the line.
+    var onAudio: ((Data, Double, String) -> Void)?
+    /// The gateway voices English lines itself (`ready` names the voice).
+    private(set) var serverVoice = false
+    /// How long a line waits for its server audio before the phone's own voice reads it.
+    var audioWait: TimeInterval = 4
     var onOverlay: ((HWOverlay?) -> Void)?
     /// The brain session is up: send a frame and the first question.
     var onReady: (() -> Void)?
@@ -43,6 +50,9 @@ final class HWSession: ObservableObject {
     private var saidThisTurn = false
     private var quietTurn = false
     private var locateTurn = false
+    /// The line waiting for its server audio, and audio that came before its line did.
+    private var awaitingAudio: String?
+    private var earlyAudio: [String: (Data, Double)] = [:]
 
     /// False when the gateway URL is unusable (nothing was started).
     @discardableResult
@@ -149,9 +159,20 @@ final class HWSession: ObservableObject {
         case "ready":
             connected = true
             status = "Live"
+            serverVoice = m["voice"] is String
             onReady?()
         case "say":
             if let text = m["text"] as? String { speak(text) }
+        case "audio":
+            guard let text = m["text"] as? String, let b64 = m["pcm"] as? String,
+                  let pcm = Data(base64Encoded: b64) else { return }
+            let rate = (m["rate"] as? NSNumber)?.doubleValue ?? 24000
+            if awaitingAudio == text {
+                awaitingAudio = nil
+                onAudio?(pcm, rate, text)
+            } else {
+                earlyAudio = [text: (pcm, rate)]  // its line is still coming; a late one (fallback spoke) is dropped
+            }
         case "reply":
             thinking = false
             lastSeconds = (m["total_s"] as? NSNumber)?.doubleValue
@@ -192,7 +213,28 @@ final class HWSession: ObservableObject {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         saidThisTurn = true
         say = text
-        onSay?(text)
+        guard serverVoice, !Self.isArabic(text) else {
+            awaitingAudio = nil
+            onSay?(text)
+            return
+        }
+        if case let (pcm, rate)? = earlyAudio.removeValue(forKey: text) {
+            awaitingAudio = nil
+            onAudio?(pcm, rate, text)
+            return
+        }
+        awaitingAudio = text
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.audioWait ?? 0) * 1_000_000_000))
+            guard let self, self.awaitingAudio == text else { return }
+            self.awaitingAudio = nil  // the server voice failed or is slow: the phone reads it
+            self.onSay?(text)
+        }
+    }
+
+    /// Same range as the gateway's check: Arabic lines are never voiced there.
+    static func isArabic(_ text: String) -> Bool {
+        text.unicodeScalars.contains { (0x0600...0x06FF).contains($0.value) }
     }
 
     /// `target_px` is in pixels of the image the brain saw (w×h); normalize and clamp.

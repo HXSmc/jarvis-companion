@@ -295,6 +295,16 @@ final class HWVoiceAudioTests: XCTestCase {
         let counts = diag["counts"] as? [String: Int] ?? [:]
         print("speak after restart: \(counts)")
         XCTAssertGreaterThan((counts["buffers"] ?? 0) + (counts["speakFallback"] ?? 0), 0, "nothing was played after the restart")
+        // Jarvis's server voice (1 s of a 220 Hz tone, 24 kHz Int16) through the same player
+        let tone = (0..<24000).map { Int16(8000 * sin(2 * Double.pi * 220 * Double($0) / 24000)) }
+        voice.playPCM(tone.withUnsafeBufferPointer { Data(buffer: $0) }, rate: 24000, text: "Good, sir.")
+        diag = voice.diagnostics()
+        let after = diag["counts"] as? [String: Int] ?? [:]
+        XCTAssertEqual(after["playPCM"], 1)
+        XCTAssertGreaterThan(after["buffers"] ?? 0, counts["buffers"] ?? 0, "server audio was not scheduled")
+        XCTAssertEqual(diag["speaking"] as? Bool, true)
+        voice.repeatLine("Good, sir.")  // "repeat" replays the server voice
+        XCTAssertEqual((voice.diagnostics()["counts"] as? [String: Int])?["playPCM"], 2)
         voice.stop()
     }
 }
