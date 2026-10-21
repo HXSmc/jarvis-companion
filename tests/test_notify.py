@@ -289,3 +289,29 @@ def test_without_ntfy_ring_falls_back_to_whatsapp_but_never_for_turn_ends(monkey
 
     assert asyncio.run(run()) == (True, False)
     assert texted == ["[jarvis] Needs your decision: A"]
+
+
+def test_with_ntfy_set_up_alerts_skip_the_app(monkeypatch: pytest.MonkeyPatch):
+    """The app's own alerts piled up on opening it: with ntfy, only ntfy rings."""
+    rung, app = [], []
+
+    async def ntfy(kind, title, text):
+        rung.append(title)
+        return True
+
+    async def push(*args, **kw):
+        app.append(args)
+        return True
+
+    monkeypatch.setattr(notify, "_ntfy_target", lambda: ("http://ntfy.test", "jarvis"))
+    monkeypatch.setattr(notify, "push_ntfy", ntfy)
+    monkeypatch.setattr(notify, "push_app", push)
+    asyncio.run(notify.deliver("done", "Done: A", "a", "s1"))
+    assert rung == ["Done: A"] and app == []
+
+    async def down(kind, title, text):  # ntfy down: the app is the fallback
+        return False
+
+    monkeypatch.setattr(notify, "push_ntfy", down)
+    asyncio.run(notify.deliver("crossroads", "Needs your decision: B", "b", "s2"))
+    assert [a[1] for a in app] == ["Needs your decision: B"]
