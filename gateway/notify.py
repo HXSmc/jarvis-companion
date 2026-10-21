@@ -283,7 +283,11 @@ _deliveries: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak o
 
 
 async def deliver(kind: str, title: str, text: str, sid: str | None) -> None:
-    """A note the owner must not miss: the app, else ntfy/WhatsApp when the app does not confirm it."""
+    """A note the owner must not miss. With ntfy set up it goes to ntfy only: the app's own
+    alerts arrived in a burst on opening it (owner, 2026-10-21). The app (then WhatsApp) is the
+    path when ntfy is not set up or the push fails."""
+    if _ntfy_target() is not None and await push_ntfy(kind, title, text):
+        return
     if not await push_app(kind, title, text, sid, confirm=True):
         await ring(kind, title, text)
 
