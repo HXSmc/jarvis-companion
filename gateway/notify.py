@@ -279,19 +279,16 @@ def crossroads(prev: dict[str, tuple], sessions: list[dict], now: float | None =
 
 _card_needs_seen: deque[tuple] = deque(maxlen=200)
 _titles: dict[str, str] = {}  # session id -> title, from the watcher's polls
-_names: dict[str, str] = {}  # session id -> the card's purple project label, from the same polls
 _deliveries: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
 
 
 def _card_name(sid: str | None) -> str | None:
-    """The card's purple label in the app (project, else the cwd folder), else the router title.
-    The owner picked it over the bold line, which changes as the session works (2026-10-21)."""
-    return (_names.get(sid) or _titles.get(sid)) if sid else None
-
-
-def _project_label(s: dict) -> str | None:
-    """Same rule as the app's displayProject: project, else the last folder of cwd."""
-    return str(s.get("project") or "") or os.path.basename(str(s.get("cwd") or "").rstrip("/")) or None
+    """The bold line on the session's card in the app: central's plain `doing`, else the router title."""
+    if not sid:
+        return None
+    hit = central._load_state()["plain"].get(sid)
+    doing = hit.get("doing") if isinstance(hit, dict) else None
+    return doing if isinstance(doing, str) and doing.strip() else _titles.get(sid)
 
 
 async def deliver(kind: str, title: str, text: str, sid: str | None) -> None:
@@ -299,7 +296,7 @@ async def deliver(kind: str, title: str, text: str, sid: str | None) -> None:
     alerts arrived in a burst on opening it (owner, 2026-10-21). The app (then WhatsApp) is the
     path when ntfy is not set up or the push fails."""
     if _ntfy_target() is not None:
-        # ntfy cuts the title to one line: lead with the card's name so the owner
+        # ntfy cuts the title to one line: lead with the card's own name so the owner
         # knows which card rang (owner, 2026-10-21); the label moves to the message.
         name = _card_name(sid)
         label = title.partition(": ")[0]  # every caller builds "<label>: <session title>"
@@ -349,8 +346,6 @@ async def crossroads_watcher() -> None:
                 rows = [s for s in data if isinstance(s, dict)]
                 _titles.update({s["session_id"]: str(s["title"]) for s in rows
                                 if isinstance(s.get("session_id"), str) and s.get("title")})
-                _names.update({s["session_id"]: name for s in rows
-                               if isinstance(s.get("session_id"), str) and (name := _project_label(s))})
                 for kind, title, text, sid in crossroads(prev, rows):
                     if kind == "crossroads" and _card_need_open(sid):
                         continue  # the card's own ask was the note
