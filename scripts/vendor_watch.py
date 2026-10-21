@@ -20,6 +20,9 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common import config  # noqa: F401 (import loads .env into os.environ — launchd has no shell env)
+
 MCP_URL = "http://127.0.0.1:3765/mcp"
 # Deployment-private values come from env (see .env.example); the required ones
 # are validated loudly in main(), never silently defaulted to real values.
