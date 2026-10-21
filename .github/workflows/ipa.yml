@@ -78,9 +78,10 @@ jobs:
           # Mic/camera for the test host. simctl has no speech-recognition service, so copy the
           # mic grant's row in this simulator's own TCC.db as kTCCServiceSpeechRecognition and reboot it.
           APP=personal.jarvis.JarvisCompanion
+          xcrun simctl privacy "$UDID" grant microphone "$APP"  # its own row, to copy below
           xcrun simctl privacy "$UDID" grant all "$APP" || echo "privacy grant all: not supported here"
           DB="$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data/Library/TCC/TCC.db"
-          sqlite3 "$DB" "CREATE TEMP TABLE t AS SELECT * FROM access WHERE service='kTCCServiceMicrophone' AND client='$APP'; UPDATE t SET service='kTCCServiceSpeechRecognition'; INSERT OR REPLACE INTO access SELECT * FROM t;" \
+          sqlite3 "$DB" "CREATE TEMP TABLE t AS SELECT * FROM access WHERE service='kTCCServiceMicrophone' AND client='$APP' LIMIT 1; UPDATE t SET service='kTCCServiceSpeechRecognition'; INSERT OR REPLACE INTO access SELECT * FROM t;" \
             || echo "speech grant via TCC.db failed: voice-in tests will skip"
           sqlite3 "$DB" "SELECT service, auth_value FROM access WHERE client='$APP'" || true
           xcrun simctl shutdown "$UDID" && xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b > /dev/null
