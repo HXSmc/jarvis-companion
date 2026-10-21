@@ -22,6 +22,7 @@ struct HardwareModeView: View {
     @State private var lastHeard = ""
     @State private var lastChange: Date?
     @State private var lastWatch = Date.distantPast
+    @State private var ticks = 0
     /// The last few JPEGs sent, by frame id: the tracker starts on the one the brain saw.
     @State private var sentFrames: [Int: Data] = [:]
     @FocusState private var typing: Bool
@@ -63,6 +64,8 @@ struct HardwareModeView: View {
         .onReceive(ticker) { _ in
             // Background frames: only when the picture changed. No model call.
             guard hw.connected else { return }
+            ticks += 1
+            if ticks == 3 || ticks % 20 == 0 { hw.sendDiag(voice.diagnostics()) }
             if let jpeg = camera.jpeg(onlyIfChanged: true) {
                 send(jpeg)
                 lastChange = Date()
@@ -218,6 +221,7 @@ struct HardwareModeView: View {
 
     private func tearDown() {
         if let sid = sessionId, started { reportBack(to: sid) }
+        if hw.connected { hw.sendDiag(voice.diagnostics()) }
         // Break the closure -> view -> object cycles so the camera, audio engine and socket are freed.
         hw.onSay = nil
         hw.onOverlay = nil
@@ -266,15 +270,16 @@ struct HardwareModeView: View {
     }
 
     /// Watch mode: the picture changed and has been still for 2 s -> ask, at
-    /// most every 15 s, whether something is wrong or the step is done. The
-    /// brain stays silent ("say": "") when all is fine.
+    /// most every 15 s, whether something is wrong. It never moves to the next
+    /// step (only the user's "done" does). The brain stays silent ("say": "")
+    /// when all is fine.
     private func watchIfSettled() {
         guard let changed = lastChange, Date().timeIntervalSince(changed) > 2,
               Date().timeIntervalSince(lastWatch) > 15,
               hw.total > 0, !hw.thinking, !voice.speaking, voice.heard.isEmpty else { return }
         lastChange = nil
         lastWatch = Date()
-        hw.ask("[watch] The picture just changed and is now still. Only if I did something wrong, or the current step is clearly finished, tell me (and give the next step). Otherwise reply with \"say\": \"\" and \"overlay\": null.", quiet: true)
+        hw.ask("[watch] The picture just changed and is now still. Only warn me if I did something wrong. Do not move to the next step. Otherwise reply with \"say\": \"\" and \"overlay\": null.", quiet: true)
     }
 
     /// Post a short summary into the Claude session that asked for this, and clear its request.

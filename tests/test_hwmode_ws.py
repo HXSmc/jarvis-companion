@@ -130,16 +130,30 @@ def test_session_restart_after_max_turns_is_silent(gateway_server, fake_claude, 
     asyncio.run(run())
 
 
-def test_second_ask_while_busy_is_refused(gateway_server, fake_claude, monkeypatch):
+def test_watch_while_busy_is_refused_but_user_question_is_queued(gateway_server, fake_claude):
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "t"}))
                 await ws.recv()
                 await ws.send(json.dumps({"type": "ask", "text": "one", "frame": False}))
-                await ws.send(json.dumps({"type": "ask", "text": "two", "frame": False}))
-                kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(3)]
-                assert sorted(kinds) == ["error", "reply", "say"]
+                await ws.send(json.dumps({"type": "ask", "text": "[watch] all good?", "frame": False}))
+                await ws.send(json.dumps({"type": "ask", "text": "where is the cable", "frame": False}))
+                kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(5)]
+                # watch: refused; the user's question: answered after the first one, not dropped
+                assert sorted(kinds) == ["error", "reply", "reply", "say", "say"]
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), 1)
+    asyncio.run(run())
+
+
+def test_diag_is_logged_without_reply(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "diag", "data": {"engine": True, "mic": "granted"}}))
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                assert json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] == "ready"
     asyncio.run(run())
 
 
