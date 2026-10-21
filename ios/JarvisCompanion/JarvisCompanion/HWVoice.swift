@@ -339,8 +339,15 @@ final class HWVoice: ObservableObject {
     }
 
     nonisolated static func mostlyContained(_ text: String, in spoken: String) -> Bool {
+        // The recognizer spells numbers out ("SATA1" -> "sat one", "Step 1 of 2" -> "step one two"):
+        // split letters from digits and read digits as words before comparing.
+        let names = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
         func words(_ s: String) -> [String] {
-            s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+            var spaced = ""
+            for ch in s.lowercased() {
+                if let d = ch.wholeNumberValue, ch.isASCII { spaced += " \(names[d]) " } else { spaced.append(ch) }
+            }
+            return spaced.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
         }
         let heard = words(text)
         guard !heard.isEmpty else { return false }
