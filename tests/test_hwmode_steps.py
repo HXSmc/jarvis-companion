@@ -19,7 +19,7 @@ import websockets
 
 from conftest import IOS_AUTH_HEADER
 from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
-from gateway.hwmode import StepGate, is_done_confirmation
+from gateway.hwmode import StepGate, is_done_confirmation, step_navigation
 
 
 @pytest.mark.parametrize("text", ["done", "Done.", "ok done", "I'm done", "finished", "next", "next step",
@@ -174,4 +174,31 @@ def test_ws_locate_while_busy_is_skipped(gateway_server, fake_claude):
                 await ws.send(json.dumps({"type": "ask", "text": "[locate] lost it", "frame": False}))
                 kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(2)]
                 assert sorted(kinds) == ["error", "reply"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("text,want", [
+    ("go back", -1), ("Go back one step.", -1), ("previous step", -1), ("back one step please", -1), ("ارجع", -1),
+    ("الخطوة السابقة", -1), ("skip", 1), ("skip this step", 1), ("move on", 1), ("go forward one step", 1), ("تخطى", 1),
+    ("can we go back?", 0), ("where is the cable", 0), ("done", 0), ("go back to the shop and buy screws", 0),
+])
+def test_step_navigation(text, want):
+    assert step_navigation(text) == want
+
+
+def test_ws_go_back_and_skip(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                await ws.recv()
+
+                async def ask(text):
+                    await ws.send(json.dumps({"type": "ask", "text": text, "frame": False}))
+                    return await _reply(ws)
+
+                assert (await ask("plan"))["step"] == 1
+                assert (await ask("skip this step"))["step"] == 2  # skip is an explicit move on
+                assert (await ask("go back one step"))["step"] == 1  # the fake brain says 2: the gate follows the user
+                assert (await ask("where is the cable"))["step"] == 1  # and holds there
     asyncio.run(run())

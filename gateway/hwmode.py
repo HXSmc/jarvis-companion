@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from gateway.auth import require_bearer, require_bearer_any
 from gateway.ws import IOS_ROLE, _authorized
 from hwmode.brain import LeanSession
+from hwmode.tts import get_voice
 
 logger = logging.getLogger(__name__)
 # uvicorn only configures its own loggers: send the hwmode trace (asks, replies,
@@ -65,6 +66,10 @@ _requests: dict[str, dict] = {}
 _SAY_RE = re.compile(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"')
 _STEP_RE = re.compile(r'"step"\s*:\s*(\d+)')
 WATCH_PREFIX = "[watch]"
+# Boxes smaller than this share of the image's short side get a zoomed second look.
+SMALL_PART = 0.12
+ZOOM_PROMPT = ("[zoom] This is a zoomed-in crop of the same view, around {label}. Box exactly that part again, "
+               "tightly, in THIS image's pixel coordinates. Same JSON; only the overlay matters, keep the same step.")
 LOCATE_PREFIX = "[locate]"  # the phone lost the part: where is it now? (moves the box, never the step)
 BACKGROUND = (WATCH_PREFIX, LOCATE_PREFIX)
 # The user saying the current step is finished: the only spoken way to move on.
@@ -78,6 +83,32 @@ _DONE_RE = re.compile(
 
 # Arabic: "تم", "خلصت", "خلاص", "انتهيت", "التالي", "الخطوة التالية"...
 _DONE_AR_RE = re.compile(r"(طيب |اوكي |يب )?(تم|خلاص|خلصت|خلصنا|خلص|انتهيت|انتهينا|التالي|الخطوة التالية)( خلاص| تم)?")
+
+
+# Moving through the steps by voice: "go back" / "skip" (English and Arabic).
+_BACK_RE = re.compile(r"(ok(ay)? )?(go back( one step| a step| to the last step| to the previous step)?|previous step"
+                      r"|back one step|one step back|step back|last step please|undo that step)( please)?")
+_FWD_RE = re.compile(r"(ok(ay)? )?(skip( it| this( step)?| that( step)?)?|go forward( one step)?|move on|forward one step)( please)?")
+_BACK_AR_RE = re.compile(r"(ارجع|رجعني|رجوع|الخطوة السابقة|ارجع خطوة|خطوة لورا)( خطوة)?")
+_FWD_AR_RE = re.compile(r"(تخطى|تخطي|تجاوز|الخطوة الجاية|الخطوة اللي بعدها)( هذي)?( الخطوة)?")
+
+
+def _norm(text: str) -> tuple[str, str]:
+    en = re.sub(r"\s+", " ", re.sub(r"[^a-z' ]+", " ", text.lower().replace("\u2019", "'"))).strip()
+    ar = re.sub(r"\s+", " ", re.sub(r"[^\u0621-\u064a ]+", " ", text)).strip()
+    return en, ar
+
+
+def step_navigation(text: str) -> int:
+    """-1 for "go back one step", +1 for "skip this step", 0 otherwise (questions never count)."""
+    if text.strip().endswith(("?", "\u061f")):
+        return 0
+    en, ar = _norm(text)
+    if _BACK_RE.fullmatch(en) or _BACK_AR_RE.fullmatch(ar):
+        return -1
+    if _FWD_RE.fullmatch(en) or _FWD_AR_RE.fullmatch(ar):
+        return 1
+    return 0
 
 
 def is_done_confirmation(text: str) -> bool:
@@ -142,6 +173,8 @@ class _Conn:
         # A user question that arrived while the brain was busy: answered right after, never dropped.
         self.pending: tuple[str, bool] | None = None
         self.tasks: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
+        self.voice = get_voice()
+        self.speaking: set[asyncio.Task] = set()  # voice synthesis, outside `tasks` (never "busy")
 
     async def send(self, msg: dict) -> None:
         await self.ws.send_text(json.dumps(msg))
@@ -163,7 +196,8 @@ class _Conn:
             self.gate = StepGate()
         self.session = await asyncio.to_thread(LeanSession, self.model, claude_bin=_claude_bin())
         if announce:  # the phone answers "ready" by planning the task, so only for a real start
-            await self.send({"type": "ready", "model": self.model})
+            await self.send({"type": "ready", "model": self.model,
+                             "voice": self.voice.name if self.voice else None})
 
     async def ask(self, text: str, use_frame: bool) -> None:
         async with self.busy:
@@ -172,7 +206,11 @@ class _Conn:
             asked = text
             watch = asked.startswith(WATCH_PREFIX)
             locate = asked.startswith(LOCATE_PREFIX)
-            user_done = not (watch or locate) and is_done_confirmation(asked)
+            nav = 0 if (watch or locate) else step_navigation(asked)
+            user_done = not (watch or locate) and (is_done_confirmation(asked) or nav == 1)
+            back_to = max(1, self.gate.current - 1) if nav == -1 and self.gate.current > 1 else None
+            if back_to:  # the user asked to go back: say so to the brain, and the gate follows
+                text = f"{text} [The user wants to go back to step {back_to}. Guide step {back_to} again.]"
             if self.session.turns == 0 and self.task:  # a fresh brain must know the job
                 where = f" We are on step {self.gate.current}." if self.gate.current else ""
                 text = f"Task: {self.task}.{where} {text}"
@@ -181,6 +219,7 @@ class _Conn:
             size = jpeg_size(jpeg) if jpeg else None
             loop = asyncio.get_running_loop()
             streamed: list[str] = []
+            early: list[str] = []  # the line already sent (and voiced) before the full reply
             said = False
 
             def on_text(chunk: str) -> None:
@@ -195,15 +234,22 @@ class _Conn:
                 if not (m_step and m_say):
                     return
                 step, cur = int(m_step.group(1)), self.gate.current
-                if cur == 0 or step <= cur or (user_done and step == cur + 1):
+                if cur == 0 or step <= cur or (user_done and step == cur + 1) or back_to:
                     said = True
                     say = json.loads(f'"{m_say.group(1)}"')
                     asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
+                    early.append(say)
+                    asyncio.run_coroutine_threadsafe(self._speak(say), loop)
 
             logger.info("ask frame=%s text=%r", frame_id, text[:200])
             reply = await asyncio.to_thread(self.session.ask, text, jpeg, on_text)
-            data = self._gate(reply.data, user_done, watch, jpeg is not None, locate)
-            if data is not None and data.get("step") != (reply.data or {}).get("step") and not (watch or locate):
+            if back_to:
+                self.gate.current = back_to
+                data = {**reply.data, "step": back_to} if isinstance(reply.data, dict) else reply.data
+            else:
+                data = self._gate(reply.data, user_done, watch, jpeg is not None, locate)
+            if (data is not None and data.get("step") != (reply.data or {}).get("step")
+                    and not (watch or locate or back_to)):
                 # The brain tried to move on without a confirmed "done": ask it to stay.
                 cur = self.gate.current
                 logger.info("step gate: refused %s -> %s, re-asking", cur, (reply.data or {}).get("step"))
@@ -215,12 +261,73 @@ class _Conn:
                 if data is not None and data.get("step") != (reply.data or {}).get("step"):
                     # Still jumping: never speak the next step's instructions on this step.
                     data = {**data, "say": f"Let's finish step {cur} first. Say done when it is.", "overlay": None}
+            if data is not None and jpeg is not None and not watch:
+                data = await self._refine_small(data, jpeg)
             d = data or {}
             logger.info("reply %.1fs step=%s/%s gate=%s say=%r", reply.total_s, d.get("step"), d.get("of"),
                         self.gate.current, str(d.get("say", reply.raw))[:200])
+            if not early and d.get("say"):
+                self._spawn_speak(str(d["say"]))
             await self.send({"type": "reply", "data": data, "raw": reply.raw, "frame_id": frame_id,
                              "w": size[0] if size else None, "h": size[1] if size else None,
                              "ttft_s": reply.ttft_s, "total_s": round(reply.total_s, 3)})
+
+    async def _speak(self, text: str) -> None:
+        """Jarvis's voice for a spoken line: Kokoro on this box, sent as 16-bit PCM after the text."""
+        if not self.voice or not self.voice.speaks(text):
+            return
+        try:
+            pcm, rate = await asyncio.to_thread(self.voice.synth, text)
+            await self.send({"type": "audio", "text": text, "rate": rate,
+                             "pcm": base64.b64encode(pcm).decode()})
+        except Exception:  # the phone falls back to its own voice after a short wait
+            logger.exception("hwmode: voice failed")
+
+    def _spawn_speak(self, text: str) -> None:
+        t = asyncio.create_task(self._speak(text))
+        self.speaking.add(t)
+        t.add_done_callback(self.speaking.discard)
+
+    async def _refine_small(self, data: dict, jpeg: bytes) -> dict:
+        """Small part (a screw): look again at a zoomed crop around the first box and use the
+        tighter box from that (the Phase 0 two-pass method). Costs one extra turn, small parts only."""
+        o = data.get("overlay")
+        px = o.get("target_px") if isinstance(o, dict) else None
+        size = jpeg_size(jpeg)
+        if not (isinstance(px, list) and len(px) == 4 and size) or self.session is None:
+            return data
+        try:
+            box = [float(v) for v in px]
+        except (TypeError, ValueError):
+            return data
+        w, h = size
+        if max(box[2] - box[0], box[3] - box[1]) > SMALL_PART * min(w, h):
+            return data
+        try:
+            import io
+
+            from PIL import Image
+
+            from hwmode.bench_ground import unzoom, zoom_crop
+        except ImportError:  # no Pillow on this box: keep the first box
+            return data
+        im = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        crop, origin = zoom_crop(im, box)
+        buf = io.BytesIO()
+        crop.save(buf, "JPEG", quality=85)
+        label = str(o.get("label") or "the part")
+        r = await asyncio.to_thread(self.session.ask, ZOOM_PROMPT.format(label=label), buf.getvalue(), None)
+        zo = (r.data or {}).get("overlay") if isinstance(r.data, dict) else None
+        zp = zo.get("target_px") if isinstance(zo, dict) else None
+        if not (isinstance(zp, list) and len(zp) == 4):
+            return data
+        try:
+            fine = unzoom([float(v) for v in zp], origin)
+        except (TypeError, ValueError):
+            return data
+        fine = [min(max(fine[0], 0), w), min(max(fine[1], 0), h), min(max(fine[2], 0), w), min(max(fine[3], 0), h)]
+        logger.info("zoom refine %s: %s -> %s", label, [round(v) for v in box], [round(v) for v in fine])
+        return {**data, "overlay": {**o, "target_px": fine}}
 
     def _gate(self, data: dict | None, user_done: bool, watch: bool, has_frame: bool,
               locate: bool = False) -> dict | None:
@@ -289,9 +396,9 @@ class _Conn:
             (text, use_frame), self.pending = self.pending, None
 
     async def close(self) -> None:
-        for t in self.tasks:
+        for t in self.tasks | self.speaking:
             t.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await asyncio.gather(*self.tasks, *self.speaking, return_exceptions=True)
         await asyncio.to_thread(self._close_session)
 
 
