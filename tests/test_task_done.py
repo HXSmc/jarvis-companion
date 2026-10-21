@@ -170,7 +170,7 @@ def test_box_mode_forwards_exactly_once(monkeypatch: pytest.MonkeyPatch, store_h
     _box(monkeypatch, seen)
     notes: list[tuple] = []
 
-    async def push_app(*args):
+    async def push_app(*args, **kw):
         notes.append(args)
         return True
 

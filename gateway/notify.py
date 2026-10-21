@@ -147,6 +147,51 @@ async def _whatsapp_mcp_send(to: str, text: str) -> bool:
     return ok
 
 
+# ntfy: the owner's self-hosted push server. It rings the phone like any app, unlike a
+# WhatsApp from the owner's own number (never notifies) or the app (frozen in the
+# background). Off unless JARVIS_NTFY_URL and JARVIS_NTFY_TOPIC are set (.env);
+# JARVIS_NTFY_TOKEN when the topic needs auth.
+NTFY_TIMEOUT = httpx.Timeout(10.0, connect=3.0)
+
+
+def _ntfy_target() -> tuple[str, str] | None:
+    url, topic = os.environ.get("JARVIS_NTFY_URL", "").rstrip("/"), os.environ.get("JARVIS_NTFY_TOPIC", "")
+    if not (url and topic) or os.environ.get("PYTEST_CURRENT_TEST"):  # a test never pushes for real
+        return None
+    return url, topic
+
+
+async def push_ntfy(kind: str, title: str, text: str) -> bool:
+    """One ntfy push (JSON publish: UTF-8 safe); False = not configured or not sent."""
+    target = _ntfy_target()
+    if target is None:
+        return False
+    url, topic = target
+    headers = {"Authorization": f"Bearer {os.environ['JARVIS_NTFY_TOKEN']}"} if os.environ.get("JARVIS_NTFY_TOKEN") else {}
+    body = {"topic": topic, "title": title, "message": text or title,
+            "tags": ["white_check_mark" if kind == "done" else "bell"],
+            "priority": 3 if kind == "done" else 4}
+    try:
+        async with httpx.AsyncClient(timeout=NTFY_TIMEOUT) as client:
+            resp = await client.post(url, json=body, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("notify: ntfy unreachable: %s", type(exc).__name__)
+        return False
+    if resp.status_code >= 300:
+        logger.warning("notify: ntfy refused the push (HTTP %d)", resp.status_code)
+        return False
+    return True
+
+
+async def ring(kind: str, title: str, text: str) -> bool:
+    """The out-of-app ping: ntfy when it is set up, else WhatsApp (not for turn-ends)."""
+    if _ntfy_target() is not None:
+        return await push_ntfy(kind, title, text)
+    if kind == "done":
+        return False
+    return await whatsapp_owner(f"{title}\n\n{text}\n\nOpen the Jarvis app to reply.", f"[jarvis] {title}")
+
+
 async def whatsapp_owner(text: str, subject: str) -> bool:
     """One WhatsApp to the owner's own number; False = not sent (never raises)."""
     text = text if len(text) <= WHATSAPP_MAX_CHARS else text[: WHATSAPP_MAX_CHARS - 1] + "…"
@@ -237,10 +282,17 @@ _titles: dict[str, str] = {}  # session id -> title, from the watcher's polls
 _deliveries: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
 
 
-async def _deliver(kind: str, title: str, text: str, sid: str) -> None:
-    """A needs-you note: the app, or WhatsApp when the app does not confirm it."""
+async def deliver(kind: str, title: str, text: str, sid: str | None) -> None:
+    """A note the owner must not miss: the app, else ntfy/WhatsApp when the app does not confirm it."""
     if not await push_app(kind, title, text, sid, confirm=True):
-        await whatsapp_owner(f"{title}\n\n{text}\n\nOpen the Jarvis app to reply.", f"[jarvis] {title}")
+        await ring(kind, title, text)
+
+
+def spawn_deliver(kind: str, title: str, text: str, sid: str | None) -> None:
+    """deliver() in the background: a request path must not wait for the app's confirmation."""
+    task = asyncio.get_running_loop().create_task(deliver(kind, title, text, sid))
+    _deliveries.add(task)
+    task.add_done_callback(_deliveries.discard)
 
 
 def on_card_need(session_id: str, need: dict) -> None:
@@ -251,9 +303,7 @@ def on_card_need(session_id: str, need: dict) -> None:
     _card_needs_seen.append(key)
     title = f"Needs you: {_titles.get(session_id) or 'a Jarvis session'}"
     text = str(need.get("question") or "").strip() or "It is waiting for your answer."
-    task = asyncio.get_running_loop().create_task(_deliver("card", title, text, session_id))
-    _deliveries.add(task)
-    task.add_done_callback(_deliveries.discard)
+    spawn_deliver("card", title, text, session_id)
 
 
 def _card_need_open(sid: str) -> bool:
@@ -281,10 +331,7 @@ async def crossroads_watcher() -> None:
                 for kind, title, text, sid in crossroads(prev, rows):
                     if kind == "crossroads" and _card_need_open(sid):
                         continue  # the card's own ask was the note
-                    delivered = await push_app(kind, title, text, sid, confirm=True)
-                    # A turn end is too frequent for WhatsApp; the app catches up on it.
-                    if not delivered and kind != "done":
-                        await whatsapp_owner(f"{title}\n\n{text}\n\nOpen the Jarvis app to reply.", f"[jarvis] {title}")
+                    await deliver(kind, title, text, sid)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a failed poll never kills the watcher
