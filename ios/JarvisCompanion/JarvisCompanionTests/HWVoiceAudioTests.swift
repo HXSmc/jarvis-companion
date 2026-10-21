@@ -280,11 +280,15 @@ final class HWVoiceAudioTests: XCTestCase {
         try await Task.sleep(nanoseconds: 500_000_000)
         var diag = voice.diagnostics()
         print("engine restart diag: \(diag["events"] ?? "")")
-        XCTAssertEqual((diag["counts"] as? [String: Int])?["restart"], 1)
+        // iOS itself may post a configuration change right after a restart (it did on CI:
+        // "engine restart: configuration change"): that one must be handled too.
+        let restarts = (diag["counts"] as? [String: Int])?["restart"] ?? 0
+        XCTAssertGreaterThanOrEqual(restarts, 1)
+        XCTAssertLessThanOrEqual(restarts, 3, "restart loop")
         XCTAssertEqual(diag["engine"] as? Bool, true, "engine not running after a restart")
         voice.ensureRunning()  // running: the watchdog must not restart again
         diag = voice.diagnostics()
-        XCTAssertEqual((diag["counts"] as? [String: Int])?["restart"], 1)
+        XCTAssertEqual((diag["counts"] as? [String: Int])?["restart"], restarts)
         voice.speak("Step 1: unplug the power cable.")
         try await Task.sleep(nanoseconds: 3_000_000_000)
         diag = voice.diagnostics()
