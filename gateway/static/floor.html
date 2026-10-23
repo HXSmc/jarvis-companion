@@ -188,6 +188,7 @@
       byProject.get(p).push(s);
     }
     const names = [...byProject.keys()].sort();
+    const onFloor = new Set(sessions.map((s) => s.session_id));
     const ringN = names.length + 1;               // +1 slot reserved for the Mac wing
     const R = 230 + Math.max(0, ringN - 4) * 30;
     names.forEach((name, i) => {
@@ -196,7 +197,11 @@
       const cols = Math.min(2, list.length), rows = Math.ceil(list.length / 2);
       const w = cols * 70 + 30, d = rows * 70 + 30;
       const px = Math.cos(a) * R - w / 2, py = Math.sin(a) * R - d / 2;
-      pods.push({ name: name.toUpperCase(), x: px, y: py, w, d, color: POD_COLORS[i % POD_COLORS.length] });
+      // Sub-sessions: an office whose sessions were all spawned by one session
+      // on the floor hangs off that session's desk instead of the brain.
+      const ps = new Set(list.map((s) => s.parent_session_id || null)), from = ps.size === 1 ? [...ps][0] : null;
+      const parent = from && onFloor.has(from) && !list.some((s) => s.session_id === from) ? from : null;
+      pods.push({ name: name.toUpperCase(), x: px, y: py, w, d, color: POD_COLORS[i % POD_COLORS.length], parent });
       const office = [px + w / 2, py + d / 2];
       list.forEach((s, j) => {
         const id = s.session_id;
@@ -205,7 +210,7 @@
         upsertDesk(id, {
           kind: "session", x: px + 22 + (j % 2) * 70, y: py + 22 + Math.floor(j / 2) * 70,
           role, tag: roleLabel(role) + " · " + name, session: s, phase: s.phase || "done",
-          pod: name, office,
+          pod: name, office, from: parent,
         }, now);
       });
     });
@@ -399,8 +404,9 @@
     // Brain feeds each office; each office feeds its own desks.
     for (const p of pods) {
       if (p.mac) continue;  // the Mac office's dashed spoke comes from its anchor desk
-      const a = scr(0, 0, 10), b = scr(p.x + p.w / 2, p.y + p.d / 2, 4);
-      ctx.strokeStyle = "rgba(255,255,255,0.09)";
+      const src = p.parent && desks.get(p.parent), e = src && spokeEnd(src);
+      const a = e ? scr(e[0], e[1], 14) : scr(0, 0, 10), b = scr(p.x + p.w / 2, p.y + p.d / 2, 4);
+      ctx.strokeStyle = e ? "rgba(52,211,153,0.35)" : "rgba(255,255,255,0.09)";
       ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
     }
     for (const d of desks.values()) {
@@ -592,6 +598,8 @@
     const p = d.kind === "sub" ? desks.get(d.parent) : null;
     const o = (p || d).office;
     const hop = [];
+    const src = d.from && desks.get(d.from);  // a sub-session's work comes through the session that spawned it
+    if (src) { const e = spokeEnd(src); hop.push([e[0], e[1], 16]); }
     if (o) hop.push([o[0], o[1], 16]);
     if (p) { const e = spokeEnd(p); hop.push([e[0], e[1], 16]); }
     return hop;

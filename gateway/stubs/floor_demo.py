@@ -38,6 +38,10 @@ SESSIONS = [
     {"session_id": "s-mac", "kind": "claude", "title": "Mac hook session", "state": "running", "project": "demo",
      "device": "Mac", "task": "Tidy Downloads", "summary": "Reported by the Mac session hook", "phase": "in_progress",
      "updated_at": "2026-10-15T09:58:00Z"},
+    # Sub-sessions spawned by s-res: their office hangs off s-res's desk, not the brain.
+    *({"session_id": f"s-sub{i}", "kind": "claude", "title": f"helper {i}", "state": "running", "project": "helpers",
+       "parent_session_id": "s-res", "task": "Answer cards", "summary": "One-shot helper", "phase": "in_progress",
+       "updated_at": "2026-10-15T09:56:00Z"} for i in (1, 2, 3)),
     {"session_id": "s-old", "kind": "claude", "title": "Notes cleanup", "state": "done", "project": "vault",
      "task": "Tidy daily notes", "summary": "Done", "phase": "done", "updated_at": "2026-10-15T08:00:00Z"},
 ]

@@ -252,6 +252,12 @@ def test_floor_page_filters_hidden_sessions():
     assert "!x.floor_hidden" in html
 
 
+def test_floor_page_hangs_sub_sessions_off_their_parent():
+    # An office whose sessions share one parent on the floor is wired to that desk, not the brain.
+    html = central.FLOOR_HTML.read_text()
+    assert "s.parent_session_id" in html and "p.parent && desks.get(p.parent)" in html
+
+
 # --- live status: last_activity_at + health -----------------------------------
 
 def test_activity_and_health_pass_through_unchanged(monkeypatch):
