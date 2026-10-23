@@ -343,16 +343,6 @@ def test_attention_health_never_floor_hidden(monkeypatch):
     assert out["floor_hidden"] is False
 
 
-def test_busy_session_never_floor_hidden(monkeypatch):
-    # A live daemon on a long silent task (router health "quiet") stays on the floor.
-    items = [
-        {"session_id": h, "state": "running", "health": h, "last_activity_at": "2026-10-15T11:00:00Z"}
-        for h in ("quiet", "working", "idle")
-    ]
-    data = {s["session_id"]: s["floor_hidden"] for s in _sessions(monkeypatch, items)}
-    assert data == {"quiet": False, "working": False, "idle": True}
-
-
 def test_suspect_done_never_floor_hidden(monkeypatch):
     items = [{
         "session_id": "s1", "state": "done", "phase": "done", "done_verdict": "suspect",

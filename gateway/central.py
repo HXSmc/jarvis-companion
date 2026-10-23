@@ -12,7 +12,7 @@ Plain words (round 3): each session also carries `device` (constant "Mini PC"),
 `doing` (one plain line) and `recap` (short plain bullets) made by a local
 `claude -p` call (Haiku, the owner's Claude subscription — never OpenRouter,
 never an API key) from the latest summary, plus `floor_hidden` (idle 30+ min,
-UTC, never for a session that needs the owner or that the router reports busy). The router's `last_activity_at`
+UTC, never for a session that needs the owner). The router's `last_activity_at`
 and `health` pass through unchanged; when missing they fall back to
 `updated_at` and to the phase (working / waiting_for_owner / null). The model runs in the
 background only; the 10 s poll reads the cache in ~/.jarvis/central_state.json
@@ -379,10 +379,7 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None,
         or out["health"] in ("waiting", "attention", "waiting_for_owner")
         or (out["phase"] == "done" and out.get("done_verdict") == "suspect")
     )
-    # Nor one the router itself reports busy: "quiet" is a live daemon on a long
-    # silent task (build, model run), not an idle row (hamsa, 2026-10-23).
-    live = item.get("health") in ("working", "quiet")
-    out["floor_hidden"] = bool(ts and not needs_owner and not live and (now or _now()) - ts >= FLOOR_IDLE)
+    out["floor_hidden"] = bool(ts and not needs_owner and (now or _now()) - ts >= FLOOR_IDLE)
     return out
 
 
