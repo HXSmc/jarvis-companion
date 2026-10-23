@@ -37,8 +37,9 @@ struct HardwareModeView: View {
             GeometryReader { geo in
                 // The brain's box always shows; tracking only keeps it on the part as the phone moves.
                 if let overlay = hw.overlay {
-                    // Lost: dimmed at the last known spot while the brain is asked to find it again.
-                    HWOverlayLayer(overlay: overlay, rect: viewRect(tracked ?? overlay.rect, in: geo.size))
+                    // Lost: a dimmed box at the last known spot while the brain is asked to find it again;
+                    // the part's painted shape there would sit on whatever is in that spot now.
+                    HWOverlayLayer(overlay: overlay, rect: viewRect(tracked ?? overlay.rect, in: geo.size), plain: lost)
                         .opacity(lost ? 0.35 : 1)
                 }
             }
@@ -333,13 +334,15 @@ struct HardwareModeView: View {
 struct HWOverlayLayer: View {
     let overlay: HWOverlay
     let rect: CGRect
+    /// Box only, even when the part's shape is known.
+    var plain = false
 
     var body: some View {
         TimelineView(.animation) { timeline in
             let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2)
             ZStack {
                 Canvas { ctx, _ in
-                    if let mask = overlay.mask {  // the part's own shape, painted over it
+                    if !plain, let mask = overlay.mask {  // the part's own shape, painted over it
                         ctx.draw(Image(decorative: mask, scale: 1), in: rect)
                     } else {
                         let box = Path(roundedRect: rect.insetBy(dx: -4, dy: -4), cornerRadius: 6)
