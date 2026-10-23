@@ -28,7 +28,9 @@ jobs:
           # +100: run_number restarted at 1 when the repo was recreated (2026-10-21);
           # the phone already has 1.0.38, and AltStore only offers higher versions.
           BUILD=$(( ${{ github.run_number }} + 100 ))
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.$BUILD" "$PLIST"
+          # 1.1 line from run 39 on (owner, 2026-10-23): 1.1.0, 1.1.1, ... (last 1.0 was 1.0.138).
+          # CFBundleVersion keeps counting up, so AltStore still sees every build as newer.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1.$(( ${{ github.run_number }} - 39 ))" "$PLIST"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST"
