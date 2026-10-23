@@ -148,3 +148,38 @@ def test_real_mask_hugs_each_plug_from_a_loose_box(segmenter):
         assert png.mode == "L" and max(png.size) <= MASK_MAX
         levels = set(png.tobytes())
         assert levels <= {0, INSIDE, EDGE} and {INSIDE, EDGE} <= levels
+
+
+def test_stray_specks_are_dropped_and_small_holes_filled():
+    import numpy as np
+
+    from hwmode.segment import _main_part
+
+    m = np.zeros((100, 100), bool)
+    m[30:70, 30:70] = True  # the part
+    m[48:52, 48:52] = False  # glare on it
+    m[5:9, 85:90] = True  # a speck of table, inside the box
+    out = _main_part(m, (0, 0, 99, 99))
+    assert out[30:70, 30:70].all()  # one solid piece, hole filled
+    assert not out[5:9, 85:90].any()  # the speck is gone
+    assert not out[:, 95:].any() and _main_part(np.zeros((10, 10), bool), (0, 0, 9, 9)) is None
+
+
+def test_real_mask_on_a_dim_table_is_the_part_not_the_table(segmenter):
+    """The owner's screenshot: on a dim, grainy wood table SAM liked to paint the table around the
+    dock. The mask must be the dock itself, or no mask at all (the phone then shows the box)."""
+    import numpy as np
+    from PIL import Image
+
+    from hwmode_synth import iou, render_dim_table
+
+    scene = render_dim_table()
+    emb = segmenter.embed(scene.jpeg)
+    t = scene.boxes["dock"]
+    loose = [t[0] - 70, t[1] - 55, t[2] + 70, t[3] + 55]  # a loose box takes in plenty of table
+    m = segmenter.mask(emb, loose)
+    assert m, "no mask for the dock"
+    print(f"  dock: loose={loose} mask={m['target_px']} truth={t} iou={iou(m['target_px'], t):.2f}")
+    assert iou(m["target_px"], t) > 0.8
+    png = np.asarray(Image.open(io.BytesIO(base64.b64decode(m["mask_png"])))) > 0
+    assert png.mean() > 0.75  # the dock is a solid block: its mask fills its own box
