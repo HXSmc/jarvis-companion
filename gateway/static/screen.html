@@ -202,7 +202,9 @@ function expired() { showBanner(BANNER_EXPIRED, true); }
 function pullFrame() {
   if (target === "windows" && pcSleeping) return Promise.resolve(); // don't wake it back up
   var dpr = window.devicePixelRatio || 1;
-  var w = Math.min(1600, Math.max(320, Math.round(canvas.clientWidth * dpr)));
+  // Size from the space the frame can fill, not the canvas: the canvas starts
+  // at 320 px, so on a big window its own width never let the frame grow.
+  var w = Math.min(1600, Math.max(320, Math.round(fitView() * dpr)));
   var headers = {};
   if (etag) headers["If-None-Match"] = etag;
   return fetch("/screen/" + target + "/frame?w=" + w + "&q=55", { headers: headers, cache: "no-store" })
@@ -490,9 +492,22 @@ function resyncCursor() {
   if (next !== cursor) { cursor = next; saveCursorPos(); positionCursor(); }
 }
 
+// Largest frame-shaped box inside #wrap (a desktop window, a phone): the
+// canvas fills it. Returns that box's CSS width.
+var wrapEl = document.getElementById("wrap");
+function fitView() {
+  var ratio = canvas.width / canvas.height;
+  var w = Math.max(1, Math.floor(Math.min(wrapEl.clientWidth, wrapEl.clientHeight * ratio)));
+  cursorWrap.style.width = w + "px";
+  cursorWrap.style.height = Math.floor(w / ratio) + "px";
+  return w;
+}
+window.addEventListener("resize", function () { fitView(); positionCursor(); });
+
 function syncCursorToFrame() {
   var d = frameSize();
   cursorWrap.style.aspectRatio = d.w + " / " + d.h;
+  fitView();
   var p = null;
   try {
     p = JSON.parse(sessionStorage.getItem("screen.cursorPos") || "null");
