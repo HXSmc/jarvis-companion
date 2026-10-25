@@ -11,6 +11,7 @@ let them ask you to plug in a cable, and only read the email that needs you.
 ![FastAPI](https://img.shields.io/badge/gateway-FastAPI-009688?logo=fastapi&logoColor=white)
 ![Claude Code](https://img.shields.io/badge/brain-Claude%20Code-D97757)
 ![Tests](https://img.shields.io/badge/tests-545%20passing-brightgreen)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Self-hosted](https://img.shields.io/badge/cloud-none-lightgrey)
 
 <img src="docs/images/floor.png" alt="Agency Floor: an isometric office where every Claude Code session is a worker at a desk" width="100%">
@@ -208,4 +209,9 @@ Sessions board and the Floor work without the author's setup.
 
 ## License
 
-No license file yet. Until one is added, default copyright applies.
+Code: [Apache-2.0](LICENSE).
+
+Exception: the wake-word models in `models/` (`hey_jarvis_v0.1.onnx`, `embedding_model.onnx`,
+`melspectrogram.onnx`) come from [openWakeWord](https://github.com/dscripka/openWakeWord) and
+keep their own license, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+(non-commercial). `silero_vad.onnx` is from [Silero VAD](https://github.com/snakers4/silero-vad) (MIT).
