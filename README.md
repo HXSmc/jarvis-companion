@@ -211,7 +211,9 @@ Sessions board and the Floor work without the author's setup.
 
 Code: [Apache-2.0](LICENSE).
 
-Exception: the wake-word models in `models/` (`hey_jarvis_v0.1.onnx`, `embedding_model.onnx`,
-`melspectrogram.onnx`) come from [openWakeWord](https://github.com/dscripka/openWakeWord) and
-keep their own license, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-(non-commercial). `silero_vad.onnx` is from [Silero VAD](https://github.com/snakers4/silero-vad) (MIT).
+`silero_vad.onnx` in `models/` is from [Silero VAD](https://github.com/snakers4/silero-vad) (MIT).
+
+The "Hey Jarvis" wake-word models are not in this repo. `mac/voice/wakeword.py` downloads
+them from [openWakeWord](https://github.com/dscripka/openWakeWord)'s releases on first run.
+They have their own license, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+(non-commercial).

@@ -34,6 +34,10 @@ MODEL_PATH = MODELS_DIR / "hey_jarvis_v0.1.onnx"
 
 def load_model() -> Model:
     """Model with all supporting files from models/ (not the venv package dir)."""
+    if not MODEL_PATH.exists():
+        # Not committed: openWakeWord's models are CC BY-NC-SA 4.0, the repo is Apache-2.0.
+        from openwakeword.utils import download_models
+        download_models(["hey_jarvis_v0.1"], target_directory=str(MODELS_DIR))
     return Model(
         wakeword_models=[str(MODEL_PATH)],
         inference_framework="onnx",
