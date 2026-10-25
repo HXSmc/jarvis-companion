@@ -158,7 +158,10 @@ async def vnc_ws(ws: WebSocket) -> None:
             await ws.close(code=4002)
             return
         try:
-            up = await websockets.connect(MINIPC_VNC_WS, subprotocols=["binary"], open_timeout=5)
+            # compression=None: RFB rects are already Tight/JPEG-compressed, so
+            # permessage-deflate only adds CPU and delay per message.
+            up = await websockets.connect(MINIPC_VNC_WS, subprotocols=["binary"], open_timeout=5,
+                                          compression=None, max_size=None)
         except Exception:
             await ws.close(code=4002)
             return

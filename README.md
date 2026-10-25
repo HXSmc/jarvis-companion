@@ -114,10 +114,29 @@ picked steps go to a new Claude session. The email body is fenced off as untrust
 the way, so a hostile email cannot steer the agent. A run with no new mail makes zero LLM
 calls.
 
+### 🖥️ Desktop Jarvis: the phone app in a PC browser
+
+At your desk, the same app runs as one page in any browser on your tailnet:
+`https://<ts-host>:8790/desktop`. It has Home (ask Jarvis, quick answers, wake the PC,
+files), the Sessions board with card asks and attachments, session chat, the Floor, the
+remote Screen and the Inbox. Hardware Mode stays on the phone because it needs the camera.
+
+There is no password to type. A one-time link logs the browser in:
+
+1. Anything holding the `ios_token` calls `POST /desktop/launch` and gets a link that
+   works once, for 60 seconds. `scripts/desktop_link.py --target windows` mints one and
+   types it into the focused address bar on the PC for you.
+2. Opening the link sets a 7-day cookie and drops the code from the address bar. The
+   cookie is HttpOnly, Secure, SameSite=Strict, and bound to that machine's tailnet IP,
+   so copying it to another device gets you nothing.
+3. The browser never sees the `ios_token`. The gateway swaps the cookie for it, and only
+   on the exact routes the phone app uses. Log out from the page, or delete
+   `~/.jarvis/desktop_sessions.json` and restart the gateway to sign out every browser.
+
 ### Also in the box
 
-- **Remote screen**: drive the Mac, Windows PC or mini PC desktop from the phone (noVNC
-  through the gateway).
+- **Remote screen**: drive the Mac, Windows PC or mini PC desktop from the phone or the
+  desktop page (JPEG frames for Mac and PC, noVNC through the gateway for the mini PC).
 - **"Hey Jarvis"**: wake word on Mac and Windows (openWakeWord), Siri Shortcut on iPhone.
 - **Windows agent**: query and control the PC by voice or from a Claude session.
 - **iPhone Mirroring driver**: lets an agent tap through an iPhone app from the Mac.
@@ -134,6 +153,7 @@ flowchart LR
     watcher["vendor_watch.py<br/>(twice a day)"] --> inbox
     sessions["Claude sessions"] -- "jarvis-card / jarvis-hw-request" --> gw
     gw -- "WebSocket" --> win["Windows agent"]
+    desk["PC browser<br/>(/desktop)"] -- "one-time link,<br/>then cookie" --> gw
     gw -- "noVNC" --> screens["Mac / PC / mini PC screens"]
 ```
 
@@ -186,6 +206,11 @@ arrives. Put your sender domains in `JARVIS_VENDOR_DOMAINS` and write
 - The page also controls the mini PC desktop over noVNC through the gateway
   (`gateway/vnc.py`). Edits to `gateway/screen.py` or `gateway/vnc.py` need a gateway
   restart; `screen.html` is live-reloaded.
+- Latency: when the gateway is not on the Mac, it reaches the Mac's own gateway over one
+  kept-alive connection (`MAC_GATEWAY_URL`). With the gateway on the mini PC, point
+  `MINIPC_VNC_WS` at websockify on loopback (`ws://127.0.0.1:6080/websockify`), not at the
+  `tailscale serve` URL. The page pulls frames back to back while you are driving and
+  every 300 ms when idle.
 - Disable with `SCREEN_CONTROL=0` and restart. Smoke test: `.venv/bin/python -m mac.screen.smoke`.
 
 ## Privacy guard
