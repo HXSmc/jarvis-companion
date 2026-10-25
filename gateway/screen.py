@@ -249,7 +249,10 @@ async def screen_page(request: Request, boot: str | None = Query(default=None)) 
         kind = _require(request)
     # Serve-time inline: cursor.js is spliced into the page's placeholder
     # script tag — one request, no extra route, no separate cacheable fetch.
-    response = HTMLResponse(SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text()))
+    # frame-ancestors 'self': only the desktop page may frame it (ts.net is a
+    # public suffix, so a tailnet sibling counts as same-site for cookies).
+    response = HTMLResponse(SCREEN_HTML.read_text().replace("/*CURSOR_JS*/", CURSOR_JS.read_text()),
+                            headers={"Content-Security-Policy": "frame-ancestors 'self'"})
     if kind in ("bearer", "boot"):
         response.set_cookie(
             SESSION_COOKIE, _mint_session(),

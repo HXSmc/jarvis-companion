@@ -831,7 +831,19 @@
   // has nothing left to watch, and left on the Floor it would just look like
   // a desk that's gone quiet forever instead of one that finished and left.
   const HIDDEN_LIFECYCLE = /^(exited|stopped)$/;
-  async function refresh() {
+  // Coalesced: the feed calls refresh() for every event of a session that is
+  // not on the floor, so a replayed backlog fired thousands of fetch triples at
+  // once. One refresh in flight plus at most one queued behind it.
+  let refreshing = null, refreshAgain = false;
+  function refresh() {
+    if (refreshing) { refreshAgain = true; return refreshing; }
+    refreshing = doRefresh().finally(() => {
+      refreshing = null;
+      if (refreshAgain) { refreshAgain = false; refresh(); }
+    });
+    return refreshing;
+  }
+  async function doRefresh() {
     const [s, a, w] = await Promise.allSettled([
       getJSON("/central/sessions"), getJSON("/central/agents"), getJSON("/central/watchdog"),
     ]);
