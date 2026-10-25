@@ -169,14 +169,19 @@ var bannerEl = document.getElementById("banner");
 var t0 = new URLSearchParams(location.search).get("target");
 var target = t0 === "windows" ? "windows" : t0 === "minipc" ? "minipc" : "mac";
 var etag = null;          // last frame's ETag -> If-None-Match
-var objUrl = null;        // current frame's blob URL
 var stopped = false;      // set on 401: freeze the whole page
 var pcSleeping = false;   // true from sleep-tap fire until the status poll sees the PC back online
 var lastInput = 0;        // ms timestamp of last input POST -> fps boost
 var state = { mac: null, windows: null };
 var mods = [];            // sticky modifiers, consumed by the next key event
 
-function frameDelay() { return Date.now() - lastInput < 3000 ? 200 : 1000; }
+// Pause between pulls: back-to-back while the user is driving (the server's
+// capture + round trip already paces it), short when idle so changes the user
+// did not cause (a reply streaming in, a video) still show up quickly.
+function frameDelay() {
+  if (document.hidden) return 1000; // nobody watching: keep the capture cost low
+  return Date.now() - lastInput < 3000 ? 0 : 300;
+}
 
 function norm(e) {
   var r = canvas.getBoundingClientRect();
@@ -214,32 +219,57 @@ function pullFrame() {
       var et = res.headers.get("ETag");
       return res.blob().then(function (blob) {
         if (et) etag = et;
-        var u = URL.createObjectURL(blob);
-        var img = new Image();
-        img.onload = function () {
-          var dimsChanged = canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight;
-          canvas.width = img.naturalWidth;
-          canvas.height = img.naturalHeight;
+        // Draw without holding up the loop: the next pull starts while this
+        // frame decodes. seq drops a late decode that a newer frame beat.
+        var mine = ++frameSeq;
+        decodeFrame(blob).then(function (img) {
+          if (mine < drawnSeq) return closeFrame(img);
+          drawnSeq = mine;
+          var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+          var dimsChanged = canvas.width !== iw || canvas.height !== ih;
+          if (dimsChanged) { canvas.width = iw; canvas.height = ih; }
           ctx.drawImage(img, 0, 0);
+          closeFrame(img);
           if (dimsChanged) syncCursorToFrame();
-          if (objUrl) URL.revokeObjectURL(objUrl);
-          objUrl = u;
-        };
-        img.src = u;
+        }).catch(function () {});
       });
     })
     .catch(function () {});
 }
 
+var frameSeq = 0, drawnSeq = 0;
+// createImageBitmap decodes off the main thread; <img> is the fallback for
+// older WebKit. Either way the blob URL is freed once the frame is drawn.
+function decodeFrame(blob) {
+  if (window.createImageBitmap) return createImageBitmap(blob);
+  return new Promise(function (resolve, reject) {
+    var img = new Image();
+    var u = URL.createObjectURL(blob);
+    img.onload = function () { URL.revokeObjectURL(u); resolve(img); };
+    img.onerror = function () { URL.revokeObjectURL(u); reject(); };
+    img.src = u;
+  });
+}
+function closeFrame(img) { if (img.close) img.close(); }
+
+var loopTimer = null, pulling = false;
 function frameLoop() {
   if (stopped) return;
   if (target === "minipc") {
-    setTimeout(frameLoop, 1000); // noVNC owns the stream; no JPEG pulls
+    loopTimer = setTimeout(frameLoop, 1000); // noVNC owns the stream; no JPEG pulls
     return;
   }
+  pulling = true;
   pullFrame().then(function () {
-    setTimeout(frameLoop, frameDelay());
+    pulling = false;
+    loopTimer = setTimeout(frameLoop, frameDelay());
   });
+}
+// Input landed: pull now instead of sitting out the idle pause.
+function kickFrame() {
+  if (pulling || stopped) return;
+  clearTimeout(loopTimer);
+  frameLoop();
 }
 
 // --- input -----------------------------------------------------------------
@@ -251,7 +281,7 @@ function sendEvents(events) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ events: events })
-  }).then(function (res) { if (res.status === 401) expired(); }).catch(function () {});
+  }).then(function (res) { if (res.status === 401) expired(); else kickFrame(); }).catch(function () {});
 }
 
 function takeMods() {

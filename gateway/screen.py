@@ -133,9 +133,19 @@ def _mac_gateway() -> str | None:
     return os.environ.get(MAC_GATEWAY_ENV, "").rstrip("/") or None
 
 
+_mac_http: httpx.AsyncClient | None = None
+
+
 def _mac_client() -> httpx.AsyncClient:
-    """Outbound client to the Mac gateway (tests swap in an ASGI transport here)."""
-    return httpx.AsyncClient(timeout=MAC_PROXY_TIMEOUT)
+    """Outbound client to the Mac gateway (tests swap in an ASGI transport here).
+
+    One shared keep-alive client: a fresh client per frame paid a new TLS
+    connection over the tailnet every pull (~260 ms/frame vs ~70 ms reused).
+    """
+    global _mac_http
+    if _mac_http is None or _mac_http.is_closed:
+        _mac_http = httpx.AsyncClient(timeout=MAC_PROXY_TIMEOUT)
+    return _mac_http
 
 
 async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
@@ -150,8 +160,7 @@ async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
         raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL)
     headers = {"Authorization": f"Bearer {token}", **kwargs.pop("headers", {})}
     try:
-        async with _mac_client() as client:
-            resp = await client.request(method, f"{_mac_gateway()}/screen/mac/{path}", headers=headers, **kwargs)
+        resp = await _mac_client().request(method, f"{_mac_gateway()}/screen/mac/{path}", headers=headers, **kwargs)
     except httpx.HTTPError as exc:
         logger.warning("mac gateway unreachable: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL) from None
