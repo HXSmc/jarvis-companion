@@ -20,6 +20,12 @@ from gateway import screen
 FAKE_JPEG = b"mac-jpeg"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_input_window():
+    """The 60 events / 2 s limiter is module-global; reset it so suite speed never decides a test."""
+    screen._input_times.clear()
+
+
 def _fake_mac(seen: list[tuple[str, str, str | None]]) -> FastAPI:
     mac = FastAPI()
 
@@ -109,4 +115,67 @@ def test_mac_unreachable_is_offline(gateway_server, monkeypatch):
                 assert status.status_code == 200 and status.json()["online"] is False
                 frame = await c.get("/screen/mac/frame")
                 assert frame.status_code == 503 and frame.json()["detail"] == screen.MAC_OFFLINE_DETAIL
+    asyncio.run(run())
+
+
+@pytest.fixture
+def mac_focus(monkeypatch):
+    """Fake Mac for focus-lock tests: records every input body it receives and
+    answers /screen/mac/input with a settable (status, detail)."""
+    state: dict = {"bodies": [], "status": 200, "detail": None}
+    mac = FastAPI()
+
+    @mac.post("/screen/mac/input")
+    async def input_(request: Request):
+        state["bodies"].append(await request.json())
+        if state["status"] == 200:
+            return {"ok": True}
+        raise HTTPException(status_code=state["status"], detail=state["detail"])
+
+    transport = httpx.ASGITransport(app=mac)
+    monkeypatch.setenv(screen.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(screen, "_mac_client", lambda: httpx.AsyncClient(transport=transport))
+    return state
+
+
+def test_focus_lock_fields_forwarded_to_mac_gateway(gateway_server, mac_focus):
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                resp = await c.post(
+                    "/screen/mac/input",
+                    json={"events": [{"type": "text", "text": "hi",
+                                      "require_app": "Terminal", "require_window": "zsh"}]},
+                )
+                assert resp.status_code == 200, resp.text
+
+    asyncio.run(run())
+    events = mac_focus["bodies"][0]["events"]
+    assert events[0]["require_app"] == "Terminal", events
+    assert events[0]["require_window"] == "zsh", events
+
+
+def test_focus_mismatch_409_passes_through_and_500_is_still_503(gateway_server, mac_focus):
+    detail = {"error": "focus_mismatch", "frontmost_app": "iTerm2", "refused_index": 1,
+              "events_run": 1, "partial": False,
+              "message": "Refused: iTerm2 is focused, not the required app/window. "
+                         "Events before index 1 already ran. "
+                         "Focus the required app and resend from index 1."}
+    mac_focus.update(status=409, detail=detail)
+
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                resp = await c.post(
+                    "/screen/mac/input",
+                    json={"events": [{"type": "text", "text": "a", "require_app": "Terminal"}]},
+                )
+                assert resp.status_code == 409, resp.text
+                assert resp.json()["detail"] == detail, resp.text
+                # Non-pass-through statuses stay "mac offline".
+                mac_focus.update(status=500, detail="boom")
+                resp = await c.post("/screen/mac/input", json={"events": [{"type": "tap", "x": 0.5, "y": 0.5}]})
+                assert resp.status_code == 503, resp.text
+                assert resp.json() == {"detail": screen.MAC_OFFLINE_DETAIL}, resp.text
+
     asyncio.run(run())

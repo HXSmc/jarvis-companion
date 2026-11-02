@@ -3,9 +3,9 @@
 Whole-display sibling of mac/mirroring/driver.py (which targets the iPhone
 Mirroring window only). Reuses the same framework handles and event engine:
 CG/CF/AX CDLLs, CGPoint, prototypes and constants come from the mirroring
-stack — no duplicated ctypes loading. Deliberately NO frontmost-window guard
-(mirroring's `_check_frontmost` is specific to that feature; screen control
-acts on whatever is on the display).
+stack — no duplicated ctypes loading. Mouse events act on whatever is on the
+display, but text/key events may carry require_app/require_window and are
+refused (FocusMismatch) when the focused app/window differs.
 
 Pure ctypes against macOS system frameworks — no pyobjc, no new deps.
 """
@@ -20,7 +20,8 @@ import time
 from mac.mirroring.driver import (UNICODE_CHUNK, kCGEventLeftMouseDown,
                                   kCGEventLeftMouseUp, kCGEventMouseMoved,
                                   kCGHIDEventTap)
-from mac.mirroring.window import AX, CF, CG, CGPoint, CGRect, _cfstr
+from mac.mirroring.window import (AX, CF, CG, CGPoint, CGRect, _cfstr,
+                                  _cfstr_value)
 
 # CG is not re-entrant-safe from multiple threads: one lock guards every
 # capture and every event batch (gateway calls run in a threadpool).
@@ -82,6 +83,10 @@ AX.CGEventCreateScrollWheelEvent2.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
 AX.CGEventSetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                            ctypes.c_int64]
 AX.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+AX.AXUIElementCreateSystemWide.restype = ctypes.c_void_p
+AX.AXUIElementCreateSystemWide.argtypes = []
+AX.AXUIElementSetMessagingTimeout.restype = ctypes.c_int
+AX.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
 
 # mirroring/driver.py declares only the left-button constants
 kCGEventRightMouseDown, kCGEventRightMouseUp = 3, 4
@@ -89,6 +94,7 @@ kCGMouseEventClickState = 1  # dblclick sets this field to 2
 kCGScrollEventUnitLine = 1
 kCGImageAlphaPremultipliedLast = 1
 kCFNumberDoubleType = 6
+FOCUS_SETTLE_S = 0.3  # wait before a locked event that follows others in the batch
 
 # Full Quartz keycode table (HIToolbox Events.h) for the ScreenEvent `key`
 # literal set — written out, no ranges or comprehension tricks.
@@ -135,6 +141,15 @@ _FLAG_MASKS = {
     "alt": 0x80000,    # kCGEventFlagMaskAlternate
     "ctrl": 0x40000,   # kCGEventFlagMaskControl
 }
+
+
+class FocusMismatch(Exception):
+    """Keyboard event refused: the focused app/window is not the required one."""
+    def __init__(self, index: int = 0, frontmost_app: str | None = None, partial: bool = False):
+        super().__init__(f"focus mismatch at event {index}")
+        self.index = index
+        self.frontmost_app = frontmost_app
+        self.partial = partial
 
 
 def tcc_ok() -> bool:
@@ -220,12 +235,85 @@ def capture_jpeg(w: int, q: int) -> tuple[bytes, int, int]:
         return jpeg, jw, jh
 
 
+def _ax_copy(el, name):
+    """Copy one AX attribute value, releasing the CFString key (window._attr
+    leaks both key and value — do not use it for the focus probe)."""
+    key = _cfstr(name)
+    out = ctypes.c_void_p()
+    try:
+        if AX.AXUIElementCopyAttributeValue(el, key, ctypes.byref(out)) != 0:
+            return None
+        return out.value
+    finally:
+        CF.CFRelease(key)
+
+
+def _ax_title(el) -> str | None:
+    v = _ax_copy(el, "AXTitle")
+    if not v:
+        return None
+    try:
+        return _cfstr_value(v)
+    finally:
+        CF.CFRelease(v)
+
+
+def _focus_probe() -> tuple[str | None, str | None]:
+    """(frontmost app title, focused window title) via the system-wide AX
+    element. Any AX failure -> None for that part (or the whole result): the
+    caller then fails closed rather than typing blind."""
+    system = AX.AXUIElementCreateSystemWide()
+    if not system:
+        return (None, None)
+    # A hung frontmost app would otherwise stall the batch ~6 s per check; failure still fails closed.
+    AX.AXUIElementSetMessagingTimeout(system, 1.0)
+    try:
+        app = _ax_copy(system, "AXFocusedApplication")
+    finally:
+        CF.CFRelease(system)
+    if not app:
+        return (None, None)
+    try:
+        front = _ax_title(app)
+        window = _ax_copy(app, "AXFocusedWindow")
+    finally:
+        CF.CFRelease(app)
+    if not window:
+        return (front, None)
+    try:
+        return (front, _ax_title(window))
+    finally:
+        CF.CFRelease(window)
+
+
+def _check_focus(ev: dict, partial: bool) -> None:
+    """Refuse (FocusMismatch) before a key-down when the event pins the
+    focused app/window and live focus differs: synthetic keystrokes land
+    wherever focus is (incident: typed into the owner's terminal)."""
+    app = ev.get("require_app")
+    if not app:
+        return
+    front, window = _focus_probe()
+    if front is None or front != app:
+        raise FocusMismatch(frontmost_app=front, partial=partial)
+    want = ev.get("require_window")
+    if want and (not window or want not in window):
+        raise FocusMismatch(frontmost_app=front, partial=partial)
+
+
 def send_events(events) -> None:
     """Post a batch of gateway ScreenEvent dicts. One lock, whole batch."""
     with _LOCK:
         bounds = _main_bounds()
-        for ev in events:
-            _post(ev, bounds)
+        for index, ev in enumerate(events):
+            if index and ev.get("require_app"):
+                # An earlier tap/key in this batch may still be moving focus.
+                time.sleep(FOCUS_SETTLE_S)
+            try:
+                _post(ev, bounds)
+            except FocusMismatch as exc:
+                exc.index = index
+                raise
 
 
 def _post(ev: dict, bounds: CGRect) -> None:
@@ -244,9 +332,9 @@ def _post(ev: dict, bounds: CGRect) -> None:
         # model_dump() sends unset dx/dy as None, so .get(k, 0.0) is not enough
         _scroll(ev.get("dy") or 0.0, ev.get("dx") or 0.0)
     elif t == "text":
-        _type_text(ev["text"])
+        _type_text(ev["text"], ev)
     elif t == "key":
-        _key(ev["key"], ev.get("mods") or [])
+        _key(ev["key"], ev.get("mods") or [], ev)
     else:
         raise ValueError(f"unknown event type {t!r}")
 
@@ -298,32 +386,38 @@ def _scroll(dy: float, dx: float = 0.0) -> None:
     CF.CFRelease(ev)
 
 
-def _type_text(text: str) -> None:
+def _type_text(text: str, ev: dict) -> None:
     """keycode-0 keyboard events carrying UTF-16 in UNICODE_CHUNK chunks —
-    exact type_text pattern from mirroring/driver."""
+    exact type_text pattern from mirroring/driver. Each chunk's key-down is
+    preceded by a focus check when the event pins an app; the key-up always
+    follows its key-down (never checked in between)."""
     units = text.encode("utf-16-le")
+    posted = False
     for i in range(0, len(units), UNICODE_CHUNK * 2):
         chunk = units[i:i + UNICODE_CHUNK * 2]
         buf = ctypes.create_string_buffer(chunk, len(chunk))
         n = len(chunk) // 2
+        _check_focus(ev, partial=posted)
         for down in (True, False):
-            ev = AX.CGEventCreateKeyboardEvent(None, 0, down)
-            AX.CGEventSetFlags(ev, 0)  # see _key: never inherit live modifiers
-            AX.CGEventKeyboardSetUnicodeString(ev, n, buf)
-            AX.CGEventPost(kCGHIDEventTap, ev)
-            CF.CFRelease(ev)
+            kev = AX.CGEventCreateKeyboardEvent(None, 0, down)
+            AX.CGEventSetFlags(kev, 0)  # see _key: never inherit live modifiers
+            AX.CGEventKeyboardSetUnicodeString(kev, n, buf)
+            AX.CGEventPost(kCGHIDEventTap, kev)
+            CF.CFRelease(kev)
             time.sleep(0.02)
+        posted = True
 
 
-def _key(key: str, mods: list[str]) -> None:
+def _key(key: str, mods: list[str], ev: dict) -> None:
+    _check_focus(ev, partial=False)
     mask = 0
     for m in mods:
         mask |= _FLAG_MASKS[m]
     for down in (True, False):
-        ev = AX.CGEventCreateKeyboardEvent(None, KEYCODES[key], down)
+        kev = AX.CGEventCreateKeyboardEvent(None, KEYCODES[key], down)
         # A NULL-source event copies the live HID modifier state; a stuck
         # Command there turned every typed char into Cmd+char (nothing typed).
-        AX.CGEventSetFlags(ev, mask)
-        AX.CGEventPost(kCGHIDEventTap, ev)
-        CF.CFRelease(ev)
+        AX.CGEventSetFlags(kev, mask)
+        AX.CGEventPost(kCGHIDEventTap, kev)
+        CF.CFRelease(kev)
         time.sleep(0.02)

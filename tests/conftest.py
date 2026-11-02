@@ -28,6 +28,18 @@ except OSError:
     _mac_driver.send_events = lambda events: None
     _mac_driver.tcc_ok = lambda: True
     _mac_driver.display_asleep = lambda: False
+
+    class _FocusMismatch(Exception):
+        """Focus lock refusal (mac/screen/driver.py contract): index of the
+        refused event, the app that was actually frontmost, partial typing."""
+
+        def __init__(self, index: int = 0, frontmost_app: str | None = None, partial: bool = False):
+            super().__init__(index, frontmost_app, partial)
+            self.index = index
+            self.frontmost_app = frontmost_app
+            self.partial = partial
+
+    _mac_driver.FocusMismatch = _FocusMismatch
     _pkg = types.ModuleType("mac.screen")
     _pkg.driver = _mac_driver
     sys.modules["mac.screen"] = _pkg

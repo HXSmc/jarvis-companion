@@ -42,6 +42,12 @@ from gateway import screen
 FAKE_JPEG = b"fake-jpeg-bytes-sc2"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_input_window():
+    """The 60 events / 2 s limiter is module-global; reset it so suite speed never decides a test."""
+    screen._input_times.clear()
+
+
 @pytest.fixture
 def fake_capture(monkeypatch):
     calls: list[tuple[int, int]] = []
@@ -310,3 +316,112 @@ def test_key_events_accept_chars_and_every_key_maps_on_mac_and_windows():
 
     from windows.agent import commands
     assert keys == set(commands.VK), keys ^ set(commands.VK)
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "tap", "x": 0.5, "y": 0.5, "require_app": "T"},
+    {"type": "text", "text": "a", "require_window": "w"},
+    {"type": "text", "text": "a", "require_app": "x" * 65},
+    {"type": "text", "text": "a", "require_app": "T", "require_window": "w" * 129},
+    {"type": "text", "text": "a", "require_app": ""},
+])
+def test_require_app_field_rules_reject_bad_values(event):
+    """Focus lock fields: text/key only, require_window needs require_app,
+    length caps 64/128, no empty strings."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        screen.ScreenEvent(**event)
+
+
+def test_require_app_on_scroll_event_is_422_before_driver(gateway_server, fake_send_events):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER,
+                                   json={"events": [{"type": "scroll", "dy": 0.5, "require_app": "T"}]})
+            assert resp.status_code == 422, resp.text
+
+    asyncio.run(run())
+    assert fake_send_events == []
+
+
+def test_focus_mismatch_is_409_with_detail_and_no_window_title(monkeypatch, gateway_server):
+    def refused(events):
+        raise mac_driver.FocusMismatch(index=1, frontmost_app="iTerm2", partial=False)
+
+    monkeypatch.setattr(mac_driver, "send_events", refused)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            events = [{"type": "key", "key": "a", "require_app": "Terminal", "require_window": "secret-doc-title"},
+                      {"type": "text", "text": "b", "require_app": "Terminal", "require_window": "secret-doc-title"}]
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": events})
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert detail["error"] == "focus_mismatch", detail
+            assert detail["frontmost_app"] == "iTerm2", detail
+            assert detail["refused_index"] == 1, detail
+            assert detail["events_run"] == 1, detail
+            assert detail["partial"] is False, detail
+            assert "secret-doc-title" not in resp.text, resp.text
+
+    asyncio.run(run())
+
+
+def test_focus_mismatch_partial_appends_message(monkeypatch, gateway_server):
+    def refused(events):
+        raise mac_driver.FocusMismatch(index=1, frontmost_app="iTerm2", partial=True)
+
+    monkeypatch.setattr(mac_driver, "send_events", refused)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            events = [{"type": "text", "text": "a", "require_app": "Terminal"},
+                      {"type": "text", "text": "b", "require_app": "Terminal"}]
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": events})
+            assert resp.status_code == 409, resp.text
+            message = resp.json()["detail"]["message"]
+            assert "partially" in message and "resend from index 1" in message, resp.text
+
+    asyncio.run(run())
+
+
+def test_focus_mismatch_unknown_app_points_to_accessibility(monkeypatch, gateway_server):
+    def refused(events):
+        raise mac_driver.FocusMismatch(index=0, frontmost_app=None, partial=False)
+
+    monkeypatch.setattr(mac_driver, "send_events", refused)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            events = [{"type": "key", "key": "return", "require_app": "Terminal"}]
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": events})
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert detail["frontmost_app"] is None, detail
+            assert "Accessibility permission" in detail["message"], detail
+
+    asyncio.run(run())
+
+
+def test_require_app_on_windows_target_is_422_without_agent_call(gateway_server, monkeypatch):
+    """Windows input rejects focus-lock fields before the agent roundtrip."""
+    calls: list[tuple] = []
+
+    async def never(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("agent_roundtrip must not be called")
+
+    monkeypatch.setattr(screen, "agent_roundtrip", never)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/screen/windows/input", headers=IOS_AUTH_HEADER,
+                json={"events": [{"type": "text", "text": "a", "require_app": "Terminal"}]},
+            )
+            assert resp.status_code == 422, resp.text
+            assert resp.json() == {"detail": "require_app/require_window are only supported on target mac"}, resp.text
+
+    asyncio.run(run())
+    assert calls == []

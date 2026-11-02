@@ -141,8 +141,8 @@ def _mac_client() -> httpx.AsyncClient:
 async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
     """Forward one /screen/mac/<path> call to the Mac gateway.
 
-    422/429 pass through with the Mac's detail; anything else that is not a
-    200/304 (Mac down, auth mismatch, driver error) is 503 "mac offline".
+    409/422/429 pass through with the Mac's detail; anything else that is not
+    a 200/304 (Mac down, auth mismatch, driver error) is 503 "mac offline".
     The ios_token is never logged.
     """
     token = config.get_token(name="ios_token")
@@ -157,7 +157,7 @@ async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
         raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL) from None
     if resp.status_code in (200, 304):
         return resp
-    if resp.status_code in (422, 429):
+    if resp.status_code in (409, 422, 429):
         try:
             detail = resp.json().get("detail")
         except ValueError:
@@ -208,9 +208,16 @@ class ScreenEvent(BaseModel):
     text: str | None = Field(default=None, max_length=100)
     key: _Key | None = None
     mods: list[Literal["cmd", "ctrl", "alt", "shift"]] = []
+    # Focus lock: pin text/key events to the expected app/window (409 on mismatch).
+    require_app: str | None = Field(default=None, min_length=1, max_length=64)
+    require_window: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def _fields_for_type(self) -> "ScreenEvent":
+        if (self.require_app is not None or self.require_window is not None) and self.type not in ("text", "key"):
+            raise ValueError("require_app/require_window only apply to text and key events")
+        if self.require_window is not None and self.require_app is None:
+            raise ValueError("require_window needs require_app")
         if self.type in ("move", "tap", "dblclick", "right", "drag"):
             if self.x is None or self.y is None:
                 raise ValueError(f"{self.type} event requires x and y")
@@ -384,11 +391,29 @@ async def screen_frame(
     return Response(content=jpeg, media_type="image/jpeg", headers={"ETag": etag})
 
 
+def _focus_mismatch_detail(exc) -> dict:
+    """409 body for a refused focus-locked batch. Never echoes a window title
+    (required or actual) — the frontmost app name is all the client gets."""
+    app = exc.frontmost_app
+    if app:
+        msg = f"Refused: {app} is focused, not the required app/window."
+    else:
+        msg = "Refused: could not read the focused app (check Accessibility permission)."
+    msg += f" Events before index {exc.index} already ran."
+    if exc.partial:
+        msg += f" Event {exc.index} was partially typed."
+    msg += f" Focus the required app and resend from index {exc.index}."
+    return {"error": "focus_mismatch", "frontmost_app": app, "refused_index": exc.index,
+            "events_run": exc.index, "partial": exc.partial, "message": msg}
+
+
 @router.post("/{target}/input")
 async def screen_input(request: Request, target: Target, body: InputBody) -> dict:
     _require(request)
     if target == "minipc":
         raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
+    if target == "windows" and any(e.require_app or e.require_window for e in body.events):
+        raise HTTPException(status_code=422, detail="require_app/require_window are only supported on target mac")
     if not _input_slot_available(target, len(body.events)):
         raise HTTPException(status_code=429, detail="too many input events")
     events = [event.model_dump() for event in body.events]
@@ -398,7 +423,10 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
         await _mac_forward("POST", "input", json={"events": events})
     elif target == "mac":
         from mac.screen import driver
-        await run_in_threadpool(driver.send_events, events)
+        try:
+            await run_in_threadpool(driver.send_events, events)
+        except driver.FocusMismatch as exc:
+            raise HTTPException(status_code=409, detail=_focus_mismatch_detail(exc)) from None
     else:
         _windows_online()
         reply = await agent_roundtrip(voice_router.request_envelope("screen_input", {"events": events}))
