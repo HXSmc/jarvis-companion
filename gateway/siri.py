@@ -104,6 +104,17 @@ _SCREEN_REPLIES = {
     "screen_minipc": "Opening your Mini PC screen",
 }
 
+# The iPhone app's 3 screen chips (ios/.../App.swift ~1167) send one of these
+# verbatim — phone callers only launch the screen on an exact match, never on
+# voice_router.route()'s keyword/substring matching (which also fires on any
+# text containing "screen" plus "mac"/"pc"/"windows"/"computer", e.g. "fix the
+# screen bug on my mac"). Matched case-insensitively on the stripped text.
+_PHONE_SCREEN_CMDS = {
+    "show mac screen": "screen_mac",
+    "show pc screen": "screen_windows",
+    "show mini pc screen": "screen_minipc",
+}
+
 # Wake intents (spec §19), fullmatch on the stripped transcript: magic packet
 # out, then the reply reports the online-wait result.
 _WAKE_RE = re.compile(
@@ -165,9 +176,16 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         except Exception:
             return {"reply": "quick ask failed, try again"}
         return {"reply": answer or ""}
+    # The phone (ios_token, not the shared token) vs. the Siri Shortcut
+    # (shared token) — computed once, reused below for the router gate too.
+    is_phone = not ios_token_is_shared() and _bearer_matches(
+        authorization, config.get_token(name="ios_token")
+    )
     # Screen intents (SC7): launch the control page instead of a brain call —
     # the same launch_screen POST /screen/launch uses, never an HTTP self-call.
-    cmd = voice_router.route(text)
+    # Phone callers only match an exact button payload (see _PHONE_SCREEN_CMDS);
+    # the Shortcut's free-form transcript still uses route()'s keyword matching.
+    cmd = _PHONE_SCREEN_CMDS.get(stripped.lower()) if is_phone else voice_router.route(text)
     if cmd in _SCREEN_REPLIES:
         await screen.launch_screen(cmd[len("screen_"):])
         return {"reply": _SCREEN_REPLIES[cmd]}
@@ -184,11 +202,11 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         if not result["sent"]:
             return {"reply": "PC wake failed to send — check the Mac and PC are on the same network"}
         return {"reply": "PC didn't come online after 90 seconds — check Wake-on-LAN is enabled"}
-    # The dependency already let the bearer in; only ios_token goes on to the router
-    # (never while ios_token equals the shared token: it would not prove the phone).
-    # Every other caller here is the shared-token Shortcut — it never reaches
-    # central.route; a general question gets a real answer from quick.ask instead.
-    if ios_token_is_shared() or not _bearer_matches(authorization, config.get_token(name="ios_token")):
+    # The dependency already let the bearer in; only the phone (is_phone) goes on
+    # to the router. Every other caller here is the shared-token Shortcut — it
+    # never reaches central.route; a general question gets a real answer from
+    # quick.ask instead.
+    if not is_phone:
         try:
             result = await asyncio.wait_for(quick.ask(stripped), timeout=SHARED_TOKEN_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
