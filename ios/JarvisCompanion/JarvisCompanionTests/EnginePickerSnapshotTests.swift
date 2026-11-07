@@ -11,6 +11,8 @@ import XCTest
 final class EnginePickerSnapshotTests: XCTestCase {
 
     static let glm = EngineOption(id: "glm", label: "GLM", kind: "worker", available: true, isDefault: false, reason: nil)
+    static let glmDown = EngineOption(id: "glm", label: "GLM", kind: "glm", available: false, isDefault: false,
+                                      reason: "endpoint offline")
     static let agy = EngineOption(id: "agy", label: "Antigravity", kind: "worker", available: true, isDefault: false, reason: nil)
 
     func testEngineRowStates() throws {
@@ -25,6 +27,13 @@ final class EnginePickerSnapshotTests: XCTestCase {
         try shot("14-engine-row-ax5",
                  EnginePickerRow(engineID: .constant("hub"), newSession: .constant(true), refreshOnAppear: false)
                      .dynamicTypeSize(.accessibility5))
+        // the picked engine went down: warning on the pill, sends blocked (never a silent Hub)
+        EngineStore.shared.seed([.hub, Self.glmDown, Self.agy])
+        try shot("15-engine-row-unavailable",
+                 EnginePickerRow(engineID: .constant("glm"), newSession: .constant(false), refreshOnAppear: false))
+        XCTAssertEqual(EngineStore.shared.unavailableNote("glm"), "GLM unavailable: endpoint offline")
+        XCTAssertNil(EngineStore.shared.unavailableNote("hub"))
+        XCTAssertNil(EngineStore.shared.unavailableNote("agy"))
     }
 
     // MARK: drawing

@@ -508,6 +508,12 @@ final class AppModel: ObservableObject {
         routeTag = nil
         lastSession = nil
         replyIsError = false
+        // A picked engine that is down never silently becomes Hub: say so, send nothing.
+        let choice = EngineStore.sendChoice()
+        if let blocked = choice.blocked {
+            fail(blocked)
+            return
+        }
         isSending = true
         // F3: URLComponents-built endpoint — https enforced, no query or
         // fragment leaking into the path.
@@ -522,7 +528,7 @@ final class AppModel: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
         var body: [String: Any] = ["text": text]
-        if let engine = EngineStore.sendEngineID() { body["engine"] = engine }
+        if let engine = choice.engine { body["engine"] = engine }
         if newSession { body["new_session"] = true }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -643,7 +649,9 @@ final class AppModel: ObservableObject {
                     "msg_id": UUID().uuidString, "thread_id": thread, "text": text,
                     "attachments": files.compactMap(\.uploadedID),
                 ]
-                if let engine = EngineStore.sendEngineID() { body["engine"] = engine }
+                let choice = EngineStore.sendChoice()
+                if let blocked = choice.blocked { throw CentralError(blocked) }
+                if let engine = choice.engine { body["engine"] = engine }
                 if self.newSession { body["new_session"] = true }
                 let obj = try await Central.json(Central.request("/chat", method: "POST", json: body, timeout: 45))
                 let reply = obj["reply"] as? String ?? ""

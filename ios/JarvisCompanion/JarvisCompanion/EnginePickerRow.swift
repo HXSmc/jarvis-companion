@@ -61,16 +61,34 @@ final class EngineStore: ObservableObject {
         engines.first { $0.id == id && $0.available } ?? .hub
     }
 
-    /// The engine id a send carries, or nil for Hub (the field is then omitted).
-    /// Reads the stored pick and the cached list straight from UserDefaults, so
-    /// non-main callers (AppModel.ask) need no actor hop; same rule as resolved().
-    nonisolated static func sendEngineID() -> String? {
+    /// Why the stored pick cannot be used right now (nil = usable). A down or
+    /// removed engine is never swapped for Hub behind the owner's back.
+    func unavailableNote(_ id: String) -> String? {
+        Self.unavailableNote(id, in: engines)
+    }
+
+    nonisolated private static func unavailableNote(_ id: String, in list: [EngineOption]) -> String? {
+        guard id != EngineOption.hub.id else { return nil }
+        let option = list.first { $0.id == id }
+        if option?.available == true { return nil }
+        let name = option?.label ?? id
+        if let reason = option?.reason, !reason.isEmpty { return "\(name) unavailable: \(reason)" }
+        return "\(name) unavailable"
+    }
+
+    /// What a send carries: the engine id (nil = Hub, field omitted), or the
+    /// reason the send must wait for another pick. Reads the stored pick and the
+    /// cached list straight from UserDefaults, so non-main callers
+    /// (AppModel.ask) need no actor hop.
+    nonisolated static func sendChoice() -> (engine: String?, blocked: String?) {
         let id = UserDefaults.standard.string(forKey: "engineID") ?? EngineOption.hub.id
-        guard id != EngineOption.hub.id,
-              let data = UserDefaults.standard.data(forKey: cacheKey),
-              let list = try? JSONDecoder().decode([EngineOption].self, from: data),
-              list.contains(where: { $0.id == id && $0.available }) else { return nil }
-        return id
+        guard id != EngineOption.hub.id else { return (nil, nil) }
+        let list = UserDefaults.standard.data(forKey: cacheKey)
+            .flatMap { try? JSONDecoder().decode([EngineOption].self, from: $0) } ?? []
+        if let note = unavailableNote(id, in: list) {
+            return (nil, note + ". Pick another engine.")
+        }
+        return (id, nil)
     }
 
     /// Session rows carry raw engine ids ("claude" means the Hub).
@@ -97,8 +115,8 @@ final class EngineStore: ObservableObject {
     }
 }
 
-/// The ask bar's control row: engine picker left, one-shot "New session"
-/// toggle right. Below each other when dynamic type no longer fits side by side.
+/// The ask bar's control row: engine picker, then the one-shot "New session"
+/// toggle, aligned with the text field. Stacked when dynamic type no longer fits.
 @MainActor
 struct EnginePickerRow: View {
     @Binding var engineID: String
@@ -109,24 +127,40 @@ struct EnginePickerRow: View {
     var refreshOnAppear = true
     @ObservedObject var store = EngineStore.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// Paperclip (44) + its gap (8): the row starts where the text field starts.
+    private static let fieldInset: CGFloat = 52
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack {
+            HStack(spacing: 8) {
                 engineMenu
-                Spacer(minLength: 8)
                 newSessionToggle
+                Spacer(minLength: 0)
             }
             VStack(alignment: .leading, spacing: 8) {
                 engineMenu
                 newSessionToggle
             }
         }
+        .padding(.leading, Self.fieldInset)
         .task { if refreshOnAppear { await store.refresh() } }
+    }
+
+    private var labelLines: Int { typeSize.isAccessibilitySize ? 2 : 1 }
+
+    /// Non-nil when the picked engine is down or gone (not shown while locked).
+    private var warning: String? {
+        lockedEngine == nil ? store.unavailableNote(engineID) : nil
     }
 
     private var currentLabel: String {
         if let locked = lockedEngine { return EngineStore.label(forSession: locked) }
+        if warning != nil {
+            let name = store.engines.first { $0.id == engineID }?.label ?? engineID
+            return "\(name) unavailable"
+        }
         return store.resolved(engineID).label
     }
 
@@ -137,7 +171,7 @@ struct EnginePickerRow: View {
                     engineID = option.id
                 } label: {
                     // A menu item shows its first Text as the title, the second as the subtitle.
-                    if option.id == store.resolved(engineID).id {
+                    if option.id == engineID {
                         Label(option.label, systemImage: "checkmark")
                     } else {
                         Text(option.label)
@@ -150,21 +184,31 @@ struct EnginePickerRow: View {
             }
         } label: {
             HStack(spacing: 6) {
-                Text(currentLabel).lineLimit(1)
+                if lockedEngine != nil {
+                    Image(systemName: "lock.fill").font(.caption)
+                } else if warning != nil {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.caption)
+                }
+                Text(currentLabel).lineLimit(labelLines)
                 if lockedEngine == nil {
                     Image(systemName: "chevron.down").font(.caption.weight(.semibold))
                 }
             }
             .font(.subheadline)
-            .foregroundColor(.jarvisText)
-            .padding(.horizontal, 16)
+            .foregroundColor(lockedEngine != nil ? Color.jarvisMuted : (warning != nil ? Color.jarvisDanger : Color.jarvisText))
+            .padding(.horizontal, lockedEngine == nil ? 16 : 4)
             .frame(minHeight: 44)
-            .background(RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface))
+            .background {
+                // locked = plain muted text (fixed, not a control); otherwise the house chip
+                if lockedEngine == nil {
+                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface)
+                }
+            }
             .contentShape(Rectangle())
         }
         .disabled(lockedEngine != nil)
         .accessibilityLabel("Engine")
-        .accessibilityValue(currentLabel)
+        .accessibilityValue(warning.map { "\($0). Pick another engine." } ?? currentLabel)
         .accessibilityHint(lockedEngine == nil ? "" : "Set by this session")
     }
 
@@ -175,33 +219,45 @@ struct EnginePickerRow: View {
         return nil
     }
 
+    private func toggleLabel(on: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: on ? "checkmark" : "plus.bubble")
+            Text("New session").lineLimit(labelLines)
+            if on { Text("On").fontWeight(.semibold) }
+        }
+    }
+
     private var newSessionToggle: some View {
         Button {
             newSession.toggle()
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: newSession ? "checkmark" : "plus.bubble")
-                Text("New session").lineLimit(1)
+            // the hidden "on" label reserves the width, so the pill never jumps
+            ZStack(alignment: .leading) {
+                toggleLabel(on: true).hidden()
+                toggleLabel(on: newSession)
             }
             .font(.subheadline)
-            // dark text on the accent: white on this orange is ~2:1, under WCAG AA
-            .foregroundColor(newSession ? .jarvisBackground : .jarvisText)
+            // on: accent text on a faint accent tint (AA on the dark background);
+            // the solid accent stays reserved for the send button
+            .foregroundColor(newSession ? .jarvisAccent : .jarvisText)
             .padding(.horizontal, 16)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
             .background {
                 if newSession {
-                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisAccent)
-                } else {
                     RoundedRectangle(cornerRadius: jarvisRadius)
-                        .strokeBorder(Color.jarvisMuted.opacity(0.6), lineWidth: 1)
+                        .fill(Color.jarvisAccent.opacity(0.18))
+                        .overlay(RoundedRectangle(cornerRadius: jarvisRadius)
+                            .strokeBorder(Color.jarvisAccent, lineWidth: 1.5))
+                } else {
+                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface)
                 }
             }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: newSession)
         .accessibilityLabel("New session")
         .accessibilityValue(newSession ? "On" : "Off")
-        .accessibilityHint("Starts a separate session for the next message")
+        .accessibilityHint("Starts a separate session for your next message, then turns off")
         .modifier(TogglePillTraits())
     }
 }

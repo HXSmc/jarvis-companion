@@ -866,7 +866,7 @@ final class ChatModel: ObservableObject {
         guard !text.isEmpty || !attachments.isEmpty, !isSending else { return }
         if newSession, sessionID != nil {
             // Detach onto a fresh thread: the old session keeps running on the
-            // server and stays in the Sessions list; this sheet becomes a new chat.
+            // server and stays in the Sessions list; its lines stay above a divider.
             streamTask?.cancel()
             streamTask = nil
             streamConnected = false
@@ -878,7 +878,7 @@ final class ChatModel: ObservableObject {
             chips = ChatChipMachine()
             turnActive = false
             options = []
-            lines = []
+            lines.append(ChatLine(role: .status, text: "New session. The previous one stays in Sessions."))
             threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
             title = "New chat"
         }
@@ -927,7 +927,10 @@ final class ChatModel: ObservableObject {
                     )
                 } else {
                     body["thread_id"] = threadID
-                    if let engine = EngineStore.sendEngineID() { body["engine"] = engine }
+                    // a picked engine that is down never silently becomes Hub
+                    let choice = EngineStore.sendChoice()
+                    if let blocked = choice.blocked { throw CentralError(blocked) }
+                    if let engine = choice.engine { body["engine"] = engine }
                     if newSession { body["new_session"] = true }
                     let obj = try await Central.json(Central.request(
                         "/chat", method: "POST", json: body, timeout: 45
