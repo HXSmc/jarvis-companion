@@ -272,3 +272,92 @@ def test_rate_limit_at_20_per_60s(
     resp = asyncio.run(run())
     assert resp.status_code == 200
     assert resp.json() == {"reply": "Jarvis is busy, try again in a moment."}
+
+
+# --- engine / new_session forwarding ---------------------------------------------
+
+def _post_fields(token: str, fields: dict) -> httpx.Response:
+    """POST /siri/hey with `fields` merged into the body (engine/new_session tests)."""
+    from gateway.app import app
+
+    async def run() -> httpx.Response:
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            return await client.post(
+                "/siri/hey", json={"text": "tell me a joke", **fields}, headers=headers)
+
+    return asyncio.run(run())
+
+
+def _spy_route(monkeypatch: pytest.MonkeyPatch) -> list[tuple[tuple, dict]]:
+    from gateway import central
+
+    calls: list[tuple[tuple, dict]] = []
+
+    async def fake_route(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"action": "answered", "session_id": None, "title": "hi", "reply": "sure"}
+
+    monkeypatch.setattr(central, "route", fake_route)
+    return calls
+
+
+def test_engine_fields_forwarded_on_router_path(
+    ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+) -> None:
+    calls = _spy_route(monkeypatch)
+
+    resp = _post_fields(ios_token, {"engine": "glm", "new_session": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == "sure"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[3] == "voice"
+    assert kwargs == {"engine": "glm", "new_only": True}
+
+
+def test_no_engine_fields_sends_no_kwargs(
+    ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+) -> None:
+    calls = _spy_route(monkeypatch)
+
+    resp = _post_fields(ios_token, {})
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][1] == {}
+
+
+def test_invalid_engine_is_400_and_route_not_called(
+    ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
+) -> None:
+    calls = _spy_route(monkeypatch)
+
+    resp = _post_fields(ios_token, {"engine": "../x"})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid engine"
+    assert calls == []
+
+
+def test_shared_token_engine_never_reaches_router(
+    stubbed_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway import quick, siri
+
+    calls = _spy_route(monkeypatch)
+
+    async def fake_ask(q: str, brain: str = "auto") -> quick.QuickAnswer:
+        return quick.QuickAnswer("Paris", "web", 10, "agy")
+
+    monkeypatch.setattr(quick, "ask", fake_ask)
+    monkeypatch.setattr(siri, "quick", quick)
+
+    resp = _post_fields(stubbed_token, {"engine": "glm"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"reply": "Paris"}
+    assert calls == []

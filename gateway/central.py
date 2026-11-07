@@ -67,6 +67,8 @@ SSE_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=10.0, pool=5.0)
 
 ID_PATTERN = r"^[A-Za-z0-9-]{1,64}$"
 _ID_RE = re.compile(ID_PATTERN)
+ENGINE_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
+_ENGINE_RE = re.compile(ENGINE_PATTERN)
 _SEQ_RE = re.compile(r"^\d{1,18}$")
 
 ROUTER_UNAVAILABLE = "router unavailable"
@@ -75,7 +77,7 @@ ROUTER_UNCONFIGURED = "router not configured"
 # Keys passed back to the phone; anything else the router adds is dropped.
 # `seq` (when the router sends it) is the event seq of the reply, so the phone
 # resumes the session stream after it instead of rendering the reply twice.
-_ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq")
+_ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq", "engine")
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at", "device",
     "project", "task", "summary", "phase", "last_activity_at", "health",
@@ -148,6 +150,7 @@ FLOOR_CSP = (
 AGENTIC_OS_URL_DEFAULT = "http://127.0.0.1:8787"
 AGENTIC_OS_TOKEN_PATH = FilePath.home() / ".config" / "agentic-os" / "token"
 AGENTIC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+_ENGINE_KEYS = ("id", "label", "kind", "available", "default", "reason")
 _HUB_KEYS = ("key", "dirLabel", "engine", "active", "lastTs")
 _AGENT_KEYS = ("id", "persona", "engine", "label", "active", "status")
 
@@ -257,12 +260,25 @@ def _pick(data, keys: tuple[str, ...]) -> dict:
     return {k: data[k] for k in keys if isinstance(data, dict) and k in data}
 
 
-async def route(thread_id: str, msg_id: str, text: str, source: str) -> dict:
+def route_opts(engine: str | None, new_session: bool) -> dict:
+    """Optional /route kwargs; empty when unset so existing fakes (*args) keep working."""
+    opts = {}
+    if engine:
+        opts["engine"] = engine
+    if new_session:
+        opts["new_only"] = True
+    return opts
+
+
+async def route(thread_id: str, msg_id: str, text: str, source: str,
+                *, engine: str | None = None, new_only: bool = False) -> dict:
     """POST /route -> the allowlisted subset of the router's answer."""
-    data = await _router_json(
-        "POST", "/route",
-        {"thread_id": thread_id, "msg_id": msg_id, "text": text, "source": source},
-    )
+    body = {"thread_id": thread_id, "msg_id": msg_id, "text": text, "source": source}
+    if engine:
+        body["engine"] = engine
+    if new_only:
+        body["new_only"] = True
+    data = await _router_json("POST", "/route", body)
     return _pick(data, _ROUTE_KEYS)
 
 
@@ -574,6 +590,8 @@ class MessageBody(BaseModel):
 
 class ChatBody(MessageBody):
     thread_id: str = Field(pattern=ID_PATTERN)
+    engine: str | None = Field(default=None, pattern=ENGINE_PATTERN)
+    new_session: bool = False
 
 
 def _with_files(body: MessageBody) -> str:
@@ -614,7 +632,8 @@ async def upload_attachment(request: Request, name: str = Query(default="", max_
 async def chat(body: ChatBody) -> dict:
     text = _with_files(body)
     try:
-        data = await route(body.thread_id, body.msg_id, text, "app")
+        data = await route(body.thread_id, body.msg_id, text, "app",
+                           **route_opts(body.engine, body.new_session))
     except RouterError as exc:
         raise _bad_gateway(exc)
     sid = data.get("session_id")
@@ -622,6 +641,18 @@ async def chat(body: ChatBody) -> dict:
         cards.record_message(sid, body.text or "(files)", body.msg_id,
                              "queued" if data.get("action") == "queued" else "received", data.get("action"))
     return data
+
+
+@router.get("/central/engines")
+async def engines() -> dict:
+    try:
+        data = await _router_json("GET", "/engines")
+    except RouterError as exc:
+        raise _bad_gateway(exc)
+    items = data.get("engines") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise HTTPException(status_code=502, detail="router sent invalid json")
+    return {"engines": [_pick(item, _ENGINE_KEYS) for item in items if isinstance(item, dict)]}
 
 
 @router.get("/central/sessions")

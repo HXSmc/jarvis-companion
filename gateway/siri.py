@@ -115,19 +115,22 @@ _WAKE_RE = re.compile(
 )
 
 
-async def _router_reply(text: str, thread_id: str, msg_id: str) -> dict:
+async def _router_reply(text: str, thread_id: str, msg_id: str,
+                        engine: str | None = None, new_session: bool = False) -> dict:
     """central.route (source "voice"), hard-bounded; failure → canned reply, never a 500.
 
     `reply` always holds something speakable: the router's reply, else its
     needs_input prompt, else the session title. action/session_id/title (and
     prompt/options on needs_input) are passed through for the phone.
     """
-    task = asyncio.ensure_future(central.route(thread_id, msg_id, text, "voice"))
+    task = asyncio.ensure_future(
+        central.route(thread_id, msg_id, text, "voice", **central.route_opts(engine, new_session)))
     try:
         data = await asyncio.wait_for(asyncio.shield(task), timeout=ROUTER_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         # The router keeps going; hand its answer to the owner when it lands.
-        late = asyncio.ensure_future(_deliver_late(task, text, thread_id, msg_id))
+        late = asyncio.ensure_future(
+            _deliver_late(task, text, thread_id, msg_id, engine, new_session))
         _late_tasks.add(late)
         late.add_done_callback(_late_tasks.discard)
         return {"reply": _TIMEOUT_REPLY}
@@ -150,7 +153,8 @@ LATE_ANSWER_MAX_SECONDS = 300
 LATE_RETRY_SECONDS = 5
 
 
-async def _deliver_late(task: asyncio.Future, text: str, thread_id: str, msg_id: str) -> None:
+async def _deliver_late(task: asyncio.Future, text: str, thread_id: str, msg_id: str,
+                        engine: str | None = None, new_session: bool = False) -> None:
     """Wait out a router call that missed the request deadline, then send its answer to the app + WhatsApp."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + LATE_ANSWER_MAX_SECONDS
@@ -161,7 +165,8 @@ async def _deliver_late(task: asyncio.Future, text: str, thread_id: str, msg_id:
     while data is None and loop.time() < deadline:
         await asyncio.sleep(LATE_RETRY_SECONDS)
         try:
-            data = await central.route(thread_id, msg_id, text, "voice")
+            data = await central.route(thread_id, msg_id, text, "voice",
+                                       **central.route_opts(engine, new_session))
         except Exception:
             data = None
     if data is None:
@@ -194,6 +199,8 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         text = str(body.get("text") or "")
         thread_id = str(body.get("thread_id") or f"voice-{uuid.uuid4().hex}")
         msg_id = str(body.get("msg_id") or uuid.uuid4().hex)
+        engine = body.get("engine")
+        new_session = body.get("new_session") is True
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail='expected JSON body {"text": "..."}')
     if len(text) > MAX_TEXT_CHARS:
@@ -244,7 +251,9 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
         raise HTTPException(status_code=400, detail="invalid thread_id")
     if not _THREAD_RE.fullmatch(msg_id):
         raise HTTPException(status_code=400, detail="invalid msg_id")
+    if engine is not None and not (isinstance(engine, str) and central._ENGINE_RE.fullmatch(engine)):
+        raise HTTPException(status_code=400, detail="invalid engine")
     if _brain_semaphore.locked() or not _brain_slot_available():
         return {"reply": _BUSY_REPLY}
     async with _brain_semaphore:
-        return await _router_reply(text, thread_id, msg_id)
+        return await _router_reply(text, thread_id, msg_id, engine, new_session)
