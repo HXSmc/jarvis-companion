@@ -144,11 +144,14 @@ struct EnginePickerRow: View {
                 newSessionToggle
             }
         }
-        .padding(.leading, Self.fieldInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // at accessibility sizes the text needs the full width more than the alignment
+        .padding(.leading, typeSize.isAccessibilitySize ? 0 : Self.fieldInset)
         .task { if refreshOnAppear { await store.refresh() } }
     }
 
-    private var labelLines: Int { typeSize.isAccessibilitySize ? 2 : 1 }
+    /// One line normally; wraps freely at accessibility sizes (never truncates there).
+    private var labelLines: Int? { typeSize.isAccessibilitySize ? nil : 1 }
 
     /// Non-nil when the picked engine is down or gone (not shown while locked).
     private var warning: String? {
