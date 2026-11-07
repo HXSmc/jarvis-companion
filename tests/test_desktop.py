@@ -155,6 +155,7 @@ def test_oldest_session_is_evicted_past_the_cap():
     ("POST", "/inbox/notify", False), ("GET", "/hwmode/requests", False), ("GET", "/ws", False),
     ("POST", "/cards/event", False), ("POST", "/desktop/launch", False), ("POST", "/pc/sleep", False),
     ("GET", "/chat", False), ("GET", "/screens", False), ("POST", "/agents/windows/command", False),
+    ("GET", "/central/engines", True), ("POST", "/central/engines", False),
 ])
 def test_allowlist(method, path, ok):
     assert desktop._allowed(method, path) is ok
@@ -164,7 +165,7 @@ def test_allowlist(method, path, ok):
 # under an allowed pattern fails here until someone decides it belongs.
 EXPECTED_REACHABLE = {
     "POST /chat", "GET /central/sessions", "POST /central/clear-done", "POST /central/attachments",
-    "GET /central/agents", "GET /central/watchdog", "GET /central/feed",
+    "GET /central/agents", "GET /central/watchdog", "GET /central/feed", "GET /central/engines",
     "POST /central/sessions/{session_id}/message", "POST /central/sessions/{session_id}/stop",
     "GET /central/sessions/{session_id}/events", "POST /central/cards/{session_id}/answer",
     "GET /central/cards/{session_id}/files/{file_id}", "POST /siri/hey", "POST /ask", "POST /pc/wake",

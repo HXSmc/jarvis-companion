@@ -61,6 +61,24 @@
   .icon-btn svg { width: 24px; height: 24px; }
   .icon-btn.send svg { width: 30px; height: 30px; }
   .icon-btn.mic.on { background: var(--accent); color: #000; }
+
+  /* engine row (picker + one-shot New session), a port of ios EnginePickerRow */
+  .engine-row { display: flex; gap: 8px; }
+  .engine-row > * { flex: 1 1 0; min-width: 0; min-height: 44px; }
+  .sel-wrap { position: relative; display: block; }
+  .sel-wrap select { width: 100%; height: 44px; appearance: none; -webkit-appearance: none; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 34px 0 14px; font: inherit; outline: none; }
+  .sel-wrap select:hover { background: var(--surface2); }
+  .sel-wrap select:focus-visible { outline: 2px solid rgba(255,159,67,.6); outline-offset: -2px; }
+  .sel-wrap select.warn { color: var(--danger); }
+  .sel-wrap option { background: var(--surface); color: var(--text); }
+  .sel-wrap svg { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; pointer-events: none; color: var(--muted); }
+  .engine-lock { display: inline-flex; align-items: center; gap: 6px; padding: 0 6px; min-height: 44px; color: var(--muted); font-size: 14px; }
+  .engine-lock svg { width: 13px; height: 13px; flex: none; }
+  .new-session { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 14px; min-height: 44px; font-size: 14px; white-space: nowrap; }
+  .new-session:hover { background: var(--surface2); }
+  .new-session:focus-visible { outline: 2px solid rgba(255,159,67,.6); outline-offset: -2px; }
+  .new-session[aria-pressed="true"] { background: rgba(255,159,67,.18); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .new-session svg { width: 16px; height: 16px; flex: none; }
   .files { display: flex; gap: 8px; flex-wrap: wrap; }
   .fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border-radius: 10px; padding: 4px 6px 4px 4px; max-width: 220px; font-size: 13px; }
   .fchip img, .fchip .ficon { width: 32px; height: 32px; border-radius: 6px; object-fit: cover; flex: none; display: grid; place-items: center; color: var(--accent); background: var(--surface2); font-size: 11px; }
@@ -231,6 +249,7 @@
           <button class="icon-btn mic" id="home-mic" hidden title="Talk" aria-label="Talk"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1A7 7 0 0 0 19 12z"/></svg></button>
           <button class="icon-btn send" id="home-send" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm4.7 9.7a1 1 0 0 1-1.4 0L13 9.4V17a1 1 0 1 1-2 0V9.4l-2.3 2.3a1 1 0 0 1-1.4-1.4l4-4a1 1 0 0 1 1.4 0l4 4a1 1 0 0 1 0 1.4z"/></svg></button>
         </div>
+        <div class="engine-row" id="home-engine"></div>
       </div>
     </section>
 
@@ -325,6 +344,87 @@ function ago(iso, now) {
   if (s < 60) return s + "s"; if (s < 3600) return Math.floor(s / 60) + " min";
   if (s < 86400) return Math.floor(s / 3600) + " h"; return Math.floor(s / 86400) + " d";
 }
+
+// ---------------------------------------------------------------- engine --
+// Port of ios EnginePickerRow/EngineStore (EnginePickerRow.swift): the ask row
+// picks the engine, a one-shot "New session" starts a separate thread.
+// engine-logic:start (pure, no DOM: tests/test_desktop_engine.py runs this block in node)
+function withHubFirst(list) {
+  const rest = (list || []).filter(o => o && o.id !== "hub");
+  const hub = (list || []).find(o => o && o.id === "hub");
+  rest.unshift(hub || { id: "hub", label: "Hub", kind: "hub", available: true, "default": true });
+  return rest;
+}
+function sessionLabel(engine, list) {
+  const id = engine || "claude";
+  if (id === "claude" || id === "hub") return "Hub";
+  if (id === "glm") return "GLM";
+  if (id === "agy") return "Antigravity";
+  const opt = (list || []).find(o => o && o.id === id);
+  return opt && opt.label ? opt.label : id;
+}
+function sendChoice(pick, list) {
+  const id = pick || "hub";
+  if (id === "hub") return {};
+  const opt = (list || []).find(o => o && o.id === id);
+  if (opt && opt.available) return { engine: id };
+  const name = opt && opt.label ? opt.label : id;
+  const note = opt && opt.reason ? name + " unavailable: " + opt.reason : name + " unavailable";
+  return { blocked: note + ". Pick another engine." };
+}
+function engineFields(pick, list, newSession) {
+  const choice = sendChoice(pick, list);
+  if (choice.blocked) return choice;
+  if (!newSession) return choice;
+  return choice.engine ? { engine: choice.engine, new_session: true } : { new_session: true };
+}
+// engine-logic:end
+const engine = { pick: store.get("engineID") || "hub", homeNew: false };
+let engineList = withHubFirst([]);
+try { const raw = JSON.parse(store.get("engineListCache") || "null"); if (Array.isArray(raw) && raw.length) engineList = withHubFirst(raw); } catch (e) {}
+async function refreshEngines() {
+  try {
+    const obj = await api("/central/engines");
+    if (Array.isArray(obj.engines) && obj.engines.length) {
+      engineList = withHubFirst(obj.engines);
+      store.set("engineListCache", JSON.stringify(engineList));
+      renderEngineRows();
+    }
+  } catch (e) { /* offline or an older gateway: the cached list stays */ }
+}
+const blockedError = text => { const e = new ApiError(text); e.isBlocked = true; return e; };
+const SVG_CHEVRON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+const SVG_LOCK = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 0 1 6 0v3z"/></svg>';
+const SVG_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.1-2.9-.4L4 20.5l1.2-3.6C3.8 15.5 3 13.6 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/><path d="M12 8.5v6M9 11.5h6"/></svg>';
+const SVG_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>';
+// CSP blocks url() images: inline SVG via a template, like sendIcon() above.
+const svgNode = markup => { const t = document.createElement("template"); t.innerHTML = markup; return t.content.firstElementChild; };
+function engineRow(getNew, setNew, lockedEngine) {
+  const parts = [];
+  if (lockedEngine) {
+    parts.push(h("span", { class: "engine-lock", title: "Set by this session" }, svgNode(SVG_LOCK), sessionLabel(lockedEngine, engineList)));
+  } else {
+    const warn = sendChoice(engine.pick, engineList).blocked;
+    const sel = h("select", { "aria-label": "Engine", class: warn ? "warn" : null,
+      onchange: () => { engine.pick = sel.value; store.set("engineID", sel.value); renderEngineRows(); } },
+      engineList.map(o => h("option", { value: o.id, disabled: o.available ? null : true, selected: o.id === engine.pick ? true : null },
+        !o.available && o.reason ? o.label + " (" + o.reason + ")" : o.label)));
+    parts.push(h("span", { class: "sel-wrap" }, sel, svgNode(SVG_CHEVRON)));
+  }
+  const on = !!getNew();
+  parts.push(h("button", { class: "new-session", type: "button", "aria-pressed": on ? "true" : "false",
+    title: "Starts a separate session for your next message, then turns off",
+    onclick: () => { setNew(!getNew()); renderEngineRows(); } },
+    svgNode(on ? SVG_CHECK : SVG_PLUS), "New session"));
+  return parts;
+}
+function renderHomeEngine() {
+  const host = $("#home-engine"); if (!host) return;
+  host.replaceChildren(...engineRow(() => engine.homeNew, v => { engine.homeNew = v; }, null));
+}
+function renderEngineRows() { renderHomeEngine(); if (panel.chat) panel.chat.renderEngine(); }
+// Owner 2026-11-07: every successful send puts the picker back on Hub, like the toggle.
+function engineReset() { engine.pick = "hub"; store.set("engineID", "hub"); renderEngineRows(); }
 
 // --------------------------------------------------------------- markdown --
 // Port of ios ChatMarkdown.swift: block split, then inline marks. DOM only
@@ -523,7 +623,7 @@ function renderHome() {
     c.append(home.err ? h("div", { class: "reply err" }, home.reply) : h("div", { class: "reply" }, md(home.reply)));
     if (home.tag) c.append(h("div", { class: "tag" }, home.tag));
     if (home.session) c.append(h("div", { style: "margin-top:12px" },
-      h("button", { class: "accent-btn", onclick: () => openChat(home.session.id, home.session.title) }, "Open chat")));
+      h("button", { class: "accent-btn", onclick: () => openChat(home.session.id, home.session.title, "", home.session.engine) }, "Open chat")));
   } else if (home.sending) c.append(h("div", { class: "hint" }, h("span", { class: "spin" })));
   else if (!home.owner) c.append(h("div", { class: "hint" }, "Ask anything, or open your Mac or PC screen."));
   const busy = home.sending;
@@ -537,16 +637,18 @@ function sendIcon() { const s = h("span"); s.innerHTML = SEND_SVG; return s.firs
 async function homeRun(label, work) {
   if (home.sending) return;
   home.sending = true; homeSay(label, null);
-  try { await work(); } catch (e) { home.reply = "ask failed: " + e.message; home.err = true; }
+  try { await work(); } catch (e) { home.reply = e.isBlocked ? e.message : "ask failed: " + e.message; home.err = true; }
   home.sending = false; renderHome();
 }
 function ask(text) {   // full brain via /siri/hey, like the phone's mic + typed row
   return homeRun(text, async () => {
-    const obj = await api("/siri/hey", { method: "POST", json: { text }, timeout: 30000 });
+    const fields = engineFields(engine.pick, engineList, engine.homeNew);
+    if (fields.blocked) throw blockedError(fields.blocked);
+    const obj = await api("/siri/hey", { method: "POST", json: Object.assign({ text }, fields), timeout: 30000 });
     if (typeof obj.reply !== "string") throw new ApiError("malformed reply");
     home.reply = obj.reply;
-    home.session = obj.session_id ? { id: obj.session_id, title: obj.title || "Chat" } : null;
-    homeText.value = ""; homeFit();
+    home.session = obj.session_id ? { id: obj.session_id, title: obj.title || "Chat", engine: obj.engine || null } : null;
+    homeText.value = ""; homeFit(); engineReset();
   });
 }
 function quickAsk(text) {
@@ -563,12 +665,14 @@ function sendWithFiles(text) {
   const names = files.map(f => f.name).join(", ");
   return homeRun(text ? text + "\n📎 " + names : "📎 " + names, async () => {
     try {
+      const fields = engineFields(engine.pick, engineList, engine.homeNew);
+      if (fields.blocked) throw blockedError(fields.blocked);
       for (const f of files) if (!f.id) f.id = await uploadFile(f);
-      const obj = await api("/chat", { method: "POST", timeout: 45000, json: {
-        msg_id: uuid(), thread_id: newThread(), text, attachments: files.map(f => f.id) } });
+      const obj = await api("/chat", { method: "POST", timeout: 45000, json: Object.assign({
+        msg_id: uuid(), thread_id: newThread(), text, attachments: files.map(f => f.id) }, fields) });
       home.reply = obj.reply || "sent";
-      home.session = obj.session_id ? { id: obj.session_id, title: obj.title || "Chat" } : null;
-      homeText.value = ""; homeFit();
+      home.session = obj.session_id ? { id: obj.session_id, title: obj.title || "Chat", engine: obj.engine || null } : null;
+      homeText.value = ""; homeFit(); engineReset();
     } catch (e) { homeFiles.restore(files); throw e; }
   });
 }
@@ -761,7 +865,7 @@ function cardExtras(s, compact) {
         e.stopPropagation();
         if (!sends) {
           const prefix = need.kind === "approve" ? "Revise: " : need.kind === "checklist" ? "Test note: " : "";
-          return openChat(s.session_id, displayTask(s), prefix);
+          return openChat(s.session_id, displayTask(s), prefix, s.engine);
         }
         row.querySelectorAll("button").forEach(x => x.disabled = true);
         b.replaceChildren(h("span", { class: "spin" }), " ", label);
@@ -848,17 +952,17 @@ function renderRecap() {
     if (!bullets.length) body.append(h("div", { class: "muted", style: "font-size:15px" }, s.summary || "No recap yet."));
     bullets.forEach(b => body.append(h("div", { class: "bul" + (b.startsWith("Needs you") ? " need" : "") }, b)));
     if (hasCard(s.card)) body.append(h("div", { class: "gap" }), cardExtras(s, false));
-    body.append(h("button", { class: "big-btn", onclick: () => openChat(s.session_id, displayTask(s)) }, "Open chat"));
+    body.append(h("button", { class: "big-btn", onclick: () => openChat(s.session_id, displayTask(s), "", s.engine) }, "Open chat"));
   }
   const scroll = $(".pb", p) ? $(".pb", p).scrollTop : 0;
   p.replaceChildren(h("div", { class: "ph" }, h("div", { class: "tt" }, h("div", null, "Recap"), h("small", null, panel.sid)),
     h("button", { class: "close", onclick: closePanel }, "Close")), body);
   body.scrollTop = scroll;
 }
-function openChat(sid, title, draft = "") {
+function openChat(sid, title, draft = "", engine) {
   if (sid && !SID_RE.test(sid)) return;
   if (panel.chat) panel.chat.close();
-  Object.assign(panel, { kind: "chat", sid: sid || null, chat: new Chat(sid || null, title || "New chat") });
+  Object.assign(panel, { kind: "chat", sid: sid || null, chat: new Chat(sid || null, title || "New chat", engine) });
   $("#panel").classList.add("on");
   panel.chat.mount($("#panel"), draft);
   renderBoard();
@@ -890,10 +994,11 @@ class ChipMachine {
   }
 }
 class Chat {
-  constructor(sid, title) {
+  constructor(sid, title, engine) {
     Object.assign(this, { sid, title, lines: [], options: [], sending: false, canRetry: false, threadId: newThread(),
       pendingMsg: null, failed: null, lastSeq: null, seen: new Set(), echoed: [], turnActive: false,
-      chips: new ChipMachine(), connected: false, abort: null, loop: null, closed: false });
+      chips: new ChipMachine(), connected: false, abort: null, loop: null, closed: false,
+      sessionEngine: engine || "claude", newSession: false });
   }
   mount(el, draft) {
     this.el = el;
@@ -912,7 +1017,8 @@ class Chat {
     this.titleEl = h("div", null, this.title);
     this.idEl = h("small", null, this.sid || this.threadId);
     this.stopBtn = h("button", { class: "stop", onclick: () => this.stop(), hidden: !this.sid }, "Stop");
-    const foot = h("div", { class: "pf" }, this.optsEl, this.filesEl, h("div", { class: "composer" }, attach, this.ta, this.sendBtn));
+    this.engineEl = h("div", { class: "engine-row" });
+    const foot = h("div", { class: "pf" }, this.optsEl, this.filesEl, h("div", { class: "composer" }, attach, this.ta, this.sendBtn), this.engineEl);
     // A fresh root per chat: drop/paste listeners die with it, never pile up on #panel.
     const root = h("div", { style: "display:flex;flex-direction:column;flex:1;min-height:0" },
       h("div", { class: "ph" }, h("div", { class: "tt" }, this.titleEl, this.idEl), this.stopBtn,
@@ -921,6 +1027,7 @@ class Chat {
     fileTargets(root, this.files);
     fit(); this.ta.focus();
     if (draft) this.ta.setSelectionRange(draft.length, draft.length);
+    this.renderEngine();
     this.startStream();
   }
   add(role, text, extra = {}) {
@@ -950,6 +1057,23 @@ class Chat {
     this.idEl.textContent = this.sid || this.threadId;
     this.stopBtn.hidden = !this.sid;
   }
+  renderEngine() {
+    if (!this.engineEl) return;
+    // locked like ios: a bound chat's engine is that session's, no picker
+    const locked = (this.sid && !this.newSession) ? (this.sessionEngine || "claude") : null;
+    this.engineEl.replaceChildren(...engineRow(() => this.newSession, v => { this.newSession = v; }, locked));
+  }
+  // "New session" on a bound chat: drop the binding, next send starts a fresh thread.
+  detach() {
+    this.sid = null; panel.sid = null;
+    this.sessionEngine = null; this.lastSeq = null; this.seen = new Set(); this.echoed = [];
+    this.chips = new ChipMachine(); this.turnActive = false; this.options = [];
+    this.threadId = newThread(); this.title = "New chat";
+    if (this.abort) this.abort.abort();
+    if (this.wake) this.wake();
+    this.add("status", "New session. The previous one stays in Sessions.");
+    this.renderEngine(); this.renderControls();
+  }
   sendDraft() {
     if (this.sending || (!this.ta.value.trim() && !this.files.length)) return;
     this.send(this.ta.value); this.ta.value = "";
@@ -970,26 +1094,33 @@ class Chat {
       for (const f of files) if (!f.id) f.id = await uploadFile(f);
       const body = { msg_id: msgId, text };
       if (files.length) body.attachments = files.map(f => f.id);
+      if (this.sid && this.newSession) this.detach();  // one-shot: this send starts a separate thread
       if (this.sid) {
         const obj = await api("/central/sessions/" + encodeURIComponent(this.sid) + "/message", { method: "POST", json: body });
         if (obj.action) this.setChip(line, obj.action);
         this.chips.track(line, obj.action || "", midTurn);
       } else {
+        const fields = engineFields(engine.pick, engineList, this.newSession);
+        if (fields.blocked) throw blockedError(fields.blocked);
         body.thread_id = this.threadId;
+        Object.assign(body, fields);
         this.applyRoute(await api("/chat", { method: "POST", json: body, timeout: 45000 }), line);
       }
+      this.newSession = false; engineReset();
       this.pendingMsg = null;
       this.wakeStream();
     } catch (e) {
       this.turnActive = false;
       this.failed = { text, files, line }; this.canRetry = true;
-      this.add("error", "send failed: " + e.message);
+      this.add("error", e.isBlocked ? e.message : "send failed: " + e.message);
+      this.renderEngine();
     }
     this.sending = false; this.renderControls();
     if (panel.chat === this) refreshSessionsSoon();
   }
   applyRoute(obj, line) {
     if (obj.action) this.setChip(line, obj.action);
+    if (typeof obj.engine === "string" && obj.engine) this.sessionEngine = obj.engine;
     if (typeof obj.session_id === "string" && SID_RE.test(obj.session_id)) { this.sid = obj.session_id; panel.sid = this.sid; }
     if (obj.title) this.title = obj.title;
     const seq = Number.isInteger(obj.seq) ? obj.seq : null;
@@ -1005,7 +1136,7 @@ class Chat {
     const sid = this.sid;
     this.loop = (async () => {
       let delay = 1, quiet = 0;
-      while (!this.closed) {
+      while (!this.closed && this.sid === sid) {  // detach(): the old session's loop stops
         const end = await this.streamOnce(sid);
         if (this.closed || end === "unauthorized") break;
         if (end.gotEvent) { delay = 1; quiet = 0; }
@@ -1015,6 +1146,7 @@ class Chat {
         delay = Math.min(delay * 2, 30);
       }
       this.loop = null;
+      if (!this.closed && this.sid !== sid && this.sid) this.startStream();  // rebound after detach
     })();
   }
   wakeStream() { if (!this.connected) { if (this.loop && this.wake) this.wake(); else this.startStream(); } }
@@ -1214,9 +1346,9 @@ document.addEventListener("keydown", e => {
   else if (panel.kind) closePanel();
 });
 
-renderHome();
+renderHome(); renderHomeEngine();
 show(["home", "sessions", "floor", "screen", "inbox"].includes(store.get("desk.view")) ? store.get("desk.view") : "home");
-refreshSessions(); refreshInbox(); pollNotes();
+refreshSessions(); refreshInbox(); pollNotes(); refreshEngines();
 setInterval(() => { if (!document.hidden && (view === "sessions" || panel.kind === "recap")) refreshSessions(); }, 5000);
 setInterval(() => { if (!document.hidden && view !== "sessions" && panel.kind !== "recap") refreshSessions(); }, 30000);
 setInterval(pollNotes, 15000);
