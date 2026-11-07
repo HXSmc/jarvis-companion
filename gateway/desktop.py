@@ -87,6 +87,7 @@ ALLOWED: list[tuple[str, re.Pattern[str]]] = [(m, re.compile(p)) for m, p in [
     ("GET", r"/central/agents"),
     ("GET", r"/central/watchdog"),
     ("GET", r"/central/feed"),
+    ("GET", r"/central/engines"),
     ("POST", rf"/central/sessions/{_ID}/message"),
     ("POST", rf"/central/sessions/{_ID}/stop"),
     ("GET", rf"/central/sessions/{_ID}/events"),

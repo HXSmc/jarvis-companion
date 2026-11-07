@@ -121,8 +121,9 @@ final class EngineStore: ObservableObject {
     }
 }
 
-/// The ask bar's control row: engine picker, then the one-shot "New session"
-/// toggle, aligned with the text field. Stacked when dynamic type no longer fits.
+/// The ask bar's control row: engine picker and the one-shot "New session"
+/// toggle, each taking half the composer width (owner 2026-11-07: no empty
+/// sides). Stacked when dynamic type no longer fits.
 @MainActor
 struct EnginePickerRow: View {
     @Binding var engineID: String
@@ -135,15 +136,11 @@ struct EnginePickerRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    /// Paperclip (44) + its gap (8): the row starts where the text field starts.
-    private static let fieldInset: CGFloat = 52
-
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 engineMenu
                 newSessionToggle
-                Spacer(minLength: 0)
             }
             VStack(alignment: .leading, spacing: 8) {
                 engineMenu
@@ -151,13 +148,15 @@ struct EnginePickerRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        // at accessibility sizes the text needs the full width more than the alignment
-        .padding(.leading, typeSize.isAccessibilitySize ? 0 : Self.fieldInset)
         .task { if refreshOnAppear { await store.refresh() } }
     }
 
     /// One line normally; wraps freely at accessibility sizes (never truncates there).
     private var labelLines: Int? { typeSize.isAccessibilitySize ? nil : 1 }
+
+    /// One line never truncates: a chip keeps its label's full width, so a long
+    /// label takes more than half the row, and the row stacks when both cannot fit.
+    private var keepsLabelWidth: Bool { !typeSize.isAccessibilitySize }
 
     /// Non-nil when the picked engine is down or gone (not shown while locked).
     private var warning: String? {
@@ -203,18 +202,19 @@ struct EnginePickerRow: View {
                     Image(systemName: "chevron.down").font(.caption.weight(.semibold))
                 }
             }
+            .fixedSize(horizontal: keepsLabelWidth, vertical: false)
             .font(.subheadline)
             .foregroundColor(lockedEngine != nil ? Color.jarvisMuted : (warning != nil ? Color.jarvisDanger : Color.jarvisText))
-            .padding(.horizontal, lockedEngine == nil ? 16 : 4)
-            .frame(minHeight: 44)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 44)
             .background {
-                // locked = plain muted text (fixed, not a control); otherwise the house chip
-                if lockedEngine == nil {
-                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface)
-                }
+                // locked = a muted chip (fixed, not a control); otherwise the house chip
+                RoundedRectangle(cornerRadius: jarvisRadius)
+                    .fill(lockedEngine != nil ? Color.jarvisSurface.opacity(0.5) : Color.jarvisSurface)
             }
             .contentShape(Rectangle())
         }
+        .frame(maxWidth: .infinity)
         .disabled(lockedEngine != nil)
         .accessibilityLabel("Engine")
         .accessibilityValue(warning.map { "\($0). Pick another engine." } ?? currentLabel)
@@ -240,29 +240,27 @@ struct EnginePickerRow: View {
         Button {
             newSession.toggle()
         } label: {
-            // the hidden "on" label reserves the width, so the pill never jumps
-            ZStack(alignment: .leading) {
-                toggleLabel(on: true).hidden()
-                toggleLabel(on: newSession)
-            }
-            .font(.subheadline)
-            // on: accent text on a faint accent tint (AA on the dark background);
-            // the solid accent stays reserved for the send button
-            .foregroundColor(newSession ? .jarvisAccent : .jarvisText)
-            .padding(.horizontal, 16)
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-            .background {
-                if newSession {
-                    RoundedRectangle(cornerRadius: jarvisRadius)
-                        .fill(Color.jarvisAccent.opacity(0.18))
-                        .overlay(RoundedRectangle(cornerRadius: jarvisRadius)
-                            .strokeBorder(Color.jarvisAccent, lineWidth: 1.5))
-                } else {
-                    RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface)
+            toggleLabel(on: newSession)
+                .fixedSize(horizontal: keepsLabelWidth, vertical: false)
+                .font(.subheadline)
+                // on: accent text on a faint accent tint (AA on the dark background);
+                // the solid accent stays reserved for the send button
+                .foregroundColor(newSession ? .jarvisAccent : .jarvisText)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+                .background {
+                    if newSession {
+                        RoundedRectangle(cornerRadius: jarvisRadius)
+                            .fill(Color.jarvisAccent.opacity(0.18))
+                            .overlay(RoundedRectangle(cornerRadius: jarvisRadius)
+                                .strokeBorder(Color.jarvisAccent, lineWidth: 1.5))
+                    } else {
+                        RoundedRectangle(cornerRadius: jarvisRadius).fill(Color.jarvisSurface)
+                    }
                 }
-            }
         }
+        .frame(maxWidth: .infinity)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: newSession)
         .accessibilityLabel("New session")
         .accessibilityValue(newSession ? "On" : "Off")
