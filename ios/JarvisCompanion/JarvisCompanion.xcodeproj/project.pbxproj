@@ -25,6 +25,8 @@
 		6E0C1D2E3F405162738495B1 /* NotifyLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E0C1D2E3F405162738495A1 /* NotifyLogicTests.swift */; };
 		C4AD5A0B1C2D3E4F50617211 /* CardSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AD5A0B1C2D3E4F50617201 /* CardSnapshotTests.swift */; };
 		5A0B1C2D3E4F5061726A7412 /* HWVoiceAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */; };
+		5A0B1C2D3E4F5061EA745200 /* EnginePickerRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061EA745100 /* EnginePickerRow.swift */; };
+		C4AD5A0B1C2D3E4F5061EA02 /* EnginePickerSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AD5A0B1C2D3E4F5061EA01 /* EnginePickerSnapshotTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -54,11 +56,13 @@
 		5A0B1C2D3E4F5061726A7315 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7316 /* JarvisCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061EA745100 /* EnginePickerRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnginePickerRow.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7401 /* HWLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWLogicTests.swift; sourceTree = "<group>"; };
 		6E0C1D2E3F405162738495A1 /* NotifyLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotifyLogicTests.swift; sourceTree = "<group>"; };
 		C4AD5A0B1C2D3E4F50617201 /* CardSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardSnapshotTests.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWVoiceAudioTests.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7403 /* JarvisCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JarvisCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C4AD5A0B1C2D3E4F5061EA01 /* EnginePickerSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnginePickerSnapshotTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -104,6 +108,7 @@
 				5A0B1C2D3E4F5061726A73E1 /* HWVoice.swift */,
 				5A0B1C2D3E4F5061726A73D1 /* HWCamera.swift */,
 				5A0B1C2D3E4F5061726A73C1 /* HWSession.swift */,
+				5A0B1C2D3E4F5061EA745100 /* EnginePickerRow.swift */,
 				5A0B1C2D3E4F5061726A7315 /* Info.plist */,
 				5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */,
 			);
@@ -126,6 +131,7 @@
 				6E0C1D2E3F405162738495A1 /* NotifyLogicTests.swift */,
 				C4AD5A0B1C2D3E4F50617201 /* CardSnapshotTests.swift */,
 				5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */,
+				C4AD5A0B1C2D3E4F5061EA01 /* EnginePickerSnapshotTests.swift */,
 			);
 			path = JarvisCompanionTests;
 			sourceTree = "<group>";
@@ -233,6 +239,7 @@
 				5A0B1C2D3E4F5061726A73E2 /* HWVoice.swift in Sources */,
 				5A0B1C2D3E4F5061726A73D2 /* HWCamera.swift in Sources */,
 				5A0B1C2D3E4F5061726A73C2 /* HWSession.swift in Sources */,
+				5A0B1C2D3E4F5061EA745200 /* EnginePickerRow.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -244,6 +251,7 @@
 				6E0C1D2E3F405162738495B1 /* NotifyLogicTests.swift in Sources */,
 				C4AD5A0B1C2D3E4F50617211 /* CardSnapshotTests.swift in Sources */,
 				5A0B1C2D3E4F5061726A7412 /* HWVoiceAudioTests.swift in Sources */,
+				C4AD5A0B1C2D3E4F5061EA02 /* EnginePickerSnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

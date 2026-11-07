@@ -153,6 +153,54 @@ def test_chat_needs_input_carries_prompt_and_options():
     assert resp.json()["options"] == ["staging", "prod"]
 
 
+# --- engine / new_session forwarding ---------------------------------------------
+
+def test_chat_forwards_engine_only():
+    resp = _call("POST", "/chat", headers=IOS,
+                 json={"thread_id": "t", "msg_id": "m", "text": "hi", "engine": "glm"})
+    assert resp.status_code == 200
+    assert router_stub.seen[-1]["body"]["engine"] == "glm"
+    assert "new_only" not in router_stub.seen[-1]["body"]
+
+
+def test_chat_forwards_new_session_only():
+    resp = _call("POST", "/chat", headers=IOS,
+                 json={"thread_id": "t", "msg_id": "m", "text": "hi", "new_session": True})
+    assert resp.status_code == 200
+    assert router_stub.seen[-1]["body"]["new_only"] is True
+    assert "engine" not in router_stub.seen[-1]["body"]
+
+
+def test_chat_forwards_engine_and_new_session():
+    resp = _call("POST", "/chat", headers=IOS,
+                 json={"thread_id": "t", "msg_id": "m", "text": "hi",
+                       "engine": "glm", "new_session": True})
+    assert resp.status_code == 200
+    body = router_stub.seen[-1]["body"]
+    assert body["engine"] == "glm"
+    assert body["new_only"] is True
+
+
+@pytest.mark.parametrize("engine", ["../x", "GLM", "", "a b"])
+def test_chat_invalid_engine_is_422(engine):
+    resp = _call("POST", "/chat", headers=IOS,
+                 json={"thread_id": "t", "msg_id": "m", "text": "hi", "engine": engine})
+    assert resp.status_code == 422
+    assert router_stub.seen == []
+
+
+def test_chat_passes_router_engine_through(monkeypatch):
+    async def fake_json(method, path, body=None):
+        return {"action": "spawned", "session_id": "s-new", "kind": "claude",
+                "title": "New task", "reply": "Started", "seq": 3, "engine": "glm-5"}
+
+    monkeypatch.setattr(central, "_router_json", fake_json)
+    resp = _call("POST", "/chat", headers=IOS,
+                 json={"thread_id": "t", "msg_id": "m", "text": "hi", "engine": "glm"})
+    assert resp.status_code == 200
+    assert resp.json()["engine"] == "glm-5"
+
+
 def test_sessions_filtered_with_phase_fallback():
     data = _call("GET", "/central/sessions", headers=IOS).json()
     assert [s["phase"] for s in data] == ["in_progress", "in_review", "done"]

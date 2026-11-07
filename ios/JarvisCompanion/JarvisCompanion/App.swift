@@ -414,6 +414,8 @@ final class AppModel: ObservableObject {
     /// brain path keeps it nil (spec §22).
     @Published var routeTag: String?
     @Published var isSending = false
+    /// One-shot from the engine row: the next send starts a fresh session.
+    @Published var newSession = false
     @Published var showSettings = false
     @Published var showPushedPage = false
     @Published var showInbox = false
@@ -506,6 +508,12 @@ final class AppModel: ObservableObject {
         routeTag = nil
         lastSession = nil
         replyIsError = false
+        // A picked engine that is down never silently becomes Hub: say so, send nothing.
+        let choice = EngineStore.sendChoice()
+        if let blocked = choice.blocked {
+            fail(blocked)
+            return
+        }
         isSending = true
         // F3: URLComponents-built endpoint — https enforced, no query or
         // fragment leaking into the path.
@@ -519,7 +527,10 @@ final class AppModel: ObservableObject {
         request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
+        var body: [String: Any] = ["text": text]
+        if let engine = choice.engine { body["engine"] = engine }
+        if newSession { body["new_session"] = true }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -554,6 +565,8 @@ final class AppModel: ObservableObject {
                 }
                 self.replyIsError = false
                 self.typedText = ""
+                // "New session" is one-shot: it resets after one successful send so it never silently sticks; a failed send keeps it for Retry.
+                self.newSession = false
                 Haptics.success()
             }
         }.resume()
@@ -632,10 +645,15 @@ final class AppModel: ObservableObject {
                 for index in files.indices where files[index].uploadedID == nil {
                     files[index].uploadedID = try await Central.upload(files[index])
                 }
-                let obj = try await Central.json(Central.request("/chat", method: "POST", json: [
+                var body: [String: Any] = [
                     "msg_id": UUID().uuidString, "thread_id": thread, "text": text,
                     "attachments": files.compactMap(\.uploadedID),
-                ], timeout: 45))
+                ]
+                let choice = EngineStore.sendChoice()
+                if let blocked = choice.blocked { throw CentralError(blocked) }
+                if let engine = choice.engine { body["engine"] = engine }
+                if self.newSession { body["new_session"] = true }
+                let obj = try await Central.json(Central.request("/chat", method: "POST", json: body, timeout: 45))
                 let reply = obj["reply"] as? String ?? ""
                 self.replyText = reply.isEmpty ? "sent" : reply
                 if let sid = obj["session_id"] as? String, !sid.isEmpty {
@@ -643,6 +661,8 @@ final class AppModel: ObservableObject {
                 }
                 self.attachments = []
                 self.typedText = ""
+                // "New session" is one-shot: it resets after one successful send so it never silently sticks; a failed send keeps it for Retry.
+                self.newSession = false
                 Haptics.success()
             } catch {
                 self.attachments = files
@@ -959,6 +979,7 @@ struct ContentView: View {
     @FocusState private var typedFieldFocused: Bool
     /// Wordmark menu choice: Controls (this screen), Sessions, Floor.
     @AppStorage("homeView") private var homeView: HomeView = .controls
+    @AppStorage("engineID") private var engineID = "hub"
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showHardware = false
@@ -988,6 +1009,7 @@ struct ContentView: View {
                         }
                     }
                     typedRow
+                    EnginePickerRow(engineID: $engineID, newSession: $model.newSession)
                 case .sessions:
                     SessionsBoard()
                 case .floor:

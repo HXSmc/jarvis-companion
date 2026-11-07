@@ -127,6 +127,8 @@ struct CentralSession: Identifiable, Decodable, Equatable {
     let doneVerdictReason: String?
     let lifecycle: String?
     let purpose: String?
+    /// Engine owning this session ("claude" = Hub, nil = an older router).
+    let engine: String?
     /// What the session put on its card with `jarvis-card` (gateway/cards.py):
     /// an ask with buttons, files, child sessions, the owner's last message.
     let card: CardInfo?
@@ -277,6 +279,8 @@ struct ChatTarget: Identifiable {
     let id = UUID()
     let sessionID: String?
     let title: String
+    /// Engine of the session this target opens (nil for a new thread).
+    var engine: String? = nil
     /// Text already in the composer (card "Revise"), focused on open.
     var draft: String = ""
 }
@@ -674,7 +678,8 @@ struct RecapView: View {
                                        openSession: { openChild = RecapTarget(id: $0) })
                         }
                         Button {
-                            openChat = ChatTarget(sessionID: session.sessionId, title: session.displayTask)
+                            openChat = ChatTarget(sessionID: session.sessionId, title: session.displayTask,
+                                                  engine: session.engine)
                         } label: {
                             Label("Open chat", systemImage: "bubble.left.and.bubble.right")
                                 .font(.headline)
@@ -804,8 +809,12 @@ final class ChatModel: ObservableObject {
     @Published var canRetry = false
     /// Files picked for the next message.
     @Published var attachments: [ChatAttachment] = []
+    /// One-shot from the engine row: the next send detaches onto a fresh thread.
+    @Published var newSession = false
+    /// Engine owning sessionID ("claude" = Hub); what the picker shows while bound.
+    @Published var sessionEngine: String?
 
-    let threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
+    private(set) var threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
     private var pendingMsgID: String?
     private var failed: (text: String, files: [ChatAttachment], ownerIndex: Int)?
     /// Highest seq seen; nil until the first event (seq 0 is a real event).
@@ -830,9 +839,10 @@ final class ChatModel: ObservableObject {
 
     private enum StreamEnd { case unauthorized, dropped(gotEvent: Bool) }
 
-    init(sessionID: String?, title: String) {
+    init(sessionID: String?, title: String, engine: String? = nil) {
         self.sessionID = sessionID
         self.title = title
+        self.sessionEngine = engine
     }
 
     func addAttachment(_ file: ChatAttachment) {
@@ -854,6 +864,24 @@ final class ChatModel: ObservableObject {
     func send(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty, !isSending else { return }
+        if newSession, sessionID != nil {
+            // Detach onto a fresh thread: the old session keeps running on the
+            // server and stays in the Sessions list; its lines stay above a divider.
+            streamTask?.cancel()
+            streamTask = nil
+            streamConnected = false
+            sessionID = nil
+            sessionEngine = nil
+            lastSeq = nil
+            seenSeqs = []
+            echoed = []
+            chips = ChatChipMachine()
+            turnActive = false
+            options = []
+            lines.append(ChatLine(role: .status, text: "New session. The previous one stays in Sessions."))
+            threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
+            title = "New chat"
+        }
         let files = attachments
         attachments = []
         lines.append(ChatLine(role: .owner, text: text, files: files))
@@ -899,10 +927,16 @@ final class ChatModel: ObservableObject {
                     )
                 } else {
                     body["thread_id"] = threadID
+                    // a picked engine that is down never silently becomes Hub
+                    let choice = EngineStore.sendChoice()
+                    if let blocked = choice.blocked { throw CentralError(blocked) }
+                    if let engine = choice.engine { body["engine"] = engine }
+                    if newSession { body["new_session"] = true }
                     let obj = try await Central.json(Central.request(
                         "/chat", method: "POST", json: body, timeout: 45
                     ))
                     apply(route: obj, ownerIndex: ownerIndex)
+                    newSession = false
                 }
                 pendingMsgID = nil
                 Haptics.success()
@@ -922,6 +956,7 @@ final class ChatModel: ObservableObject {
         lines[ownerIndex].chip = action
         if let sid = obj["session_id"] as? String, !sid.isEmpty { sessionID = sid }
         if let title = obj["title"] as? String, !title.isEmpty { self.title = title }
+        if let engine = obj["engine"] as? String { sessionEngine = engine }
         // The stream replays this turn's reply: mark its seq rendered and resume after it.
         let seq = obj["seq"] as? Int
         if let seq = seq {
@@ -1119,11 +1154,13 @@ struct ChatView: View {
     @State private var showPhotos = false
     @State private var showFiles = false
     @FocusState private var draftFocused: Bool
+    @AppStorage("engineID") private var engineID = "hub"
 
     private let startsWithDraft: Bool
 
     init(target: ChatTarget) {
-        _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title))
+        _model = StateObject(wrappedValue: ChatModel(sessionID: target.sessionID, title: target.title,
+                                                     engine: target.engine))
         _draft = State(initialValue: target.draft)
         startsWithDraft = !target.draft.isEmpty
     }
@@ -1171,6 +1208,9 @@ struct ChatView: View {
                 }
             }
             inputRow
+            EnginePickerRow(engineID: $engineID, newSession: $model.newSession,
+                            lockedEngine: (model.sessionID == nil || model.newSession)
+                                ? nil : (model.sessionEngine ?? "claude"))
         }
         .padding(16)
         .background(Color.jarvisBackground.ignoresSafeArea())
@@ -1915,7 +1955,8 @@ struct CardExtras: View {
                 }
             } else {
                 let prefix = need.kind == "approve" ? "Revise: " : need.kind == "checklist" ? "Test note: " : ""
-                openChat(ChatTarget(sessionID: session.sessionId, title: session.displayTask, draft: prefix))
+                openChat(ChatTarget(sessionID: session.sessionId, title: session.displayTask,
+                                    engine: session.engine, draft: prefix))
             }
         } label: {
             HStack(spacing: 6) {
