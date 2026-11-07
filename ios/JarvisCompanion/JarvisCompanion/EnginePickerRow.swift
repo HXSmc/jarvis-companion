@@ -184,7 +184,8 @@ struct EnginePickerRow: View {
                 Text("New session").lineLimit(1)
             }
             .font(.subheadline)
-            .foregroundColor(newSession ? .white : .jarvisText)
+            // dark text on the accent: white on this orange is ~2:1, under WCAG AA
+            .foregroundColor(newSession ? .jarvisBackground : .jarvisText)
             .padding(.horizontal, 16)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
