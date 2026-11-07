@@ -350,7 +350,7 @@ def test_shared_token_engine_never_reaches_router(
 
     calls = _spy_route(monkeypatch)
 
-    async def fake_ask(q: str, brain: str = "auto") -> quick.QuickAnswer:
+    async def fake_ask(q: str, brain: str = "auto", **_kw) -> quick.QuickAnswer:
         return quick.QuickAnswer("Paris", "web", 10, "agy")
 
     monkeypatch.setattr(quick, "ask", fake_ask)
