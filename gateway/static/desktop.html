@@ -9,6 +9,7 @@
     --bg: #0a0a0c; --surface: #141418; --surface2: #1c1c22; --line: rgba(255,255,255,.08);
     --text: #f2f2f4; --muted: #8a8a93; --accent: #ff9f43; --danger: #ff5c5c;
     --purple: #b18cff; --green: #4ade80; --radius: 12px;
+    --accent-tint: rgba(255,159,67,.18); --accent-ring: rgba(255,159,67,.6); --surface-muted: rgba(20,20,24,.5);
     --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -63,22 +64,24 @@
   .icon-btn.mic.on { background: var(--accent); color: #000; }
 
   /* engine row (picker + one-shot New session), a port of ios EnginePickerRow */
-  .engine-row { display: flex; gap: 8px; }
-  .engine-row > * { flex: 1 1 0; min-width: 0; min-height: 44px; }
+  /* equal halves; a label that needs more room takes it instead of being cut (ios does the same) */
+  .engine-row { display: grid; grid-template-columns: repeat(2, minmax(min-content, 1fr)); gap: 8px; }
+  .engine-row > * { min-height: 44px; }
   .sel-wrap { position: relative; display: block; }
-  .sel-wrap select { width: 100%; height: 44px; appearance: none; -webkit-appearance: none; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 34px 0 14px; font: inherit; outline: none; }
+  .sel-wrap select { width: 100%; height: 44px; appearance: none; -webkit-appearance: none; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 36px; font: inherit; text-align: center; text-align-last: center; outline: none; }
   .sel-wrap select:hover { background: var(--surface2); }
-  .sel-wrap select:focus-visible { outline: 2px solid rgba(255,159,67,.6); outline-offset: -2px; }
+  .sel-wrap select:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
   .sel-wrap select.warn { color: var(--danger); }
   .sel-wrap option { background: var(--surface); color: var(--text); }
   .sel-wrap svg { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; pointer-events: none; color: var(--muted); }
-  .engine-lock { display: inline-flex; align-items: center; gap: 6px; padding: 0 6px; min-height: 44px; color: var(--muted); font-size: 14px; }
+  .engine-lock { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; min-height: 44px; border-radius: var(--radius); background: var(--surface-muted); color: var(--muted); white-space: nowrap; overflow: hidden; }
   .engine-lock svg { width: 13px; height: 13px; flex: none; }
-  .new-session { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 14px; min-height: 44px; font-size: 14px; white-space: nowrap; }
+  .new-session { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 16px; min-height: 44px; white-space: nowrap; }
   .new-session:hover { background: var(--surface2); }
-  .new-session:focus-visible { outline: 2px solid rgba(255,159,67,.6); outline-offset: -2px; }
-  .new-session[aria-pressed="true"] { background: rgba(255,159,67,.18); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .new-session:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
+  .new-session[aria-pressed="true"] { background: var(--accent-tint); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
   .new-session svg { width: 16px; height: 16px; flex: none; }
+  .new-session b { font-weight: 600; }
   .files { display: flex; gap: 8px; flex-wrap: wrap; }
   .fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border-radius: 10px; padding: 4px 6px 4px 4px; max-width: 220px; font-size: 13px; }
   .fchip img, .fchip .ficon { width: 32px; height: 32px; border-radius: 6px; object-fit: cover; flex: none; display: grid; place-items: center; color: var(--accent); background: var(--surface2); font-size: 11px; }
@@ -402,12 +405,16 @@ const svgNode = markup => { const t = document.createElement("template"); t.inne
 function engineRow(getNew, setNew, lockedEngine) {
   const parts = [];
   if (lockedEngine) {
-    parts.push(h("span", { class: "engine-lock", title: "Set by this session" }, svgNode(SVG_LOCK), sessionLabel(lockedEngine, engineList)));
+    const name = sessionLabel(lockedEngine, engineList);
+    parts.push(h("span", { class: "engine-lock", role: "note", title: "Set by this session",
+      "aria-label": "Engine: " + name + ", set by this session" }, svgNode(SVG_LOCK), name));
   } else {
     const warn = sendChoice(engine.pick, engineList).blocked;
-    const sel = h("select", { "aria-label": "Engine", class: warn ? "warn" : null,
+    const options = engineList.some(o => o.id === engine.pick) ? engineList
+      : engineList.concat([{ id: engine.pick, label: engine.pick + " unavailable", available: false }]);
+    const sel = h("select", { "aria-label": "Engine", class: warn ? "warn" : null, title: warn || null,
       onchange: () => { engine.pick = sel.value; store.set("engineID", sel.value); renderEngineRows(); } },
-      engineList.map(o => h("option", { value: o.id, disabled: o.available ? null : true, selected: o.id === engine.pick ? true : null },
+      options.map(o => h("option", { value: o.id, disabled: o.available ? null : true, selected: o.id === engine.pick ? true : null },
         !o.available && o.reason ? o.label + " (" + o.reason + ")" : o.label)));
     parts.push(h("span", { class: "sel-wrap" }, sel, svgNode(SVG_CHEVRON)));
   }
@@ -415,7 +422,7 @@ function engineRow(getNew, setNew, lockedEngine) {
   parts.push(h("button", { class: "new-session", type: "button", "aria-pressed": on ? "true" : "false",
     title: "Starts a separate session for your next message, then turns off",
     onclick: () => { setNew(!getNew()); renderEngineRows(); } },
-    svgNode(on ? SVG_CHECK : SVG_PLUS), "New session"));
+    svgNode(on ? SVG_CHECK : SVG_PLUS), "New session", on ? h("b", null, "On") : null));
   return parts;
 }
 function renderHomeEngine() {
@@ -648,7 +655,7 @@ function ask(text) {   // full brain via /siri/hey, like the phone's mic + typed
     if (typeof obj.reply !== "string") throw new ApiError("malformed reply");
     home.reply = obj.reply;
     home.session = obj.session_id ? { id: obj.session_id, title: obj.title || "Chat", engine: obj.engine || null } : null;
-    homeText.value = ""; homeFit(); engineReset();
+    homeText.value = ""; homeFit(); engine.homeNew = false; engineReset();
   });
 }
 function quickAsk(text) {
@@ -672,7 +679,7 @@ function sendWithFiles(text) {
         msg_id: uuid(), thread_id: newThread(), text, attachments: files.map(f => f.id) }, fields) });
       home.reply = obj.reply || "sent";
       home.session = obj.session_id ? { id: obj.session_id, title: obj.title || "Chat", engine: obj.engine || null } : null;
-      homeText.value = ""; homeFit(); engineReset();
+      homeText.value = ""; homeFit(); engine.homeNew = false; engineReset();
     } catch (e) { homeFiles.restore(files); throw e; }
   });
 }
@@ -1081,6 +1088,7 @@ class Chat {
   send(raw) {
     const text = raw.trim(), files = this.files.take();
     if ((!text && !files.length) || this.sending) { this.files.restore(files); return; }
+    if (this.sid && this.newSession) this.detach();  // one-shot: this send starts a separate thread
     const line = this.add("owner", text, { files });
     this.pendingMsg = uuid();
     this.deliver(text, files, line, this.turnActive);
@@ -1094,7 +1102,6 @@ class Chat {
       for (const f of files) if (!f.id) f.id = await uploadFile(f);
       const body = { msg_id: msgId, text };
       if (files.length) body.attachments = files.map(f => f.id);
-      if (this.sid && this.newSession) this.detach();  // one-shot: this send starts a separate thread
       if (this.sid) {
         const obj = await api("/central/sessions/" + encodeURIComponent(this.sid) + "/message", { method: "POST", json: body });
         if (obj.action) this.setChip(line, obj.action);
@@ -1105,8 +1112,8 @@ class Chat {
         body.thread_id = this.threadId;
         Object.assign(body, fields);
         this.applyRoute(await api("/chat", { method: "POST", json: body, timeout: 45000 }), line);
+        this.newSession = false; engineReset();
       }
-      this.newSession = false; engineReset();
       this.pendingMsg = null;
       this.wakeStream();
     } catch (e) {
