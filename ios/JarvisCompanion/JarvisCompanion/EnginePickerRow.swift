@@ -154,6 +154,10 @@ struct EnginePickerRow: View {
     /// One line normally; wraps freely at accessibility sizes (never truncates there).
     private var labelLines: Int? { typeSize.isAccessibilitySize ? nil : 1 }
 
+    /// One line never truncates: a chip keeps its label's full width, so a long
+    /// label takes more than half the row, and the row stacks when both cannot fit.
+    private var keepsLabelWidth: Bool { !typeSize.isAccessibilitySize }
+
     /// Non-nil when the picked engine is down or gone (not shown while locked).
     private var warning: String? {
         lockedEngine == nil ? store.unavailableNote(engineID) : nil
@@ -193,11 +197,12 @@ struct EnginePickerRow: View {
                 } else if warning != nil {
                     Image(systemName: "exclamationmark.triangle.fill").font(.caption)
                 }
-                Text(currentLabel).lineLimit(labelLines).truncationMode(.tail)
+                Text(currentLabel).lineLimit(labelLines)
                 if lockedEngine == nil {
                     Image(systemName: "chevron.down").font(.caption.weight(.semibold))
                 }
             }
+            .fixedSize(horizontal: keepsLabelWidth, vertical: false)
             .font(.subheadline)
             .foregroundColor(lockedEngine != nil ? Color.jarvisMuted : (warning != nil ? Color.jarvisDanger : Color.jarvisText))
             .padding(.horizontal, 16)
@@ -236,6 +241,7 @@ struct EnginePickerRow: View {
             newSession.toggle()
         } label: {
             toggleLabel(on: newSession)
+                .fixedSize(horizontal: keepsLabelWidth, vertical: false)
                 .font(.subheadline)
                 // on: accent text on a faint accent tint (AA on the dark background);
                 // the solid accent stays reserved for the send button

@@ -14,6 +14,8 @@ final class EnginePickerSnapshotTests: XCTestCase {
     static let glmDown = EngineOption(id: "glm", label: "GLM", kind: "glm", available: false, isDefault: false,
                                       reason: "endpoint offline")
     static let agy = EngineOption(id: "agy", label: "Antigravity", kind: "worker", available: true, isDefault: false, reason: nil)
+    static let agyDown = EngineOption(id: "agy", label: "Antigravity", kind: "worker", available: false, isDefault: false,
+                                      reason: "signed out")
 
     func testEngineRowStates() throws {
         EngineStore.shared.seed([.hub, Self.glm, Self.agy])
@@ -31,6 +33,11 @@ final class EnginePickerSnapshotTests: XCTestCase {
         EngineStore.shared.seed([.hub, Self.glmDown, Self.agy])
         try shot("15-engine-row-unavailable",
                  EnginePickerRow(engineID: .constant("glm"), newSession: .constant(false), refreshOnAppear: false))
+        // a long label is never cut: the row gives it more than half, or stacks when both cannot fit
+        EngineStore.shared.seed([.hub, Self.glm, Self.agyDown])
+        try shot("16-engine-row-long-label",
+                 EnginePickerRow(engineID: .constant("agy"), newSession: .constant(true), refreshOnAppear: false))
+        EngineStore.shared.seed([.hub, Self.glmDown, Self.agy])
         XCTAssertEqual(EngineStore.shared.unavailableNote("glm"), "GLM unavailable: endpoint offline")
         XCTAssertNil(EngineStore.shared.unavailableNote("hub"))
         XCTAssertNil(EngineStore.shared.unavailableNote("agy"))
