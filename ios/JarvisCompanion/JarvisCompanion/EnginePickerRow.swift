@@ -76,6 +76,12 @@ final class EngineStore: ObservableObject {
         return "\(name) unavailable"
     }
 
+    /// Owner 2026-11-07: every successful send puts the picker back on Hub
+    /// (the default), like the one-shot "New session" toggle.
+    nonisolated static func resetToDefault() {
+        UserDefaults.standard.set(EngineOption.hub.id, forKey: "engineID")
+    }
+
     /// What a send carries: the engine id (nil = Hub, field omitted), or the
     /// reason the send must wait for another pick. Reads the stored pick and the
     /// cached list straight from UserDefaults, so non-main callers

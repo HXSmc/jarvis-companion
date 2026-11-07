@@ -937,6 +937,7 @@ final class ChatModel: ObservableObject {
                     ))
                     apply(route: obj, ownerIndex: ownerIndex)
                     newSession = false
+                    EngineStore.resetToDefault()  // engine pick is one-shot too
                 }
                 pendingMsgID = nil
                 Haptics.success()
