@@ -57,7 +57,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents, cards, central, desktop, hwmode, inbox, notify, quick, screen, vnc, wake
+from gateway import agents, cards, central, desktop, hwmode, inbox, notify, overlay, quick, screen, vnc, wake
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
@@ -74,6 +74,7 @@ app.include_router(notify.router)  # /notify/notes: app catch-up on missed owner
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
 app.include_router(cards.session_router)  # /cards/*: jarvis-card from box sessions (shared token)
 app.include_router(hwmode.router)  # /hwmode/ws: phone camera frames -> lean Claude brain (ios_token only)
+app.include_router(overlay.router)  # /overlay/*: Mac voice overlay (loopback + shared token)
 app.include_router(central.public_router)  # /central/floor page only: no data, no auth
 app.include_router(desktop.router)  # /desktop: the phone app's screens for a PC browser (one-time link login)
 app.add_middleware(desktop.DesktopAuth)  # desktop cookie -> ios_token, phone-app routes only
