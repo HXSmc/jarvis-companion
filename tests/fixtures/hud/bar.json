@@ -1,0 +1,5 @@
+{"shapes": [], "cards": [
+  {"id": "c-bar", "type": "bar", "title": "Lines changed by folder",
+   "items": [{"label": "gateway", "value": 120}, {"label": "mac", "value": 64}, {"label": "tests", "value": 210.5}],
+   "caption": "git diff --stat since the last merge"}
+]}
