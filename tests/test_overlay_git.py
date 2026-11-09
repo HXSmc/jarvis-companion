@@ -195,3 +195,18 @@ def test_has_filters_only_for_repo_local_filters(repo):
     assert gitdiff.has_filters(r) is False
     _git(r, "config", "--local", "filter.evil.clean", "touch pwned")
     assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_catches_worktree_config(repo, tmp_path, monkeypatch):
+    r, _ = repo
+    _git(r, "config", "extensions.worktreeConfig", "true")
+    _git(r, "config", "--worktree", "filter.sneaky.smudge", "touch pwned")
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_ignores_global_filters(repo, tmp_path, monkeypatch):
+    r, _ = repo
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text("[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(glob))
+    assert gitdiff.has_filters(r) is False

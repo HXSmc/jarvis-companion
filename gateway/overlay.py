@@ -373,7 +373,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
                 async for ev in _speak("This repository sets its own git filters, so I won't run git in it.", deps):
                     yield ev
                 card = hud.validate_card({"type": "info", "title": "Diff skipped for safety",
-                                          "body": ["This repository's .git/config defines a filter.",
+                                          "body": ["This repository's own git config defines a filter.",
                                                    "Filters run commands from the repository on every diff.",
                                                    "Run git diff yourself if you trust it."]})
                 if card:

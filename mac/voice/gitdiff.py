@@ -53,13 +53,18 @@ def repo_for(document: str | None) -> Path | None:
 
 
 def has_filters(repo: Path) -> bool:
-    """True when the repo's own config (incl. its include files) defines a clean/smudge/textconv filter.
+    """True when any filter comes from repo-controlled config (local, worktree, or their includes).
 
     Those run repo-chosen commands during `git diff`; the overlay refuses such repos.
-    Global/system filters (e.g. git-lfs) are the owner's own and are not counted.
+    Only global/system filters (the owner's own, e.g. git-lfs) are allowed. All scopes are read
+    (not just --local): .git/config.worktree would otherwise slip past.
     """
-    out = _git(Path(repo), "config", "--local", "--includes", "--get-regexp", r"^filter\.")
-    return bool(out and out.strip())
+    out = _git(Path(repo), "config", "--includes", "--show-scope", "--get-regexp", r"^filter\.")
+    for line in (out or "").splitlines():
+        scope = line.split("\t", 1)[0].strip()
+        if scope not in ("global", "system"):
+            return True
+    return False
 
 
 def last_merge(repo: Path) -> str | None:
