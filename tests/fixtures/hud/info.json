@@ -1,0 +1,4 @@
+{"shapes": [], "cards": [
+  {"id": "c-info", "type": "info", "title": "Why the retry loop changed",
+   "body": ["The old loop retried forever on a 401.", "Now it stops after 3 tries.", "Tokens refresh before the retry."]}
+]}

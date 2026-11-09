@@ -1,0 +1,175 @@
+{
+ "question": "Show me the button to start the slideshow.",
+ "scale": 2,
+ "gt_label": "Play",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Play",
+   "box": [
+    20,
+    46,
+    48,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Add Slide",
+   "box": [
+    54,
+    46,
+    84,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Format",
+   "box": [
+    90,
+    46,
+    120,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Animate",
+   "box": [
+    124,
+    46,
+    154,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Inspect",
+   "box": [
+    158,
+    46,
+    188,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    192,
+    46,
+    220,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Comment",
+   "box": [
+    226,
+    46,
+    256,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Present",
+   "box": [
+    260,
+    46,
+    292,
+    72
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "1",
+   "box": [
+    20,
+    110,
+    140,
+    180
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "2",
+   "box": [
+    20,
+    182,
+    140,
+    252
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "3",
+   "box": [
+    20,
+    254,
+    140,
+    324
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "4",
+   "box": [
+    20,
+    326,
+    140,
+    396
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "5",
+   "box": [
+    20,
+    398,
+    140,
+    468
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Slide Layout",
+   "box": [
+    2200,
+    220,
+    2460,
+    260
+   ]
+  },
+  {
+   "text": "Background",
+   "box": [
+    2200,
+    280,
+    2440,
+    320
+   ]
+  },
+  {
+   "text": "Colors",
+   "box": [
+    2200,
+    340,
+    2340,
+    380
+   ]
+  },
+  {
+   "text": "Helvetica",
+   "box": [
+    2200,
+    400,
+    2420,
+    440
+   ]
+  }
+ ]
+}

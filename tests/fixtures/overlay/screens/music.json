@@ -1,0 +1,175 @@
+{
+ "question": "Show me the button to skip to the next track.",
+ "scale": 1,
+ "gt_label": "Next",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Shuffle",
+   "box": [
+    640,
+    900,
+    668,
+    924
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Previous",
+   "box": [
+    676,
+    900,
+    704,
+    924
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Play",
+   "box": [
+    712,
+    900,
+    742,
+    924
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Next",
+   "box": [
+    750,
+    900,
+    778,
+    924
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Repeat",
+   "box": [
+    786,
+    900,
+    814,
+    924
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Volume",
+   "box": [
+    900,
+    900,
+    990,
+    924
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "AirPlay",
+   "box": [
+    1020,
+    900,
+    1048,
+    924
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Listen Now",
+   "box": [
+    20,
+    110,
+    200,
+    134
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Browse",
+   "box": [
+    20,
+    136,
+    200,
+    160
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Radio",
+   "box": [
+    20,
+    162,
+    200,
+    186
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Songs",
+   "box": [
+    20,
+    188,
+    200,
+    212
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Albums",
+   "box": [
+    20,
+    214,
+    200,
+    238
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Made for You",
+   "box": [
+    20,
+    240,
+    200,
+    264
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Nightcall \u2014 Kavinsky",
+   "box": [
+    260,
+    110,
+    520,
+    132
+   ]
+  },
+  {
+   "text": "Midnight City \u2014 M83",
+   "box": [
+    260,
+    136,
+    490,
+    158
+   ]
+  },
+  {
+   "text": "Opus \u2014 Eric Prydz",
+   "box": [
+    260,
+    162,
+    470,
+    184
+   ]
+  },
+  {
+   "text": "Genesis \u2014 Justice",
+   "box": [
+    260,
+    188,
+    460,
+    210
+   ]
+  }
+ ]
+}

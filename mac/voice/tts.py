@@ -4,7 +4,7 @@
 
 Copied from the jarvis-phone scripts/tts.sh request pattern (not imported —
 separate repo): POST {base}/v1/audio/speech with {input, voice, speed,
-response_format:"wav"}. Defaults voice=af_heart, speed=1.0,
+response_format:"wav"}. Defaults voice=bm_daniel (Jarvis's British voice), speed=1.0,
 base=http://localhost:8880; env overrides KOKORO_VOICE / KOKORO_SPEED /
 KOKORO_BASE_URL. Service must be running (jarvis-phone scripts/kokoro-start.sh).
 """
@@ -18,7 +18,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
+VOICE = os.environ.get("KOKORO_VOICE", "bm_daniel")
 SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 BASE_URL = os.environ.get("KOKORO_BASE_URL", "http://localhost:8880")
 

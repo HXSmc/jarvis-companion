@@ -1,0 +1,154 @@
+{
+ "question": "Show me the Share button in the toolbar at the top of the window.",
+ "scale": 2,
+ "gt_label": "Share",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Back",
+   "box": [
+    20,
+    46,
+    46,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Forward",
+   "box": [
+    50,
+    46,
+    76,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    86,
+    46,
+    112,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Action",
+   "box": [
+    120,
+    46,
+    146,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Tag",
+   "box": [
+    152,
+    46,
+    178,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "New Folder",
+   "box": [
+    184,
+    46,
+    214,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    1380,
+    930,
+    1408,
+    954
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Documents",
+   "box": [
+    20,
+    110,
+    190,
+    134
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Downloads",
+   "box": [
+    20,
+    136,
+    190,
+    160
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Desktop",
+   "box": [
+    20,
+    162,
+    190,
+    186
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Documents",
+   "box": [
+    1400,
+    100,
+    1620,
+    140
+   ]
+  },
+  {
+   "text": "scan_0042.jpg",
+   "box": [
+    520,
+    220,
+    840,
+    264
+   ]
+  },
+  {
+   "text": "receipts.zip",
+   "box": [
+    520,
+    272,
+    780,
+    316
+   ]
+  },
+  {
+   "text": "Keynote draft",
+   "box": [
+    520,
+    324,
+    820,
+    368
+   ]
+  },
+  {
+   "text": "Preview",
+   "box": [
+    520,
+    420,
+    700,
+    464
+   ]
+  }
+ ]
+}

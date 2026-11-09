@@ -1,0 +1,174 @@
+{
+ "question": "Show me Bluetooth in the settings sidebar.",
+ "scale": 1,
+ "gt_label": "Bluetooth",
+ "ax": [
+  {
+   "role": "AXStaticText",
+   "label": "Wi-Fi",
+   "box": [
+    20,
+    90,
+    230,
+    120
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Bluetooth",
+   "box": [
+    20,
+    124,
+    230,
+    154
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Network",
+   "box": [
+    20,
+    158,
+    230,
+    188
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Notifications",
+   "box": [
+    20,
+    192,
+    230,
+    222
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Sound",
+   "box": [
+    20,
+    226,
+    230,
+    256
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Focus",
+   "box": [
+    20,
+    260,
+    230,
+    290
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Screen Time",
+   "box": [
+    20,
+    294,
+    230,
+    324
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "General",
+   "box": [
+    20,
+    328,
+    230,
+    358
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Appearance",
+   "box": [
+    20,
+    362,
+    230,
+    392
+   ]
+  },
+  {
+   "role": "AXTextField",
+   "label": "Search",
+   "box": [
+    1240,
+    60,
+    1480,
+    88
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Advanced...",
+   "box": [
+    900,
+    700,
+    1010,
+    732
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Done",
+   "box": [
+    1020,
+    700,
+    1100,
+    732
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Wi-Fi is connected to Mars-5G",
+   "box": [
+    280,
+    90,
+    580,
+    112
+   ]
+  },
+  {
+   "text": "Bluetooth is on",
+   "box": [
+    280,
+    124,
+    450,
+    146
+   ]
+  },
+  {
+   "text": "Disconnect",
+   "box": [
+    280,
+    200,
+    390,
+    222
+   ]
+  },
+  {
+   "text": "Join...",
+   "box": [
+    400,
+    200,
+    470,
+    222
+   ]
+  },
+  {
+   "text": "Forget This Network",
+   "box": [
+    280,
+    230,
+    470,
+    252
+   ]
+  }
+ ]
+}

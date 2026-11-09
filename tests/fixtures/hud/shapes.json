@@ -1,0 +1,5 @@
+{"shapes": [
+  {"kind": "rect", "box": [120, 80, 420, 160], "label": "Settings button", "id": "s1"},
+  {"kind": "circle", "box": [600, 300, 680, 380], "label": "Power LED"},
+  {"kind": "triangle", "box": [900, 500, 980, 580]}
+], "cards": []}

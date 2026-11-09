@@ -1,0 +1,168 @@
+{
+ "question": "Show me the Filter button in the toolbar.",
+ "scale": 1,
+ "gt_label": "Filter",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Sidebar",
+   "box": [
+    20,
+    46,
+    50,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Gallery View",
+   "box": [
+    54,
+    46,
+    84,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Zoom",
+   "box": [
+    88,
+    46,
+    118,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Memories",
+   "box": [
+    122,
+    46,
+    152,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Shared",
+   "box": [
+    156,
+    46,
+    186,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Albums",
+   "box": [
+    190,
+    46,
+    220,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Rotate",
+   "box": [
+    224,
+    46,
+    254,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Enhance",
+   "box": [
+    258,
+    46,
+    288,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Filter",
+   "box": [
+    292,
+    46,
+    322,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Adjust",
+   "box": [
+    326,
+    46,
+    356,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    360,
+    46,
+    390,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Favorite",
+   "box": [
+    394,
+    46,
+    424,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Delete",
+   "box": [
+    428,
+    46,
+    458,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Info",
+   "box": [
+    462,
+    46,
+    492,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Import",
+   "box": [
+    496,
+    46,
+    526,
+    72
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Photos \u2014 Recents",
+   "box": [
+    700,
+    50,
+    860,
+    70
+   ]
+  }
+ ]
+}

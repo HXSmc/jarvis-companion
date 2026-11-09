@@ -3,7 +3,7 @@
 Offline test mode:  python3 -m mac.voice.wakeword --test-audio <wav> --dry-run
 Live mode:          python3 -m mac.voice.wakeword
   ffmpeg mic capture -> 80 ms frames -> model -> on detection POST
-  {type:"wake", source:"mac"} to the gateway + local callbacks.
+  {type:"wake", source:"mac"} to the overlay service + local callbacks.
 
 Mic capture shells out to ffmpeg (jarvis-phone stt.sh pattern: ffmpeg owns the
 resample/mono conversion, no Python audio package). --dry-run never touches
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import urllib.request
@@ -24,12 +25,13 @@ from pathlib import Path
 import numpy as np
 from openwakeword.model import Model
 
-from common import config
-
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 MODEL_PATH = MODELS_DIR / "hey_jarvis_v0.1.onnx"
+
+# The overlay service (mac.voice.service) owns wake notifications now.
+OVERLAY_PORT = int(os.environ.get("OVERLAY_PORT", "8791"))
 
 
 def load_model() -> Model:
@@ -83,12 +85,11 @@ def notify_wake(at_seconds: float, dry_run: bool) -> None:
         cb(at_seconds)
     if dry_run:
         return  # no network side effects in dry-run, by construction
-    token = config.get_token()
-    if token is None:
-        logger.error("no bearer token: get_token() failed, wake not delivered to gateway")
-        return
+    # Dedicated overlay token (the shared gateway token never reaches the Mac app).
+    from gateway.overlay import overlay_token
+    token = overlay_token()
     req = urllib.request.Request(
-        f"http://127.0.0.1:{config.PORT}",
+        f"http://127.0.0.1:{OVERLAY_PORT}/overlay/wake",
         data=json.dumps({"type": "wake", "source": "mac"}).encode(),
         headers={"Authorization": f"Bearer {token}"},
         method="POST",

@@ -1,0 +1,293 @@
+{
+ "question": "Show me the Downloads folder in the sidebar.",
+ "scale": 2,
+ "gt_label": "Downloads",
+ "ax": [
+  {
+   "role": "AXMenuItem",
+   "label": "Apple",
+   "box": [
+    8,
+    3,
+    55,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Finder",
+   "box": [
+    68,
+    3,
+    122,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "File",
+   "box": [
+    128,
+    3,
+    168,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Edit",
+   "box": [
+    188,
+    3,
+    228,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "View",
+   "box": [
+    248,
+    3,
+    288,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Go",
+   "box": [
+    308,
+    3,
+    342,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Window",
+   "box": [
+    368,
+    3,
+    422,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Help",
+   "box": [
+    428,
+    3,
+    468,
+    21
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Back",
+   "box": [
+    20,
+    46,
+    46,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Forward",
+   "box": [
+    50,
+    46,
+    76,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "View",
+   "box": [
+    86,
+    46,
+    112,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Group",
+   "box": [
+    118,
+    46,
+    144,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Action",
+   "box": [
+    150,
+    46,
+    176,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    182,
+    46,
+    208,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Tag",
+   "box": [
+    214,
+    46,
+    240,
+    72
+   ]
+  },
+  {
+   "role": "AXTextField",
+   "label": "Search",
+   "box": [
+    1300,
+    46,
+    1490,
+    72
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "AirDrop",
+   "box": [
+    20,
+    120,
+    190,
+    144
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Recents",
+   "box": [
+    20,
+    146,
+    190,
+    170
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Applications",
+   "box": [
+    20,
+    172,
+    190,
+    196
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Desktop",
+   "box": [
+    20,
+    198,
+    190,
+    222
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Documents",
+   "box": [
+    20,
+    224,
+    190,
+    248
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Downloads",
+   "box": [
+    20,
+    250,
+    190,
+    274
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Pictures",
+   "box": [
+    20,
+    276,
+    190,
+    300
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Documents",
+   "box": [
+    1400,
+    100,
+    1620,
+    140
+   ]
+  },
+  {
+   "text": "project-notes.md",
+   "box": [
+    520,
+    240,
+    960,
+    284
+   ]
+  },
+  {
+   "text": "budget-2027.numbers",
+   "box": [
+    520,
+    292,
+    1000,
+    336
+   ]
+  },
+  {
+   "text": "floorplan.png",
+   "box": [
+    520,
+    344,
+    840,
+    388
+   ]
+  },
+  {
+   "text": "Invoice 104.pdf",
+   "box": [
+    520,
+    396,
+    820,
+    440
+   ]
+  },
+  {
+   "text": "demo.mov",
+   "box": [
+    520,
+    448,
+    720,
+    492
+   ]
+  }
+ ]
+}
