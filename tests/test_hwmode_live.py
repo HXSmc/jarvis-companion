@@ -214,6 +214,7 @@ def test_full_repair_replay_event_order(gateway_server):
     }
 
     async def body(phone: Phone):
+        await phone.start("")  # voice-first: no task yet, the first spoken line (TASK) becomes it
         replies: list[tuple[int, str | None, dict]] = []  # (frame index, script text, reply data)
         for i, scene in enumerate(frames):
             await phone.frame(scene.jpeg)
@@ -235,7 +236,8 @@ def test_full_repair_replay_event_order(gateway_server):
         for idx, text, d in replies:
             if d.get("next_ready"):
                 assert text is None and d.get("done_seen") is True, (idx, text, d)
-        assert any(d.get("next_ready") for _, _, d in replies), "never moved past instruction 1"
+        assert any(d.get("next_ready") or d.get("done_seen") for _, _, d in replies), \
+            "never moved past instruction 1"  # the last instruction seen done ends the job without a new one
         final = replies[-1][2]
         assert final.get("say") and not final.get("next_ready"), f"job done: wrap up, no new work: {final}"
         print("  final:", final.get("say"))
