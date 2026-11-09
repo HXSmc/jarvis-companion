@@ -45,6 +45,7 @@ def _start_wake_thread() -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     await asyncio.to_thread(get_deps().acks.prerender)
+    get_deps().conversations.prewarm()  # first answer skips the claude CLI cold start
     if os.environ.get("OVERLAY_WAKEWORD", "1") != "0":
         _start_wake_thread()
     yield

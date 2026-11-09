@@ -146,11 +146,11 @@ def test_conversations_lru():
 
     convs = Conversations(FakeSession)
     got = {i: convs.get(f"c{i}") for i in range(10)}
-    assert len(made) == 10  # exactly one session per conv_id
+    assert len(made) == 11  # one session per conv_id + one warm spare
     # LRU cap 8: the two oldest were evicted and closed.
     assert closed == [got[0], got[1]]
     assert convs.get("c9") is got[9]  # still cached: no new session
-    assert len(made) == 10
+    assert len(made) == 11
     convs.get("c2")  # touch: c2 becomes newest
     convs.get("c10")
     assert closed[-1] is got[3]  # the now-oldest is evicted instead
@@ -161,3 +161,20 @@ def test_lean_argv_preapproves_only_allowlisted_tools():
     argv = lean_argv("sonnet", "p", "WebSearch,WebFetch")
     assert argv[argv.index("--allowedTools") + 1] == "WebSearch,WebFetch"
     assert "--allowedTools" not in lean_argv("haiku", "p", "")
+
+
+def test_conversations_prewarm_hands_the_spare_to_the_next_new_conversation():
+    made: list[object] = []
+
+    class FakeSession:
+        def __init__(self):
+            made.append(self)
+
+        def close(self):
+            pass
+
+    convs = Conversations(FakeSession)
+    convs.prewarm()
+    spare = made[0]
+    assert convs.get("a") is spare  # the warm one, no cold start
+    assert len(made) == 2  # a new spare is already starting for the next conversation

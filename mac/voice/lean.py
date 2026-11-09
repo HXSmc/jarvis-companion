@@ -111,12 +111,19 @@ class Conversations:
         self._factory = factory
         self._max = max_sessions
         self._sessions: OrderedDict[str, object] = OrderedDict()
+        self._spare = None
+
+    def prewarm(self) -> None:
+        """Start one spare session now so a new conversation skips the CLI cold start."""
+        if self._spare is None:
+            self._spare = self._factory()
 
     def get(self, conv_id: str):
         if conv_id in self._sessions:
             self._sessions.move_to_end(conv_id)
             return self._sessions[conv_id]
-        session = self._factory()
+        session, self._spare = (self._spare or self._factory()), None
+        self.prewarm()
         self._sessions[conv_id] = session
         while len(self._sessions) > self._max:
             _, evicted = self._sessions.popitem(last=False)

@@ -53,7 +53,7 @@ Reply ONLY as JSON Lines - one JSON object per line, nothing else:
 
 Speak the first {"say"} line as soon as you have the first sentence of thought, then continue.
 
-Card schema (title <= 60 chars; type is one of info, stat, bar, flow, link, image):
+Card schema (title <= 60 chars, stat value <= 24, labels <= 40, info lines <= 200; type is one of info, stat, bar, flow, link, image):
   info:  {"type": "info",  "title": "...", "body": ["line", ...]}                  up to 6 lines
   stat:  {"type": "stat",  "title": "...", "value": "...", "label": "..."}
   bar:   {"type": "bar",   "title": "...", "items": [{"label": "...", "value": N}]}  up to 12 items, optional "caption"
