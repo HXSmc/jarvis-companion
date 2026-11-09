@@ -592,6 +592,12 @@ class _Conn:
         if not (isinstance(tight, list) and len(tight) == 4):
             logger.info("outline %s: no believable mask, keeping the box", s.get("label"))
             return data
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        if all(abs(t - b) <= 0.06 * side for t, b, side in zip(tight, box, (bw, bh, bw, bh))):
+            # A mask that only trims a few pixels off an already tight box loses the part's rim
+            # (bench: sockets 0.95 -> 0.86 IoU); SAM only replaces a box it really corrects.
+            logger.info("outline %s: %s ~ %s, keeping the brain's box", s.get("label"), [round(v) for v in box], tight)
+            return data
         logger.info("outline %s: %s -> %s", s.get("label"), [round(v) for v in box], tight)
         return {**data, "shape": {**s, "box": [float(v) for v in tight]}}
 

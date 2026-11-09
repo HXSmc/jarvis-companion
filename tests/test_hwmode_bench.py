@@ -81,7 +81,7 @@ async def _one(base: str, task: str, jpeg: bytes, question: str) -> dict:
             now = round(time.monotonic() - t0, 3)
             if msg["type"] == "say" and first_say is None:
                 first_say = now
-            elif msg["type"] == "audio" and first_audio is None:
+            elif msg["type"] in ("audio", "ack") and first_audio is None:  # an instant ack is audio too
                 first_audio = now
             elif msg["type"] == "reply" and result is None:
                 result = {"box": _box(msg.get("data")), "reply_s": now}

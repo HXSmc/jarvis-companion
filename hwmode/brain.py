@@ -30,8 +30,9 @@ Reply with ONLY one JSON object, no prose, no code fence, keys in this order:
  "shape": null or {"kind": "rect"|"circle"|"triangle", "box": [x1,y1,x2,y2] pixel box in the image you see,
    tight around the exact ONE part to touch, "label": at most 4 words}}
 The shape kind: "rect" by default; "circle" for round parts (screws, round buttons, LEDs); "triangle" only to mark
-a hazard. Instructions are given one at a time: never number them, never say how many there are, never say
-step-counting words like the word before "one of three".
+a hazard. The phone draws the shape: never describe its colour or look in "say" ("outlined in red").
+Instructions are given one at a time: never number them, never say how many there are, never say "step" with a
+number.
 Answer what the user just asked FIRST, even if it is about something other than the current instruction ("point at
 the SATA drive" midway): box that thing and answer; then, only if useful, one short reminder of the current
 instruction.

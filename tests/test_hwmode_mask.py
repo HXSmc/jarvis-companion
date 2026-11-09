@@ -49,6 +49,14 @@ def test_outline_puts_the_mask_on_the_brains_box():
     assert out["say"] == "There, sir." and out["next_ready"] is False
 
 
+def test_a_mask_that_only_trims_the_rim_keeps_the_brains_box():
+    seg = FakeSegmenter()
+    seg.result = {"target_px": [302, 422, 419, 468], "mask_score": 0.9}  # 1-3 px inside a 120x50 box
+    conn = _conn(seg)
+    data = {"say": "There, sir.", "shape": {"kind": "rect", "box": [300, 420, 420, 470]}}
+    assert asyncio.run(conn._outline(data, b"jpeg", None))["shape"]["box"] == [300, 420, 420, 470]
+
+
 @pytest.mark.parametrize("seg", [FakeSegmenter(result=None), FakeSegmenter(fail=True), None])
 def test_no_believable_mask_keeps_the_box(seg):
     conn = _conn(seg)
