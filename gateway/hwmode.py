@@ -16,6 +16,8 @@ Server -> client:
   {"type": "ack", "text": str, "rate": int, "pcm": base64}          cached instant ack
   {"type": "say", "text": str}                        early speech, before the full reply
   {"type": "audio", "text": str, "rate": int, "pcm": base64}        Kokoro voice line
+  {"type": "research", "state": "started"|"done"}   the web research turn ("find out about X")
+  {"type": "session", "session_id": str, "title": str}   a Claude session started from the findings
   {"type": "reply", "data": {...}|null, "raw": str, "frame_id": int|null, "w": int, "h": int,
    "ttft_s": float|null, "total_s": float}
        data = {say, shape|null, done_seen, next_ready} (+ cards when the brain sent any):
@@ -55,6 +57,7 @@ from common.hud import validate_card, validate_shape
 from gateway import cards
 from gateway.auth import require_bearer, require_bearer_any
 from gateway.ws import IOS_ROLE, _authorized
+from hwmode import research
 from hwmode.acks import get_acks
 from hwmode.brain import LeanSession
 from hwmode.segment import get_segmenter
@@ -190,6 +193,10 @@ class _Conn:
         self.model = "sonnet"
         self.task = ""
         self.session_id: str | None = None
+        # The research turn ("find out about X"): its own web-tools-only brain, one per connection.
+        self.research: research.ResearchBrain | None = None
+        self.research_topic: str | None = None
+        self.research_result: research.ResearchResult | None = None
         self.task_from_session = False
         self.frame: bytes | None = None
         self.frame_id: int | None = None
@@ -219,6 +226,18 @@ class _Conn:
         if self.session:
             self.session.close()
             self.session = None
+
+    def _reset_research(self) -> None:
+        if self.research is not None:
+            try:
+                self.research.close()
+            except Exception:
+                logger.exception("hwmode: research brain close failed")
+            self.research = None
+
+    def _close_all(self) -> None:
+        self._close_session()
+        self._reset_research()
 
     def _note_said(self, say: str) -> None:
         self.last_say = say
@@ -260,6 +279,13 @@ class _Conn:
                 text = f"{text} [The user wants to go back to the previous instruction. Give it again.]"
             if not self.task and not (watch or locate) and nav == 0 and not user_done:
                 self.task = asked[:2000]  # voice-first: the job is whatever the owner says first
+            plain = not (watch or locate) and not user_done and not back
+            if plain and research.is_start_session(asked):
+                await self._session_turn(asked)
+                return
+            if plain and research.is_research(asked):
+                await self._research_turn(asked, use_frame)
+                return
             if self.session.turns == 0 and self.task:  # a fresh brain must know the job
                 prefix = f"Task: {self.task}."
                 if self.last_say:  # silent restart (turn cap): it also forgot where we were
@@ -386,6 +412,86 @@ class _Conn:
             await self.send({"type": "reply", "data": out, "raw": reply.raw, "frame_id": frame_id,
                              "w": size[0] if size else None, "h": size[1] if size else None,
                              "ttft_s": reply.ttft_s, "total_s": round(reply.total_s, 3)})
+
+    async def _instant_ack(self, acks, kind: str) -> None:
+        """The research/session turns take seconds: their ack clip goes out at once, no 0.45 s wait."""
+        clip = acks.clip(kind) if acks else None
+        if clip is None:
+            return
+        line, pcm, rate = clip
+        if self._ask_t0 is not None:
+            self._ack_s = time.monotonic() - self._ask_t0
+            if self._first_audio_s is None:
+                self._first_audio_s = self._ack_s
+        await self.send({"type": "ack", "text": line, "rate": rate,
+                         "pcm": base64.b64encode(pcm).decode()})
+
+    async def _research_turn(self, asked: str, use_frame: bool) -> None:
+        """A spoken "find out about X": answered by a web-tools-only brain on its own session,
+        spoken out loud with HUD cards. The coaching brain never gains web tools."""
+        jpeg = self.frame if use_frame else None
+        frame_id = self.frame_id if use_frame else None
+        size = jpeg_size(jpeg) if jpeg else None
+        self.asked_any = True
+        self.owner_asks = (self.owner_asks + [asked])[-12:]
+        self._ask_t0 = time.monotonic()
+        self._ack_s = self._first_audio_s = None
+        await self._instant_ack(get_acks(self.voice), "research")
+        await self.send({"type": "research", "state": "started"})
+        if self.research is None:
+            self.research = research.ResearchBrain(self.model, claude_bin=_claude_bin())
+        say, cards, raw, ttft, total = "I couldn't look that up just now.", [], "", None, None
+        try:
+            result = await asyncio.to_thread(self.research.ask, asked, jpeg, None)
+        except Exception:  # never crash the socket over a failed lookup
+            logger.exception("hwmode: research turn failed")
+            await asyncio.to_thread(self._reset_research)
+        else:
+            self.research_topic, self.research_result = asked, result
+            say, cards, raw, ttft, total = result.say, result.cards, result.raw, result.ttft_s, result.total_s
+        await self.send({"type": "research", "state": "done"})
+        self._note_said(say)
+        self._spawn_speak(say)
+        elapsed = time.monotonic() - self._ask_t0
+        total = round(total if total is not None else elapsed, 3)
+        logger.info("timing ttft_s=%s ack_s=%s first_audio_s=%s total_s=%s", ttft, self._ack_s,
+                    self._first_audio_s, total)
+        logger.info("research reply say=%r cards=%d", say[:200], len(cards))
+        await self.send({"type": "reply", "data": {"say": say, "shape": None, "cards": cards},
+                         "raw": raw, "frame_id": frame_id, "w": size[0] if size else None,
+                         "h": size[1] if size else None, "ttft_s": ttft, "total_s": total})
+
+    async def _session_turn(self, asked: str) -> None:
+        """"Start a session about this": the last research findings become a Claude session."""
+        self.asked_any = True
+        self.owner_asks = (self.owner_asks + [asked])[-12:]
+        self._ask_t0 = time.monotonic()
+        self._ack_s = self._first_audio_s = None
+        await self._instant_ack(get_acks(self.voice), "session")
+        if self.research_result is None or self.research_topic is None:
+            say = "Ask me to look something up first, then I can start a session on it."
+        else:
+            try:
+                from gateway import central  # imported here: circular at module load
+
+                data = await central.route(f"hwmode-{uuid.uuid4().hex[:12]}", uuid.uuid4().hex,
+                                           research.session_text(self.research_topic, self.research_result),
+                                           "app", new_only=True)
+            except Exception:
+                logger.exception("hwmode: start session failed")
+                say = "I couldn't start that session."
+            else:
+                title = str(data.get("title") or self.research_topic[:60])
+                await self.send({"type": "session", "session_id": data.get("session_id"), "title": title})
+                say = f"Session started: {title}."
+        self._note_said(say)
+        self._spawn_speak(say)
+        total = round(time.monotonic() - self._ask_t0, 3)
+        logger.info("timing ttft_s=%s ack_s=%s first_audio_s=%s total_s=%s", None, self._ack_s,
+                    self._first_audio_s, total)
+        logger.info("session reply say=%r", say[:200])
+        await self.send({"type": "reply", "data": {"say": say, "shape": None}, "raw": "",
+                         "frame_id": None, "w": None, "h": None, "ttft_s": None, "total_s": total})
 
     async def _ack(self, acks, kind: str, say_event: asyncio.Event) -> None:
         """The cached instant ack ("One moment.", "Right."): fills the silence while the brain
@@ -589,7 +695,7 @@ class _Conn:
         for t in self.tasks | self.speaking:
             t.cancel()
         await asyncio.gather(*self.tasks, *self.speaking, return_exceptions=True)
-        await asyncio.to_thread(self._close_session)
+        await asyncio.to_thread(self._close_all)
 
 
 @router.websocket("/hwmode/ws")
