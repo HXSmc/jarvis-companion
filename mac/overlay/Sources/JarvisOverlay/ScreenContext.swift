@@ -42,7 +42,7 @@ enum ScreenContext {
         "AXPopUpButton", "AXMenuButton", "AXTextField", "AXLink", "AXTab",
     ]
 
-    private static let nodeAttributes: [CFString] = [
+    private static let nodeAttributes: [String] = [
         kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
         kAXValueAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute,
     ]
@@ -317,8 +317,8 @@ enum ScreenContext {
     private static func axAttribute(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-              let value else { return nil }
-        return value as? AXUIElement
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
     }
 
     private static func axString(_ element: AXUIElement, _ attribute: String) -> String? {

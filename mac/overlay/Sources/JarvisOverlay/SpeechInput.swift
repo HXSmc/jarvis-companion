@@ -275,10 +275,10 @@ final class SpeechInput {
         }
         turn.cancelHandler = { task.cancel() }
         for chunk in tap.ringSnapshot() {
-            request.appendAudioPCMBuffer(chunk.buffer)
+            request.append(chunk.buffer)
         }
         tap.setSink { [weak request] buffer, _ in
-            request?.appendAudioPCMBuffer(buffer)
+            request?.append(buffer)
         }
         Task { @MainActor [weak self] in
             guard let self else { return }
