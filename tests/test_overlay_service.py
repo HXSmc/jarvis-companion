@@ -105,11 +105,13 @@ def reset_overlay_state():
     overlay._history.clear()
     overlay._notes.clear()
     overlay._tainted.clear()
+    overlay._card_ids.clear()
     yield
     overlay.set_deps(None)
     overlay._history.clear()
     overlay._notes.clear()
     overlay._tainted.clear()
+    overlay._card_ids.clear()
 
 
 @pytest.fixture
@@ -514,3 +516,11 @@ def test_parse_gets_the_cached_app_list_off_the_event_loop(client, monkeypatch):
     turn(client, "open notes", conv_id="o2")
     assert ["open", "-a", "Notes"] in ran
     assert len(calls) == 1  # cached
+
+
+def test_repeated_model_card_id_gets_a_fresh_id(client):
+    line = json.dumps({"card": {"id": "dup", "type": "stat", "title": "T", "value": "1", "label": "x"}}) + "\n"
+    overlay.set_deps(make_deps(chunks=[line, line]))
+    ids = [e["card"]["id"] for e in turn(client, "what is a monad", conv_id="k1") if e["type"] == "card"]
+    ids += [e["card"]["id"] for e in turn(client, "and again", conv_id="k1") if e["type"] == "card"]
+    assert ids[0] == "dup" and len(set(ids)) == 4

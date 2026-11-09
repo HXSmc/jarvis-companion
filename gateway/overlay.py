@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -259,6 +260,9 @@ _notes: dict[str, deque] = {}  # conv_id -> context notes (e.g. the last diff te
 # conv_ids that ever saw screen/diff text: their later turns stay on the tool-less pool,
 # because history (the model's own replies) can carry that text to a web-tool session.
 _tainted: set[str] = set()
+# conv_id -> card ids already sent: a model-supplied id that repeats would silently replace
+# an earlier card in the app (and could overwrite a card the service itself sent).
+_card_ids: dict[str, set] = {}
 _apps_cache: tuple[float, dict] | None = None
 
 
@@ -432,6 +436,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
         _history.pop(oldest)
         _notes.pop(oldest, None)
         _tainted.discard(oldest)
+        _card_ids.pop(oldest, None)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}
@@ -502,6 +507,10 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
         card = hud.validate_card(obj.get("card")) if "card" in obj else None
         if card:
+            seen = _card_ids.setdefault(body.conv_id, set())
+            if card["id"] in seen:
+                card["id"] = uuid.uuid4().hex[:8]
+            seen.add(card["id"])
             yield {"type": "card", "card": card}
         shape = hud.validate_shape(obj.get("shape")) if "shape" in obj else None
         if shape:
