@@ -104,6 +104,7 @@ final class CardSnapshotTests: XCTestCase {
     |---|---|---|
     | Tabs | 1 h | low |
     | Search | 2 h | medium |
+    | Delivery-margin reconciler for restaurants that drop in a month of statements | 18,000-40,000 per SAR 100k delivered, rates verified on every app | high: the owner signs alone |
 
     - Nothing changes for old messages
     - You can undo it from Settings

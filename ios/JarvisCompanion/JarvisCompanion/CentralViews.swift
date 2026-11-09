@@ -1502,18 +1502,25 @@ struct MarkdownText: View {
             Rectangle().fill(Color.jarvisMuted.opacity(0.4)).frame(height: 1)
         case .table(let header, let rows):
             // Columns are capped so long cells wrap; wide tables scroll sideways.
+            // Each column gets a fixed width (see columnWidths) and each cell its full
+            // height, so long cells wrap onto more lines instead of ending in "...".
+            let widths = Self.columnWidths(header: header, rows: rows)
             ScrollView(.horizontal, showsIndicators: false) {
                 Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 8) {
                     GridRow {
-                        ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                            Text(Self.inline(cell)).font(.subheadline.bold()).frame(maxWidth: 240, alignment: .leading)
+                        ForEach(Array(header.enumerated()), id: \.offset) { i, cell in
+                            Text(Self.inline(cell)).font(.subheadline.bold())
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(width: widths[i], alignment: .leading)
                         }
                     }
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                         Divider().gridCellUnsizedAxes(.horizontal)
                         GridRow {
-                            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                                Text(Self.inline(cell)).font(.subheadline).frame(maxWidth: 240, alignment: .leading)
+                            ForEach(Array(row.enumerated()), id: \.offset) { i, cell in
+                                Text(Self.inline(cell)).font(.subheadline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(width: widths[min(i, widths.count - 1)], alignment: .leading)
                             }
                         }
                     }
@@ -1521,6 +1528,22 @@ struct MarkdownText: View {
                 .padding(10)
             }
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.jarvisSurface))
+        }
+    }
+
+    /// Column width = its widest cell on one line, capped at 240pt so long cells wrap.
+    /// A fixed width is needed: the sideways ScrollView measures its height with no width
+    /// proposal, so a maxWidth-only cell measured one line tall and the rest was cut off.
+    static func columnWidths(header: [String], rows: [[String]]) -> [CGFloat] {
+        let body = UIFont.preferredFont(forTextStyle: .subheadline)
+        let bold = UIFont(descriptor: body.fontDescriptor.withSymbolicTraits(.traitBold) ?? body.fontDescriptor, size: 0)
+        func width(_ cell: String, _ font: UIFont) -> CGFloat {
+            let plain = String(inline(cell).characters) as NSString
+            return ceil(plain.size(withAttributes: [.font: font]).width) + 1
+        }
+        return header.indices.map { i in
+            let cells = [width(header[i], bold)] + rows.compactMap { i < $0.count ? width($0[i], body) : nil }
+            return min(240, cells.max() ?? 0)
         }
     }
 
