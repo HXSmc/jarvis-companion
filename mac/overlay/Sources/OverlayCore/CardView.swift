@@ -190,7 +190,7 @@ struct LinkBody: View {
                     .tracking(1.2)
                     .foregroundStyle(Color.white.opacity(0.6))
                     .lineLimit(1)
-                if let source = card.source, !source.isEmpty {
+                if let source = card.source, !source.isEmpty, source != host {
                     Text(source)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.white.opacity(0.5))
@@ -222,6 +222,8 @@ struct ImageBody: View {
                     switch phase {
                     case .success(let image):
                         image.resizable().aspectRatio(contentMode: .fill)
+                    case .failure:
+                        tile(text: "IMAGE UNAVAILABLE")
                     default:
                         tile(text: "LOADING")
                     }
@@ -266,10 +268,10 @@ struct FlowBody: View {
                         guard let f = rects[edge.from], let t = rects[edge.to] else { continue }
                         drawArrow(&ctx, from: f, to: t)
                         if let label = edge.label, !label.isEmpty {
-                            let mid = CGPoint(x: (f.midX + t.midX) / 2, y: (f.midY + t.midY) / 2 - 8)
+                            let mid = CGPoint(x: (f.midX + t.midX) / 2 + 6, y: (f.midY + t.midY) / 2)
                             ctx.draw(Text(label)
                                 .font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.6)), at: mid)
+                                .foregroundColor(.white.opacity(0.6)), at: mid, anchor: .leading)
                         }
                     }
                 }
@@ -282,7 +284,13 @@ struct FlowBody: View {
                 }
             }
         }
-        .frame(height: 220)
+        .frame(height: height)
+    }
+
+    /// Rows of 34 pt nodes with 22 pt gaps (FlowLayout's numbers), so short flows stay compact.
+    private var height: CGFloat {
+        let rows = CGFloat(max(Set(FlowLayout.depths(nodes: card.nodes, edges: card.edges).values).count, 1))
+        return min(rows * 34 + (rows - 1) * 22, 300)
     }
 
     private func nodeBox(_ node: FlowNode) -> some View {
@@ -297,14 +305,22 @@ struct FlowBody: View {
             .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
     }
 
+    /// Distance from a rect's centre to its border along the unit vector (ux, uy).
+    private func edgeDistance(_ r: CGRect, _ ux: CGFloat, _ uy: CGFloat) -> CGFloat {
+        let hx = abs(ux) > 0.0001 ? (r.width / 2) / abs(ux) : .greatestFiniteMagnitude
+        let hy = abs(uy) > 0.0001 ? (r.height / 2) / abs(uy) : .greatestFiniteMagnitude
+        return min(hx, hy)
+    }
+
     private func drawArrow(_ ctx: inout GraphicsContext, from f: CGRect, to t: CGRect) {
-        let s = CGPoint(x: f.midX, y: f.midY)
-        let e0 = CGPoint(x: t.midX, y: t.midY)
-        let dx = e0.x - s.x, dy = e0.y - s.y
+        let c0 = CGPoint(x: f.midX, y: f.midY)
+        let c1 = CGPoint(x: t.midX, y: t.midY)
+        let dx = c1.x - c0.x, dy = c1.y - c0.y
         let len = max((dx * dx + dy * dy).squareRoot(), 0.001)
         let ux = dx / len, uy = dy / len
-        let cut = min(t.height / 2 + 6, len * 0.4)
-        let e = CGPoint(x: e0.x - ux * cut, y: e0.y - uy * cut)
+        // Border to border, so the line never runs through a node's text.
+        let s = CGPoint(x: c0.x + ux * (edgeDistance(f, ux, uy) + 2), y: c0.y + uy * (edgeDistance(f, ux, uy) + 2))
+        let e = CGPoint(x: c1.x - ux * (edgeDistance(t, ux, uy) + 2), y: c1.y - uy * (edgeDistance(t, ux, uy) + 2))
         var line = Path()
         line.move(to: s)
         line.addLine(to: e)

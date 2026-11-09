@@ -37,11 +37,12 @@ public enum FlowLayout {
         let rowCount = rows.count
         let maxPerRow = max(rows.map(\.count).max() ?? 1, 1)
         let gap: CGFloat = 8
-        let cellH = max((size.height - CGFloat(rowCount - 1) * gap) / CGFloat(rowCount), 12)
-        let cellW = max((size.width - CGFloat(maxPerRow - 1) * gap) / CGFloat(maxPerRow), 40)
+        let rowGap: CGFloat = 22  // room for the arrow and its label between rows
+        let cellH = min(max((size.height - CGFloat(rowCount - 1) * rowGap) / CGFloat(rowCount), 12), 34)
+        let cellW = min(max((size.width - CGFloat(maxPerRow - 1) * gap) / CGFloat(maxPerRow), 40), 220)
         var out: [String: CGRect] = [:]
         for (rowIndex, row) in rows.enumerated() {
-            let y = CGFloat(rowIndex) * (cellH + gap)
+            let y = CGFloat(rowIndex) * (cellH + rowGap)
             let rowWidth = CGFloat(row.count) * cellW + CGFloat(row.count - 1) * gap
             let x0 = (size.width - rowWidth) / 2
             for (col, node) in row.enumerated() {
