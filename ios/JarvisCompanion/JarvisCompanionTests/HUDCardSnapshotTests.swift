@@ -123,7 +123,7 @@ final class HUDCardSnapshotTests: XCTestCase {
         let long = String(repeating: "a", count: 100)
         XCTAssertEqual(HUDCard.parse(["id": "x", "type": "stat", "title": long, "value": "1"])?.title.count, 60)
         // list keeps valid cards only and caps at 6
-        let one = ["id": "n", "type": "info", "title": "t", "body": ["b"]]
+        let one: [String: Any] = ["id": "n", "type": "info", "title": "t", "body": ["b"]]
         XCTAssertEqual(HUDCard.list(from: Array(repeating: one, count: 9)).count, 6)
         XCTAssertEqual(HUDCard.list(from: [one, ["id": "y", "type": "bad", "title": "t"]]).count, 1)
     }
