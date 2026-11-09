@@ -1,0 +1,147 @@
+{
+ "question": "Show me the button to open a new terminal tab.",
+ "scale": 1,
+ "gt_label": "New Tab",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "New Tab",
+   "box": [
+    1100,
+    46,
+    1130,
+    72
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Shell",
+   "box": [
+    140,
+    3,
+    190,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Edit",
+   "box": [
+    200,
+    3,
+    246,
+    21
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "zsh",
+   "box": [
+    20,
+    48,
+    80,
+    66
+   ]
+  },
+  {
+   "text": "server.log",
+   "box": [
+    90,
+    48,
+    200,
+    66
+   ]
+  },
+  {
+   "text": "pytest",
+   "box": [
+    210,
+    48,
+    280,
+    66
+   ]
+  },
+  {
+   "text": "ali@mini ~ %",
+   "box": [
+    20,
+    90,
+    130,
+    110
+   ]
+  },
+  {
+   "text": "git status",
+   "box": [
+    20,
+    116,
+    120,
+    136
+   ]
+  },
+  {
+   "text": "On branch main",
+   "box": [
+    20,
+    142,
+    160,
+    162
+   ]
+  },
+  {
+   "text": "nothing to commit, working tree clean",
+   "box": [
+    20,
+    168,
+    360,
+    188
+   ]
+  },
+  {
+   "text": "python -m pytest tests -q",
+   "box": [
+    20,
+    220,
+    260,
+    240
+   ]
+  },
+  {
+   "text": "12 passed in 3.4s",
+   "box": [
+    20,
+    246,
+    210,
+    266
+   ]
+  },
+  {
+   "text": "ali@mini ~ %",
+   "box": [
+    20,
+    298,
+    130,
+    318
+   ]
+  },
+  {
+   "text": "clear",
+   "box": [
+    20,
+    324,
+    80,
+    344
+   ]
+  },
+  {
+   "text": "man tmux",
+   "box": [
+    20,
+    350,
+    110,
+    370
+   ]
+  }
+ ]
+}

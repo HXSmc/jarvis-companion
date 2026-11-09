@@ -1,0 +1,184 @@
+{
+ "question": "Show me the button to write a new email.",
+ "scale": 1,
+ "gt_label": "New Message",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "New Message",
+   "box": [
+    20,
+    46,
+    54,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Reply",
+   "box": [
+    62,
+    46,
+    92,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Reply All",
+   "box": [
+    96,
+    46,
+    126,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Forward",
+   "box": [
+    130,
+    46,
+    160,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Delete",
+   "box": [
+    164,
+    46,
+    194,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Flag",
+   "box": [
+    198,
+    46,
+    226,
+    72
+   ]
+  },
+  {
+   "role": "AXTextField",
+   "label": "Search",
+   "box": [
+    1300,
+    46,
+    1490,
+    72
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Inbox",
+   "box": [
+    20,
+    110,
+    190,
+    134
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Drafts",
+   "box": [
+    20,
+    136,
+    190,
+    160
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Sent",
+   "box": [
+    20,
+    162,
+    190,
+    186
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Junk",
+   "box": [
+    20,
+    188,
+    190,
+    212
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Trash",
+   "box": [
+    20,
+    214,
+    190,
+    238
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Archive",
+   "box": [
+    20,
+    240,
+    190,
+    264
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Design review notes",
+   "box": [
+    260,
+    120,
+    480,
+    142
+   ]
+  },
+  {
+   "text": "Re: floor focus",
+   "box": [
+    260,
+    146,
+    430,
+    168
+   ]
+  },
+  {
+   "text": "Q4 planning",
+   "box": [
+    260,
+    172,
+    390,
+    194
+   ]
+  },
+  {
+   "text": "Your order has shipped",
+   "box": [
+    260,
+    198,
+    500,
+    220
+   ]
+  },
+  {
+   "text": "Weekly digest",
+   "box": [
+    260,
+    224,
+    410,
+    246
+   ]
+  }
+ ]
+}

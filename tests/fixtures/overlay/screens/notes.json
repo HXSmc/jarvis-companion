@@ -1,0 +1,165 @@
+{
+ "question": "Show me the button to create a new note.",
+ "scale": 2,
+ "gt_label": "New Note",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "New Note",
+   "box": [
+    20,
+    46,
+    52,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "New Folder",
+   "box": [
+    56,
+    46,
+    88,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Checklist",
+   "box": [
+    94,
+    46,
+    124,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Table",
+   "box": [
+    128,
+    46,
+    156,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Format",
+   "box": [
+    160,
+    46,
+    188,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    192,
+    46,
+    220,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Lock",
+   "box": [
+    224,
+    46,
+    250,
+    72
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "iCloud Notes",
+   "box": [
+    20,
+    110,
+    200,
+    134
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Notes",
+   "box": [
+    20,
+    136,
+    200,
+    160
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Work",
+   "box": [
+    20,
+    162,
+    200,
+    186
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Ideas",
+   "box": [
+    20,
+    188,
+    200,
+    212
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Recipes",
+   "box": [
+    20,
+    214,
+    200,
+    238
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Grocery list",
+   "box": [
+    520,
+    180,
+    800,
+    224
+   ]
+  },
+  {
+   "text": "Standup 2026-11-09",
+   "box": [
+    520,
+    232,
+    940,
+    276
+   ]
+  },
+  {
+   "text": "Book quotes",
+   "box": [
+    520,
+    284,
+    780,
+    328
+   ]
+  },
+  {
+   "text": "Wifi password old",
+   "box": [
+    520,
+    336,
+    860,
+    380
+   ]
+  }
+ ]
+}

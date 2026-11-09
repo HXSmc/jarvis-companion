@@ -1,0 +1,64 @@
+name: mac-overlay
+
+on:
+  push:
+    branches: [loop/jov, ci-ipa]
+    paths:
+      - 'mac/**'
+      - 'common/hud.py'
+      - 'tests/fixtures/hud/**'
+      - 'tests/fixtures/overlay/**'
+      - 'tests/test_hud_schema.py'
+      - 'tests/test_overlay_*.py'
+      - 'tests/test_mac_voice_*.py'
+      - 'scripts/install-mac-overlay.sh'
+      - '.github/workflows/mac-overlay.yml'
+  workflow_dispatch: {}
+
+# Never echo env/secrets in this workflow.
+permissions:
+  contents: read
+
+jobs:
+  mac-overlay:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode and print toolchain info
+        run: |
+          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $LATEST"
+          sudo xcode-select -s "$LATEST"
+          swift --version
+          sw_vers
+
+      - name: Build OverlayCore + JarvisOverlay (release)
+        run: swift build -c release --package-path mac/overlay
+
+      - name: OverlayCore tests (snapshots to $RUNNER_TEMP/snapshots)
+        run: SNAPSHOT_DIR=$RUNNER_TEMP/snapshots swift test --package-path mac/overlay
+
+      - name: Upload overlay snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay-snapshots
+          path: ${{ runner.temp }}/snapshots
+          if-no-files-found: warn
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test deps
+        run: pip install fastapi uvicorn websockets httpx pyDes psutil pytest numpy
+
+      - name: Overlay + mac voice Python tests
+        run: python -m pytest tests/test_hud_schema.py tests/test_overlay_*.py tests/test_mac_voice_*.py -q
+
+      - name: Install script dry-run check
+        run: bash scripts/install-mac-overlay.sh --dry-run

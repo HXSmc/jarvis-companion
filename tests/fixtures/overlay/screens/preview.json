@@ -1,0 +1,152 @@
+{
+ "question": "Show me the button to zoom in.",
+ "scale": 2,
+ "gt_label": "Zoom In",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Zoom In",
+   "box": [
+    20,
+    46,
+    48,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Zoom Out",
+   "box": [
+    52,
+    46,
+    80,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Actual Size",
+   "box": [
+    84,
+    46,
+    114,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Rotate",
+   "box": [
+    120,
+    46,
+    146,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Markup",
+   "box": [
+    152,
+    46,
+    180,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Export",
+   "box": [
+    184,
+    46,
+    214,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    220,
+    46,
+    248,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Print",
+   "box": [
+    252,
+    46,
+    278,
+    72
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "1",
+   "box": [
+    40,
+    220,
+    100,
+    300
+   ]
+  },
+  {
+   "text": "2",
+   "box": [
+    40,
+    312,
+    100,
+    392
+   ]
+  },
+  {
+   "text": "3",
+   "box": [
+    40,
+    404,
+    100,
+    484
+   ]
+  },
+  {
+   "text": "4",
+   "box": [
+    40,
+    496,
+    100,
+    576
+   ]
+  },
+  {
+   "text": "5",
+   "box": [
+    40,
+    588,
+    100,
+    668
+   ]
+  },
+  {
+   "text": "Contract draft",
+   "box": [
+    600,
+    1400,
+    920,
+    1444
+   ]
+  },
+  {
+   "text": "Page 2 of 12",
+   "box": [
+    600,
+    1452,
+    840,
+    1496
+   ]
+  }
+ ]
+}

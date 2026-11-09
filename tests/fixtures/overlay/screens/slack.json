@@ -1,0 +1,152 @@
+{
+ "question": "Show me the #engineering channel in the sidebar.",
+ "scale": 2,
+ "gt_label": "#engineering",
+ "ax": [],
+ "ocr": [
+  {
+   "text": "#general",
+   "box": [
+    40,
+    180,
+    240,
+    220
+   ]
+  },
+  {
+   "text": "#random",
+   "box": [
+    40,
+    228,
+    220,
+    268
+   ]
+  },
+  {
+   "text": "#engineering",
+   "box": [
+    40,
+    276,
+    300,
+    316
+   ]
+  },
+  {
+   "text": "#design",
+   "box": [
+    40,
+    324,
+    220,
+    364
+   ]
+  },
+  {
+   "text": "#alerts",
+   "box": [
+    40,
+    372,
+    200,
+    412
+   ]
+  },
+  {
+   "text": "Dana",
+   "box": [
+    40,
+    480,
+    160,
+    520
+   ]
+  },
+  {
+   "text": "Miguel",
+   "box": [
+    40,
+    528,
+    180,
+    568
+   ]
+  },
+  {
+   "text": "Priya",
+   "box": [
+    40,
+    576,
+    160,
+    616
+   ]
+  },
+  {
+   "text": "Team Leads",
+   "box": [
+    40,
+    624,
+    240,
+    664
+   ]
+  },
+  {
+   "text": "Threads",
+   "box": [
+    2100,
+    92,
+    2260,
+    132
+   ]
+  },
+  {
+   "text": "Mentions",
+   "box": [
+    2280,
+    92,
+    2460,
+    132
+   ]
+  },
+  {
+   "text": "Drafts",
+   "box": [
+    2480,
+    92,
+    2620,
+    132
+   ]
+  },
+  {
+   "text": "Compose",
+   "box": [
+    2880,
+    92,
+    3060,
+    132
+   ]
+  },
+  {
+   "text": "Later",
+   "box": [
+    2680,
+    92,
+    2800,
+    132
+   ]
+  },
+  {
+   "text": "More",
+   "box": [
+    2700,
+    1720,
+    2820,
+    1760
+   ]
+  },
+  {
+   "text": "#engineering \u2014 build channel",
+   "box": [
+    520,
+    92,
+    1120,
+    132
+   ]
+  }
+ ]
+}

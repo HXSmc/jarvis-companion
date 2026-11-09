@@ -1,0 +1,161 @@
+{
+ "question": "Show me the Extensions icon in the activity bar on the left.",
+ "scale": 2,
+ "gt_label": "Extensions",
+ "ax": [],
+ "ocr": [
+  {
+   "text": "Explorer",
+   "box": [
+    32,
+    140,
+    212,
+    176
+   ]
+  },
+  {
+   "text": "Search",
+   "box": [
+    32,
+    220,
+    172,
+    256
+   ]
+  },
+  {
+   "text": "Source Control",
+   "box": [
+    32,
+    300,
+    312,
+    336
+   ]
+  },
+  {
+   "text": "Run and Debug",
+   "box": [
+    32,
+    380,
+    312,
+    416
+   ]
+  },
+  {
+   "text": "Extensions",
+   "box": [
+    32,
+    460,
+    252,
+    496
+   ]
+  },
+  {
+   "text": "main.py",
+   "box": [
+    520,
+    92,
+    720,
+    128
+   ]
+  },
+  {
+   "text": "server.py",
+   "box": [
+    760,
+    92,
+    980,
+    128
+   ]
+  },
+  {
+   "text": "README.md",
+   "box": [
+    1000,
+    92,
+    1260,
+    128
+   ]
+  },
+  {
+   "text": "src",
+   "box": [
+    200,
+    220,
+    300,
+    256
+   ]
+  },
+  {
+   "text": "tests",
+   "box": [
+    200,
+    268,
+    310,
+    304
+   ]
+  },
+  {
+   "text": "gateway",
+   "box": [
+    200,
+    316,
+    370,
+    352
+   ]
+  },
+  {
+   "text": "hwmode",
+   "box": [
+    200,
+    364,
+    370,
+    400
+   ]
+  },
+  {
+   "text": "Problems",
+   "box": [
+    520,
+    1720,
+    710,
+    1756
+   ]
+  },
+  {
+   "text": "Output",
+   "box": [
+    740,
+    1720,
+    890,
+    1756
+   ]
+  },
+  {
+   "text": "Terminal",
+   "box": [
+    920,
+    1720,
+    1110,
+    1756
+   ]
+  },
+  {
+   "text": "main*  Python 3.11",
+   "box": [
+    2200,
+    1900,
+    2600,
+    1936
+   ]
+  },
+  {
+   "text": "mypy: 0 errors",
+   "box": [
+    2600,
+    1900,
+    2900,
+    1936
+   ]
+  }
+ ]
+}

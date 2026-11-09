@@ -1,0 +1,161 @@
+{
+ "question": "Show me the button to build and run the app.",
+ "scale": 2,
+ "gt_label": "Run",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Run",
+   "box": [
+    20,
+    46,
+    48,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Stop",
+   "box": [
+    52,
+    46,
+    76,
+    72
+   ]
+  },
+  {
+   "role": "AXPopUpButton",
+   "label": "Scheme",
+   "box": [
+    84,
+    46,
+    244,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Source Control",
+   "box": [
+    250,
+    46,
+    280,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Editor Options",
+   "box": [
+    284,
+    46,
+    314,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Project Navigator",
+   "box": [
+    20,
+    110,
+    46,
+    134
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Test Navigator",
+   "box": [
+    50,
+    110,
+    76,
+    134
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Issue Navigator",
+   "box": [
+    80,
+    110,
+    106,
+    134
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "AppDelegate.swift",
+   "box": [
+    120,
+    280,
+    540,
+    320
+   ]
+  },
+  {
+   "text": "ContentView.swift",
+   "box": [
+    120,
+    328,
+    540,
+    368
+   ]
+  },
+  {
+   "text": "MainViewModel.swift",
+   "box": [
+    120,
+    376,
+    600,
+    416
+   ]
+  },
+  {
+   "text": "Preview Content",
+   "box": [
+    120,
+    424,
+    460,
+    464
+   ]
+  },
+  {
+   "text": "Assets.xcassets",
+   "box": [
+    120,
+    472,
+    460,
+    512
+   ]
+  },
+  {
+   "text": "Info.plist",
+   "box": [
+    120,
+    520,
+    340,
+    560
+   ]
+  },
+  {
+   "text": "Build Succeeded",
+   "box": [
+    2200,
+    1880,
+    2520,
+    1920
+   ]
+  },
+  {
+   "text": "2 warnings",
+   "box": [
+    2540,
+    1880,
+    2760,
+    1920
+   ]
+  }
+ ]
+}

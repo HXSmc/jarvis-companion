@@ -1,0 +1,180 @@
+{
+ "question": "Show me the Share button in the toolbar.",
+ "scale": 2,
+ "gt_label": "Share",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Sidebar",
+   "box": [
+    16,
+    46,
+    42,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Back",
+   "box": [
+    50,
+    46,
+    76,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Forward",
+   "box": [
+    80,
+    46,
+    106,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Share",
+   "box": [
+    110,
+    46,
+    136,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Add Tab",
+   "box": [
+    1480,
+    46,
+    1506,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Tab Overview",
+   "box": [
+    1450,
+    46,
+    1476,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Zoom",
+   "box": [
+    1420,
+    46,
+    1446,
+    72
+   ]
+  },
+  {
+   "role": "AXTextField",
+   "label": "Address",
+   "box": [
+    200,
+    46,
+    1300,
+    72
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Reload",
+   "box": [
+    116,
+    46,
+    142,
+    72
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "developer.apple.com",
+   "box": [
+    460,
+    104,
+    1060,
+    136
+   ]
+  },
+  {
+   "text": "Documentation \u2014 Safari",
+   "box": [
+    480,
+    168,
+    1000,
+    204
+   ]
+  },
+  {
+   "text": "WWDC Sessions",
+   "box": [
+    1040,
+    168,
+    1360,
+    204
+   ]
+  },
+  {
+   "text": "Favorites",
+   "box": [
+    480,
+    260,
+    680,
+    296
+   ]
+  },
+  {
+   "text": "Privacy Report",
+   "box": [
+    480,
+    312,
+    760,
+    348
+   ]
+  },
+  {
+   "text": "News",
+   "box": [
+    480,
+    364,
+    600,
+    400
+   ]
+  },
+  {
+   "text": "Weather",
+   "box": [
+    640,
+    364,
+    800,
+    400
+   ]
+  },
+  {
+   "text": "Maps",
+   "box": [
+    840,
+    364,
+    960,
+    400
+   ]
+  },
+  {
+   "text": "iCloud Tabs",
+   "box": [
+    480,
+    416,
+    720,
+    452
+   ]
+  }
+ ]
+}

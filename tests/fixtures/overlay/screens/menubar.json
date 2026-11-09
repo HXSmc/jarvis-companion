@@ -1,0 +1,158 @@
+{
+ "question": "Show me Control Center on the right of the menu bar.",
+ "scale": 2,
+ "gt_label": "Control Center",
+ "ax": [
+  {
+   "role": "AXMenuItem",
+   "label": "Apple",
+   "box": [
+    8,
+    3,
+    55,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Finder",
+   "box": [
+    68,
+    3,
+    122,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "File",
+   "box": [
+    128,
+    3,
+    168,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Edit",
+   "box": [
+    188,
+    3,
+    228,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "View",
+   "box": [
+    248,
+    3,
+    288,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Go",
+   "box": [
+    308,
+    3,
+    342,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Window",
+   "box": [
+    368,
+    3,
+    422,
+    21
+   ]
+  },
+  {
+   "role": "AXMenuItem",
+   "label": "Help",
+   "box": [
+    428,
+    3,
+    468,
+    21
+   ]
+  },
+  {
+   "role": "AXStatusItem",
+   "label": "Wi-Fi",
+   "box": [
+    1250,
+    3,
+    1276,
+    21
+   ]
+  },
+  {
+   "role": "AXStatusItem",
+   "label": "Battery",
+   "box": [
+    1282,
+    3,
+    1314,
+    21
+   ]
+  },
+  {
+   "role": "AXStatusItem",
+   "label": "Bluetooth",
+   "box": [
+    1318,
+    3,
+    1344,
+    21
+   ]
+  },
+  {
+   "role": "AXStatusItem",
+   "label": "Spotlight",
+   "box": [
+    1350,
+    3,
+    1376,
+    21
+   ]
+  },
+  {
+   "role": "AXStatusItem",
+   "label": "Siri",
+   "box": [
+    1382,
+    3,
+    1406,
+    21
+   ]
+  },
+  {
+   "role": "AXStatusItem",
+   "label": "Control Center",
+   "box": [
+    1414,
+    3,
+    1442,
+    21
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Mon 14:32",
+   "box": [
+    2900,
+    6,
+    3020,
+    42
+   ]
+  }
+ ]
+}

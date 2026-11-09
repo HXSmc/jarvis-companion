@@ -1,0 +1,154 @@
+{
+ "question": "Show me the Print button.",
+ "scale": 1,
+ "gt_label": "Print",
+ "ax": [
+  {
+   "role": "AXButton",
+   "label": "Print",
+   "box": [
+    660,
+    640,
+    750,
+    672
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "Cancel",
+   "box": [
+    560,
+    640,
+    650,
+    672
+   ]
+  },
+  {
+   "role": "AXPopUpButton",
+   "label": "Presets",
+   "box": [
+    300,
+    300,
+    500,
+    326
+   ]
+  },
+  {
+   "role": "AXButton",
+   "label": "PDF",
+   "box": [
+    300,
+    340,
+    390,
+    366
+   ]
+  },
+  {
+   "role": "AXTextField",
+   "label": "Copies",
+   "box": [
+    300,
+    200,
+    380,
+    226
+   ]
+  },
+  {
+   "role": "AXTextField",
+   "label": "Pages",
+   "box": [
+    300,
+    240,
+    420,
+    266
+   ]
+  },
+  {
+   "role": "AXPopUpButton",
+   "label": "Printer",
+   "box": [
+    300,
+    160,
+    520,
+    186
+   ]
+  },
+  {
+   "role": "AXStaticText",
+   "label": "Preview",
+   "box": [
+    560,
+    160,
+    760,
+    300
+   ]
+  },
+  {
+   "role": "AXCheckBox",
+   "label": "Two-Sided",
+   "box": [
+    300,
+    380,
+    420,
+    402
+   ]
+  },
+  {
+   "role": "AXCheckBox",
+   "label": "Black & White",
+   "box": [
+    300,
+    410,
+    450,
+    432
+   ]
+  }
+ ],
+ "ocr": [
+  {
+   "text": "Printer: Mars Laser",
+   "box": [
+    300,
+    130,
+    490,
+    150
+   ]
+  },
+  {
+   "text": "Copies 1",
+   "box": [
+    300,
+    195,
+    400,
+    213
+   ]
+  },
+  {
+   "text": "Pages 1-3",
+   "box": [
+    300,
+    235,
+    410,
+    253
+   ]
+  },
+  {
+   "text": "Media & Quality",
+   "box": [
+    560,
+    330,
+    720,
+    350
+   ]
+  },
+  {
+   "text": "Hide Details",
+   "box": [
+    660,
+    600,
+    770,
+    620
+   ]
+  }
+ ]
+}
