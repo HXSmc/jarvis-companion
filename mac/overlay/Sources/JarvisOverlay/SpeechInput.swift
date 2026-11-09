@@ -269,7 +269,7 @@ final class SpeechInput {
                 let text = result.bestTranscription.formattedString
                 partial(text)
                 if result.isFinal { finalize(text) }
-            } else if let error {
+            } else if error != nil {
                 nothing()
             }
         }
@@ -301,7 +301,8 @@ final class SpeechInput {
         let ratio = format.sampleRate / from.format.sampleRate
         let capacity = AVAudioFrameCount((Double(from.frameLength) * ratio).rounded(.up)) + 32
         guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return nil }
-        var consumed = false
+        // The converter calls this block synchronously inside convert(), never concurrently.
+        nonisolated(unsafe) var consumed = false
         let inputBlock: AVAudioConverterInputBlock = { _, status in
             if consumed {
                 status.pointee = .noDataNow
