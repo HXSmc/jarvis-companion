@@ -305,16 +305,20 @@ struct HUDLayer: View {
         // to the side of it (or above / below it); only a slot too small to read is dropped.
         guard let avoid = avoid, !avoid.isNull else { return out }
         let clear = avoid.insetBy(dx: -gap, dy: -gap)
+        // Sizes are checked as plain numbers: CGRect.width/height report negative sizes as positive.
         return out.compactMap { slot in
             guard slot.intersects(clear) else { return slot }
-            var side = slot
-            if slot.minX < clear.minX { side.size.width = clear.minX - slot.minX - 0.5 }
-            else { side.origin.x = clear.maxX + 0.5; side.size.width = slot.maxX - side.minX }
-            if side.width >= 110, !side.intersects(clear) { return side }
-            let above = CGRect(x: slot.minX, y: slot.minY, width: slot.width, height: clear.minY - slot.minY - 0.5)
-            if above.height >= 90 { return above }
-            let below = CGRect(x: slot.minX, y: clear.maxY + 0.5, width: slot.width, height: slot.maxY - clear.maxY - 0.5)
-            return below.height >= 90 ? below : nil
+            let leftW = clear.minX - slot.minX - 0.5, rightW = slot.maxX - clear.maxX - 0.5
+            if slot.minX < clear.minX, leftW >= 110 {
+                return CGRect(x: slot.minX, y: slot.minY, width: leftW, height: slot.height)
+            }
+            if slot.maxX > clear.maxX, rightW >= 110 {
+                return CGRect(x: clear.maxX + 0.5, y: slot.minY, width: rightW, height: slot.height)
+            }
+            let aboveH = clear.minY - slot.minY - 0.5, belowH = slot.maxY - clear.maxY - 0.5
+            if aboveH >= 90 { return CGRect(x: slot.minX, y: slot.minY, width: slot.width, height: aboveH) }
+            if belowH >= 90 { return CGRect(x: slot.minX, y: clear.maxY + 0.5, width: slot.width, height: belowH) }
+            return nil
         }
     }
 
