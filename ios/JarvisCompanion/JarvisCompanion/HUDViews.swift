@@ -14,6 +14,7 @@ struct HUDCardView: View {
         Group {
             VStack(alignment: .leading, spacing: 8) {
                 Text(card.microLabel)
+                    .lineLimit(1)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .foregroundColor(hudAccent)
                     .kerning(1.2)
@@ -85,12 +86,17 @@ struct HUDCardView: View {
         let peak = max(items.map(\.value).max() ?? 1, 0.001)
         return VStack(alignment: .leading, spacing: 5) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                HStack(spacing: 6) {
-                    Text(item.label)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(hudBody)
-                        .lineLimit(1)
-                        .frame(width: 74, alignment: .leading)
+                // Label + value on one line, the bar under them: readable in a narrow slot too.
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(item.label)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(Self.shortNumber(item.value))
+                            .fixedSize()
+                    }
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(hudBody)
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.white.opacity(0.15))
@@ -99,9 +105,6 @@ struct HUDCardView: View {
                         }
                     }
                     .frame(height: 6)
-                    Text(Self.shortNumber(item.value))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(hudBody)
                 }
             }
             if let caption = card.caption, !caption.isEmpty {
