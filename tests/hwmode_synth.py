@@ -185,3 +185,32 @@ if __name__ == "__main__":  # write a preview set for a human look: python3 test
         (out / f"{st}.jpg").write_bytes(render(st).jpeg)
     (out / "in_port1_dim_noisy.jpg").write_bytes(render("in_port1", noise=0.5, brightness=0.45, seed=3).jpeg)
     (out / "minipc_finger_hdmi.jpg").write_bytes(render_minipc(finger="hdmi").jpeg)
+
+
+def render_dim_table(seed: int = 3) -> Scene:
+    """The failure the owner saw: a dark drive dock on a dim, grainy wood table, as a phone
+    sees it in a room at night. Box "dock" is the ground truth."""
+    rng = random.Random(seed)
+    img = Image.new("RGB", (W, H), (120, 82, 50))
+    d = ImageDraw.Draw(img)
+    for y in range(0, H, 3):  # wood grain: wavy bands of slightly different browns
+        shade = rng.randint(-22, 22)
+        d.line((0, y + rng.randint(-2, 2), W, y + rng.randint(-2, 2)),
+               fill=(120 + shade, 82 + shade * 2 // 3, 50 + shade // 2), width=3)
+    d.line((0, 640, W, 560), fill=(25, 25, 25), width=14)  # a black cable across the table
+    dock = (380, 260, 660, 470)
+    d.rounded_rectangle(dock, radius=14, fill=(28, 28, 30), outline=(15, 15, 15), width=4)
+    d.rectangle((420, 290, 520, 440), fill=(60, 120, 200))  # the drive's blue label in the slot
+    d.rectangle((540, 290, 630, 440), fill=(210, 205, 190))
+    d.ellipse((392, 300, 404, 312), fill=(80, 160, 255))  # the blue activity light
+    img = img.filter(ImageFilter.GaussianBlur(1.2))
+    img = Image.eval(img, lambda v: int(v * 0.55))
+    px = img.load()
+    for _ in range(W * H // 3):  # sensor grain
+        x, y = rng.randrange(W), rng.randrange(H)
+        r, g, b = px[x, y]
+        n = rng.randint(-25, 25)
+        px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=50)
+    return Scene(buf.getvalue(), {"dock": dock}, "dim_table")
