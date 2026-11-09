@@ -139,7 +139,8 @@ struct HardwareModeView: View {
     private var phase: HWPhase {
         HWPhase.current(cameraAuthorized: camera.authorized, connected: hw.connected,
                         researching: hw.researching, thinking: hw.thinking,
-                        speaking: voice.speaking, listening: voice.listening)
+                        speaking: voice.speaking, listening: voice.listening,
+                        connecting: hw.status == "Connecting…")
     }
 
     @ViewBuilder
@@ -157,6 +158,7 @@ struct HardwareModeView: View {
     private static func phaseColor(_ phase: HWPhase) -> Color {
         switch phase {
         case .noCamera: return .red
+        case .connecting: return .gray
         case .offline: return .orange
         case .researching: return .blue
         case .thinking: return .yellow
@@ -390,14 +392,17 @@ struct HWShapeLayer: View {
             .fixedSize()
     }
 
+    /// Each outline goes AROUND the part's box, so it never cuts across the part itself.
     static func outline(kind: String, in rect: CGRect) -> Path {
         switch kind {
-        case "circle": return Path(ellipseIn: rect)
-        case "triangle":
+        case "circle":  // the ellipse through the box's corners (sqrt 2 larger than the box)
+            let k = (2.0.squareRoot() - 1) / 2
+            return Path(ellipseIn: rect.insetBy(dx: -rect.width * k, dy: -rect.height * k))
+        case "triangle":  // apex one box-height above; the box's top corners touch the sides
             var p = Path()
-            p.move(to: CGPoint(x: rect.midX, y: rect.minY))
-            p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-            p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            p.move(to: CGPoint(x: rect.midX, y: rect.minY - rect.height))
+            p.addLine(to: CGPoint(x: rect.midX + rect.width, y: rect.maxY))
+            p.addLine(to: CGPoint(x: rect.midX - rect.width, y: rect.maxY))
             p.closeSubpath()
             return p
         default: return Path(roundedRect: rect, cornerRadius: 6)  // "rect"

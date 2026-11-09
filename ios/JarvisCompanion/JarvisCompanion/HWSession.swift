@@ -13,12 +13,13 @@ struct HWShape: Equatable {
 /// The one status the screen may show, most urgent first: camera, connection,
 /// research, thinking, speaking, listening.
 enum HWPhase: Equatable {
-    case noCamera, offline, researching, thinking, speaking, listening
+    case noCamera, connecting, offline, researching, thinking, speaking, listening
 
+    /// `connecting`: the socket is up but the gateway has not said "ready" yet (not a failure).
     static func current(cameraAuthorized: Bool, connected: Bool, researching: Bool,
-                        thinking: Bool, speaking: Bool, listening: Bool) -> HWPhase {
+                        thinking: Bool, speaking: Bool, listening: Bool, connecting: Bool = false) -> HWPhase {
         if !cameraAuthorized { return .noCamera }
-        if !connected { return .offline }
+        if !connected { return connecting ? .connecting : .offline }
         if researching { return .researching }
         if thinking { return .thinking }
         if speaking { return .speaking }
@@ -28,6 +29,7 @@ enum HWPhase: Equatable {
     var label: String {
         switch self {
         case .noCamera: return "Camera is off: allow it in Settings"
+        case .connecting: return "Connecting…"
         case .offline: return "Can't reach Jarvis · tap to retry"
         case .researching: return "Researching…"
         case .thinking: return "Thinking…"
@@ -87,6 +89,8 @@ final class HWSession: ObservableObject {
     /// The line waiting for its server audio, and audio that came before its line did.
     private var awaitingAudio: String?
     private var earlyAudio: [String: (Data, Double)] = [:]
+    /// Words spoken before the gateway said "ready" (voice-first: the owner talks at once).
+    private var pendingAsk: (text: String, withFrame: Bool)?
 
     /// False when the gateway URL is unusable (nothing was started).
     @discardableResult
@@ -99,6 +103,7 @@ final class HWSession: ObservableObject {
         comps.scheme = "wss"
         guard let url = comps.url else { return false }
         disconnect()
+        pendingAsk = nil
         status = "Connecting…"
         var request = URLRequest(url: url)
         request.setValue("Bearer \(AppSettings.token)", forHTTPHeaderField: "Authorization")
@@ -148,7 +153,12 @@ final class HWSession: ObservableObject {
     /// `quiet`: a watch-mode check; an empty answer changes nothing on screen.
     func ask(_ text: String, withFrame: Bool = true, quiet: Bool = false, locate: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, connected else { return }
+        guard !trimmed.isEmpty else { return }
+        guard connected else {
+            // The first words are the task: keep them until "ready" instead of dropping them.
+            if socket != nil, !quiet, !locate { pendingAsk = (trimmed, withFrame) }
+            return
+        }
         thinking = true
         saidThisTurn = false
         quietTurn = quiet
@@ -208,6 +218,10 @@ final class HWSession: ObservableObject {
             status = "Live"
             serverVoice = m["voice"] is String
             onReady?()
+            if let queued = pendingAsk {
+                pendingAsk = nil
+                ask(queued.text, withFrame: queued.withFrame)
+            }
         case "say":
             if let text = m["text"] as? String { speak(text) }
         case "ack":

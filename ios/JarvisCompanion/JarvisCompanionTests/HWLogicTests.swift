@@ -144,6 +144,9 @@ final class HWLogicTests: XCTestCase {
                                         thinking: false, speaking: true, listening: true), .speaking)
         XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: true, researching: false,
                                         thinking: false, speaking: false, listening: false), .listening)
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: false, researching: false,
+                                        thinking: false, speaking: false, listening: true, connecting: true), .connecting,
+                       "waiting for ready is not an error")
         XCTAssertEqual(HWPhase.noCamera.label, "Camera is off: allow it in Settings")
         XCTAssertEqual(HWPhase.offline.label, "Can't reach Jarvis · tap to retry")
         XCTAssertEqual(HWPhase.researching.label, "Researching…")
