@@ -3,7 +3,7 @@
 
 Opt-in (real model calls):
   HWMODE_LIVE=1 HWMODE_BENCH_OUT=out.json python -m pytest tests/test_hwmode_bench.py -q -s
-Writes per-case IoU and hit (box centre inside the ground-truth box) for each run, plus the
+Real SAM and real Kokoro voice are on (markers live_mask, live_voice). Writes per-case IoU and hit (box centre inside the ground-truth box) for each run, plus the
 time from `ask` to the first `say` and first `audio` frame. It only speaks the wire protocol
 (start / frame / ask, box from `shape.box` or `overlay.target_px`), so the same file runs on
 older builds for a before/after comparison.
@@ -30,7 +30,7 @@ from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from hwmode_synth import MINIPC_TASK, TASK, center_in, iou, render, render_minipc
 
 pytestmark = [pytest.mark.skipif(os.environ.get("HWMODE_LIVE") != "1", reason="live model calls: set HWMODE_LIVE=1"),
-              pytest.mark.live_mask]
+              pytest.mark.live_mask, pytest.mark.live_voice]
 
 # (case id, task, scene factory, question, ground-truth part)
 CASES = [
