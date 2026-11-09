@@ -52,6 +52,16 @@ def repo_for(document: str | None) -> Path | None:
     return Path(env).expanduser() if env else None
 
 
+def has_filters(repo: Path) -> bool:
+    """True when the repo's own config (incl. its include files) defines a clean/smudge/textconv filter.
+
+    Those run repo-chosen commands during `git diff`; the overlay refuses such repos.
+    Global/system filters (e.g. git-lfs) are the owner's own and are not counted.
+    """
+    out = _git(Path(repo), "config", "--local", "--includes", "--get-regexp", r"^filter\.")
+    return bool(out and out.strip())
+
+
 def last_merge(repo: Path) -> str | None:
     """Sha of the most recent merge commit; None when the repo has none (or git fails)."""
     out = _git(Path(repo), "log", "--merges", "-1", "--format=%H")

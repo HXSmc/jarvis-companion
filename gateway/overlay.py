@@ -256,6 +256,19 @@ def set_deps(deps: OverlayDeps | None) -> None:
 
 _history: dict[str, deque] = {}  # conv_id -> [(user text, joined say text)] max 6
 _notes: dict[str, deque] = {}  # conv_id -> context notes (e.g. the last diff text) max 3
+# conv_ids that ever saw screen/diff text: their later turns stay on the tool-less pool,
+# because history (the model's own replies) can carry that text to a web-tool session.
+_tainted: set[str] = set()
+_apps_cache: tuple[float, dict] | None = None
+
+
+def _installed_apps(clock=time.monotonic) -> dict:
+    """intents.list_apps(), cached for 60 s (it walks the app folders; called off the event loop)."""
+    global _apps_cache
+    now = clock()
+    if _apps_cache is None or now - _apps_cache[0] > 60:
+        _apps_cache = (now, intents.list_apps())
+    return _apps_cache[1]
 
 
 def _say(text: str) -> dict:
@@ -291,7 +304,8 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
     error: str | None = None
     said: list[str] = []
     try:
-        intent = intents.parse(body.text)
+        apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
+        intent = intents.parse(body.text, apps=apps)
         ack_text, ack_pcm, ack_rate = deps.acks.get(acks.pick_key(intent.kind))
         if ack_pcm:
             yield {"type": "audio", "text": ack_text, "rate": ack_rate,
@@ -307,7 +321,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
             opener = intents.open_app if intent.kind == "open_app" else intents.open_site
             kwargs = {"run": deps.run}
             if intent.kind == "open_app":
-                kwargs["apps"] = deps.apps
+                kwargs["apps"] = apps
             opened = await asyncio.to_thread(opener, intent.arg, **kwargs)
             shown = (opened or intent.arg)[:60]
             async for ev in _speak(f"Opening {shown}." if opened else f"I couldn't find {shown}.", deps):
@@ -354,6 +368,17 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
                 async for ev in _speak("I couldn't find a git repository. Set OVERLAY_GIT_REPO.", deps):
                     yield ev
                 said.append("no repository")
+            elif await asyncio.to_thread(gitdiff.has_filters, repo):
+                # A repo-defined filter would run its own command on every diff: refuse.
+                async for ev in _speak("This repository sets its own git filters, so I won't run git in it.", deps):
+                    yield ev
+                card = hud.validate_card({"type": "info", "title": "Diff skipped for safety",
+                                          "body": ["This repository's .git/config defines a filter.",
+                                                   "Filters run commands from the repository on every diff.",
+                                                   "Run git diff yourself if you trust it."]})
+                if card:
+                    yield {"type": "card", "card": card}
+                said.append("refused: repo filters")
             else:
                 base = await asyncio.to_thread(gitdiff.last_merge, repo)
                 if base is None:
@@ -406,6 +431,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
         oldest = next(iter(_history))
         _history.pop(oldest)
         _notes.pop(oldest, None)
+        _tainted.discard(oldest)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}
@@ -433,7 +459,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         parts.append(f'<context untrusted="true">\n<screen_data>\n{_scrub(ocr)}\n</screen_data>\n</context>')
     prompt = "\n\n".join(parts)
 
-    pool = deps.quiet_conversations if untrusted else deps.conversations
+    if untrusted:
+        _tainted.add(body.conv_id)
+    pool = deps.quiet_conversations if body.conv_id in _tainted else deps.conversations
     session = pool.get(body.conv_id)
 
     loop = asyncio.get_running_loop()

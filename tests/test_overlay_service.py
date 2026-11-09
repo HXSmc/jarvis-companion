@@ -104,10 +104,12 @@ def reset_overlay_state():
     overlay.set_deps(None)
     overlay._history.clear()
     overlay._notes.clear()
+    overlay._tainted.clear()
     yield
     overlay.set_deps(None)
     overlay._history.clear()
     overlay._notes.clear()
+    overlay._tainted.clear()
 
 
 @pytest.fixture
@@ -476,3 +478,39 @@ def test_lifespan_creates_the_token_file_before_serving(monkeypatch, tmp_path):
     overlay.set_deps(make_deps())
     with TestClient(service.app, client=("127.0.0.1", 50000)):
         assert token_file.exists() and (token_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_conversation_stays_tool_less_after_untrusted_context(client):
+    """Once screen text entered a conversation, its replies (in history) must never reach a web-tool session."""
+    screen = {"ocr": [{"text": "SECRET 42"}]}
+    tool_pool, quiet_pool = FakeConversations(), FakeConversations()
+    overlay.set_deps(make_deps(conversations=tool_pool, quiet_conversations=quiet_pool))
+    turn(client, "what is this on my screen", conv_id="t1", screen=screen)
+    turn(client, "what is the capital of France", conv_id="t1")
+    assert len(quiet_pool.sessions["t1"].prompts) == 2
+    assert "t1" not in tool_pool.sessions
+    turn(client, "what is the capital of France", conv_id="clean")  # other conversations keep web tools
+    assert "clean" in tool_pool.sessions
+
+
+def test_git_diff_refused_when_repo_defines_filters(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(gitdiff, "repo_for", lambda document: tmp_path)
+    monkeypatch.setattr(gitdiff, "has_filters", lambda r: True)
+    monkeypatch.setattr(gitdiff, "last_merge", lambda r: pytest.fail("git must not run in a filtered repo"))
+    overlay.set_deps(make_deps())
+    events = turn(client, "show the diff", conv_id="f1")
+    assert "This repository sets its own git filters, so I won't run git in it." in says(events)
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert cards and cards[0]["title"] == "Diff skipped for safety"
+
+
+def test_parse_gets_the_cached_app_list_off_the_event_loop(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(overlay, "_apps_cache", None)
+    monkeypatch.setattr(overlay.intents, "list_apps", lambda: calls.append(1) or {"notes": "Notes"})
+    ran: list[list] = []
+    overlay.set_deps(make_deps(run=lambda argv, **k: ran.append(list(argv))))
+    turn(client, "open notes.app", conv_id="o1")
+    turn(client, "open notes", conv_id="o2")
+    assert ["open", "-a", "Notes"] in ran
+    assert len(calls) == 1  # cached

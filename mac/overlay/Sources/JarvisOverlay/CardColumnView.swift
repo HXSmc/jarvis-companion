@@ -13,7 +13,8 @@ struct CardColumnView: View {
             if !model.missingPermissions.isEmpty {
                 PermissionCard(missing: model.missingPermissions)
             }
-            ForEach(Array(model.cards.enumerated()), id: \.offset) { _, card in
+            // Stable identity per card, so an insert or drop never re-binds a view to another card.
+            ForEach(model.cards, id: \.listKey) { card in
                 CardView(card: card)
                     .transition(.opacity)
             }
@@ -51,5 +52,21 @@ private struct PermissionCard: View {
         .background(Theme.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Theme.cardBorder, lineWidth: 1))
+    }
+}
+
+extension HUDCard {
+    /// The card's own id (the service always sets one); type + title when a card has none.
+    var listKey: String { id ?? "\(typeName):\(title)" }
+
+    var title: String {
+        switch self {
+        case .info(let p): return p.title
+        case .stat(let p): return p.title
+        case .bar(let p): return p.title
+        case .flow(let p): return p.title
+        case .link(let p): return p.title
+        case .image(let p): return p.title
+        }
     }
 }

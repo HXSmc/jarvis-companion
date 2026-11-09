@@ -188,3 +188,10 @@ def test_diff_cards_empty_hunks_give_info_card(repo):
     assert cards[0]["type"] == "info"
     assert cards[0]["body"] == ["No changes since the last merge"]
     assert validate_card(cards[0]) is not None
+
+
+def test_has_filters_only_for_repo_local_filters(repo):
+    r, _ = repo
+    assert gitdiff.has_filters(r) is False
+    _git(r, "config", "--local", "filter.evil.clean", "touch pwned")
+    assert gitdiff.has_filters(r) is True
