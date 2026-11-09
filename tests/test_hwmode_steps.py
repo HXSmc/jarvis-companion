@@ -202,7 +202,7 @@ def _keys(obj) -> set:
     return out
 
 
-def test_no_step_numbers_on_the_wire(gateway_server, fake_claude):
+def test_no_step_numbers_in_wire(gateway_server, fake_claude):
     """Plan, question, watch, done, back: nothing the server sends ever counts instructions."""
     async def run():
         async with gateway_server() as base:
@@ -222,7 +222,7 @@ def test_no_step_numbers_on_the_wire(gateway_server, fake_claude):
     assert not _keys(msgs) & {"step", "of"}  # no message counts instructions anywhere
 
 
-def test_say_never_counts_instructions(gateway_server, fake_claude):
+def test_say_has_no_step_count(gateway_server, fake_claude):
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:

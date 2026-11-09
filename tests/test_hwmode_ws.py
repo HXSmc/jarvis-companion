@@ -98,7 +98,7 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
     asyncio.run(run())
 
 
-def test_first_utterance_is_the_task_and_later_ones_do_not_replace_it(gateway_server, fake_claude, monkeypatch):
+def test_first_utterance_is_task(gateway_server, fake_claude, monkeypatch):
     """Voice-first: no task on start, the first plain ask becomes it; a restart still knows it."""
     from gateway import hwmode
     monkeypatch.setattr(hwmode, "MAX_TURNS", 2)  # ask 1 fresh, ask 2 warm, ask 3 restarts
