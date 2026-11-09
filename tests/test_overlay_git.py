@@ -140,14 +140,15 @@ def test_open_in_editor_refuses_traversal(repo):
 def test_diff_cards_stat_and_bar(repo):
     r, merge = repo
     cards = gitdiff.diff_cards(EXPECTED_HUNKS, merge)
-    assert [c["type"] for c in cards] == ["stat", "bar"]
-    stat, bar = cards
+    assert [c["type"] for c in cards] == ["stat", "bar", "info"]
+    stat, bar, where = cards
     assert stat["value"] == "3 files"
     assert stat["label"] == merge[:8]
     assert [(i["label"], i["value"]) for i in bar["items"]] == [
         ("c.py", 5), ("a.py", 2), ("b.py", 2),
     ]
     assert bar["caption"] == f"git diff {merge[:8]}"
+    assert where["body"][0] == "c.py: 1-5"
     assert all(validate_card(c) is not None for c in cards)
 
 

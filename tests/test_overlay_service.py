@@ -220,7 +220,7 @@ def test_git_diff_turn(client, monkeypatch, tmp_path):
 
     events = turn(client, "show the diff", conv_id="d1")
     cards = [e["card"] for e in events if e["type"] == "card"]
-    assert len(cards) == 2  # stat + bar, via the real gitdiff.diff_cards
+    assert len(cards) == 3  # stat + bar + where, via the real gitdiff.diff_cards
     lines = next(e for e in events if e["type"] == "lines")
     assert lines["file"] == str(repo / "a.py")
     assert lines["ranges"] == [[10, 21], [40, 40]]

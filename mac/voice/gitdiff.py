@@ -15,7 +15,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from common.hud import MAX_ITEMS, MAX_LABEL, validate_card
+from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
 
 _TIMEOUT = 10
 # New side of a unified=0 hunk header: +<start>[,<count>]; a missing ,count means 1.
@@ -96,7 +96,7 @@ def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run) -> s
 
 
 def diff_cards(hunks: list[dict], base: str) -> list[dict]:
-    """Stat + bar cards summarizing `hunks()` output, validated by common.hud.
+    """Stat + bar + "where it changed" info cards summarizing `hunks()` output, validated by common.hud.
 
     Empty hunks (or a failed git call upstream) yield one info card instead.
     """
@@ -123,5 +123,18 @@ def diff_cards(hunks: list[dict], base: str) -> list[dict]:
              ],
              "caption": f"git diff {short}"},
         ),
+        # Where exactly: one line per file with its changed line ranges (top 6 files).
+        validate_card(
+            {"type": "info", "title": "Where it changed",
+             "body": [
+                 f"{f}: " + ", ".join(_span(h) for h in hunks if h["file"] == f)
+                 for f, _ in sorted(per_file.items(), key=lambda kv: -kv[1])[:MAX_BODY_LINES]
+             ]},
+        ),
     ]
     return [c for c in cards if c]
+
+
+def _span(h: dict) -> str:
+    end = h["start"] + max(h["count"], 1) - 1
+    return str(h["start"]) if end == h["start"] else f"{h['start']}-{end}"
