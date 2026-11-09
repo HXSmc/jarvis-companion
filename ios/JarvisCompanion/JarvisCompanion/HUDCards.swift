@@ -124,7 +124,7 @@ struct HUDCard: Identifiable, Equatable {
     /// A JSON array -> valid cards only, at most 6.
     static func list(from raw: Any?) -> [HUDCard] {
         guard let arr = raw as? [Any] else { return [] }
-        return Array(arr.compactMap(parse).prefix(6))
+        return Array(arr.compactMap { parse($0) }.prefix(6))
     }
 
     // MARK: validators (mirror common/hud.py)

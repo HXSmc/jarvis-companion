@@ -6,13 +6,12 @@ private let hudLine = Color(red: 0.62, green: 0.93, blue: 1.0)    // border, tic
 private let hudAccent = Color(red: 0.45, green: 0.88, blue: 1.0)  // the one accent
 private let hudBody = Color.white.opacity(0.85)
 
-/// One rendered HUD card. Fills whatever frame it is given (the layer's slot), tall
-/// content scrolls inside the panel.
+/// One rendered HUD card, as tall as its content (the layer caps it at its slot and clips).
 struct HUDCardView: View {
     let card: HUDCard
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        Group {
             VStack(alignment: .leading, spacing: 8) {
                 Text(card.microLabel)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -28,7 +27,6 @@ struct HUDCardView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.ultraThinMaterial)
@@ -97,7 +95,7 @@ struct HUDCardView: View {
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.white.opacity(0.15))
                             Capsule().fill(hudAccent)
-                                .frame(width: geo.size.width * CGFloat(item.value / peak))
+                                .frame(width: geo.size.width * CGFloat(max(0, item.value) / peak))
                         }
                     }
                     .frame(height: 6)
@@ -315,8 +313,12 @@ struct HUDLayer: View {
             let rects = Self.slots(in: geo.size, avoid: avoid)
             ZStack(alignment: .topLeading) {
                 ForEach(Array(cards.prefix(rects.count).enumerated()), id: \.offset) { i, card in
+                    // Content height, capped at the slot: the camera stays visible between cards.
                     HUDCardView(card: card)
-                        .frame(width: rects[i].width, height: rects[i].height)
+                        .frame(width: rects[i].width)
+                        .frame(maxHeight: rects[i].height, alignment: .top)
+                        .clipped()
+                        .frame(width: rects[i].width, height: rects[i].height, alignment: .top)
                         .position(x: rects[i].midX, y: rects[i].midY)
                         .opacity(shown || reduceMotion ? 1 : 0)
                         .scaleEffect(shown || reduceMotion ? 1 : 0.92)
