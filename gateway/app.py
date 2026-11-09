@@ -24,6 +24,11 @@ if _bind_host != HOST:
 logger = logging.getLogger(__name__)
 
 
+def overlay_enabled(platform: str, env: dict) -> bool:
+    """The overlay router is Mac-only; OVERLAY_IN_GATEWAY=1 mounts it anywhere (tests, CI)."""
+    return platform == "darwin" or env.get("OVERLAY_IN_GATEWAY") == "1"
+
+
 def warn_if_ios_token_shared() -> bool:
     """Startup check: ios_token == shared token gets a loud warning (True).
 
@@ -74,7 +79,9 @@ app.include_router(notify.router)  # /notify/notes: app catch-up on missed owner
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
 app.include_router(cards.session_router)  # /cards/*: jarvis-card from box sessions (shared token)
 app.include_router(hwmode.router)  # /hwmode/ws: phone camera frames -> lean Claude brain (ios_token only)
-app.include_router(overlay.router)  # /overlay/*: Mac voice overlay (loopback + shared token)
+# /overlay/*: Mac voice overlay (loopback + dedicated overlay token) — Mac-only mount.
+if overlay_enabled(sys.platform, os.environ):
+    app.include_router(overlay.router)
 app.include_router(central.public_router)  # /central/floor page only: no data, no auth
 app.include_router(desktop.router)  # /desktop: the phone app's screens for a PC browser (one-time link login)
 app.add_middleware(desktop.DesktopAuth)  # desktop cookie -> ios_token, phone-app routes only

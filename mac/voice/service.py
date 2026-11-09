@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from gateway.overlay import get_deps, router
+from gateway.overlay import get_deps, overlay_token, router
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,17 @@ def _start_wake_thread() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    await asyncio.to_thread(get_deps().acks.prerender)
-    get_deps().conversations.prewarm()  # first answer skips the claude CLI cold start
+    # Create the overlay token before serving: the app reads this file before its first request.
+    overlay_token()
+    try:
+        await asyncio.to_thread(get_deps().acks.prerender)
+    except Exception as exc:  # prewarm must never keep the overlay from serving
+        logger.warning("ack prerender failed (%s), continuing", type(exc).__name__)
+    for pool_name in ("conversations", "quiet_conversations"):
+        try:
+            getattr(get_deps(), pool_name).prewarm()  # first answer skips the CLI cold start
+        except Exception as exc:
+            logger.warning("%s prewarm failed (%s), continuing", pool_name, type(exc).__name__)
     if os.environ.get("OVERLAY_WAKEWORD", "1") != "0":
         _start_wake_thread()
     yield

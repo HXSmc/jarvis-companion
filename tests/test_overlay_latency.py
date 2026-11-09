@@ -20,7 +20,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from conftest import AUTH_HEADER, TOKEN
-from common import config
 from gateway import overlay
 from mac.voice import acks, lean
 
@@ -69,13 +68,16 @@ def percentile(values: list[float], p: float) -> int:
     return round(values[max(0, math.ceil(p / 100 * len(values)) - 1)])
 
 
-def test_overlay_latency(monkeypatch):
-    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": TOKEN)
+def test_overlay_latency(monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN)
+    monkeypatch.setattr(overlay, "TOKEN_FILE", token_file)
     cache = acks.AckCache(lambda text: (ACK_PCM, RATE))
     cache.prerender()
+    brain = OneConversations(SlowBrain())
     overlay.set_deps(overlay.OverlayDeps(
         acks=cache, synth=slow_synth,
-        conversations=OneConversations(SlowBrain()),
+        conversations=brain, quiet_conversations=brain,
         vlm_ask=lambda prompt, jpeg: '{"id": null}',
     ))
     try:

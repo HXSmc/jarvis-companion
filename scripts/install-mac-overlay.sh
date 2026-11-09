@@ -12,8 +12,10 @@ Usage: scripts/install-mac-overlay.sh [--dry-run] [--help]
   --help     show this help
 
 Steps: tool checks (swift, brew, ffmpeg, espeak-ng, claude) -> brew install ffmpeg/espeak-ng
--> .venv with the service deps -> Kokoro TTS model download -> swift build of mac/overlay
--> bundle + ad-hoc sign $HOME/Applications/JarvisOverlay.app -> write the gateway token file
+-> .venv with the service deps -> Kokoro TTS model download (sha256-verified)
+-> swift build of mac/overlay
+-> bundle + ad-hoc sign $HOME/Applications/JarvisOverlay.app
+(the service writes its own dedicated overlay token on first start; no token step here)
 -> render launchd/ templates into $HOME/Library/LaunchAgents and bootstrap them
 -> refuse a taken OVERLAY_PORT -> print the TCC permissions to grant.
 EOF
@@ -31,8 +33,6 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$REPO/.venv/bin/python"
 APP="$HOME/Applications/JarvisOverlay.app"
 TTS_DIR="${HWMODE_TTS_DIR:-$HOME/.local/share/kokoro}"
-TOKEN_DIR="$HOME/Library/Application Support/JarvisOverlay"
-TOKEN_FILE="$TOKEN_DIR/token"
 LOG_DIR="$HOME/Library/Logs/JarvisOverlay"
 PORT="${OVERLAY_PORT:-8791}"
 KOKORO_BASE="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
@@ -96,16 +96,39 @@ if [ -x "$PY" ]; then
 else
   run python3 -m venv "$REPO/.venv"
 fi
-run "$PY" -m pip install fastapi uvicorn httpx numpy openwakeword kokoro-onnx
+run "$PY" -m pip install fastapi==0.143.2 uvicorn==0.54.0 httpx==0.28.1 numpy==2.5.4 openwakeword==0.6.0 kokoro-onnx==0.6.1
 
-# (d) Kokoro TTS model files (skip when already downloaded; never redistributed by this repo)
+# (d) Kokoro TTS model files (never redistributed by this repo; sha256-verified,
+# freshly downloaded ones and files already on disk alike).
+# case, not an associative array: macOS ships bash 3.2.
+model_sha() {
+  case "$1" in
+    kokoro-v1.0.int8.onnx) echo 6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb ;;
+    voices-v1.0.bin) echo bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d ;;
+  esac
+}
+verify_model() {  # $1 = model file path; mismatch -> delete the file, abort the install
+  if (( DRY_RUN )); then
+    echo "would: verify sha256 $(basename "$1")"
+    return 0
+  fi
+  local GOT
+  GOT="$(shasum -a 256 "$1" | cut -d' ' -f1)"
+  if [ "$GOT" != "$(model_sha "$(basename "$1")")" ]; then
+    echo "install-mac-overlay: sha256 mismatch for $1 (got $GOT), deleting and aborting" >&2
+    rm -f "${1:?}"
+    exit 1
+  fi
+  echo "sha256 ok: $(basename "$1")"
+}
 run mkdir -p "$TTS_DIR"
 for MODEL_FILE in kokoro-v1.0.int8.onnx voices-v1.0.bin; do
-  if [ -f "$TTS_DIR/$MODEL_FILE" ]; then
-    echo "kokoro model present: $TTS_DIR/$MODEL_FILE"
-  else
+  if [ ! -f "$TTS_DIR/$MODEL_FILE" ]; then
     run curl -fL --retry 3 -o "$TTS_DIR/$MODEL_FILE" "$KOKORO_BASE/$MODEL_FILE"
+  else
+    echo "kokoro model present: $TTS_DIR/$MODEL_FILE"
   fi
+  verify_model "$TTS_DIR/$MODEL_FILE"
 done
 
 # (e) overlay Swift package, release build
@@ -148,19 +171,8 @@ PLIST
 fi
 run codesign --force --sign - "$APP"
 
-# (g) gateway token file (value never printed; 0600 via umask 077)
-run mkdir -p "$TOKEN_DIR"
-if (( DRY_RUN )); then
-  echo "would: write $TOKEN_FILE from common.config.get_token (token value never printed)"
-else
-  if ! (
-    umask 077 && cd "$REPO" &&
-    "$PY" -c 'from common import config; import sys; t = config.get_token(); sys.exit(1) if not t else open(sys.argv[1], "w").write(t)' "$TOKEN_FILE"
-  ); then
-    echo "install-mac-overlay: no gateway token found (config.get_token returned empty)" >&2
-    exit 1
-  fi
-fi
+# (g) token: none written here — the service mints its own dedicated overlay
+# token (0600) on first start; the installer never touches token files.
 
 # (h) refuse a port held by another process (our own service may already hold it: it is reloaded below)
 if (( DRY_RUN )); then

@@ -25,8 +25,6 @@ from pathlib import Path
 import numpy as np
 from openwakeword.model import Model
 
-from common import config
-
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
@@ -87,10 +85,9 @@ def notify_wake(at_seconds: float, dry_run: bool) -> None:
         cb(at_seconds)
     if dry_run:
         return  # no network side effects in dry-run, by construction
-    token = config.get_token()
-    if token is None:
-        logger.error("no bearer token: get_token() failed, wake not delivered to gateway")
-        return
+    # Dedicated overlay token (the shared gateway token never reaches the Mac app).
+    from gateway.overlay import overlay_token
+    token = overlay_token()
     req = urllib.request.Request(
         f"http://127.0.0.1:{OVERLAY_PORT}/overlay/wake",
         data=json.dumps({"type": "wake", "source": "mac"}).encode(),

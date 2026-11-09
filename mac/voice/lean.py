@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -65,34 +66,38 @@ class LeanSession:
             env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
         )
         self.turns = 0
+        self._lock = threading.Lock()
 
     def ask(self, text: str, jpeg: bytes | None = None, on_text=None) -> Reply:
-        content = []
-        if jpeg is not None:
-            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                                        "data": base64.b64encode(jpeg).decode()}})
-        content.append({"type": "text", "text": text})
-        start = time.monotonic()
-        self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n")
-        self.proc.stdin.flush()
-        ttft = None
-        for line in self.proc.stdout:
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("type") == "stream_event":
-                delta = ev["event"].get("delta", {})
-                if delta.get("type") == "text_delta":
-                    if ttft is None:
-                        ttft = time.monotonic() - start
-                    if on_text:
-                        on_text(delta["text"])
-            elif ev.get("type") == "result":
-                self.turns += 1
-                raw = ev.get("result") or ""
-                return Reply(raw, ttft, time.monotonic() - start)
-        raise RuntimeError("claude session ended without a result")
+        # One write+read pair at a time: interleaved asks on the same session
+        # would interleave their stream-json lines and corrupt every reply.
+        with self._lock:
+            content = []
+            if jpeg is not None:
+                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                            "data": base64.b64encode(jpeg).decode()}})
+            content.append({"type": "text", "text": text})
+            start = time.monotonic()
+            self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n")
+            self.proc.stdin.flush()
+            ttft = None
+            for line in self.proc.stdout:
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "stream_event":
+                    delta = ev["event"].get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        if ttft is None:
+                            ttft = time.monotonic() - start
+                        if on_text:
+                            on_text(delta["text"])
+                elif ev.get("type") == "result":
+                    self.turns += 1
+                    raw = ev.get("result") or ""
+                    return Reply(raw, ttft, time.monotonic() - start)
+            raise RuntimeError("claude session ended without a result")
 
     def close(self):
         if self.proc.poll() is None:

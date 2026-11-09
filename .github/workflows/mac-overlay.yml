@@ -5,7 +5,10 @@ on:
     branches: [loop/jov, ci-ipa]
     paths:
       - 'mac/**'
-      - 'common/hud.py'
+      - 'gateway/overlay.py'
+      - 'gateway/app.py'
+      - 'common/**'
+      - 'tests/conftest.py'
       - 'tests/fixtures/hud/**'
       - 'tests/fixtures/overlay/**'
       - 'tests/test_hud_schema.py'
