@@ -16,12 +16,12 @@ struct OverlayRootView: View {
                 Spacer()
                 if let banner = model.banner {
                     Text(banner)
-                        .font(Theme.microLabel)
-                        .tracking(1.2)
+                        .font(.system(size: 13))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.black.opacity(0.75), in: Capsule())
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.8), in: Capsule())
+                        .accessibilityLabel(banner)
                 }
                 HStack {
                     Spacer()

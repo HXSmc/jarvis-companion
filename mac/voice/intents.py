@@ -28,23 +28,45 @@ APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utili
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _PATH_RE = re.compile(r"^[/A-Za-z0-9._~%-]*$")
 _WAKE_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
-_GROUND_LEADS = ("show me", "where is", "which button", "point to", "highlight")
+_GROUND_LEADS = ("show me", "where is", "where's", "which button", "point to",
+                 "point at", "highlight", "find the")
+# UI things on screen; anything else after a lead is a question for the model.
+UI_NOUNS = ("button", "menu", "icon", "tab", "field", "toggle", "switch", "checkbox",
+            "link", "setting", "settings", "option", "toolbar", "sidebar", "dropdown",
+            "slider", "box", "bar", "item", "key", "control")
+# Word boundaries only: "difference"/"different"/"diffusion" are not diffs.
+_DIFF_RE = re.compile(r"\bdiffs?\b|\bwhat changed\b")
+_CHANGES_RE = re.compile(r"\bchang(e|es|ed)\b")
+_MERGE_RE = re.compile(r"\bmerge[sd]?\b")
+_GROUND_LEAD_RE = re.compile(r"\b(" + "|".join(_GROUND_LEADS) + r")\b")
+_UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
+_APP_SUFFIX_RE = re.compile(r"\.app$", re.I)
 
 
-def parse(text: str) -> Intent:
-    """Transcript -> Intent; the cleaned transcript is the arg for the model kinds."""
+def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
+    """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
+
+    `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
+    to a real installed app before the domain check.
+    """
     t = _WAKE_RE.sub("", text.strip(), count=1).strip().rstrip(".?!").strip()
     low = t.lower()
     if low in ("clear", "clear the screen"):
         return Intent("clear")
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.
-    if "diff" in low or ("changes" in low and "merge" in low):
+    if _DIFF_RE.search(low) or (_CHANGES_RE.search(low) and _MERGE_RE.search(low)):
         return Intent("git_diff", t)
-    if low.startswith(_GROUND_LEADS):
+    # Ground only for a UI thing on screen: a lead followed by a UI noun,
+    # else "where is Paris" would ask the screen instead of the model.
+    lead = _GROUND_LEAD_RE.search(low)
+    if lead and _UI_NOUN_RE.search(low, lead.end()):
         return Intent("ground", t)
     if low.startswith("open "):
         arg = t[5:].strip()
+        name = _APP_SUFFIX_RE.sub("", arg)  # "notes.app" is a bundle, not a domain
+        if _match_app(name, apps if apps is not None else list_apps()):
+            return Intent("open_app", name)
         host = arg.lower().partition("/")[0]
         kind = "open_site" if _HOST_RE.match(host) else "open_app"
         return Intent(kind, arg)
@@ -65,6 +87,17 @@ def list_apps(dirs: tuple[str, ...] = APP_DIRS) -> dict[str, str]:
     return apps
 
 
+def _match_app(name: str, apps: dict[str, str]) -> str | None:
+    """Real app name for a transcript name (exact, then unique prefix); None = no match."""
+    low = name.strip().lower()
+    if not low:
+        return None
+    if low in apps:
+        return apps[low]
+    matches = [v for k, v in apps.items() if k.startswith(low)]
+    return matches[0] if len(matches) == 1 else None
+
+
 def open_app(name: str, *, run=subprocess.run, apps: dict[str, str] | None = None) -> str | None:
     """Launch a real app by validated name; None = refused, nothing run.
 
@@ -73,16 +106,9 @@ def open_app(name: str, *, run=subprocess.run, apps: dict[str, str] | None = Non
     """
     if apps is None:
         apps = list_apps()
-    low = name.strip().lower()
-    if not low:
+    real = _match_app(name, apps)
+    if real is None:
         return None
-    if low in apps:
-        real = apps[low]
-    else:
-        matches = [v for k, v in apps.items() if k.startswith(low)]
-        if len(matches) != 1:
-            return None
-        real = matches[0]
     run(["open", "-a", real], check=False)
     return real
 

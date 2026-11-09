@@ -21,9 +21,11 @@ public struct OrbView: View {
 
     public var body: some View {
         ZStack {
+            // Dark disc so the orb reads on a light desktop in every state.
+            Circle().fill(Color.black.opacity(0.6))
             switch state {
             case .idle:
-                Circle().stroke(Color.white.opacity(0.25), lineWidth: 3)
+                Circle().stroke(Color.white.opacity(0.6), lineWidth: 3)
             case .listening:
                 Circle().stroke(Theme.accent, lineWidth: 3)
                     .modifier(Pulse())
@@ -41,12 +43,23 @@ public struct OrbView: View {
             case .error:
                 Circle().fill(Theme.accent)
                 Text("!")
-                    .font(.system(size: 20, weight: .bold))
+                    .font(Theme.fontTitle)
                     .foregroundStyle(.white)
             }
         }
         .frame(width: 44, height: 44)
-        .animation(.easeOut(duration: 0.2), value: state)
+        .animation(Theme.reduceMotion ? nil : .easeOut(duration: 0.2), value: state)
+        .accessibilityLabel(axLabel)
+    }
+
+    private var axLabel: String {
+        switch state {
+        case .idle: return "Jarvis idle"
+        case .listening: return "Jarvis listening"
+        case .thinking: return "Jarvis thinking"
+        case .speaking: return "Jarvis speaking"
+        case .error: return "Jarvis needs attention"
+        }
     }
 
     private func startSpin() {

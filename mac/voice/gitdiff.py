@@ -18,6 +18,10 @@ from pathlib import Path
 from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
 
 _TIMEOUT = 10
+# Every git call runs with repo config defused — the repo may come from an
+# archive, so no fsmonitor, no hooks, no external diff driver, no pager.
+_GIT_PREFIX = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               "-c", "diff.external=", "-c", "core.pager=cat"]
 # New side of a unified=0 hunk header: +<start>[,<count>]; a missing ,count means 1.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -26,7 +30,7 @@ def _git(repo: Path, *args: str) -> str | None:
     """One read-only git call; stdout on success, None on failure (no repo, no git, timeout)."""
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=_TIMEOUT
+            [*_GIT_PREFIX, *args], cwd=repo, capture_output=True, text=True, timeout=_TIMEOUT
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -60,7 +64,7 @@ def hunks(repo: Path, base: str) -> list[dict]:
     [{file, start, count}] in diff order. Deleted files (+++ /dev/null) are skipped;
     pure deletions are kept with count 0 so the app can still highlight the old line.
     """
-    out = _git(Path(repo), "diff", "--unified=0", "--no-color", "--no-ext-diff", base)
+    out = _git(Path(repo), "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
     if not out:
         return []
     result: list[dict] = []
@@ -76,10 +80,18 @@ def hunks(repo: Path, base: str) -> list[dict]:
     return result
 
 
-def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run) -> str:
-    """Open <repo/file> at `line` in VS Code; fall back to macOS `open`. Returns "code"|"open".
+def diff_text(repo: Path, base: str, limit: int = 12000) -> str:
+    """First `limit` chars of the plain working-tree diff against `base`; "" on failure."""
+    out = _git(Path(repo), "diff", "--no-color", "--no-ext-diff", "--no-textconv", base)
+    return (out or "")[:limit]
 
-    `file` is repo-relative and untrusted: a path resolving outside the repo is refused.
+
+def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run) -> str:
+    """Open <repo/file> at `line` in VS Code; fall back to the default text editor.
+
+    Returns "code"|"text-editor". `file` is repo-relative and untrusted: a path
+    resolving outside the repo is refused. The fallback is `open -t`, never plain
+    `open` — a file checked out of a repo must not be executed (.command/.workflow).
     """
     root = Path(repo).resolve()
     target = (root / file).resolve()
@@ -91,8 +103,8 @@ def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run) -> s
             return "code"
     except FileNotFoundError:
         pass
-    run(["open", str(target)], check=False, capture_output=True)
-    return "open"
+    run(["open", "-t", str(target)], check=False, capture_output=True)
+    return "text-editor"
 
 
 def diff_cards(hunks: list[dict], base: str) -> list[dict]:

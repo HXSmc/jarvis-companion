@@ -36,6 +36,16 @@ def test_retina_scale():
     assert cands[0]["box"] == [100.0, 50.0, 200.0, 70.0]
 
 
+def test_malformed_ocr_entries_are_skipped():
+    # Non-dict entries and non-numeric box values must be skipped, not raise,
+    # and must not disturb the scaling of the valid ones.
+    ocr = ["not-a-dict", {"text": "bad", "box": [0, "a", 1, 2]},
+           {"text": "good", "box": [20, 20, 60, 40]}]
+    cands = build_candidates([], ocr, scale=2.0)
+    assert [c["label"] for c in cands] == ["good"]
+    assert cands[0]["box"] == [10.0, 10.0, 30.0, 20.0]
+
+
 def test_pick_maps_id_to_box():
     cands = build_candidates(
         [{"role": "AXButton", "label": "Export", "box": [10, 10, 90, 44]},

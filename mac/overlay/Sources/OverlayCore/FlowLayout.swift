@@ -39,7 +39,9 @@ public enum FlowLayout {
         let gap: CGFloat = 8
         let rowGap: CGFloat = 22  // room for the arrow and its label between rows
         let cellH = min(max((size.height - CGFloat(rowCount - 1) * rowGap) / CGFloat(rowCount), 12), 34)
-        let cellW = min(max((size.width - CGFloat(maxPerRow - 1) * gap) / CGFloat(maxPerRow), 40), 220)
+        // Cells share the full card width, so nodes fill it instead of centring
+        // in a capped column (220 left an empty gutter on both sides).
+        let cellW = max((size.width - CGFloat(maxPerRow - 1) * gap) / CGFloat(maxPerRow), 40)
         var out: [String: CGRect] = [:]
         for (rowIndex, row) in rows.enumerated() {
             let y = CGFloat(rowIndex) * (cellH + rowGap)

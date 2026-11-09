@@ -88,8 +88,14 @@ final class ServiceClient {
     }
 
     private static func token() throws -> String {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/JarvisOverlay/token")
+        // The service writes the token file; OVERLAY_TOKEN_FILE overrides its location.
+        let url: URL
+        if let path = ProcessInfo.processInfo.environment["OVERLAY_TOKEN_FILE"], !path.isEmpty {
+            url = URL(fileURLWithPath: path)
+        } else {
+            url = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/JarvisOverlay/token")
+        }
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { throw ServiceError.noToken }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw ServiceError.noToken }

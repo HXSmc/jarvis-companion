@@ -22,6 +22,8 @@ final class AppController {
     // Outage state.
     private var serviceVoice: String?
     private var outageAnnounced = false
+    private var bannerTask: Task<Void, Never>?
+    private var permissionTimer: Task<Void, Never>?
 
     func start() {
         let overlay = OverlayPanel()
@@ -46,27 +48,59 @@ final class AppController {
         do {
             try speech.start()
         } catch {
-            model.banner = "Microphone unavailable"
+            model.orb = .error
+            let line = "Microphone unavailable. Check System Settings > Privacy & Security > Microphone."
+            model.banner = line
+            audio.speakLocally(line)
         }
         await runEventsLoop()
     }
 
     private func requestPermissionsIfNeeded() async {
-        var missing = Permissions.missing()
+        let missing = Permissions.missing()
         guard !missing.isEmpty else { return }
         for permission in missing {
             _ = await Permissions.request(permission)
         }
-        missing = Permissions.missing()
-        guard !missing.isEmpty else { return }
+        refreshPermissions()
+        guard !model.missingPermissions.isEmpty else { return }
 
         model.orb = .error
-        let names = missing.map { Permissions.paneName($0) }.joined(separator: " and ")
+        speakPermissionNeed()
+    }
+
+    /// Keeps the permission card in sync; re-checks every 10 s while any are missing.
+    private func refreshPermissions() {
+        let missing = Permissions.missing()
+        if missing != model.missingPermissions { model.missingPermissions = missing }
+        if missing.isEmpty {
+            permissionTimer?.cancel()
+            permissionTimer = nil
+        } else if permissionTimer == nil {
+            permissionTimer = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    self.refreshPermissions()
+                }
+            }
+        }
+    }
+
+    private func speakPermissionNeed() {
+        let names = model.missingPermissions.map { Permissions.paneName($0) }.joined(separator: " and ")
         audio.speakLocally("I need \(names) permission. I've put the steps on screen.")
-        model.add(card: .info(InfoCard(id: "permissions",
-                                       title: "Permission needed",
-                                       body: missing.map { Permissions.paneName($0) }
-                                           + ["System Settings > Privacy & Security"])))
+    }
+
+    /// Banner that clears itself after `seconds`; the outage banner is sticky, not timed.
+    private func showBanner(_ text: String, for seconds: Double) {
+        bannerTask?.cancel()
+        model.banner = text
+        bannerTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.model.banner = nil
+        }
     }
 
     // MARK: - Events loop (wake) and outage handling
@@ -90,6 +124,8 @@ final class AppController {
     }
 
     private func enterOutage() {
+        bannerTask?.cancel()
+        bannerTask = nil
         if !outageAnnounced {
             outageAnnounced = true
             audio.speakLocally("My service is not running.")
@@ -101,11 +137,15 @@ final class AppController {
     private func endOutage() {
         guard outageAnnounced else { return }
         outageAnnounced = false
+        bannerTask?.cancel()
+        bannerTask = nil
         model.banner = nil
         model.orb = .idle
     }
 
     private func handleWake() async {
+        refreshPermissions()
+        if !model.missingPermissions.isEmpty { speakPermissionNeed() }
         model.orb = .listening
         audio.stop()  // barge-in
         // Screen capture starts at wake; only awaited when an utterance lands.
@@ -121,7 +161,14 @@ final class AppController {
                 }
             },
             onNothing: { [weak self] in
-                Task { @MainActor in self?.model.orb = .idle }
+                Task { @MainActor in
+                    guard let self else { return }
+                    // With no mic there is no speech to catch; the permission line covers it.
+                    if !self.model.missingPermissions.contains(.microphone) {
+                        self.audio.speakLocally("I didn't catch that.")
+                    }
+                    self.model.orb = .idle
+                }
             })
     }
 
@@ -152,8 +199,10 @@ final class AppController {
                 handle(event)
             }
         } catch {
-            // Events loop flags outages within seconds; just end the turn quietly.
-            model.orb = .idle
+            // A 401/500/timeout never surfaces on the events loop; say it out loud.
+            audio.speakLocally("I couldn't reach my service. Try again.")
+            showBanner("Couldn't reach Jarvis service", for: 5)
+            model.orb = .error  // until the next wake sets .listening
         }
     }
 

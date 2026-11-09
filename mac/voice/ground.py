@@ -57,12 +57,18 @@ def build_candidates(ax: list[dict], ocr: list[dict], scale: float = 1.0,
         scale = 1.0
     out: list[dict] = []
     for el in ax if isinstance(ax, list) else []:
+        if not isinstance(el, dict):
+            continue
         c = _keep("ax", el.get("role"), el.get("label"), el.get("box"))
         if c:
             out.append(c)
     for el in ocr if isinstance(ocr, list) else []:
+        if not isinstance(el, dict):
+            continue
         box = el.get("box")
-        if isinstance(box, (list, tuple)) and len(box) == 4:
+        # Validate before scaling: a string coord would raise in the division.
+        if (isinstance(box, (list, tuple)) and len(box) == 4
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box)):
             box = [v / scale for v in box]  # capture px -> screen points
         c = _keep("ocr", "text", el.get("text"), box)
         if c and not any(iou(c["box"], k["box"]) > iou_threshold for k in out):

@@ -71,6 +71,35 @@ def test_parse_kinds():
     assert parse("what is the capital of France").kind == "answer"
 
 
+def test_git_diff_word_boundary_only():
+    # Substring hits like "difference"/"different"/"diffusion" stay with the model.
+    for q in ("what's the difference between TCP and UDP", "explain the difference again",
+              "is this different", "diffusion models"):
+        assert parse(q).kind == "answer", q
+    for q in ("show the diff", "what changed since the last merge",
+              "highlight the changes after the last merge"):
+        assert parse(q).kind == "git_diff", q
+
+
+def test_ground_needs_lead_and_ui_noun():
+    # Lead alone or a lead + non-UI subject is a question, not a screen lookup.
+    for q in ("show me how a transformer works", "show me a flowchart of oauth",
+              "where is Paris"):
+        assert parse(q).kind == "answer", q
+    for q in ("show me the button to export a PDF", "where is the settings icon",
+              "highlight the search field"):
+        assert parse(q).kind == "ground", q
+
+
+def test_open_app_suffix_routes_to_installed_app():
+    apps = {"notes": "Notes", "safari": "Safari"}
+    assert parse("open notes.app", apps=apps) == Intent("open_app", "notes")
+    assert parse("open Safari.app", apps=apps) == Intent("open_app", "Safari")
+    assert parse("open github.com", apps=apps) == Intent("open_site", "github.com")
+    # Not an installed app: the .app name falls through to the domain check.
+    assert parse("open notes.app", apps={}).kind == "open_site"
+
+
 def test_list_apps(monkeypatch, tmp_path):
     (tmp_path / "Foo.app").mkdir()
     (tmp_path / "Bar Baz.app").mkdir()

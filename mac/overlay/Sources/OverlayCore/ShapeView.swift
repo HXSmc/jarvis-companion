@@ -17,18 +17,15 @@ public struct ShapeView: View {
             ZStack(alignment: .topLeading) {
                 switch shape.kind {
                 case .rect:
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3))
+                    stroked(RoundedRectangle(cornerRadius: Theme.radiusShape))
                         .frame(width: r.width, height: r.height)
                         .position(x: r.midX, y: r.midY)
                 case .circle:
-                    Ellipse()
-                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3))
+                    stroked(Ellipse())
                         .frame(width: r.width, height: r.height)
                         .position(x: r.midX, y: r.midY)
                 case .triangle:
-                    TriangleShape()
-                        .stroke(Theme.accent, style: StrokeStyle(lineWidth: 3))
+                    stroked(TriangleShape())
                         .frame(width: r.width, height: r.height)
                         .position(x: r.midX, y: r.midY)
                 }
@@ -46,6 +43,15 @@ public struct ShapeView: View {
                                   y: max(14, r.minY - 14))
                 }
             }
+        }
+    }
+
+    /// Accent outline over a 1.5 pt-wider dark stroke, so it still reads on
+    /// red or white UIs behind the overlay.
+    private func stroked<S: Shape>(_ s: S) -> some View {
+        ZStack {
+            s.stroke(Color.black.opacity(0.7), style: StrokeStyle(lineWidth: 6))
+            s.stroke(Theme.accent, style: StrokeStyle(lineWidth: 3))
         }
     }
 }

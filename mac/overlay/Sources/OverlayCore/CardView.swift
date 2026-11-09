@@ -26,20 +26,23 @@ struct CornerTicks: View {
     }
 }
 
-/// Dark translucent card: mono micro-label, bold title, 1pt border, corner ticks.
+/// Dark translucent card: optional meta line, bold title, 1pt border, corner ticks.
 @MainActor
 struct CardChrome<Content: View>: View {
-    let tag: String
+    /// Real information (link host); nil for cards with nothing to say.
+    let meta: String?
     let title: String
     let width: CGFloat?
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(tag)
-                .font(Theme.microLabel)
-                .tracking(1.2)
-                .foregroundStyle(Color.white.opacity(0.55))
+            if let meta {
+                Text(meta)
+                    .font(Theme.fontSmall)
+                    .foregroundStyle(Color.white.opacity(0.72))
+                    .lineLimit(1)
+            }
             Text(title)
                 .font(Theme.cardTitle)
                 .foregroundStyle(.white)
@@ -55,9 +58,10 @@ struct CardChrome<Content: View>: View {
                 Rectangle().fill(Theme.cardBackground)
             }
         )
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Theme.cardBorder, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.cardBorder, lineWidth: 1))
         .overlay(alignment: .topLeading) { CornerTicks().padding(6) }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -74,17 +78,17 @@ public struct CardView: View {
     public var body: some View {
         switch card {
         case .info(let p):
-            CardChrome(tag: "INFO", title: p.title, width: 300) { InfoBody(lines: p.body) }
+            CardChrome(meta: nil, title: p.title, width: 300) { InfoBody(lines: p.body) }
         case .stat(let p):
-            CardChrome(tag: "STAT", title: p.title, width: 300) { StatBody(value: p.value, label: p.label) }
+            CardChrome(meta: nil, title: p.title, width: 300) { StatBody(value: p.value, label: p.label) }
         case .bar(let p):
-            CardChrome(tag: "CHART", title: p.title, width: 360) { BarBody(card: p) }
+            CardChrome(meta: nil, title: p.title, width: 360) { BarBody(card: p) }
         case .flow(let p):
-            CardChrome(tag: "FLOW", title: p.title, width: 360) { FlowBody(card: p) }
+            CardChrome(meta: nil, title: p.title, width: 360) { FlowBody(card: p) }
         case .link(let p):
-            CardChrome(tag: "LINK", title: p.title, width: 300) { LinkBody(card: p) }
+            CardChrome(meta: LinkBody.host(of: p), title: p.title, width: 300) { LinkBody(card: p) }
         case .image(let p):
-            CardChrome(tag: "IMAGE", title: p.title, width: 300) { ImageBody(card: p) }
+            CardChrome(meta: nil, title: p.title, width: 300) { ImageBody(card: p) }
         }
     }
 }
@@ -99,7 +103,7 @@ struct InfoBody: View {
         VStack(alignment: .leading, spacing: 3) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 Text(line)
-                    .font(.system(size: 13))
+                    .font(Theme.fontBody)
                     .foregroundStyle(Color.white.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -115,12 +119,12 @@ struct StatBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.system(size: 44, weight: .bold).monospacedDigit())
+                .font(Theme.fontDisplay)
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.white.opacity(0.6))
+                .font(Theme.fontSmall)
+                .foregroundStyle(Color.white.opacity(0.72))
         }
     }
 }
@@ -142,8 +146,8 @@ struct BarBody: View {
             ForEach(Array(card.items.enumerated()), id: \.offset) { _, item in
                 HStack(spacing: 8) {
                     Text(item.label)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.white.opacity(0.7))
+                        .font(Theme.fontSmall)
+                        .foregroundStyle(Color.white.opacity(0.72))
                         .lineLimit(1)
                         .frame(width: 92, alignment: .leading)
                     GeometryReader { geo in
@@ -155,15 +159,15 @@ struct BarBody: View {
                     }
                     .frame(height: 10)
                     Text(barValueText(item.value))
-                        .font(.system(size: 12).monospacedDigit())
+                        .font(Theme.fontSmall.monospacedDigit())
                         .foregroundStyle(Color.white.opacity(0.85))
                         .frame(width: 56, alignment: .trailing)
                 }
             }
             if let caption = card.caption, !caption.isEmpty {
                 Text(caption)
-                    .font(Theme.microLabel)
-                    .foregroundStyle(Color.white.opacity(0.45))
+                    .font(Theme.fontSmall)
+                    .foregroundStyle(Color.white.opacity(0.72))
             }
         }
     }
@@ -173,9 +177,13 @@ struct BarBody: View {
 struct LinkBody: View {
     let card: LinkCard
 
-    private var host: String {
+    static func host(of card: LinkCard) -> String {
         URL(string: card.url)?.host ?? card.url
     }
+
+    private var host: String { Self.host(of: card) }
+
+    @State private var hovering = false
 
     var body: some View {
         Button {
@@ -185,29 +193,28 @@ struct LinkBody: View {
             }
         } label: {
             VStack(alignment: .leading, spacing: 6) {
-                Text(host)
-                    .font(Theme.microLabel)
-                    .tracking(1.2)
-                    .foregroundStyle(Color.white.opacity(0.6))
-                    .lineLimit(1)
                 if let source = card.source, !source.isEmpty, source != host {
                     Text(source)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.5))
+                        .font(Theme.fontSmall)
+                        .foregroundStyle(Color.white.opacity(0.72))
                         .lineLimit(1)
                 }
                 HStack(spacing: 4) {
-                    Text("OPEN")
-                        .font(Theme.microLabel)
-                        .tracking(1.2)
-                        .foregroundStyle(Theme.accent)
+                    Text("Open link")
+                        .font(Theme.fontSmall)
+                        .foregroundStyle(.white)
                     Image(systemName: "arrow.up.right")
-                        .font(Theme.microLabel)
+                        .font(Theme.fontSmall)
                         .foregroundStyle(Theme.accent)
                 }
             }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(Color.white.opacity(hovering ? 0.06 : 0))
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel("Open \(host)")
     }
 }
 
@@ -215,23 +222,35 @@ struct LinkBody: View {
 struct ImageBody: View {
     let card: ImageCard
 
+    /// Remote images load only after an explicit click (payload is untrusted).
+    @State private var loadRequested = false
+
+    private var safeURL: URL? {
+        guard let urlString = card.url, isSafeHTTPSURL(urlString) else { return nil }
+        return URL(string: urlString)
+    }
+
     var body: some View {
         Group {
-            if let urlString = card.url, let url = URL(string: urlString), isSafeHTTPSURL(urlString) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    case .failure:
-                        tile(text: "IMAGE UNAVAILABLE")
-                    default:
-                        tile(text: "LOADING")
+            if let url = safeURL {
+                if loadRequested {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        case .failure:
+                            tile(text: "Could not load image")
+                        default:
+                            tile(text: "Loading")
+                        }
                     }
+                } else {
+                    loadTile
                 }
             } else if let fileID = card.fileID, !fileID.isEmpty {
-                tile(text: fileID)
+                tile(text: "Saved image")
             } else {
-                tile(text: "NO IMAGE")
+                tile(text: "No image")
             }
         }
         .frame(height: 150)
@@ -240,13 +259,36 @@ struct ImageBody: View {
         .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
     }
 
+    private var loadTile: some View {
+        VStack(spacing: 8) {
+            if let host = safeURL?.host {
+                Text(host)
+                    .font(Theme.fontSmall)
+                    .foregroundStyle(Color.white.opacity(0.72))
+                    .lineLimit(1)
+            }
+            Button {
+                loadRequested = true
+            } label: {
+                Text("Load image")
+                    .font(Theme.fontSmall)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    // White on red is ~3.5:1; keep the text on dark and let the accent be the border.
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusShape).fill(Color.white.opacity(0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusShape).strokeBorder(Theme.accent, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     private func tile(text: String) -> some View {
         ZStack {
             Rectangle().fill(Color.white.opacity(0.06))
             Text(text)
-                .font(Theme.microLabel)
-                .tracking(1.2)
-                .foregroundStyle(Color.white.opacity(0.45))
+                .font(Theme.fontSmall)
+                .foregroundStyle(Color.white.opacity(0.72))
                 .lineLimit(1)
                 .padding(.horizontal, 6)
         }
@@ -270,8 +312,8 @@ struct FlowBody: View {
                         if let label = edge.label, !label.isEmpty {
                             let mid = CGPoint(x: (f.midX + t.midX) / 2 + 6, y: (f.midY + t.midY) / 2)
                             ctx.draw(Text(label)
-                                .font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.6)), at: mid, anchor: .leading)
+                                .font(Theme.fontMicro)
+                                .foregroundColor(.white.opacity(0.72)), at: mid, anchor: .leading)
                         }
                     }
                 }
@@ -295,14 +337,13 @@ struct FlowBody: View {
 
     private func nodeBox(_ node: FlowNode) -> some View {
         Text(node.text)
-            .font(.system(size: 12))
+            .font(Theme.fontSmall)
             .foregroundStyle(Color.white.opacity(0.85))
             .lineLimit(2)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 6)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.06)))
-            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: Theme.radiusCard).fill(Color.white.opacity(0.08)))
     }
 
     /// Distance from a rect's centre to its border along the unit vector (ux, uy).

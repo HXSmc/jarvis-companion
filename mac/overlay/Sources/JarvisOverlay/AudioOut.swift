@@ -76,6 +76,10 @@ final class AudioOut {
     /// Local fallback (no service voice, service down, permission prompt).
     func speakLocally(_ text: String) {
         stopPlayer()
+        // A new line replaces the one still speaking instead of overlapping it.
+        synthesizer?.delegate = nil
+        synthesizer?.stopSpeaking(at: .immediate)
+        synthSpeaking = false
         let synthesizer = AVSpeechSynthesizer()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")

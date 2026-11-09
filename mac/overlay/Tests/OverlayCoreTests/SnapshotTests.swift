@@ -3,7 +3,29 @@ import SwiftUI
 import AppKit
 @testable import OverlayCore
 
-/// Renders fixture cards, the fixture shapes and one orb per state to PNG files.
+/// Bright busy desktop stand-in: white with a red block, grey bars and black
+/// text lines (shapes only), to check contrast on light backdrops.
+private struct BusyLightBackdrop: View {
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.white
+            Rectangle().fill(Theme.accent)
+                .frame(width: 150, height: 110)
+                .padding(.leading, 24).padding(.top, 20)
+            Rectangle().fill(Color(white: 0.87)).frame(height: 12).padding(.top, 148)
+            Rectangle().fill(Color(white: 0.87)).frame(height: 12).padding(.top, 168)
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(0..<8, id: \.self) { _ in
+                    Rectangle().fill(Color.black).frame(height: 2)
+                }
+            }
+            .padding(.leading, 28).padding(.top, 196)
+        }
+    }
+}
+
+/// Renders fixture cards, the fixture shapes and one orb per state to PNG files,
+/// each over black and over a bright busy backdrop (`-light`).
 @MainActor
 final class SnapshotTests: XCTestCase {
     static var outDir: URL {
@@ -37,11 +59,16 @@ final class SnapshotTests: XCTestCase {
         for file in files {
             let msg = try JSONDecoder().decode(HUDMessage.self, from: try Data(contentsOf: file))
             for card in msg.cards {
-                let name = "card-\(card.typeName)-\(card.id ?? "noid").png"
+                let name = "card-\(card.typeName)-\(card.id ?? "noid")"
                 try renderPNG(
                     CardView(card: card).padding(20).background(Color.black),
                     size: CGSize(width: 420, height: 420),
-                    name: name
+                    name: "\(name).png"
+                )
+                try renderPNG(
+                    CardView(card: card).padding(20).background(BusyLightBackdrop()),
+                    size: CGSize(width: 420, height: 420),
+                    name: "\(name)-light.png"
                 )
             }
         }
@@ -60,6 +87,13 @@ final class SnapshotTests: XCTestCase {
             }
         }
         try renderPNG(canvas, size: CGSize(width: 1200, height: 700), name: "shapes.png")
+        let lightCanvas = ZStack(alignment: .topLeading) {
+            BusyLightBackdrop()
+            ForEach(Array(msg.shapes.enumerated()), id: \.offset) { _, shape in
+                ShapeView(shape: shape)
+            }
+        }
+        try renderPNG(lightCanvas, size: CGSize(width: 1200, height: 700), name: "shapes-light.png")
     }
 
     func testRenderOrbStates() throws {
@@ -68,11 +102,20 @@ final class SnapshotTests: XCTestCase {
                 OrbView(state: state, level: 0.7)
                 Text(state.rawValue.uppercased())
                     .font(Theme.microLabel)
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundColor(.white.opacity(0.72))
             }
             .frame(width: 120, height: 140)
             .background(Color.black)
             try renderPNG(view, size: CGSize(width: 120, height: 140), name: "orb-\(state.rawValue).png")
+            let light = VStack(spacing: 14) {
+                OrbView(state: state, level: 0.7)
+                Text(state.rawValue.uppercased())
+                    .font(Theme.microLabel)
+                    .foregroundColor(.black)
+            }
+            .frame(width: 120, height: 140)
+            .background(BusyLightBackdrop())
+            try renderPNG(light, size: CGSize(width: 120, height: 140), name: "orb-\(state.rawValue)-light.png")
         }
     }
 }

@@ -120,8 +120,37 @@ def test_open_in_editor_open_when_code_missing(repo):
         calls.append(cmd)
         return SimpleNamespace(returncode=0)
 
-    assert gitdiff.open_in_editor(r, "a.py", 3, run=fake_run) == "open"
-    assert calls == [["open", str((r / "a.py").resolve())]]
+    assert gitdiff.open_in_editor(r, "a.py", 3, run=fake_run) == "text-editor"
+    # -t (default text editor): plain `open` would execute .command/.workflow files.
+    assert calls == [["open", "-t", str((r / "a.py").resolve())]]
+
+
+def test_git_argv_defuses_repo_config(repo, monkeypatch):
+    r, merge = repo
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="abc123\n")
+
+    monkeypatch.setattr(gitdiff.subprocess, "run", fake_run)
+    assert gitdiff.last_merge(r) == "abc123"
+    gitdiff.hunks(r, merge)
+    gitdiff.diff_text(r, merge)
+    prefix = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=", "-c", "core.pager=cat"]
+    assert all(argv[:9] == prefix for argv in calls)
+    # The diff calls also refuse external diff drivers and textconv filters.
+    for argv in calls[1:]:
+        assert "--no-ext-diff" in argv and "--no-textconv" in argv
+
+
+def test_diff_text_on_repo(repo):
+    r, merge = repo
+    text = gitdiff.diff_text(r, merge)
+    assert "diff --git" in text and "alpha3 edited" in text
+    assert gitdiff.diff_text(r, merge, limit=10) == text[:10]
+    assert gitdiff.diff_text(r / "nope", merge) == ""
 
 
 def test_open_in_editor_refuses_traversal(repo):
