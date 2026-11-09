@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jarvis-companion/hud.schema.json",
+  "title": "Jarvis HUD message",
+  "type": "object",
+  "properties": {
+    "shapes": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "$ref": "#/$defs/shape"
+      }
+    },
+    "cards": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "$ref": "#/$defs/card"
+      }
+    }
+  },
+  "required": [
+    "shapes",
+    "cards"
+  ],
+  "$defs": {
+    "shape": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "rect",
+            "circle",
+            "triangle"
+          ]
+        },
+        "box": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "kind",
+        "box"
+      ],
+      "additionalProperties": false
+    },
+    "card": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "info"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "body": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "minItems": 1,
+              "maxItems": 6
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title",
+            "body"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 24
+            },
+            "label": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title",
+            "value",
+            "label"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "value": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "label",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "caption": {
+              "type": "string",
+              "maxLength": 120
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title",
+            "items"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "flow"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "nodes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 60
+                  }
+                },
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "edges": {
+              "type": "array",
+              "maxItems": 24,
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 2,
+                "maxItems": 3
+              }
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title",
+            "nodes",
+            "edges"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "link"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "url": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "source": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title",
+            "url"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "image"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "url": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "file_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "url"
+              ]
+            },
+            {
+              "required": [
+                "file_id"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

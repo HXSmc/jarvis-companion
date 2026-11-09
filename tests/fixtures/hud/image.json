@@ -1,0 +1,4 @@
+{"shapes": [], "cards": [
+  {"id": "c-img", "type": "image", "title": "Board photo", "url": "https://upload.wikimedia.org/wikipedia/commons/a/a1/Example.jpg"},
+  {"id": "c-img2", "type": "image", "title": "Saved frame", "file_id": "frame_0042.jpg"}
+]}

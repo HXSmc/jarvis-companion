@@ -1,0 +1,5 @@
+{"shapes": [], "cards": [
+  {"id": "c-flow", "type": "flow", "title": "Request path",
+   "nodes": [{"id": "a", "text": "Wake word"}, {"id": "b", "text": "Speech to text"}, {"id": "c", "text": "Brain"}, {"id": "d", "text": "Overlay"}],
+   "edges": [["a", "b"], ["b", "c", "final text"], ["c", "d", "shapes + cards"]]}
+]}
