@@ -114,7 +114,7 @@ public struct FlowEdge: Codable, Equatable {
         var u = encoder.unkeyedContainer()
         try u.encode(from)
         try u.encode(to)
-        try u.encodeIfPresent(label)
+        if let label { try u.encode(label) }
     }
 }
 
