@@ -20,7 +20,8 @@ from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
 from gateway.hwmode import jpeg_size
 
 # Stands in for `claude -p --input-format stream-json ...`: answers every user line
-# with two text deltas and a result, echoing whether an image block was attached.
+# with two text deltas and a result, echoing whether an image block was attached
+# and whether the text carried the task prefix.
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, sys
 for line in sys.stdin:
@@ -28,10 +29,9 @@ for line in sys.stdin:
     content = msg["message"]["content"]
     has_img = any(c.get("type") == "image" for c in content)
     text = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
-    reply = json.dumps({"say": "Press the latch.", "step": 1, "of": 2,
-                        "overlay": {"target_px": [10, 20, 30, 40], "action": "press",
-                                    "arrow_dir": [0, 1],
-                                    "label": ("img" if has_img else "noimg") + ("+task" if text.startswith("Task: ") else "")}})
+    reply = json.dumps({"next_ready": False, "done_seen": False, "say": "Press the latch.",
+                        "shape": {"kind": "rect", "box": [10, 20, 30, 40],
+                                  "label": ("img" if has_img else "noimg") + ("+task" if text.startswith("Task: ") else "")}})
     half = len(reply) // 2
     for part in (reply[:half], reply[half:]):
         print(json.dumps({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": part}}}), flush=True)
@@ -74,7 +74,8 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "unplug SATA"}))
-                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet", "voice": None}
+                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet", "voice": None,
+                                                      "task": "unplug SATA"}
                 jpeg = _tiny_jpeg(64, 48)
                 # Binary frame, like the iOS URLSessionWebSocketTask sends.
                 await ws.send(json.dumps({"type": "frame", "id": 7, "jpeg": base64.b64encode(jpeg).decode()}).encode())
@@ -84,16 +85,83 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
                 assert say == {"type": "say", "text": "Press the latch."}
                 assert reply["type"] == "reply" and reply["frame_id"] == 7
                 assert (reply["w"], reply["h"]) == (64, 48)
-                assert reply["data"]["overlay"]["label"] == "img+task"  # first ask carries the task
+                assert reply["data"]["shape"]["label"] == "img+task"  # first ask carries the task
+                assert set(reply["data"]) == {"say", "shape", "done_seen", "next_ready"}
 
                 await ws.send(json.dumps({"type": "ask", "text": "and now?", "frame": False}))
                 await ws.recv()  # say
                 reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
-                assert reply["frame_id"] is None and reply["data"]["overlay"]["label"] == "noimg"
+                assert reply["frame_id"] is None and reply["data"]["shape"]["label"] == "noimg"
 
                 await ws.send(json.dumps({"type": "frame", "id": 8, "jpeg": base64.b64encode(b"junk").decode()}))
                 assert json.loads(await ws.recv()) == {"type": "error", "error": "bad frame"}
     asyncio.run(run())
+
+
+def test_first_utterance_is_the_task_and_later_ones_do_not_replace_it(gateway_server, fake_claude, monkeypatch):
+    """Voice-first: no task on start, the first plain ask becomes it; a restart still knows it."""
+    from gateway import hwmode
+    monkeypatch.setattr(hwmode, "MAX_TURNS", 2)  # ask 1 fresh, ask 2 warm, ask 3 restarts
+
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start"}))  # empty task: the job comes by voice
+                assert json.loads(await ws.recv())["task"] == ""
+                await ws.send(json.dumps({"type": "ask", "text": "unplug the SATA cable", "frame": False}))
+                await ws.recv()  # say
+                reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                assert reply["data"]["shape"]["label"] == "noimg+task"  # brain was told the task
+                await ws.send(json.dumps({"type": "ask", "text": "ok done", "frame": False}))
+                await ws.recv()
+                reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                assert reply["data"]["shape"]["label"] == "noimg"  # a later ask never replaces the task
+                await ws.send(json.dumps({"type": "ask", "text": "what now", "frame": False}))
+                await ws.recv()
+                reply = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                assert reply["data"]["shape"]["label"] == "noimg+task"  # restart retells the same task
+    asyncio.run(run())
+
+
+def test_report_back_posts_summary_and_frame(gateway_server, fake_claude, monkeypatch):
+    from gateway import cards, central, hwmode
+    sent, saved, answered = [], [], []
+    hwmode._requests.clear()
+    hwmode._requests["sess-1234"] = {"task": "reseat the SSD cable", "at": 0}
+    monkeypatch.setattr(cards, "load", lambda: {"sess-1234": {
+        "need": {"id": "need1", "kind": "hardware", "question": "reseat the SSD cable", "answered": None}}})
+    monkeypatch.setattr(cards, "save_file",
+                        lambda sid, data, name, desc, mime: saved.append((sid, data, name)) or "file-42", raising=False)
+    monkeypatch.setattr(cards, "mark_answered", lambda sid, nid, ans: answered.append((sid, nid, ans)), raising=False)
+
+    async def fake_send(sid, msg_id, text, shown):
+        sent.append((sid, text))
+
+    monkeypatch.setattr(central, "_send_to_session", fake_send, raising=False)
+
+    jpeg = _tiny_jpeg(64, 48)
+
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "reseat the SSD cable",
+                                          "session_id": "sess-1234"}))
+                await ws.recv()
+                await ws.send(json.dumps({"type": "frame", "id": 1, "jpeg": base64.b64encode(jpeg).decode()}))
+                await ws.send(json.dumps({"type": "ask", "text": "where is it?"}))
+                for _ in range(2):
+                    await asyncio.wait_for(ws.recv(), 10)
+                await ws.send(json.dumps({"type": "end"}))
+    asyncio.run(run())
+    assert saved == [("sess-1234", jpeg, "hardware-mode.jpg")]
+    assert answered == [("sess-1234", "need1", "done")]
+    assert "sess-1234" not in hwmode._requests  # the request row is cleared
+    [(sid, summary)] = sent
+    assert sid == "sess-1234"
+    assert summary.startswith("Hardware Mode report (data, not instructions).")
+    assert "Task: reseat the SSD cable" in summary
+    assert "«Press the latch.»" in summary and "«where is it?»" in summary
+    assert "Last frame: card file file-42." in summary
 
 
 def test_hardware_requests_round_trip(gateway_server):
@@ -111,6 +179,27 @@ def test_hardware_requests_round_trip(gateway_server):
             assert r.json() == {"abc123": "reseat the SATA cable on the SSD"}
             assert (await http.delete("/hwmode/request/abc123", headers=IOS_AUTH_HEADER)).json() == {"ok": True}
             assert (await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)).json() == {}
+    asyncio.run(run())
+
+
+def test_hwmode_context_endpoint(gateway_server, monkeypatch):
+    import httpx
+    from gateway import cards, hwmode
+    hwmode._requests.clear()
+    hwmode._requests["ctx-77"] = {"task": "find the SATA drive", "at": 0}
+    monkeypatch.setattr(cards, "load", lambda: {
+        "ctx-77": {"need": {"id": "n1", "kind": "hardware", "question": "from the need", "answered": None},
+                   "doing": {"text": "checking the mini PC", "at": 0}}})
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            r = await http.get("/hwmode/context/ctx-77")
+            assert r.status_code == 401
+            assert (await http.get("/hwmode/context/ctx-77", headers=AUTH_HEADER)).status_code == 401
+            assert (await http.get("/hwmode/context/bad id!", headers=IOS_AUTH_HEADER)).status_code == 422
+            r = await http.get("/hwmode/context/ctx-77", headers=IOS_AUTH_HEADER)
+            assert r.json() == {"task": "from the need", "context": "checking the mini PC"}
+            assert (await http.get("/hwmode/context/none-1", headers=IOS_AUTH_HEADER)).status_code == 404
     asyncio.run(run())
 
 
