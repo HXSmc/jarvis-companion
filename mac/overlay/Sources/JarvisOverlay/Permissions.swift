@@ -26,11 +26,11 @@ enum Permissions {
     static func request(_ p: Permission) async -> Bool {
         switch p {
         case .microphone:
-            await withCheckedContinuation { c in
+            return await withCheckedContinuation { c in
                 AVCaptureDevice.requestAccess(for: .audio) { c.resume(returning: $0) }
             }
         case .speech:
-            await withCheckedContinuation { c in
+            return await withCheckedContinuation { c in
                 SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0 == .authorized) }
             }
         case .accessibility:
