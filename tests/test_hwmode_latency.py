@@ -80,6 +80,13 @@ def test_every_ask_gets_its_ack_within_a_second(gateway_server, tmp_path, monkey
                             if msg["type"] == "reply":
                                 break
                         times.append(first)
+                        # The reply's own line is voiced after the reply: drain it, or it would be
+                        # counted as the NEXT ask's first audio.
+                        said = ((msg.get("data") or {}).get("say") or "")
+                        while said:
+                            msg = json.loads(await asyncio.wait_for(ws.recv(), 15))
+                            if msg["type"] == "audio" and msg.get("text") == said:
+                                break
                     return times
         times = asyncio.run(run())
     finally:

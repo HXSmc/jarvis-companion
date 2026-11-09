@@ -55,6 +55,12 @@ def test_a_mask_that_only_trims_the_rim_keeps_the_brains_box():
     conn = _conn(seg)
     data = {"say": "There, sir.", "shape": {"kind": "rect", "box": [300, 420, 420, 470]}}
     assert asyncio.run(conn._outline(data, b"jpeg", None))["shape"]["box"] == [300, 420, 420, 470]
+    seg.result = {"target_px": [346, 514, 453, 553], "mask_score": 0.9}  # blurred edges: up to 15% inside
+    data = {"say": "There, sir.", "shape": {"kind": "rect", "box": [342, 512, 460, 560]}}
+    assert asyncio.run(conn._outline(data, b"jpeg", None))["shape"]["box"] == [342, 512, 460, 560]
+    seg.result = {"target_px": [373, 257, 673, 479], "mask_score": 0.9}  # a loose box really corrected
+    data = {"say": "There, sir.", "shape": {"kind": "rect", "box": [310, 205, 730, 525]}}
+    assert asyncio.run(conn._outline(data, b"jpeg", None))["shape"]["box"] == [373.0, 257.0, 673.0, 479.0]
 
 
 @pytest.mark.parametrize("seg", [FakeSegmenter(result=None), FakeSegmenter(fail=True), None])

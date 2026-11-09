@@ -593,9 +593,11 @@ class _Conn:
             logger.info("outline %s: no believable mask, keeping the box", s.get("label"))
             return data
         bw, bh = box[2] - box[0], box[3] - box[1]
-        if all(abs(t - b) <= 0.06 * side for t, b, side in zip(tight, box, (bw, bh, bw, bh))):
-            # A mask that only trims a few pixels off an already tight box loses the part's rim
-            # (bench: sockets 0.95 -> 0.86 IoU); SAM only replaces a box it really corrects.
+        moves = [abs(t - b) / side for t, b, side in zip(tight, box, (bw, bh, bw, bh))]
+        inside = tight[0] >= box[0] and tight[1] >= box[1] and tight[2] <= box[2] and tight[3] <= box[3]
+        if max(moves) <= 0.06 or (inside and max(moves) <= 0.15):
+            # A mask that only trims the rim off an already tight box loses the part's edge
+            # (bench: sockets 0.95 -> 0.73 IoU); SAM only replaces a box it really corrects.
             logger.info("outline %s: %s ~ %s, keeping the brain's box", s.get("label"), [round(v) for v in box], tight)
             return data
         logger.info("outline %s: %s -> %s", s.get("label"), [round(v) for v in box], tight)
