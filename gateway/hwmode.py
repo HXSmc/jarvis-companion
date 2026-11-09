@@ -287,61 +287,37 @@ class _Conn:
             if acks:
                 say_event = asyncio.Event()
 
-                def on_text(chunk: str) -> None:
-                    # Speak early only once the reply's jump is known to pass the gate:
-                    # a refused jump must never be heard.
-                    nonlocal said
-                    streamed.append(chunk)
-                    if said:
+            def on_text(chunk: str) -> None:
+                # Speak early only once the reply's jump is known to pass the gate:
+                # a refused jump must never be heard.
+                nonlocal said
+                streamed.append(chunk)
+                if said:
+                    return
+                joined = "".join(streamed)
+                m_say = _SAY_RE.search(joined)
+                if not m_say:
+                    return
+                head = joined[:m_say.start()]
+                m_next = _NEXT_READY_RE.search(head)
+                if m_next and m_next.group(1) == "true":  # seen done mid-stream proves only a watch check with a frame
+                    m_done = _DONE_SEEN_RE.search(head)
+                    seen = bool(m_done and m_done.group(1) == "true")
+                    if not (user_done or back or (watch and jpeg is not None and seen)):
                         return
-                    joined = "".join(streamed)
-                    m_say = _SAY_RE.search(joined)
-                    if not m_say:
-                        return
-                    head = joined[:m_say.start()]
-                    m_next = _NEXT_READY_RE.search(head)
-                    jump = bool(m_next and m_next.group(1) == "true")
-                    if jump:  # seen done mid-stream can only prove a watch check with a frame
-                        m_done = _DONE_SEEN_RE.search(head)
-                        seen = bool(m_done and m_done.group(1) == "true")
-                        if not (user_done or back or (watch and jpeg is not None and seen)):
-                            return
-                    said = True
-                    say = json.loads(f'"{m_say.group(1)}"')
-                    self._note_said(say)
-                    early.append(say)
-                    asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
-                    asyncio.run_coroutine_threadsafe(self._speak(say), loop)
+                said = True
+                say = json.loads(f'"{m_say.group(1)}"')
+                self._note_said(say)
+                early.append(say)
+                asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
+                asyncio.run_coroutine_threadsafe(self._speak(say), loop)
+                if say_event is not None:
                     loop.call_soon_threadsafe(say_event.set)
 
+            if acks:
                 ack_task = asyncio.create_task(self._ack(acks, "done" if user_done else "wait", say_event))
                 self.speaking.add(ack_task)
                 ack_task.add_done_callback(self.speaking.discard)
-            else:
-                def on_text(chunk: str) -> None:
-                    # No ack to race: same gate rule, minus the event.
-                    nonlocal said
-                    streamed.append(chunk)
-                    if said:
-                        return
-                    joined = "".join(streamed)
-                    m_say = _SAY_RE.search(joined)
-                    if not m_say:
-                        return
-                    head = joined[:m_say.start()]
-                    m_next = _NEXT_READY_RE.search(head)
-                    jump = bool(m_next and m_next.group(1) == "true")
-                    if jump:
-                        m_done = _DONE_SEEN_RE.search(head)
-                        seen = bool(m_done and m_done.group(1) == "true")
-                        if not (user_done or back or (watch and jpeg is not None and seen)):
-                            return
-                    said = True
-                    say = json.loads(f'"{m_say.group(1)}"')
-                    self._note_said(say)
-                    early.append(say)
-                    asyncio.run_coroutine_threadsafe(self.send({"type": "say", "text": say}), loop)
-                    asyncio.run_coroutine_threadsafe(self._speak(say), loop)
 
             # The part's outline needs the frame encoded (~1.3 s): do it while the brain thinks.
             embedding = (asyncio.create_task(asyncio.to_thread(self.segmenter.embed, jpeg))
@@ -491,8 +467,8 @@ class _Conn:
         return {**data, "shape": {**s, "box": fine}}
 
     async def _outline(self, data: dict, jpeg: bytes, embedding: asyncio.Task | None) -> dict:
-        """The part's mask (SAM on this box) inside the brain's box tightens the shape's box,
-        so the phone paints the part itself. Any failure keeps the plain box."""
+        """The part's mask (SAM on this box) inside the brain's box tightens the shape's box.
+        The mask itself never leaves the gateway; any failure keeps the brain's box."""
         s = data.get("shape")
         px = s.get("box") if isinstance(s, dict) else None
         if self.segmenter is None or not (isinstance(px, list) and len(px) == 4):

@@ -6,7 +6,7 @@ Optional by design: without `onnxruntime`/Pillow or the model files the phone ke
 Model files (sam2.1_hiera_tiny.encoder.onnx, sam2.1_hiera_tiny.decoder.onnx, Apache 2.0) come
 from the Hugging Face repo vietanhdev/segment-anything-2.1-onnx-models (sam2.1_hiera_tiny_20260221.zip);
 they live in HWMODE_SAM_DIR (default ~/.local/share/sam2.1-tiny), not in the repo.
-Cost on this box: ~1.3 s to encode a frame (run while the brain thinks), ~30 ms per mask.
+Cost on this box: ~1.3 s to encode a frame (run while the brain thinks), ~150 ms per box (two decodes).
 """
 from __future__ import annotations
 
