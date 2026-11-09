@@ -141,7 +141,12 @@ final class HUDCardSnapshotTests: XCTestCase {
             XCTAssertLessThanOrEqual(s.maxY, size.height - 150)  // bottom controls stay free
             XCTAssertLessThanOrEqual(s.width, size.width * 0.46 + 0.5)  // <= ~46% width
         }
-        XCTAssertEqual(slots.count, 4)  // the two middle slots are skipped, 4 remain
+        XCTAssertEqual(slots.count, 6)  // slots over the subject are trimmed beside / above / below it
+        // a subject filling the middle band: side slots there are too narrow, so they are dropped
+        let wide = CGRect(x: 60, y: 250, width: 270, height: 300)
+        for s in HUDLayer.slots(in: size, avoid: wide) {
+            XCTAssertFalse(s.insetBy(dx: -8, dy: -8).intersects(wide), "slot \(s) covers the subject")
+        }
         XCTAssertGreaterThanOrEqual(HUDLayer.slots(in: size, avoid: nil).count, 6)
     }
 

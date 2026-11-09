@@ -201,7 +201,7 @@ final class CardSnapshotTests: XCTestCase {
         try shot("10-report-attachment-pdf",
                  screen: CardFileView(target: CardFileTarget(sessionID: "a1b2c3d4-0003", file: pdfFile),
                                       preloaded: Self.samplePDF()))
-        try shot("11-hardware", fit: try boardCard(Self.hardware))
+        try shot("17-hardware", fit: try boardCard(Self.hardware))
     }
 
     // MARK: drawing

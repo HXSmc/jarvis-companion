@@ -301,11 +301,21 @@ struct HUDLayer: View {
         let ys: [CGFloat] = [top, top + rowH + gap, top + 2 * (rowH + gap)]
         var out: [CGRect] = []
         for y in ys { for x in xs { out.append(CGRect(x: x, y: y, width: cardW, height: rowH)) } }
-        // TL, TR, ML, MR, BL, BR is already the loop order; drop what covers the subject.
-        if let avoid = avoid, !avoid.isNull {
-            out = out.filter { !$0.insetBy(dx: -8, dy: -8).intersects(avoid) }
+        // TL, TR, ML, MR, BL, BR is already the loop order. A slot over the subject is trimmed
+        // to the side of it (or above / below it); only a slot too small to read is dropped.
+        guard let avoid = avoid, !avoid.isNull else { return out }
+        let clear = avoid.insetBy(dx: -gap, dy: -gap)
+        return out.compactMap { slot in
+            guard slot.intersects(clear) else { return slot }
+            var side = slot
+            if slot.minX < clear.minX { side.size.width = clear.minX - slot.minX - 0.5 }
+            else { side.origin.x = clear.maxX + 0.5; side.size.width = slot.maxX - side.minX }
+            if side.width >= 110, !side.intersects(clear) { return side }
+            let above = CGRect(x: slot.minX, y: slot.minY, width: slot.width, height: clear.minY - slot.minY - 0.5)
+            if above.height >= 90 { return above }
+            let below = CGRect(x: slot.minX, y: clear.maxY + 0.5, width: slot.width, height: slot.maxY - clear.maxY - 0.5)
+            return below.height >= 90 ? below : nil
         }
-        return out
     }
 
     var body: some View {
