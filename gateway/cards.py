@@ -6,6 +6,10 @@ with the shared gateway token (same door as `jarvis-hw-request`):
   POST /cards/event   {"session", "action", ...}   doing | ask | clear | delegate | link
   POST /cards/file    raw body + ?session=&name=&title=   a report/plan/screenshot for the card
 
+  Ask kinds: approve | choice | yesno | checklist | preview | info | hardware
+  (`hardware` shows "Open in Hardware Mode" on the phone; the gateway's Hardware
+  Mode report marks it answered with `done`.)
+
 `session` may be the router session id or the Claude session uuid
 ($CLAUDE_CODE_SESSION_ID); `resolve_session` maps the uuid through a read-only
 look at the router's sqlite file (ROUTER_DB). The same read-only look gives the
@@ -46,7 +50,7 @@ _ID_RE = re.compile(ID_PATTERN)
 FILE_ID_PATTERN = r"^[0-9a-f]{32}$"
 _FILE_ID_RE = re.compile(FILE_ID_PATTERN)
 
-NEED_KINDS = ("approve", "choice", "yesno", "checklist", "preview", "info")
+NEED_KINDS = ("approve", "choice", "yesno", "checklist", "preview", "info", "hardware")
 MAX_OPTIONS = 6
 MAX_ITEMS = 12
 MAX_FILES = 8  # per session; the oldest goes first
@@ -253,6 +257,35 @@ def _notify(sid: str, need: dict) -> None:
             logger.info("need listener failed: %s", type(exc).__name__)
 
 
+def post_need(sid: str, kind: str, text: str, options: list[str] | None = None,
+              items: list[str] | None = None, file_id: str = "") -> dict:
+    """Build, store and notify one ask on the card; returns the need dict."""
+    now = _iso(_now())
+    text = _line(text, 600)
+    if kind not in NEED_KINDS:
+        raise HTTPException(status_code=422, detail=f"kind must be one of {', '.join(NEED_KINDS)}")
+    if not text:
+        raise HTTPException(status_code=422, detail="text required")
+    options = [o for o in (_line(o, 40) for o in (options or [])) if o]
+    items = [i for i in (_line(i, 120) for i in (items or [])) if i]
+    if kind == "choice" and len(options) < 2:
+        raise HTTPException(status_code=422, detail="choice needs 2 to 6 options")
+    if kind == "checklist" and not items:
+        raise HTTPException(status_code=422, detail="checklist needs items")
+    if file_id and not _FILE_ID_RE.fullmatch(file_id):
+        raise HTTPException(status_code=422, detail="bad file id")
+    need = {"id": uuid.uuid4().hex[:12], "kind": kind, "question": text, "options": options,
+            "items": items, "file_id": file_id or None, "at": now, "answered": None}
+
+    def set_need(e):
+        if need["file_id"] and not any(f.get("id") == need["file_id"] for f in e.get("files", [])):
+            raise HTTPException(status_code=404, detail="file not on this card")
+        e["need"] = need
+    _update(sid, set_need)
+    _notify(sid, need)
+    return need
+
+
 @session_router.post("/cards/event")
 async def card_event(ev: CardEvent) -> dict:
     sid = _session_or_404(ev.session)
@@ -293,28 +326,44 @@ async def card_event(ev: CardEvent) -> dict:
         return {"ok": True, "session_id": sid, "child": child}
 
     # ask
-    if ev.kind not in NEED_KINDS:
-        raise HTTPException(status_code=422, detail=f"kind must be one of {', '.join(NEED_KINDS)}")
-    if not text:
-        raise HTTPException(status_code=422, detail="text required")
-    options = [o for o in (_line(o, 40) for o in ev.options) if o]
-    items = [i for i in (_line(i, 120) for i in ev.items) if i]
-    if ev.kind == "choice" and len(options) < 2:
-        raise HTTPException(status_code=422, detail="choice needs 2 to 6 options")
-    if ev.kind == "checklist" and not items:
-        raise HTTPException(status_code=422, detail="checklist needs items")
-    if ev.file_id and not _FILE_ID_RE.fullmatch(ev.file_id):
-        raise HTTPException(status_code=422, detail="bad file id")
-    need = {"id": uuid.uuid4().hex[:12], "kind": ev.kind, "question": text, "options": options,
-            "items": items, "file_id": ev.file_id or None, "at": now, "answered": None}
-
-    def set_need(e):
-        if need["file_id"] and not any(f.get("id") == need["file_id"] for f in e.get("files", [])):
-            raise HTTPException(status_code=404, detail="file not on this card")
-        e["need"] = need
-    _update(sid, set_need)
-    _notify(sid, need)
+    need = post_need(sid, ev.kind, text, ev.options, ev.items, ev.file_id)
     return {"ok": True, "session_id": sid, "need_id": need["id"]}
+
+
+def save_file(sid: str, data: bytes, name: str, title: str, media: str) -> str:
+    """Write bytes to disk as a card file and list it on the card; returns the file id."""
+    if media not in FILE_TYPES:
+        raise HTTPException(status_code=415, detail="use .md, .txt, .pdf, .png or .jpg")
+    if not data:
+        raise HTTPException(status_code=422, detail="empty file")
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="file too large")
+    ext, view = FILE_TYPES[media]
+    fid = uuid.uuid4().hex
+    folder = files_dir() / sid
+    try:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(folder / f"{fid}{ext}", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(bytes(data))
+    except OSError as exc:
+        logger.warning("card file save failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="could not save") from None
+    clean_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", os.path.basename(name)).strip(". ")[:80] or f"file{ext}"
+    row = {"id": fid, "name": clean_name, "title": _line(title, 80) or clean_name, "type": media,
+           "view": view, "size": len(data), "at": _iso(_now())}
+
+    def add_file(e):
+        # A new plan.md replaces the old plan.md (a revised plan is one file, not two).
+        same = [f for f in e.get("files", []) if f.get("name") == clean_name]
+        for old in same:
+            _remove_file(sid, old)
+        files = [f for f in e.get("files", []) if f.get("name") != clean_name] + [row]
+        for old in files[:-MAX_FILES]:
+            _remove_file(sid, old)
+        e["files"] = files[-MAX_FILES:]
+    _update(sid, add_file)
+    return fid
 
 
 @session_router.post("/cards/file")
@@ -335,33 +384,7 @@ async def card_file(
         data.extend(chunk)
         if len(data) > MAX_FILE_BYTES:
             raise HTTPException(status_code=413, detail="file too large")
-    if not data:
-        raise HTTPException(status_code=422, detail="empty file")
-    ext, view = FILE_TYPES[base]
-    fid = uuid.uuid4().hex
-    folder = files_dir() / sid
-    try:
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(folder / f"{fid}{ext}", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(bytes(data))
-    except OSError as exc:
-        logger.warning("card file save failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=500, detail="could not save") from None
-    clean_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", os.path.basename(name)).strip(". ")[:80] or f"file{ext}"
-    row = {"id": fid, "name": clean_name, "title": _line(title, 80) or clean_name, "type": base,
-           "view": view, "size": len(data), "at": _iso(_now())}
-
-    def add_file(e):
-        # A new plan.md replaces the old plan.md (a revised plan is one file, not two).
-        same = [f for f in e.get("files", []) if f.get("name") == clean_name]
-        for old in same:
-            _remove_file(sid, old)
-        files = [f for f in e.get("files", []) if f.get("name") != clean_name] + [row]
-        for old in files[:-MAX_FILES]:
-            _remove_file(sid, old)
-        e["files"] = files[-MAX_FILES:]
-    _update(sid, add_file)
+    fid = save_file(sid, bytes(data), name, title, base)
     return {"ok": True, "session_id": sid, "file_id": fid}
 
 
@@ -430,6 +453,7 @@ def valid_answer(need: dict, answer: str) -> bool:
     allowed = {
         "approve": ("Approve",), "preview": ("Looks good",), "yesno": ("Yes", "No"),
         "choice": tuple(need.get("options") or ()), "checklist": ("Send results",), "info": ("OK",),
+        "hardware": ("done",),
     }.get(kind, ())
     return answer in allowed
 
