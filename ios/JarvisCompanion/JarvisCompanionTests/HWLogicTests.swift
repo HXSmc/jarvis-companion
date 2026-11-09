@@ -1,4 +1,3 @@
-import ImageIO
 import XCTest
 @testable import JarvisCompanion
 
@@ -40,97 +39,141 @@ final class HWLogicTests: XCTestCase {
         XCTAssertTrue((diag["events"] as? [String] ?? []).contains { $0.contains("speak queued") })
     }
 
-    // MARK: pointer (overlay) mapping
+    // MARK: shapes
 
-    func testOverlayPixelsMapOntoTheImage() throws {
-        let raw: [String: Any] = ["target_px": [300, 420, 420, 470], "action": "plug", "arrow_dir": [1, 0], "label": "SATA2"]
-        let o = try XCTUnwrap(HWSession.parseOverlay(raw, width: 1024, height: 768, frameId: 3))
-        XCTAssertEqual(o.rect.minX, 300.0 / 1024, accuracy: 1e-6)
-        XCTAssertEqual(o.rect.minY, 420.0 / 768, accuracy: 1e-6)
-        XCTAssertEqual(o.rect.width, 120.0 / 1024, accuracy: 1e-6)
-        XCTAssertEqual(o.action, "plug")
-        XCTAssertEqual(o.frameId, 3)
+    func testShapeKindsParse() throws {
+        let s = try XCTUnwrap(HWSession.parseShape(["kind": "rect", "box": [300, 420, 420, 470], "label": "SATA2"],
+                                                   width: 1024, height: 768, frameId: 3))
+        XCTAssertEqual(s.kind, "rect")
+        XCTAssertEqual(s.rect.minX, 300.0 / 1024, accuracy: 1e-6)
+        XCTAssertEqual(s.rect.minY, 420.0 / 768, accuracy: 1e-6)
+        XCTAssertEqual(s.rect.width, 120.0 / 1024, accuracy: 1e-6)
+        XCTAssertEqual(s.label, "SATA2")
+        XCTAssertEqual(s.frameId, 3)
+        // the other two kinds parse; anything else is dropped
+        XCTAssertNotNil(HWSession.parseShape(["kind": "circle", "box": [1, 2, 3, 4]], width: 10, height: 10, frameId: nil))
+        XCTAssertNotNil(HWSession.parseShape(["kind": "triangle", "box": [1, 2, 3, 4]], width: 10, height: 10, frameId: nil))
+        XCTAssertNil(HWSession.parseShape(["kind": "arrow", "box": [1, 2, 3, 4]], width: 10, height: 10, frameId: nil))
         // reversed corners and out-of-image boxes are normalized and clamped
-        let r = try XCTUnwrap(HWSession.parseOverlay(["target_px": [1100, 800, 900, 700]], width: 1024, height: 768, frameId: nil))
+        let r = try XCTUnwrap(HWSession.parseShape(["kind": "rect", "box": [1100, 800, 900, 700]],
+                                                   width: 1024, height: 768, frameId: nil))
         XCTAssertEqual(r.rect.maxX, 1, accuracy: 1e-6)
-        XCTAssertNil(HWSession.parseOverlay(["target_px": [1, 2, 3]], width: 1024, height: 768, frameId: nil))
-        XCTAssertNil(HWSession.parseOverlay(["target_px": [1, 2, 3, 4]], width: nil, height: nil, frameId: nil))
+        XCTAssertNil(HWSession.parseShape(["kind": "rect", "box": [1, 2, 3]], width: 1024, height: 768, frameId: nil))
+        XCTAssertNil(HWSession.parseShape(["kind": "rect", "box": [1, 2, 3, 4]], width: nil, height: nil, frameId: nil))
+    }
+
+    // MARK: voice-first start
+
+    func testPreloadedTaskSkipsQuestion() {
+        XCTAssertEqual(HWSession.firstAsk(initialTask: "reseat the SATA cable"), "Let's start.")
+        XCTAssertNil(HWSession.firstAsk(initialTask: ""), "voice-first sends nothing; the words are coming")
+        XCTAssertNil(HWSession.firstAsk(initialTask: "   "))
     }
 
     // MARK: scripted session replay (what the gateway sends)
 
-    func testReplayShowsGatedStepsOverlayAndSpeech() {
+    func testReplayHasNoStepCounter() {
         let hw = HWSession()
         var spoken: [String] = []
-        var overlays: [HWOverlay?] = []
+        var shapes: [HWShape?] = []
         hw.onSay = { spoken.append($0) }
-        hw.onOverlay = { overlays.append($0) }
+        hw.onShape = { shapes.append($0) }
         func reply(_ d: [String: Any]?) {
             hw.handle(["type": "reply", "data": d ?? NSNull(), "frame_id": 1, "w": 1024, "h": 768, "total_s": 1.2])
         }
-        hw.handle(["type": "ready", "model": "sonnet"])
+        hw.handle(["type": "ready"])
         XCTAssertTrue(hw.connected)
-        hw.handle(["type": "say", "text": "Step 1 of 2: pull the plug out of SATA1."])  // early speech
-        reply(["step": 1, "of": 2, "say": "Step 1 of 2: pull the plug out of SATA1.",
-               "overlay": ["target_px": [294, 290, 470, 360], "action": "pull", "arrow_dir": [1, 0], "label": "SATA1 plug"]])
-        XCTAssertEqual(spoken, ["Step 1 of 2: pull the plug out of SATA1."], "early say must not be spoken twice")
-        XCTAssertEqual(hw.step, 1)
-        XCTAssertEqual(hw.total, 2)
-        XCTAssertNotNil(hw.overlay)
+        hw.handle(["type": "say", "text": "Pull the plug out of SATA1."])  // early speech
+        reply(["say": "Pull the plug out of SATA1.",
+               "shape": ["kind": "rect", "box": [294, 290, 470, 360], "label": "SATA1 plug"]])
+        XCTAssertEqual(spoken, ["Pull the plug out of SATA1."], "early say must not be spoken twice")
+        XCTAssertEqual(hw.shape?.kind, "rect")
         // a quiet watch check with nothing to say changes nothing
         hw.ask("[watch] ...", quiet: true)
-        reply(["step": 1, "of": 2, "say": "", "overlay": NSNull()])
-        XCTAssertEqual(hw.step, 1)
-        XCTAssertNotNil(hw.overlay, "an all-good watch check must not wipe the pointer")
+        reply(["say": "", "shape": NSNull()])
+        XCTAssertNotNil(hw.shape, "an all-good watch check must not wipe the shape")
         // the gateway allowed the advance (done): the phone follows
         hw.ask("done")
-        reply(["step": 2, "of": 2, "say": "Step 2: plug it into SATA2.",
-               "overlay": ["target_px": [300, 420, 420, 470], "action": "plug", "arrow_dir": [-1, 0], "label": "SATA2"]])
-        XCTAssertEqual(hw.step, 2)
-        XCTAssertEqual(spoken.last, "Step 2: plug it into SATA2.")
-        XCTAssertEqual(overlays.compactMap { $0?.label }, ["SATA1 plug", "SATA2"])
+        reply(["say": "Now plug it into SATA2.",
+               "shape": ["kind": "circle", "box": [300, 420, 420, 470], "label": "SATA2"]])
+        XCTAssertEqual(spoken.last, "Now plug it into SATA2.")
+        XCTAssertEqual(hw.shape?.kind, "circle")
+        XCTAssertEqual(shapes.compactMap { $0?.label }, ["SATA1 plug", "SATA2"])
         // a reply the brain botched still speaks, so the user is never left in silence
         hw.ask("huh")
         reply(nil)
         XCTAssertEqual(spoken.last, "Sorry, I didn't get that. Ask me again.")
     }
 
-    // MARK: the part's outline (gateway mask)
+    // MARK: instant acks
 
-    func testMaskPNGBecomesATintedPartShape() throws {
-        // a 4x2 gray mask like the gateway's: top row edge (255), bottom row inside (110), last column outside
-        let w = 4, h = 2
-        let ctx = try XCTUnwrap(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
-                                          space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue))
-        let px = try XCTUnwrap(ctx.data).assumingMemoryBound(to: UInt8.self)
-        for x in 0..<w {
-            px[x] = x == 3 ? 0 : 255
-            px[w + x] = x == 3 ? 0 : 110
+    func testAckPlaysWithoutChangingTheLine() {
+        let hw = HWSession()
+        var acks: [String] = []
+        var played: [String] = []
+        hw.onAck = { pcm, rate, text in
+            acks.append(text)
+            XCTAssertEqual(pcm.count, 4)
+            XCTAssertEqual(rate, 24000)
         }
-        let png = NSMutableData()
-        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(png as CFMutableData, "public.png" as CFString, 1, nil))
-        CGImageDestinationAddImage(dest, try XCTUnwrap(ctx.makeImage()), nil)
-        XCTAssertTrue(CGImageDestinationFinalize(dest))
-        let raw: [String: Any] = ["target_px": [10, 20, 50, 40], "label": "SATA cable",
-                                  "mask_png": (png as Data).base64EncodedString()]
-        let o = try XCTUnwrap(HWSession.parseOverlay(raw, width: 100, height: 100, frameId: 1))
-        let mask = try XCTUnwrap(o.mask, "the mask did not decode")
-        XCTAssertEqual(mask.width, 4)
-        XCTAssertEqual(mask.height, 2)
-        let pixels = try XCTUnwrap(mask.dataProvider?.data)
-        withExtendedLifetime(pixels) {  // a raw pointer into the CFData: keep it alive while reading
-            guard let b = CFDataGetBytePtr(pixels) else { return XCTFail("no pixel data") }
-            let row = mask.bytesPerRow
-            XCTAssertEqual(Int(b[3]), 255, accuracy: 3, "edge: solid")
-            XCTAssertEqual(Int(b[row + 3]), 110, accuracy: 3, "inside: see-through")
-            XCTAssertEqual(Int(b[3 * 4 + 3]), 0, "outside: clear")
-            XCTAssertEqual(Int(b[0]), 255, accuracy: 3)  // yellow at full opacity
-            XCTAssertEqual(Int(b[1]), 214, accuracy: 3)
+        hw.onAudio = { _, _, text in played.append(text) }
+        hw.handle(["type": "ready", "voice": "bm_daniel"])
+        let pcm = Data([1, 0, 2, 0]).base64EncodedString()
+        hw.handle(["type": "say", "text": "Unplug the SATA cable."])
+        XCTAssertEqual(hw.say, "Unplug the SATA cable.")
+        hw.handle(["type": "ack", "text": "Checking.", "rate": 24000, "pcm": pcm])
+        XCTAssertEqual(acks, ["Checking."])
+        XCTAssertEqual(hw.say, "Unplug the SATA cable.", "an ack must not change the line")
+        // the line's own audio still plays after the ack, not instead of it
+        hw.handle(["type": "audio", "text": "Unplug the SATA cable.", "rate": 24000, "pcm": pcm])
+        XCTAssertEqual(played, ["Unplug the SATA cable."])
+    }
+
+    // MARK: the one status the screen may show
+
+    func testHWPhasePriority() {
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: false, connected: true, researching: true,
+                                        thinking: true, speaking: true, listening: true), .noCamera)
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: false, researching: true,
+                                        thinking: true, speaking: true, listening: true), .offline)
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: true, researching: true,
+                                        thinking: true, speaking: true, listening: true), .researching)
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: true, researching: false,
+                                        thinking: true, speaking: true, listening: true), .thinking)
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: true, researching: false,
+                                        thinking: false, speaking: true, listening: true), .speaking)
+        XCTAssertEqual(HWPhase.current(cameraAuthorized: true, connected: true, researching: false,
+                                        thinking: false, speaking: false, listening: false), .listening)
+        XCTAssertEqual(HWPhase.noCamera.label, "Camera is off: allow it in Settings")
+        XCTAssertEqual(HWPhase.offline.label, "Can't reach Jarvis · tap to retry")
+        XCTAssertEqual(HWPhase.researching.label, "Researching…")
+    }
+
+    // MARK: research + cards
+
+    func testResearchCardsReplaceAndClear() {
+        let hw = HWSession()
+        var spoken: [String] = []
+        hw.onSay = { spoken.append($0) }
+        hw.handle(["type": "ready"])
+        XCTAssertFalse(hw.researching)
+        hw.handle(["type": "research", "state": "started"])
+        XCTAssertTrue(hw.researching)
+        hw.handle(["type": "research", "state": "done"])
+        XCTAssertFalse(hw.researching)
+        func reply(_ cards: Any?) {
+            hw.handle(["type": "reply", "frame_id": 1, "w": 1024, "h": 768, "total_s": 2.0,
+                       "data": ["say": "It is the SSD's data cable.", "shape": NSNull(), "cards": cards ?? NSNull()]])
         }
-        // no mask, or a broken one: the plain box stays
-        XCTAssertNil(try XCTUnwrap(HWSession.parseOverlay(["target_px": [10, 20, 50, 40]], width: 100, height: 100, frameId: 1)).mask)
-        XCTAssertNil(try XCTUnwrap(HWSession.parseOverlay(["target_px": [10, 20, 50, 40], "mask_png": "bm90IGEgcG5n"],
-                                                          width: 100, height: 100, frameId: 1)).mask)
+        reply([["id": "a", "type": "info", "title": "SATA ports", "body": ["SATA1 is free."]],
+               ["id": "b", "type": "info", "title": "Drive", "body": ["500 GB SSD"]]])
+        XCTAssertEqual(spoken, ["It is the SSD's data cable."])
+        XCTAssertEqual(hw.cards.count, 2)
+        // a reply without cards keeps them; only the Clear button empties
+        reply([])
+        XCTAssertEqual(hw.cards.count, 2)
+        hw.cards = []
+        XCTAssertTrue(hw.cards.isEmpty)
     }
 
     // MARK: Jarvis's server voice
@@ -198,28 +241,27 @@ final class HWLogicTests: XCTestCase {
 
     // MARK: lost part -> locate
 
-    func testLocateMovesTheBoxSilentlyAndNeverTheStep() {
+    func testLocateMovesTheBoxSilently() {
         let hw = HWSession()
         var spoken: [String] = []
         hw.onSay = { spoken.append($0) }
-        hw.handle(["type": "ready", "model": "sonnet"])
+        hw.handle(["type": "ready"])
         hw.ask("plan")
         hw.handle(["type": "reply", "frame_id": 1, "w": 1024, "h": 768, "total_s": 1.0,
-                   "data": ["step": 1, "of": 4, "say": "Step 1: unplug the power cable.",
-                            "overlay": ["target_px": [300, 330, 350, 380], "action": "unplug", "label": "power cable"]]])
+                   "data": ["say": "Unplug the power cable.",
+                            "shape": ["kind": "rect", "box": [300, 330, 350, 380], "label": "power cable"]]])
         XCTAssertEqual(spoken.count, 1)
         hw.locate("power cable")
         hw.handle(["type": "reply", "frame_id": 2, "w": 1024, "h": 768, "total_s": 1.0,
-                   "data": ["step": 1, "of": 4, "say": "",
-                            "overlay": ["target_px": [180, 420, 230, 470], "action": "unplug", "label": "power cable"]]])
+                   "data": ["say": "",
+                            "shape": ["kind": "rect", "box": [180, 420, 230, 470], "label": "power cable"]]])
         XCTAssertEqual(spoken.count, 1, "a found part needs no speech")
-        XCTAssertEqual(hw.overlay?.rect.minX ?? 0, 180.0 / 1024, accuracy: 1e-6, "box moved to the new spot")
-        XCTAssertEqual(hw.step, 1)
-        // out of view: no box, and it says where to aim
+        XCTAssertEqual(hw.shape?.rect.minX ?? 0, 180.0 / 1024, accuracy: 1e-6, "shape moved to the new spot")
+        // out of view: no shape, and it says where to aim
         hw.locate("power cable")
         hw.handle(["type": "reply", "frame_id": 3, "w": 1024, "h": 768, "total_s": 1.0,
-                   "data": ["step": 1, "of": 4, "say": "Point the camera at the back edge again.", "overlay": NSNull()]])
-        XCTAssertNil(hw.overlay)
+                   "data": ["say": "Point the camera at the back edge again.", "shape": NSNull()]])
+        XCTAssertNil(hw.shape)
         XCTAssertEqual(spoken.last, "Point the camera at the back edge again.")
         // a botched background reply stays silent
         hw.locate("power cable")

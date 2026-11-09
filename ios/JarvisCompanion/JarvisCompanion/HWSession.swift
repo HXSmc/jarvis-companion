@@ -1,49 +1,39 @@
 import Foundation
-import ImageIO
 
-/// What the brain wants drawn on the live picture. `rect` is normalized 0...1 in
-/// the image's own coordinates (origin top-left), so it maps onto any view size.
-struct HWOverlay: Equatable {
+/// What the brain wants drawn on the live picture: ONE simple outline shape.
+/// `rect` is normalized 0...1 in the image's own coordinates (origin top-left),
+/// so it maps onto any view size.
+struct HWShape: Equatable {
+    var kind: String  // "rect" | "circle" | "triangle"
     var rect: CGRect
-    var action: String
-    var dir: CGVector
     var label: String
     var frameId: Int?
-    /// The part's own shape inside `rect` (the gateway's mask, already tinted): painted
-    /// instead of the box when present.
-    var mask: CGImage? = nil
-
-    static func == (a: HWOverlay, b: HWOverlay) -> Bool {
-        a.rect == b.rect && a.action == b.action && a.dir == b.dir && a.label == b.label
-            && a.frameId == b.frameId && a.mask === b.mask
-    }
 }
 
-/// The gateway's mask PNG (gray: 0 outside, ~110 inside, 255 on the edge) as a highlight
-/// colour whose opacity is that gray level: a see-through part with a solid outline.
-enum HWMask {
-    static func tinted(_ png: Data, red: UInt8 = 255, green: UInt8 = 214, blue: UInt8 = 10) -> CGImage? {
-        guard let source = CGImageSourceCreateWithData(png as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
-        let w = image.width, h = image.height
-        // Contexts own their memory (data: nil): a pointer to a Swift array would not outlive the call.
-        guard w > 0, h > 0, w * h <= 512 * 512,
-              let gray = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
-                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
-              let out = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-              let g = gray.data?.assumingMemoryBound(to: UInt8.self),
-              let o = out.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
-        gray.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        for i in 0..<(w * h) {
-            let a = UInt16(g[i])
-            o[i * 4] = UInt8(UInt16(red) * a / 255)  // premultiplied
-            o[i * 4 + 1] = UInt8(UInt16(green) * a / 255)
-            o[i * 4 + 2] = UInt8(UInt16(blue) * a / 255)
-            o[i * 4 + 3] = UInt8(a)
+/// The one status the screen may show, most urgent first: camera, connection,
+/// research, thinking, speaking, listening.
+enum HWPhase: Equatable {
+    case noCamera, offline, researching, thinking, speaking, listening
+
+    static func current(cameraAuthorized: Bool, connected: Bool, researching: Bool,
+                        thinking: Bool, speaking: Bool, listening: Bool) -> HWPhase {
+        if !cameraAuthorized { return .noCamera }
+        if !connected { return .offline }
+        if researching { return .researching }
+        if thinking { return .thinking }
+        if speaking { return .speaking }
+        return .listening
+    }
+
+    var label: String {
+        switch self {
+        case .noCamera: return "Camera is off: allow it in Settings"
+        case .offline: return "Can't reach Jarvis · tap to retry"
+        case .researching: return "Researching…"
+        case .thinking: return "Thinking…"
+        case .speaking: return "Speaking"
+        case .listening: return "Listening"
         }
-        return out.makeImage()
     }
 }
 
@@ -54,35 +44,42 @@ struct HWTarget: Identifiable {
 }
 
 /// Hardware Mode link to the gateway's `/hwmode/ws`: frames up, spoken
-/// guidance + overlay down. The brain (a lean Claude Code session) runs on the
-/// mini PC; this class only moves messages and keeps the latest answer.
+/// guidance + one outline shape down. The brain (a lean Claude Code session)
+/// runs on the mini PC; this class only moves messages and keeps the latest answer.
 @MainActor
 final class HWSession: ObservableObject {
     @Published var connected = false
     @Published var status = "Connecting…"
     @Published var say = ""
-    @Published var step = 0
-    @Published var total = 0
-    @Published var overlay: HWOverlay?
+    @Published var shape: HWShape?
     @Published var thinking = false
     @Published var lastSeconds: Double?
+    /// A research turn is running on the gateway ("Find out about X").
+    @Published var researching = false
+    /// Explanation cards over the camera (research answers). Replaced by each reply
+    /// that carries any; only the Clear button empties them.
+    @Published var cards: [HUDCard] = []
 
     /// Called with each spoken line (early `say`, or the reply's when no early one came) that the
     /// phone voices itself: Arabic, no server voice, or the server audio did not come in time.
     var onSay: ((String) -> Void)?
+    /// An instant cached ack clip ("Checking.", ...): play at once; it must not change
+    /// `say` or touch the audio the line that follows is still waiting for.
+    var onAck: ((Data, Double, String) -> Void)?
     /// Jarvis's own voice for a line, from the gateway: 16-bit mono PCM, sample rate, the line.
     var onAudio: ((Data, Double, String) -> Void)?
     /// The gateway voices English lines itself (`ready` names the voice).
     private(set) var serverVoice = false
     /// How long a line waits for its server audio before the phone's own voice reads it.
     var audioWait: TimeInterval = 6  // seen live: audio 2.3 s after a 4 s line; long lines take longer
-    var onOverlay: ((HWOverlay?) -> Void)?
-    /// The brain session is up: send a frame and the first question.
+    var onShape: ((HWShape?) -> Void)?
+    /// The brain session is up. A preloaded task asks at once; voice-first waits for words.
     var onReady: (() -> Void)?
+    /// A Claude session was started from research findings: show its title.
+    var onSession: ((String) -> Void)?
 
     private var socket: URLSessionWebSocketTask?
     private var urlSession: URLSession?
-    private var taskText = ""
     private var nextFrameId = 1
     private var saidThisTurn = false
     private var quietTurn = false
@@ -93,8 +90,7 @@ final class HWSession: ObservableObject {
 
     /// False when the gateway URL is unusable (nothing was started).
     @discardableResult
-    func connect(task: String) -> Bool {
-        taskText = task
+    func connect(task: String, sessionId: String? = nil) -> Bool {
         guard let https = AppModel.gatewayEndpoint("/hwmode/ws"),
               var comps = URLComponents(url: https, resolvingAgainstBaseURL: false) else {
             status = "Set the gateway URL (https) in Settings"
@@ -113,7 +109,9 @@ final class HWSession: ObservableObject {
         socket = ws
         ws.resume()
         receive(on: ws)
-        send(["type": "start", "task": task])
+        var start: [String: Any] = ["type": "start", "task": task]
+        if let sessionId { start["session_id"] = sessionId }  // the gateway reports results back to it
+        send(start)
         return true
     }
 
@@ -124,9 +122,21 @@ final class HWSession: ObservableObject {
         urlSession = nil
         connected = false
         thinking = false
+        researching = false
     }
 
-    /// Sends a camera frame; returns its id so a later overlay can be matched to it.
+    /// The phone is closing: the gateway posts the report back to the session itself.
+    func end() {
+        send(["type": "end"])
+    }
+
+    /// The first ask after `ready`: a preloaded task starts at once; voice-first
+    /// sends nothing, because the owner's first words become the task.
+    static func firstAsk(initialTask: String) -> String? {
+        initialTask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : "Let's start."
+    }
+
+    /// Sends a camera frame; returns its id so a later shape can be matched to it.
     @discardableResult
     func sendFrame(_ jpeg: Data) -> Int {
         let id = nextFrameId
@@ -147,10 +157,10 @@ final class HWSession: ObservableObject {
     }
 
     /// The tracker lost the part: ask where `label` is in the newest frame. The answer only
-    /// moves the box (it speaks only if the part is out of view).
+    /// moves the shape (it speaks only if the part is out of view).
     func locate(_ label: String) {
         ask("[locate] I lost the highlight. Point again at the same part (\(label)) in this picture. "
-            + "If you see it, reply with its overlay and \"say\": \"\". If it is not in view, set overlay to null and say where to aim.",
+            + "If you see it, reply with its shape and \"say\": \"\". If it is not in view, set shape to null and say where to aim.",
             quiet: true, locate: true)
     }
 
@@ -200,6 +210,11 @@ final class HWSession: ObservableObject {
             onReady?()
         case "say":
             if let text = m["text"] as? String { speak(text) }
+        case "ack":
+            // Instant clip: straight to the speaker, past everything else.
+            guard let text = m["text"] as? String, let b64 = m["pcm"] as? String,
+                  let pcm = Data(base64Encoded: b64) else { return }
+            onAck?(pcm, (m["rate"] as? NSNumber)?.doubleValue ?? 24000, text)
         case "audio":
             guard let text = m["text"] as? String, let b64 = m["pcm"] as? String,
                   let pcm = Data(base64Encoded: b64) else { return }
@@ -210,6 +225,10 @@ final class HWSession: ObservableObject {
             } else {
                 earlyAudio = [text: (pcm, rate)]  // its line is still coming; a late one (fallback spoke) is dropped
             }
+        case "research":
+            researching = (m["state"] as? String) == "started"
+        case "session":
+            if let title = m["title"] as? String { onSession?(title) }
         case "reply":
             thinking = false
             lastSeconds = (m["total_s"] as? NSNumber)?.doubleValue
@@ -218,24 +237,23 @@ final class HWSession: ObservableObject {
                 return
             }
             let said = ((d["say"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
-            let parsed = Self.parseOverlay(d["overlay"], width: (m["w"] as? NSNumber)?.doubleValue,
-                                           height: (m["h"] as? NSNumber)?.doubleValue,
-                                           frameId: (m["frame_id"] as? NSNumber)?.intValue)
-            if locateTurn {  // only the box moves; speak only when the part is out of view
+            let parsed = Self.parseShape(d["shape"], width: (m["w"] as? NSNumber)?.doubleValue,
+                                         height: (m["h"] as? NSNumber)?.doubleValue,
+                                         frameId: (m["frame_id"] as? NSNumber)?.intValue)
+            let newCards = HUDCard.list(from: d["cards"])
+            if !newCards.isEmpty { cards = newCards }  // only the Clear button empties them
+            if locateTurn {  // only the shape moves; speak only when the part is out of view
                 if !saidThisTurn, !said.isEmpty { speak(said) }
                 if parsed != nil || !said.isEmpty {
-                    overlay = parsed
-                    onOverlay?(overlay)
+                    shape = parsed
+                    onShape?(shape)
                 }
                 return
             }
             if quietTurn && said.isEmpty { return }  // watch check: all good, keep the current guidance
             if !saidThisTurn, !said.isEmpty { speak(said) }
-            // The gateway gates the step (done, or seen done): show what it allows.
-            step = (d["step"] as? NSNumber)?.intValue ?? step
-            total = (d["of"] as? NSNumber)?.intValue ?? total
-            overlay = parsed
-            onOverlay?(overlay)
+            shape = parsed
+            onShape?(shape)
         case "error":
             let error = (m["error"] as? String) ?? "error"
             guard error != "busy" else { return }  // the answer already in flight still arrives
@@ -274,20 +292,17 @@ final class HWSession: ObservableObject {
         text.unicodeScalars.contains { (0x0600...0x06FF).contains($0.value) }
     }
 
-    /// `target_px` is in pixels of the image the brain saw (w×h); normalize and clamp.
-    static func parseOverlay(_ raw: Any?, width: Double?, height: Double?, frameId: Int?) -> HWOverlay? {
+    /// `box` is in pixels of the image the brain saw (w×h); normalize and clamp.
+    /// Unknown kinds are dropped: only plain outline shapes are drawn.
+    static func parseShape(_ raw: Any?, width: Double?, height: Double?, frameId: Int?) -> HWShape? {
         guard let o = raw as? [String: Any],
-              let px = (o["target_px"] as? [NSNumber])?.map({ $0.doubleValue }), px.count == 4,
+              let kind = o["kind"] as? String, ["rect", "circle", "triangle"].contains(kind),
+              let px = (o["box"] as? [NSNumber])?.map({ $0.doubleValue }), px.count == 4,
               let w = width, let h = height, w > 0, h > 0 else { return nil }
         let x1 = min(max(min(px[0], px[2]) / w, 0), 1), x2 = min(max(max(px[0], px[2]) / w, 0), 1)
         let y1 = min(max(min(px[1], px[3]) / h, 0), 1), y2 = min(max(max(px[1], px[3]) / h, 0), 1)
         guard x2 > x1, y2 > y1 else { return nil }
-        let d = (o["arrow_dir"] as? [NSNumber])?.map { CGFloat($0.doubleValue) } ?? [0, 0]
-        return HWOverlay(rect: CGRect(x: x1, y: y1, width: x2 - x1, height: y2 - y1),
-                         action: (o["action"] as? String) ?? "look",
-                         dir: d.count == 2 ? CGVector(dx: d[0], dy: d[1]) : .zero,
-                         label: (o["label"] as? String) ?? "",
-                         frameId: frameId,
-                         mask: (o["mask_png"] as? String).flatMap { Data(base64Encoded: $0) }.flatMap { HWMask.tinted($0) })
+        return HWShape(kind: kind, rect: CGRect(x: x1, y: y1, width: x2 - x1, height: y2 - y1),
+                       label: (o["label"] as? String) ?? "", frameId: frameId)
     }
 }

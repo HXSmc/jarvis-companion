@@ -1,11 +1,12 @@
 import SwiftUI
 
 /// Hardware Mode: point the phone at the hardware, talk to Jarvis, and follow
-/// the instructions drawn on the live picture (box + moving arrow + action +
-/// step card), which stay on the part as the phone moves.
+/// the instruction drawn on the live picture (one outline shape that stays on
+/// the part as the phone moves). Voice-first: the camera, the connection and
+/// the microphone all start on open; the first words become the task.
 struct HardwareModeView: View {
     var initialTask: String = ""
-    /// Set when opened from a session card: the summary goes back to that session.
+    /// Set when opened from a session card: the gateway reports results back to it.
     var sessionId: String? = nil
 
     @Environment(\.dismiss) private var dismiss
@@ -16,14 +17,18 @@ struct HardwareModeView: View {
     @State private var tracked: CGRect?
     @State private var lost = false
     @State private var task = ""
-    @State private var started = false
     @State private var typed = ""
+    @State private var showKeyboard = false
     @State private var torch = false
     @State private var lastHeard = ""
     @State private var lastChange: Date?
     @State private var lastWatch = Date.distantPast
     @State private var ticks = 0
     @State private var lastLocate = Date.distantPast
+    @State private var wasConnected = false
+    @State private var spokeOffline = false
+    @State private var sessionPill: String?
+    @State private var sessionPillId: UUID?
     /// The last few JPEGs sent, by frame id: the tracker starts on the one the brain answered about.
     @State private var sentFrames: [Int: Data] = [:]
     @FocusState private var typing: Bool
@@ -33,33 +38,31 @@ struct HardwareModeView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             HWCameraPreview(session: camera.session).ignoresSafeArea()
-            // Measured full-screen, like the preview, so boxes land on the part.
+            // Measured full-screen, like the preview, so shapes land on the part.
             GeometryReader { geo in
-                // The brain's box always shows; tracking only keeps it on the part as the phone moves.
-                if let overlay = hw.overlay {
+                // The brain's shape always shows; tracking only keeps it on the part as the phone moves.
+                if let shape = hw.shape {
                     // Lost: dimmed at the last known spot while the brain is asked to find it again.
-                    HWOverlayLayer(overlay: overlay, rect: viewRect(tracked ?? overlay.rect, in: geo.size))
+                    HWShapeLayer(shape: shape, rect: viewRect(tracked ?? shape.rect, in: geo.size))
                         .opacity(lost ? 0.35 : 1)
+                        .allowsHitTesting(false)
                 }
+                // Research cards around the part, never over it. HUDLayer keeps its own taps.
+                HUDLayer(cards: hw.cards, avoid: hw.shape.map { viewRect(tracked ?? $0.rect, in: geo.size) })
             }
             .ignoresSafeArea()
-            .allowsHitTesting(false)
             VStack(spacing: 10) {
                 topBar
-                if started { stepCard }
+                instructionCard
                 Spacer()
-                if lost && hw.overlay != nil {
+                if lost && hw.shape != nil {
                     pill("Finding the part again…", color: .orange)
                 }
-                if started && !hw.connected && hw.status != "Connecting…" {
-                    Button { _ = hw.connect(task: task) } label: {
-                        pill("\(hw.status) · tap to reconnect", color: .orange)
-                    }
+                if let title = sessionPill {
+                    pill("Session started: \(title)", color: .blue)
                 }
-                if !camera.authorized {
-                    pill("Camera is off: allow it in Settings", color: .red)
-                }
-                if started { bottomBar } else { startPanel }
+                if let err = voice.error { pill(err, color: .red) }
+                bottomBar
             }
             .padding(16)
         }
@@ -78,6 +81,15 @@ struct HardwareModeView: View {
                 watchIfSettled()
             }
             relocateIfLost()
+        }
+        .onChange(of: hw.connected) { ok in
+            if ok {
+                wasConnected = true
+                spokeOffline = false
+            } else if wasConnected, !spokeOffline {  // one spoken nudge per drop, not per refresh
+                spokeOffline = true
+                voice.speak("I can't reach the gateway. Tap retry.")
+            }
         }
         .onChange(of: voice.heard) { heard in
             // Prefetch: ship a fresh frame the moment speech starts.
@@ -99,8 +111,17 @@ struct HardwareModeView: View {
             }
             .accessibilityLabel("Close Hardware Mode")
             Spacer()
-            pill(statusText, color: hw.connected ? .green : .gray)
+            phasePill
             Spacer()
+            if !hw.cards.isEmpty {
+                Button {
+                    hw.cards = []
+                } label: {
+                    Image(systemName: "xmark.rectangle").font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44).background(Circle().fill(Color.black.opacity(0.5)))
+                }
+                .accessibilityLabel("Clear cards")
+            }
             Button {
                 torch.toggle()
                 camera.setTorch(torch)
@@ -114,48 +135,50 @@ struct HardwareModeView: View {
         .foregroundColor(.white)
     }
 
-    private var statusText: String {
-        if hw.thinking { return "Looking…" }
-        if let s = hw.lastSeconds, hw.connected { return String(format: "Live · %.1fs", s) }
-        return hw.status
+    /// One status at a time (HWPhase priority); offline doubles as the retry button.
+    private var phase: HWPhase {
+        HWPhase.current(cameraAuthorized: camera.authorized, connected: hw.connected,
+                        researching: hw.researching, thinking: hw.thinking,
+                        speaking: voice.speaking, listening: voice.listening)
     }
 
-    private var stepCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if hw.total > 0 {
-                HStack(spacing: 6) {
-                    Text("Step \(hw.step) of \(hw.total)").font(.system(size: 13, weight: .bold))
-                    ProgressView(value: Double(min(hw.step, hw.total)), total: Double(max(hw.total, 1)))
-                        .tint(.yellow)
-                }
+    @ViewBuilder
+    private var phasePill: some View {
+        if phase == .offline {
+            Button { reconnect() } label: {
+                pill(phase.label, color: .orange).frame(minHeight: 44)
             }
-            Text(hw.say.isEmpty ? "Point the camera at it and talk to me." : hw.say)
-                .font(.system(size: 18, weight: .semibold))
-                .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Reconnect")
+        } else {
+            pill(phase.label, color: Self.phaseColor(phase))
         }
-        .foregroundColor(.white)
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.6)))
-        .accessibilityElement(children: .combine)
     }
 
-    private var startPanel: some View {
-        VStack(spacing: 10) {
-            Text("What are we doing?").font(.system(size: 17, weight: .semibold)).foregroundColor(.white)
-            TextField("e.g. reseat the SATA cable", text: $task, axis: .vertical)
-                .lineLimit(1...3)
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.12)))
-                .foregroundColor(.white)
-            Button(action: begin) {
-                Text("Start").font(.system(size: 17, weight: .bold)).frame(maxWidth: .infinity, minHeight: 50)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.yellow)).foregroundColor(.black)
-            }
-            .disabled(task.trimmingCharacters(in: .whitespaces).isEmpty)
+    private static func phaseColor(_ phase: HWPhase) -> Color {
+        switch phase {
+        case .noCamera: return .red
+        case .offline: return .orange
+        case .researching: return .blue
+        case .thinking: return .yellow
+        case .speaking, .listening: return .green
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.black.opacity(0.65)))
+    }
+
+    /// Only the current instruction; before the first one, what the owner should say.
+    private var instructionCard: some View {
+        Text(instructionText)
+            .font(.system(size: 18, weight: .semibold))
+            .fixedSize(horizontal: false, vertical: true)
+            .foregroundColor(.white)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.6)))
+            .accessibilityElement(children: .combine)
+    }
+
+    private var instructionText: String {
+        if !hw.say.isEmpty { return hw.say }
+        return task.isEmpty ? "Listening. Tell me what we're fixing." : task
     }
 
     private var bottomBar: some View {
@@ -164,22 +187,31 @@ struct HardwareModeView: View {
                 Text(voice.heard).font(.system(size: 15)).foregroundColor(.white.opacity(0.85))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let err = voice.error { pill(err, color: .red) }
             HStack(spacing: 8) {
                 Image(systemName: voice.listening ? "waveform" : "mic.slash")
                     .foregroundColor(voice.listening ? .green : .gray)
                     .frame(width: 32)
                     .accessibilityLabel(voice.listening ? "Listening" : "Not listening")
-                TextField("Or type: done / where is it? / it won't go in", text: $typed)
-                    .focused($typing)
-                    .submitLabel(.send)
-                    .onSubmit { handle(typed); typed = "" }
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
+                if showKeyboard {  // hidden fallback for when speaking is not an option
+                    TextField("Or type: done / where is it? / it won't go in", text: $typed)
+                        .focused($typing)
+                        .submitLabel(.send)
+                        .onSubmit { handle(typed); typed = "" }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
+                }
                 Button("Done") { handle("done") }
                     .font(.system(size: 15, weight: .bold))
                     .padding(.horizontal, 14).frame(minHeight: 44)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.yellow)).foregroundColor(.black)
+                Button {
+                    showKeyboard.toggle()
+                    typing = showKeyboard
+                } label: {
+                    Image(systemName: "keyboard").font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44).background(Circle().fill(Color.black.opacity(0.5)))
+                }
+                .accessibilityLabel("Type instead")
             }
             .foregroundColor(.white)
         }
@@ -204,40 +236,56 @@ struct HardwareModeView: View {
         camera.onPixelBuffer = { @Sendable buffer in tracker.process(buffer) }  // camera queue, not main
         self.tracker = tracker
         camera.start()
+        if !initialTask.isEmpty { task = initialTask }
         hw.onSay = { voice.speak($0) }
+        // Instant acks play at once; HWVoice queues, never drops, the line that follows.
+        hw.onAck = { pcm, rate, text in voice.playPCM(pcm, rate: rate, text: text) }
         hw.onAudio = { pcm, rate, text in voice.playPCM(pcm, rate: rate, text: text) }
-        hw.onOverlay = { overlay in
+        hw.onShape = { shape in
             tracked = nil
             lost = false
-            if let overlay {
+            if let shape {
                 // Start tracking on the frame the brain looked at (scaled to the camera's size),
-                // so the seconds the answer took don't leave the box on the wrong spot.
-                let seen = overlay.frameId.flatMap { sentFrames[$0] }.flatMap { CIImage(data: $0) }
+                // so the seconds the answer took don't leave the shape on the wrong spot.
+                let seen = shape.frameId.flatMap { sentFrames[$0] }.flatMap { CIImage(data: $0) }
                     .map { img in img.transformed(by: CGAffineTransform(scaleX: camera.frameSize.width / img.extent.width,
                                                                          y: camera.frameSize.height / img.extent.height)) }
-                tracker.seed(overlay.rect, on: seen)
+                tracker.seed(shape.rect, on: seen)
             } else {
                 tracker.clear()
             }
         }
         hw.onReady = {
-            sendFreshFrame()
-            hw.ask("Plan the steps, then guide me through step 1.")  // the gateway adds the task
+            // A preloaded task starts at once; voice-first sends nothing (the words are coming).
+            if let first = HWSession.firstAsk(initialTask: task) {
+                sendFreshFrame()
+                hw.ask(first)
+            }
+        }
+        hw.onSession = { title in
+            sessionPill = title
+            let id = UUID()
+            sessionPillId = id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {  // a hint, not a permanent banner
+                if sessionPillId == id { sessionPill = nil }
+            }
         }
         voice.onUtterance = { handle($0) }
-        if !initialTask.isEmpty {
-            task = initialTask
-        }
+        guard hw.connect(task: task, sessionId: sessionId) else { return }  // the phase pill says why
+        voice.start()  // listening starts with the camera: the first words ARE the task
     }
 
     private func tearDown() {
-        if let sid = sessionId, started { reportBack(to: sid) }
+        wasConnected = false  // our own disconnect is not a drop
         if hw.connected { hw.sendDiag(voice.diagnostics()) }
+        hw.end()  // the gateway posts the report back to the session itself
         // Break the closure -> view -> object cycles so the camera, audio engine and socket are freed.
         hw.onSay = nil
+        hw.onAck = nil
         hw.onAudio = nil
-        hw.onOverlay = nil
+        hw.onShape = nil
         hw.onReady = nil
+        hw.onSession = nil
         voice.onUtterance = nil
         camera.onPixelBuffer = nil
         tracker?.onUpdate = nil
@@ -248,11 +296,9 @@ struct HardwareModeView: View {
         tracker?.clear()
     }
 
-    private func begin() {
-        typing = false
-        guard hw.connect(task: task) else { return }  // stays on the start panel; status says why
-        started = true
-        voice.start()
+    private func reconnect() {
+        wasConnected = false  // our own reconnect is not a drop; ready sets it again
+        _ = hw.connect(task: task, sessionId: sessionId)
     }
 
     private func send(_ jpeg: Data) {
@@ -267,7 +313,7 @@ struct HardwareModeView: View {
 
     private func handle(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard started, !t.isEmpty else { return }
+        guard !t.isEmpty else { return }
         switch HWLocalCommand(t) {
         case .repeatLast?: voice.repeatLine(hw.say)
         case .stop?: voice.stopSpeaking()
@@ -282,39 +328,26 @@ struct HardwareModeView: View {
     }
 
     /// Tracking lost the part: ask the brain where it is now, at most every 6 s. The answer
-    /// moves the box; nothing is spoken unless the part is out of view.
+    /// moves the shape; nothing is spoken unless the part is out of view.
     private func relocateIfLost() {
-        guard lost, let overlay = hw.overlay, !hw.thinking, !voice.speaking, voice.heard.isEmpty,
+        guard lost, let shape = hw.shape, !hw.thinking, !voice.speaking, voice.heard.isEmpty,
               Date().timeIntervalSince(lastLocate) > 6 else { return }
         lastLocate = Date()
         sendFreshFrame()
-        hw.locate(overlay.label.isEmpty ? "the part you pointed at" : overlay.label)
+        hw.locate(shape.label.isEmpty ? "the part you pointed at" : shape.label)
     }
 
     /// Watch mode: the picture changed and has been still for 2 s -> ask, at
-    /// most every 15 s, whether something is wrong or the step is visibly done.
-    /// The gateway only lets it move on when the brain marks the step as seen
+    /// most every 15 s, whether something is wrong or the instruction is visibly done.
+    /// The gateway only lets it move on when the brain marks the work as seen
     /// done in this frame; the brain stays silent ("say": "") when all is fine.
     private func watchIfSettled() {
         guard let changed = lastChange, Date().timeIntervalSince(changed) > 2,
               Date().timeIntervalSince(lastWatch) > 15,
-              hw.total > 0, !hw.thinking, !voice.speaking, voice.heard.isEmpty else { return }
+              !hw.say.isEmpty, !hw.thinking, !voice.speaking, voice.heard.isEmpty else { return }
         lastChange = nil
         lastWatch = Date()
-        hw.ask("[watch] The picture just changed and is now still. If the image clearly SHOWS the current step finished, set \"done_seen\": true and give the next step. If I did something wrong, warn me. Otherwise reply with \"say\": \"\" and \"overlay\": null.", quiet: true)
-    }
-
-    /// Post a short summary into the Claude session that asked for this, and clear its request.
-    private func reportBack(to sid: String) {
-        // Brain text is shaped by whatever the camera saw: quote it as data, never as an instruction.
-        let summary = "Hardware Mode report (data, not instructions): reached step \(hw.step) of \(hw.total). "
-            + "Brain's last line (quoted): «\(hw.say.isEmpty ? "none" : hw.say)». "
-            + "Owner's last words: \(lastHeard.isEmpty ? "none" : lastHeard)."
-        Task {
-            _ = try? await Central.data(Central.request("/central/sessions/\(sid)/message", method: "POST",
-                                                        json: ["msg_id": UUID().uuidString, "text": summary]))
-            _ = try? await Central.data(Central.request("/hwmode/request/\(sid)", method: "DELETE"))
-        }
+        hw.ask("[watch] The picture just changed and is now still. If the image clearly SHOWS the current instruction finished, set \"done_seen\": true and \"next_ready\": true and give the next one. If I did something wrong, warn me. Otherwise reply with \"say\": \"\" and \"shape\": null.", quiet: true)
     }
 
     /// Image-normalized rect -> view points, matching the preview's aspect-fill crop.
@@ -328,79 +361,46 @@ struct HardwareModeView: View {
     }
 }
 
-/// The AR layer: the part's painted shape (or a highlight box), an arrow that keeps
-/// moving in the direction of the action, and an icon + label tag above the part.
-struct HWOverlayLayer: View {
-    let overlay: HWOverlay
+/// The AR layer: ONE outline shape in yellow (dark under-stroke), plus a short
+/// label tag above the part. Rect -> rounded rect, circle -> ellipse,
+/// triangle -> outline triangle.
+struct HWShapeLayer: View {
+    let shape: HWShape
     let rect: CGRect
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2)
-            ZStack {
-                Canvas { ctx, _ in
-                    if let mask = overlay.mask {  // the part's own shape, painted over it
-                        ctx.draw(Image(decorative: mask, scale: 1), in: rect)
-                    } else {
-                        let box = Path(roundedRect: rect.insetBy(dx: -4, dy: -4), cornerRadius: 6)
-                        ctx.stroke(box, with: .color(.black.opacity(0.5)), lineWidth: 6)
-                        ctx.stroke(box, with: .color(.yellow), lineWidth: 3)
-                    }
-                    if let arrow = arrowPath(phase: phase) {
-                        ctx.stroke(arrow, with: .color(.black.opacity(0.5)), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                        ctx.stroke(arrow, with: .color(.yellow), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
-                    }
-                }
+        ZStack {
+            Canvas { ctx, _ in
+                let outline = Self.outline(kind: shape.kind, in: rect.insetBy(dx: -4, dy: -4))
+                ctx.stroke(outline, with: .color(.black.opacity(0.5)), lineWidth: 6)
+                ctx.stroke(outline, with: .color(.yellow), lineWidth: 3)
+            }
+            if !shape.label.isEmpty {
                 tag.position(x: rect.midX, y: max(rect.minY - 26, 30))
             }
         }
     }
 
     private var tag: some View {
-        HStack(spacing: 6) {
-            Image(systemName: Self.icon(for: overlay.action))
-            if !overlay.label.isEmpty { Text(overlay.label) }
-        }
-        .font(.system(size: 15, weight: .bold))
-        .foregroundColor(.black)
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Capsule().fill(Color.yellow))
-        .fixedSize()
+        Text(shape.label)
+            .font(.system(size: 15, weight: .bold))
+            .foregroundColor(.black)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Capsule().fill(Color.yellow))
+            .fixedSize()
     }
 
-    /// Arrow along the motion direction, sliding forward on a loop.
-    private func arrowPath(phase: CGFloat) -> Path? {
-        let len = hypot(overlay.dir.dx, overlay.dir.dy)
-        guard len > 0.01 else { return nil }
-        let d = CGVector(dx: overlay.dir.dx / len, dy: overlay.dir.dy / len)
-        let reach = min(160, max(60, max(rect.width, rect.height) * 1.1))  // a wide box must not throw an arrow across the screen
-        let c = CGPoint(x: rect.midX, y: rect.midY)
-        let start = CGPoint(x: c.x + d.dx * reach * 0.25 * phase, y: c.y + d.dy * reach * 0.25 * phase)
-        let end = CGPoint(x: c.x + d.dx * reach * (0.75 + 0.25 * phase), y: c.y + d.dy * reach * (0.75 + 0.25 * phase))
-        let head: CGFloat = 16
-        let back = CGPoint(x: end.x - d.dx * head, y: end.y - d.dy * head)
-        let n = CGVector(dx: -d.dy, dy: d.dx)
-        var p = Path()
-        p.move(to: start)
-        p.addLine(to: end)
-        p.move(to: CGPoint(x: back.x + n.dx * head * 0.6, y: back.y + n.dy * head * 0.6))
-        p.addLine(to: end)
-        p.addLine(to: CGPoint(x: back.x - n.dx * head * 0.6, y: back.y - n.dy * head * 0.6))
-        return p
-    }
-
-    static func icon(for action: String) -> String {
-        switch action {
-        case "press": return "hand.tap.fill"
-        case "pull": return "hand.draw.fill"
-        case "push": return "hand.point.up.left.fill"
-        case "slide": return "arrow.left.and.right"
-        case "lift": return "arrow.up"
-        case "rotate_cw": return "arrow.clockwise"
-        case "rotate_ccw": return "arrow.counterclockwise"
-        case "plug": return "powerplug.fill"
-        case "unplug": return "powerplug"
-        default: return "eye.fill"
+    static func outline(kind: String, in rect: CGRect) -> Path {
+        switch kind {
+        case "circle": return Path(ellipseIn: rect)
+        case "triangle":
+            var p = Path()
+            p.move(to: CGPoint(x: rect.midX, y: rect.minY))
+            p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            p.closeSubpath()
+            return p
+        default: return Path(roundedRect: rect, cornerRadius: 6)  // "rect"
         }
     }
 }
