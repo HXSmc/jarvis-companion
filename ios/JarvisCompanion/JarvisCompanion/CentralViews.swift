@@ -1940,8 +1940,9 @@ struct CardExtras: View {
     @ViewBuilder
     private func buttonRows(_ need: CardInfo.Need) -> some View {
         let buttons = CardInfo.buttons(for: need)
-        // Two short buttons sit side by side; longer lists (choices) stack full width.
-        if buttons.count == 2 {
+        // Two short buttons sit side by side; longer lists (choices) and the long
+        // hardware label stack full width so the label never truncates.
+        if buttons.count == 2, need.kind != "hardware" {
             HStack(spacing: 8) {
                 ForEach(Array(buttons.enumerated()), id: \.offset) { index, button in
                     actionButton(need, button.label, sends: button.sends, primary: index == 0)
@@ -1949,8 +1950,9 @@ struct CardExtras: View {
             }
         } else {
             VStack(spacing: 8) {
-                ForEach(Array(buttons.enumerated()), id: \.offset) { _, button in
-                    actionButton(need, button.label, sends: button.sends, primary: button.sends)
+                ForEach(Array(buttons.enumerated()), id: \.offset) { index, button in
+                    actionButton(need, button.label, sends: button.sends,
+                                 primary: need.kind == "hardware" ? index == 0 : button.sends)
                 }
             }
         }
@@ -1978,7 +1980,7 @@ struct CardExtras: View {
             HStack(spacing: 6) {
                 if sending == label { ProgressView().tint(primary ? Color.black : Color.jarvisAccent) }
                 if opensHardware { Image(systemName: "wrench.and.screwdriver") }
-                Text(label).lineLimit(1)
+                Text(label).lineLimit(1).minimumScaleFactor(0.85)
             }
             .font(.subheadline.weight(.bold))
             .frame(maxWidth: .infinity, minHeight: 44)

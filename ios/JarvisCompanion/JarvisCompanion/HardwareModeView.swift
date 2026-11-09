@@ -191,7 +191,7 @@ struct HardwareModeView: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: voice.listening ? "waveform" : "mic.slash")
-                    .foregroundColor(voice.listening ? .green : .gray)
+                    .foregroundColor(.white.opacity(0.9))
                     .frame(width: 32)
                     .accessibilityLabel(voice.listening ? "Listening" : "Not listening")
                 if showKeyboard {  // hidden fallback for when speaking is not an option
@@ -218,13 +218,18 @@ struct HardwareModeView: View {
             .foregroundColor(.white)
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.black.opacity(0.55)))
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.55)))
     }
 
+    /// Solid dark capsule, white text, small coloured dot: readable over any camera
+    /// frame (coloured fills were near-unreadable). Yellow stays the only highlight.
     private func pill(_ text: String, color: Color) -> some View {
-        Text(text).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Capsule().fill(color.opacity(0.75)))
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(text).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Capsule().fill(Color.black.opacity(0.75)))
     }
 
     // MARK: - Behaviour
@@ -374,7 +379,7 @@ struct HWShapeLayer: View {
         ZStack {
             Canvas { ctx, _ in
                 let outline = Self.outline(kind: shape.kind, in: rect.insetBy(dx: -4, dy: -4))
-                ctx.stroke(outline, with: .color(.black.opacity(0.5)), lineWidth: 6)
+                ctx.stroke(outline, with: .color(.black.opacity(0.8)), lineWidth: 8)
                 ctx.stroke(outline, with: .color(.yellow), lineWidth: 3)
             }
             if !shape.label.isEmpty {
@@ -389,6 +394,7 @@ struct HWShapeLayer: View {
             .foregroundColor(.black)
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(Capsule().fill(Color.yellow))
+            .overlay(Capsule().stroke(Color.black.opacity(0.6), lineWidth: 1))
             .fixedSize()
     }
 

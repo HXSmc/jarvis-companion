@@ -179,6 +179,54 @@ final class HWLogicTests: XCTestCase {
         XCTAssertTrue(hw.cards.isEmpty)
     }
 
+    /// A mid-task research turn ("what is this?") explains on the side: the current
+    /// instruction and the shape on the part survive it, and the aside is heard once.
+    func testResearchReplyKeepsInstructionAndShape() {
+        let hw = HWSession()
+        var spoken: [String] = []
+        var acks: [String] = []
+        hw.onSay = { spoken.append($0) }
+        hw.onAck = { _, _, text in acks.append(text) }
+        hw.handle(["type": "ready"])
+        hw.ask("done")
+        hw.handle(["type": "reply", "frame_id": 1, "w": 1024, "h": 768, "total_s": 1.0,
+                   "data": ["say": "Unplug the SATA data cable.",
+                            "shape": ["kind": "rect", "box": [300, 330, 350, 380], "label": "SATA data cable"]]])
+        let instruction = hw.say
+        let shape = hw.shape
+        let pcm = Data([1, 0, 2, 0]).base64EncodedString()
+        // gateway order: ack, research started/done, aside, research reply
+        hw.handle(["type": "ack", "text": "Checking.", "rate": 24000, "pcm": pcm])
+        hw.handle(["type": "research", "state": "started"])
+        XCTAssertTrue(hw.researching)
+        let aside = "It is the SSD's data cable. Back to it: unplug the SATA data cable."
+        hw.handle(["type": "research", "state": "done"])
+        hw.handle(["type": "aside", "text": aside, "rate": 24000, "pcm": pcm])
+        hw.handle(["type": "reply", "frame_id": 1, "w": 1024, "h": 768, "total_s": 8.0,
+                   "data": ["research": true, "say": "It is the SSD's data cable.", "shape": NSNull(),
+                            "cards": [["id": "a", "type": "info", "title": "SATA", "body": ["It is the data cable."]]]]])
+        XCTAssertEqual(hw.say, instruction, "a research turn must not change the instruction")
+        XCTAssertEqual(hw.shape, shape, "a research turn must not move or clear the shape")
+        XCTAssertEqual(hw.cards.count, 1)
+        XCTAssertFalse(hw.thinking)
+        XCTAssertEqual(acks.filter { $0 == aside }, [aside], "the aside plays once, as an ack")
+        // a no-pcm aside is read by the phone's own voice, still without touching say
+        hw.handle(["type": "aside", "text": "Second note."])
+        XCTAssertEqual(spoken.last, "Second note.")
+        XCTAssertEqual(hw.say, instruction)
+    }
+
+    func testWordsBeforeReadyAreJoinedNotDropped() {
+        let first = HWSession.joinedPending(nil, "fix the SSD", true)
+        XCTAssertEqual(first.text, "fix the SSD")
+        XCTAssertTrue(first.withFrame)
+        // a second sentence before ready joins the first instead of replacing it
+        let joined = HWSession.joinedPending(first, "the drive light is off", false)
+        XCTAssertEqual(joined.text, "fix the SSD the drive light is off")
+        XCTAssertTrue(joined.withFrame, "the frame flag sticks once any sentence set it")
+        XCTAssertEqual(HWSession.joinedPending(nil, "hello", false).text, "hello")
+    }
+
     // MARK: Jarvis's server voice
 
     func testServerVoiceIsPlayedAndThePhoneVoiceIsOnlyAFallback() async throws {

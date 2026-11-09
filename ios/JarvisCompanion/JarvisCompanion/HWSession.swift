@@ -141,6 +141,14 @@ final class HWSession: ObservableObject {
         initialTask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : "Let's start."
     }
 
+    /// Words spoken before "ready" pile into ONE ask, joined with a space.
+    /// The frame flag sticks once set: any sentence may name what the camera sees.
+    static func joinedPending(_ old: (text: String, withFrame: Bool)?, _ new: String,
+                              _ withFrame: Bool) -> (text: String, withFrame: Bool) {
+        old.map { (text: "\($0.text) \(new)", withFrame: $0.withFrame || withFrame) }
+            ?? (text: new, withFrame: withFrame)
+    }
+
     /// Sends a camera frame; returns its id so a later shape can be matched to it.
     @discardableResult
     func sendFrame(_ jpeg: Data) -> Int {
@@ -155,8 +163,8 @@ final class HWSession: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard connected else {
-            // The first words are the task: keep them until "ready" instead of dropping them.
-            if socket != nil, !quiet, !locate { pendingAsk = (trimmed, withFrame) }
+            // The first words are the task: keep them until "ready", joined, not overwritten.
+            if socket != nil, !quiet, !locate { pendingAsk = Self.joinedPending(pendingAsk, trimmed, withFrame) }
             return
         }
         thinking = true
@@ -241,6 +249,16 @@ final class HWSession: ObservableObject {
             }
         case "research":
             researching = (m["state"] as? String) == "started"
+        case "aside":
+            // A spoken aside (a research summary): heard, never shown; it must not
+            // touch `say`, the instruction card or the shape.
+            guard let text = m["text"] as? String,
+                  !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            if let b64 = m["pcm"] as? String, let pcm = Data(base64Encoded: b64) {
+                onAck?(pcm, (m["rate"] as? NSNumber)?.doubleValue ?? 24000, text)
+            } else {
+                onSay?(text)  // no server audio: the phone's own voice reads it
+            }
         case "session":
             if let title = m["title"] as? String { onSession?(title) }
         case "reply":
@@ -255,6 +273,12 @@ final class HWSession: ObservableObject {
                                          height: (m["h"] as? NSNumber)?.doubleValue,
                                          frameId: (m["frame_id"] as? NSNumber)?.intValue)
             let newCards = HUDCard.list(from: d["cards"])
+            if (d["research"] as? Bool) == true {
+                // A research turn explains on the side: only the cards change; the
+                // instruction, the shape and the tracker stay exactly as they were.
+                if !newCards.isEmpty { cards = newCards }
+                return
+            }
             if !newCards.isEmpty { cards = newCards }  // only the Clear button empties them
             if locateTurn {  // only the shape moves; speak only when the part is out of view
                 if !saidThisTurn, !said.isEmpty { speak(said) }
