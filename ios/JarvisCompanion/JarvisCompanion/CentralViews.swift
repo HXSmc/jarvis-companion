@@ -1502,18 +1502,24 @@ struct MarkdownText: View {
             Rectangle().fill(Color.jarvisMuted.opacity(0.4)).frame(height: 1)
         case .table(let header, let rows):
             // Columns are capped so long cells wrap; wide tables scroll sideways.
+            // fixedSize(vertical:) lets a cell grow to every line it needs: inside the
+            // sideways ScrollView a capped Text otherwise stays one line and ends in "...".
             ScrollView(.horizontal, showsIndicators: false) {
                 Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 8) {
                     GridRow {
                         ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                            Text(Self.inline(cell)).font(.subheadline.bold()).frame(maxWidth: 240, alignment: .leading)
+                            Text(Self.inline(cell)).font(.subheadline.bold())
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: 240, alignment: .leading)
                         }
                     }
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                         Divider().gridCellUnsizedAxes(.horizontal)
                         GridRow {
                             ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                                Text(Self.inline(cell)).font(.subheadline).frame(maxWidth: 240, alignment: .leading)
+                                Text(Self.inline(cell)).font(.subheadline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: 240, alignment: .leading)
                             }
                         }
                     }
