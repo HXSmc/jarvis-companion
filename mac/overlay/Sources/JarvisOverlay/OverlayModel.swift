@@ -6,8 +6,15 @@ import OverlayCore
 @MainActor
 final class OverlayModel: ObservableObject {
     @Published var shapes: [HUDShape] = []
-    /// Newest last (bottom of the column), max 5; a card with the same id replaces the old one.
-    @Published var cards: [HUDCard] = []
+    /// Newest last, at most ScatterLayout.maxCards; a card with the same id replaces the old one.
+    @Published var cards: [HUDCard] = [] {
+        didSet {
+            layout.keep(Set(cards.map(\.listKey)))
+            MediaPlaybackController.shared.cardsChanged(old: oldValue, new: cards)
+        }
+    }
+    /// Stored scatter frame per card and the normal / aside mode (CardPanel draws it).
+    @Published private(set) var layout = ScatterLayout.LayoutState()
     /// Missing system permissions; drives the native permission card, which the
     /// idle timer and clear() must not remove.
     @Published var missingPermissions: [Permission] = []
@@ -18,6 +25,9 @@ final class OverlayModel: ObservableObject {
     @Published var banner: String?
 
     private var idleTask: Task<Void, Never>?
+    /// Set by CardPanel: whether the pointer rests on a shown card, chip or the permission card
+    /// right now. Read at the idle deadline only, so no remembered hover state can stick.
+    var pointerOnPanel: @MainActor () -> Bool = { false }
     private static let maxShapes = 40
 
     /// Every shape held, oldest first; `shapes` is the visible part (hidden anchored shapes
@@ -103,22 +113,51 @@ final class OverlayModel: ObservableObject {
         } else {
             cards.append(card)
         }
-        if cards.count > 5 { cards.removeFirst(cards.count - 5) }
+        // Over the cap the first card of the layout's retire order goes (pinned cards last).
+        while cards.count > ScatterLayout.maxCards {
+            let index = layout.retireOrder.compactMap { key in cards.firstIndex { $0.listKey == key } }.first ?? 0
+            cards.remove(at: index)
+        }
         bumpIdle()
     }
 
-    /// Oldest card (top of the column) goes first when the panel must shrink.
-    func dropOldestCard() {
-        guard !cards.isEmpty else { return }
-        cards.removeFirst()
+    /// Stores a measured card's scatter frame; cards retired to make room leave `cards`.
+    func place(key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) {
+        let retired = layout.cardAdded(key, size: size, visible: visible, keepOut: keepOut)
+        if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
     }
 
-    /// Pauses the 60 s idle clear while the pointer is over the card panel.
-    func setIdlePaused(_ paused: Bool) {
-        if paused {
-            idleTask?.cancel()
-            idleTask = nil
-        } else {
+    /// A card replaced in place keeps its spot while its new size keeps the caps; otherwise it
+    /// alone is placed again, and cards retired to make room leave `cards`.
+    func resize(key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) {
+        let retired = layout.cardResized(key, size: size, visible: visible, keepOut: keepOut)
+        if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
+    }
+
+    /// The user drags a card: it comes to the front and stays where it is dropped. The idle
+    /// countdown restarts when the drag ends (during it the pointer rests on the card).
+    func drag(key: String, to frame: CGRect, visible: CGRect, ended: Bool) {
+        layout.cardDragged(key, to: frame, visible: visible)
+        if ended { bumpIdle() }
+    }
+
+    /// The screen changed: every stored frame moves the least distance back on screen.
+    func reclamp(visible: CGRect) {
+        layout.reclamp(visible: visible)
+    }
+
+    /// Aside parks every card as a chip and drops the current highlight boxes; restore puts
+    /// each card back at its stored frame and restarts the idle countdown. Repeats are no-ops.
+    func setLayout(_ mode: LayoutMode) {
+        switch mode {
+        case .aside:
+            guard layout.mode == .normal else { return }
+            layout.aside()
+            MediaPlaybackController.shared.stopAll()
+            clearShapes()
+        case .restore:
+            guard layout.mode == .aside else { return }
+            layout.restore()
             bumpIdle()
         }
     }
@@ -126,6 +165,7 @@ final class OverlayModel: ObservableObject {
     func clear() {
         clearShapes()
         cards = []
+        layout.clear()
         idleTask?.cancel()
         idleTask = nil
     }
@@ -135,9 +175,22 @@ final class OverlayModel: ObservableObject {
         idleTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 60_000_000_000)
             guard !Task.isCancelled else { return }
-            self?.clearShapes()
-            self?.cards = []
+            self?.idleExpired()
         }
+    }
+
+    /// At the deadline: the pointer resting on a panel (read now), or a video plays — held at
+    /// most 10 min from its start — waits another round; otherwise clears the highlight boxes,
+    /// and the cards unless they are parked aside (chips wait for restore or clear, no timer).
+    private func idleExpired() {
+        if ScatterLayout.idleWaits(pointerOnPanel: pointerOnPanel(),
+                                   playingSince: MediaPlaybackController.shared.playingSince,
+                                   now: Date()) {
+            bumpIdle()
+            return
+        }
+        clearShapes()
+        if layout.mode == .normal { cards = [] }
     }
 
     private func clearShapes() {

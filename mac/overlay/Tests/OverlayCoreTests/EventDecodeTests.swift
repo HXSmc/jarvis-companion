@@ -69,4 +69,18 @@ final class EventDecodeTests: XCTestCase {
         XCTAssertEqual(decode(#"{"type":"hologram","text":"x"}"#), .unknown)
         XCTAssertEqual(decode(#"{"text":"no type"}"#), .unknown)
     }
+
+    func testLayoutAside() {
+        XCTAssertEqual(decode(#"{"type":"layout","mode":"aside"}"#), .layout(.aside))
+    }
+
+    func testLayoutRestore() {
+        XCTAssertEqual(decode(#"{"type":"layout","mode":"restore"}"#), .layout(.restore))
+    }
+
+    func testLayoutBadModeIsUnknown() {
+        XCTAssertEqual(decode(#"{"type":"layout"}"#), .unknown)
+        XCTAssertEqual(decode(#"{"type":"layout","mode":"tidy"}"#), .unknown)
+        XCTAssertEqual(decode(#"{"type":"layout","mode":1}"#), .unknown)
+    }
 }
