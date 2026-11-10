@@ -145,10 +145,12 @@ final class HWVoice: ObservableObject {
     }
 
     private func playPending() {
+        // Both in order: an instant ack clip must not drop or cut the line queued after it.
         if case let (pcm, rate, text)? = pendingAudio {
             pendingAudio = nil
             playPCM(pcm, rate: rate, text: text)
-        } else if let text = pendingSpeech {
+        }
+        if let text = pendingSpeech {
             pendingSpeech = nil
             speak(text)
         }
@@ -161,7 +163,6 @@ final class HWVoice: ObservableObject {
         lastAudio = (data, rate, text)
         guard engine.isRunning else {
             pendingAudio = (data, rate, text)
-            pendingSpeech = nil
             note("audio queued: engine not running")
             if listening { restartEngine("engine down at playPCM") }
             return
@@ -205,7 +206,6 @@ final class HWVoice: ObservableObject {
         count("speak")
         guard engine.isRunning else {
             pendingSpeech = text
-            pendingAudio = nil
             note("speak queued: engine not running")
             if listening { restartEngine("engine down at speak") }  // spoken as soon as it is back
             return

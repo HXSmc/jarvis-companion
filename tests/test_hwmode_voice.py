@@ -24,7 +24,7 @@ from hwmode.tts import Voice
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, sys
 for line in sys.stdin:
-    reply = json.dumps({"step": 1, "of": 2, "done_seen": False, "say": "The power cable, sir: left plug.", "overlay": None})
+    reply = json.dumps({"next_ready": False, "done_seen": False, "say": "The power cable, sir: left plug.", "shape": None})
     for part in (reply[:30], reply[30:]):
         print(json.dumps({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": part}}}), flush=True)
     print(json.dumps({"type": "result", "result": reply, "usage": {}}), flush=True)
@@ -51,7 +51,7 @@ def fake_claude(tmp_path, monkeypatch):
 
 
 def test_voice_only_speaks_english_lines():
-    assert Voice.speaks("Step one, sir.")
+    assert Voice.speaks("Unplug it, sir.")
     assert not Voice.speaks("")
     assert not Voice.speaks("افصل الكيبل")  # the phone's Arabic voice takes these
 
@@ -63,7 +63,8 @@ def test_ready_announces_the_voice_and_each_line_comes_with_audio(gateway_server
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "t"}))
-                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet", "voice": "bm_daniel"}
+                assert json.loads(await ws.recv()) == {"type": "ready", "model": "sonnet",
+                                                      "voice": "bm_daniel", "task": "t"}
                 await ws.send(json.dumps({"type": "ask", "text": "where is the power cable", "frame": False}))
                 msgs = [json.loads(await asyncio.wait_for(ws.recv(), 10)) for _ in range(3)]
                 kinds = [m["type"] for m in msgs]
@@ -96,7 +97,9 @@ class ZoomSession:
 
     def ask(self, text, jpeg=None, on_text=None):
         self.asked.append((text, jpeg))
-        return Reply(data={"step": 1, "overlay": {"target_px": [300, 300, 468, 468]}}, raw="", ttft_s=None, total_s=0.1)
+        return Reply(data={"next_ready": False, "done_seen": False, "say": "",
+                           "shape": {"kind": "rect", "box": [300, 300, 468, 468]}},
+                     raw="", ttft_s=None, total_s=0.1)
 
 
 def _jpeg(w=1024, h=768) -> bytes:
@@ -110,19 +113,19 @@ def test_small_box_gets_a_zoomed_second_look():
     pytest.importorskip("PIL.Image")
     conn = hwmode._Conn(ws=None)
     conn.session = ZoomSession()
-    data = {"step": 1, "overlay": {"target_px": [500, 400, 520, 420], "label": "corner screw"}}  # 20 px: small
+    data = {"say": "There, sir.", "shape": {"kind": "rect", "box": [500, 400, 520, 420], "label": "corner screw"}}  # 20 px: small
     out = asyncio.run(conn._refine_small(data, _jpeg()))
     text, crop = conn.session.asked[0]
     assert text.startswith("[zoom]") and "corner screw" in text and crop
     # crop = 200x200 around the box centre (510,410) -> origin (410,310), scale 768/200 = 3.84
-    fine = out["overlay"]["target_px"]
+    fine = out["shape"]["box"]
     assert fine == pytest.approx([410 + 300 / 3.84, 310 + 300 / 3.84, 410 + 468 / 3.84, 310 + 468 / 3.84])
-    assert out["overlay"]["label"] == "corner screw" and out["step"] == 1
+    assert out["shape"]["label"] == "corner screw" and out["say"] == "There, sir."
 
 
 def test_big_box_is_left_alone():
     conn = hwmode._Conn(ws=None)
     conn.session = ZoomSession()
-    data = {"step": 1, "overlay": {"target_px": [100, 100, 600, 500]}}
+    data = {"say": "There.", "shape": {"kind": "rect", "box": [100, 100, 600, 500]}}
     assert asyncio.run(conn._refine_small(data, _jpeg())) == data
     assert conn.session.asked == []

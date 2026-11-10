@@ -9,6 +9,7 @@ usage:
   jarvis-card ask checklist "Test on your phone" --item "Open the board" --item "Tap Approve"
   jarvis-card ask preview "New header" --file shot.png    Looks good + Change it
   jarvis-card ask info "Merged, nothing to do"           no buttons, just a note
+  jarvis-card ask hardware "Reseat the SATA cable"   Open in Hardware Mode button
   jarvis-card file report.md ["title"]                   a .md/.txt/.pdf/.png/.jpg on the card
   jarvis-card link https://claude.ai/artifact/... ["title"]
   jarvis-card delegate CHILD_SESSION_ID "handed notifications"

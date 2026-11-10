@@ -27,6 +27,9 @@
 		5A0B1C2D3E4F5061726A7412 /* HWVoiceAudioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */; };
 		5A0B1C2D3E4F5061EA745200 /* EnginePickerRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061EA745100 /* EnginePickerRow.swift */; };
 		C4AD5A0B1C2D3E4F5061EA02 /* EnginePickerSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AD5A0B1C2D3E4F5061EA01 /* EnginePickerSnapshotTests.swift */; };
+		5A0B1C2D3E4F5061726A7C12 /* HUDCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7C11 /* HUDCards.swift */; };
+		5A0B1C2D3E4F5061726A7C22 /* HUDViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0B1C2D3E4F5061726A7C21 /* HUDViews.swift */; };
+		C4AD5A0B1C2D3E4F5061EB02 /* HUDCardSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AD5A0B1C2D3E4F5061EB01 /* HUDCardSnapshotTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +66,9 @@
 		5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HWVoiceAudioTests.swift; sourceTree = "<group>"; };
 		5A0B1C2D3E4F5061726A7403 /* JarvisCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JarvisCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C4AD5A0B1C2D3E4F5061EA01 /* EnginePickerSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnginePickerSnapshotTests.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7C11 /* HUDCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDCards.swift; sourceTree = "<group>"; };
+		5A0B1C2D3E4F5061726A7C21 /* HUDViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDViews.swift; sourceTree = "<group>"; };
+		C4AD5A0B1C2D3E4F5061EB01 /* HUDCardSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDCardSnapshotTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +114,8 @@
 				5A0B1C2D3E4F5061726A73E1 /* HWVoice.swift */,
 				5A0B1C2D3E4F5061726A73D1 /* HWCamera.swift */,
 				5A0B1C2D3E4F5061726A73C1 /* HWSession.swift */,
+				5A0B1C2D3E4F5061726A7C11 /* HUDCards.swift */,
+				5A0B1C2D3E4F5061726A7C21 /* HUDViews.swift */,
 				5A0B1C2D3E4F5061EA745100 /* EnginePickerRow.swift */,
 				5A0B1C2D3E4F5061726A7315 /* Info.plist */,
 				5A0B1C2D3E4F5061726A7318 /* Assets.xcassets */,
@@ -130,6 +138,7 @@
 				5A0B1C2D3E4F5061726A7401 /* HWLogicTests.swift */,
 				6E0C1D2E3F405162738495A1 /* NotifyLogicTests.swift */,
 				C4AD5A0B1C2D3E4F50617201 /* CardSnapshotTests.swift */,
+				C4AD5A0B1C2D3E4F5061EB01 /* HUDCardSnapshotTests.swift */,
 				5A0B1C2D3E4F5061726A7402 /* HWVoiceAudioTests.swift */,
 				C4AD5A0B1C2D3E4F5061EA01 /* EnginePickerSnapshotTests.swift */,
 			);
@@ -240,6 +249,8 @@
 				5A0B1C2D3E4F5061726A73D2 /* HWCamera.swift in Sources */,
 				5A0B1C2D3E4F5061726A73C2 /* HWSession.swift in Sources */,
 				5A0B1C2D3E4F5061EA745200 /* EnginePickerRow.swift in Sources */,
+				5A0B1C2D3E4F5061726A7C12 /* HUDCards.swift in Sources */,
+				5A0B1C2D3E4F5061726A7C22 /* HUDViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -251,6 +262,7 @@
 				6E0C1D2E3F405162738495B1 /* NotifyLogicTests.swift in Sources */,
 				C4AD5A0B1C2D3E4F50617211 /* CardSnapshotTests.swift in Sources */,
 				5A0B1C2D3E4F5061726A7412 /* HWVoiceAudioTests.swift in Sources */,
+				C4AD5A0B1C2D3E4F5061EB02 /* HUDCardSnapshotTests.swift in Sources */,
 				C4AD5A0B1C2D3E4F5061EA02 /* EnginePickerSnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
