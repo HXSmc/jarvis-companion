@@ -431,8 +431,8 @@ private struct HUDCornerTicks: View {
 /// The card layer over the camera: up to 6 cards in edge slots around the subject.
 /// `avoid` is the active shape's rect in this view's own points; slots covering it are
 /// trimmed or skipped, and the top 70 pt (status bar) and bottom 150 pt (controls) stay free.
-/// From accessibility1 up the cards stack in one full-width column (max 3), so big text is
-/// not squeezed into a half-width slot.
+/// From accessibility1 up the cards stack in one full-width column of 2 tall slots, so big
+/// text is neither squeezed into a half-width slot nor cut at a short one.
 struct HUDLayer: View {
     let cards: [HUDCard]
     let avoid: CGRect?
@@ -446,14 +446,15 @@ struct HUDLayer: View {
 
     static let top: CGFloat = 70, bottom: CGFloat = 150, margin: CGFloat = 8, gap: CGFloat = 8
 
-    /// Grid cells, [row][column]: 3 rows of 2 half-width columns (or 1 full-width column).
+    /// Grid cells, [row][column]: 3 rows of 2 half-width columns, or 2 rows of 1 full-width column.
     static func cells(in size: CGSize, singleColumn: Bool = false) -> [[CGRect]] {
         let w = size.width, h = size.height
         guard w > 60, h > 300 else { return [] }
         let cardW = singleColumn ? w - 2 * margin : min(w * 0.46, w - 2 * margin)
-        let rowH = (h - top - bottom - 2 * gap) / 3
+        let rows = singleColumn ? 2 : 3
+        let rowH = (h - top - bottom - CGFloat(rows - 1) * gap) / CGFloat(rows)
         let xs: [CGFloat] = singleColumn ? [margin] : [margin, w - margin - cardW]
-        return (0..<3).map { r in
+        return (0..<rows).map { r in
             xs.map { CGRect(x: $0, y: top + CGFloat(r) * (rowH + gap), width: cardW, height: rowH) }
         }
     }

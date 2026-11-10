@@ -165,7 +165,7 @@ final class HUDCardSnapshotTests: XCTestCase {
             }
         }
         let big = HUDLayer.placements(for: all, in: size, avoid: nil, singleColumn: true)
-        XCTAssertLessThanOrEqual(big.count, 3)
+        XCTAssertEqual(big.count, 2)
         for r in big { XCTAssertEqual(r.width, size.width - 16) }  // full width, never two columns
         // with the subject mid-screen, no placement covers it
         let avoid = CGRect(x: 140, y: 300, width: 120, height: 160)
