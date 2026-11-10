@@ -120,8 +120,9 @@ final class CardPanel: NSObject {
 
     func host(_ model: OverlayModel) {
         self.model = model
-        permissionWindow.contentView = NSHostingView(rootView: PermissionTile(model: model, missing: []))
+        permissionWindow.contentView = NSHostingView(rootView: PermissionCard(missing: []))
         chipWindow.contentView = NSHostingView(rootView: ChipStrip(model: model, chips: []))
+        model.pointerOnPanel = { [weak self] in self?.pointerOnPanel() ?? false }
         // @Published fires before the value lands: sync on the next main-loop turn.
         let refit = { [weak self] (_: Any) in DispatchQueue.main.async { self?.sync() } }
         cancellables = [
@@ -150,6 +151,13 @@ final class CardPanel: NSObject {
         return (Self.flip(screen?.frame ?? .zero), Self.flip(screen?.visibleFrame ?? .zero))
     }
 
+    /// Whether the pointer rests on a shown, clickable card, chip or permission panel now.
+    private func pointerOnPanel() -> Bool {
+        let windows = entries.values.map(\.window) + [permissionWindow, chipWindow]
+        let frames = windows.filter { $0.isVisible && !$0.ignoresMouseEvents }.map(\.frame)
+        return ScatterLayout.pointerRests(NSEvent.mouseLocation, onAnyOf: frames)
+    }
+
     @objc private func screensChanged() {
         model?.reclamp(visible: geometry.visible)
         sync()
@@ -167,12 +175,12 @@ final class CardPanel: NSObject {
             let key = card.listKey
             if var entry = entries[key] {
                 guard entry.card != card else { continue }
-                entry.host.rootView = CardTile(model: model, card: card)
+                entry.host.rootView = CardTile(card: card)
                 entry.card = card
                 entries[key] = entry
                 model.resize(key: key, size: entry.host.fittingSize, visible: visible)
             } else {
-                let host = NSHostingView(rootView: CardTile(model: model, card: card))
+                let host = NSHostingView(rootView: CardTile(card: card))
                 let window = HUDWindow()
                 window.contentView = host
                 entries[key] = Entry(window: window, host: host, card: card)
@@ -188,7 +196,6 @@ final class CardPanel: NSObject {
         for (key, entry) in entries where !live.contains(key) {
             entry.window.fade(to: 0)
             entries[key] = nil
-            model.setHovering(key, false)
         }
 
         let aside = model.layout.mode == .aside
@@ -197,7 +204,6 @@ final class CardPanel: NSObject {
             guard let entry = entries[key] else { continue }
             guard !aside, let frame = model.layout.frames[key] else {
                 entry.window.fade(to: 0)
-                model.setHovering(key, false)
                 continue
             }
             entry.window.place(frame)
@@ -211,13 +217,12 @@ final class CardPanel: NSObject {
     /// returns its frame as a keep-out. It never goes aside and is never cleared.
     private func syncPermission(_ model: OverlayModel, visible: CGRect) -> CGRect? {
         guard !model.missingPermissions.isEmpty,
-              let host = permissionWindow.contentView as? NSHostingView<PermissionTile>
+              let host = permissionWindow.contentView as? NSHostingView<PermissionCard>
         else {
             permissionWindow.fade(to: 0)
-            model.setHovering(PermissionTile.hoverID, false)
             return nil
         }
-        host.rootView = PermissionTile(model: model, missing: model.missingPermissions)
+        host.rootView = PermissionCard(missing: model.missingPermissions)
         let size = host.fittingSize
         let frame = CGRect(x: visible.maxX - ScatterLayout.inset - size.width, y: visible.minY + ScatterLayout.inset,
                            width: size.width, height: size.height)
@@ -231,7 +236,6 @@ final class CardPanel: NSObject {
         let keys = model.layout.chipKeys
         guard aside, !keys.isEmpty, let host = chipWindow.contentView as? NSHostingView<ChipStrip> else {
             chipWindow.fade(to: 0)
-            model.setHovering(ChipStrip.hoverID, false)
             return
         }
         let frames = ScatterLayout.chipFrames(keys: keys, visible: visible, orbOnRight: true)

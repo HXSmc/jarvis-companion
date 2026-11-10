@@ -3,10 +3,9 @@ import SwiftUI
 import OverlayCore
 
 /// One card in its own panel: scales in from 0.96 on arrival (none with Reduce Motion; the
-/// panel itself fades in). Hovering pauses the idle clear.
+/// panel itself fades in).
 @MainActor
 struct CardTile: View {
-    let model: OverlayModel
     let card: HUDCard
     @State private var entered = false
 
@@ -20,15 +19,12 @@ struct CardTile: View {
                 }
                 withAnimation(.easeOut(duration: 0.2)) { entered = true }
             }
-            .onHover { model.setHovering(card.listKey, $0) }
     }
 }
 
 /// Parked cards as chips at their strip offsets; a click on any chip restores every card.
 @MainActor
 struct ChipStrip: View {
-    static let hoverID = "chips"
-
     struct Chip {
         let card: HUDCard
         let offset: CGPoint
@@ -46,28 +42,13 @@ struct ChipStrip: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onHover { model.setHovering(Self.hoverID, $0) }
-    }
-}
-
-/// The permission card in its own top-right panel; hovering pauses the idle clear.
-@MainActor
-struct PermissionTile: View {
-    static let hoverID = "permission"
-
-    let model: OverlayModel
-    let missing: [Permission]
-
-    var body: some View {
-        PermissionCard(missing: missing)
-            .onHover { model.setHovering(Self.hoverID, $0) }
     }
 }
 
 /// Native permission card (x-apple.systempreferences is not https, so this one
 /// is not a HUD card): one row per missing pane, each opening its settings pane.
 @MainActor
-private struct PermissionCard: View {
+struct PermissionCard: View {
     let missing: [Permission]
 
     var body: some View {

@@ -166,6 +166,12 @@ public enum ScatterLayout {
 
     static func area(_ rect: CGRect) -> CGFloat { rect.width * rect.height }
 
+    /// Idle deadline rule: wait another round only while the pointer rests inside a shown panel
+    /// (decided from the pointer position now, never from remembered hover events).
+    public static func pointerRests(_ pointer: CGPoint, onAnyOf frames: [CGRect]) -> Bool {
+        frames.contains { $0.contains(pointer) }
+    }
+
     /// SplitMix64: small, seedable, the same sequence on every run and machine.
     struct SplitMix64 {
         var state: UInt64

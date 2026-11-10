@@ -250,4 +250,15 @@ final class ScatterLayoutTests: XCTestCase {
         }
         XCTAssertTrue(LayoutDebugCommand.demoCards(count: 0).isEmpty)
     }
+
+    // MARK: idle deadline (hub amendment A1.1)
+    func testIdleDeadlineWaitsOnlyWhileThePointerRestsOnAPanel() {
+        let cards = [CGRect(x: 100, y: 100, width: 300, height: 120), CGRect(x: 700, y: 400, width: 200, height: 28)]
+        XCTAssertTrue(ScatterLayout.pointerRests(CGPoint(x: 150, y: 150), onAnyOf: cards))
+        XCTAssertTrue(ScatterLayout.pointerRests(CGPoint(x: 750, y: 410), onAnyOf: cards))
+        XCTAssertFalse(ScatterLayout.pointerRests(CGPoint(x: 50, y: 50), onAnyOf: cards))
+        // The hovered card was replaced or removed: its frame is gone, so the deadline clears.
+        XCTAssertFalse(ScatterLayout.pointerRests(CGPoint(x: 150, y: 150), onAnyOf: Array(cards.dropFirst())))
+        XCTAssertFalse(ScatterLayout.pointerRests(CGPoint(x: 150, y: 150), onAnyOf: []))
+    }
 }

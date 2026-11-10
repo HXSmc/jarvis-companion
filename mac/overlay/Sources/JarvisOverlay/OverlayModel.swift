@@ -22,9 +22,9 @@ final class OverlayModel: ObservableObject {
     @Published var banner: String?
 
     private var idleTask: Task<Void, Never>?
-    /// Panels under the pointer (cards, chips, permission card); idle is paused while any is.
-    /// A set, not a flag: moving between panels may deliver one's exit after the next one's enter.
-    private var hovered: Set<String> = []
+    /// Set by CardPanel: whether the pointer rests on a shown card, chip or the permission card
+    /// right now. Read at the idle deadline only, so no remembered hover state can stick.
+    var pointerOnPanel: @MainActor () -> Bool = { false }
     private static let maxShapes = 40
 
     /// Every shape held, oldest first; `shapes` is the visible part (hidden anchored shapes
@@ -145,32 +145,16 @@ final class OverlayModel: ObservableObject {
         }
     }
 
-    /// Pauses the 60 s idle clear while the pointer is over any card, chip or the permission card.
-    func setHovering(_ id: String, _ on: Bool) {
-        let wasHovered = !hovered.isEmpty
-        if on { hovered.insert(id) } else { hovered.remove(id) }
-        if hovered.isEmpty {
-            if wasHovered { bumpIdle() }
-        } else {
-            idleTask?.cancel()
-            idleTask = nil
-        }
-    }
-
     func clear() {
         clearShapes()
         cards = []
         layout.clear()
-        hovered = []
         idleTask?.cancel()
         idleTask = nil
     }
 
-    /// Restarts the 60 s countdown, unless the pointer is on a panel (its exit restarts it).
     private func bumpIdle() {
         idleTask?.cancel()
-        idleTask = nil
-        guard hovered.isEmpty else { return }
         idleTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 60_000_000_000)
             guard !Task.isCancelled else { return }
@@ -178,9 +162,14 @@ final class OverlayModel: ObservableObject {
         }
     }
 
-    /// Clears the highlight boxes; cards too, unless they are parked aside (chips wait for
+    /// At the deadline: the pointer resting on a panel (read now) waits another round; otherwise
+    /// clears the highlight boxes, and the cards unless they are parked aside (chips wait for
     /// restore or clear, with no timer).
     private func idleExpired() {
+        if pointerOnPanel() {
+            bumpIdle()
+            return
+        }
         clearShapes()
         if layout.mode == .normal { cards = [] }
     }
