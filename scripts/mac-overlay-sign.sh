@@ -8,7 +8,7 @@
 #
 # The identity lives in its own keychain with a random password kept 0600 next
 # to the overlay token, so signing never needs the login keychain password and
-# never shows a keychain prompt.
+# never shows a keychain prompt. The only prompt is the one-time trust setting below.
 set -euo pipefail
 
 APP="${1:?usage: mac-overlay-sign.sh /path/to/App.app}"
@@ -54,6 +54,19 @@ EOF
 fi
 
 security unlock-keychain -p "$(cat "$PASSFILE")" "$KC"
+# codesign only uses a trusted identity. Trusting it for code signing only is a one-time
+# user trust setting: macOS asks for Touch ID or the login password once (never typed here).
+if ! security find-identity -v -p codesigning "$KC" | grep -q "\"$NAME\""; then
+  CERT="$(mktemp)"
+  security find-certificate -c "$NAME" -p "$KC" > "$CERT"
+  echo "trusting $NAME for code signing: approve the macOS Touch ID / password box (one time)"
+  if [ -n "${JARVIS_SIGN_ADMIN_TRUST:-}" ]; then  # CI: no user to approve, passwordless sudo
+    sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$CERT"
+  else
+    security add-trusted-cert -r trustRoot -p codeSign -k "$KC" "$CERT"
+  fi
+  rm -f "$CERT"
+fi
 HASH="$(security find-certificate -c "$NAME" -Z "$KC" | awk '/SHA-1 hash/ {print $NF; exit}')"
 codesign --force --deep --keychain "$KC" --sign "$HASH" "$APP"
 codesign --verify --deep --strict "$APP"

@@ -47,6 +47,7 @@ jobs:
         env:
           JARVIS_SIGN_DIR: ${{ runner.temp }}/sign
           JARVIS_SIGN_KEYCHAIN: ${{ runner.temp }}/sign/test-signing.keychain-db
+          JARVIS_SIGN_ADMIN_TRUST: "1"
         run: |
           APP="$RUNNER_TEMP/JarvisOverlay.app"
           mkdir -p "$APP/Contents/MacOS"
