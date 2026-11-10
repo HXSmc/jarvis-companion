@@ -362,4 +362,31 @@ extension SnapshotTests {
             XCTAssertEqual(size.height, expected.height, accuracy: 1, card.listKey)
         }
     }
+
+    /// Round 1: the play button never covers the preview's own text; galleries of 3 and 5 have
+    /// no empty cell; the "Starting video" cover after the click.
+    func testRenderMediaRoundOneStates() throws {
+        guard case .video(let youTube)? = LayoutDebugCommand.demoMediaCards().first(where: { $0.id == "media-3" }) else {
+            return XCTFail("demoMediaCards has no media-3 video card")
+        }
+        let size = padded(MediaPolicy.cardSize(for: .video(youTube))!)
+        try renderMediaCard(VideoCardView(card: youTube, thumbnail: .loading, phase: .idle, onPlay: {}),
+                            size: size, name: "media-video-thumb-loading")
+        try renderMediaCard(VideoCardView(card: youTube, thumbnail: .failed, phase: .idle, onPlay: {}),
+                            size: size, name: "media-video-thumb-failed")
+        let thumb = MediaImageState.loaded(makeMediaImage(width: 1600, height: 900, seed: 3))
+        try renderMediaCard(VideoCardView(card: youTube, thumbnail: thumb, phase: .starting, onPlay: {}) { Color.black },
+                            size: size, name: "media-video-starting")
+        for count in [3, 5] {
+            let items = (1...count).map { ImageItem(url: "https://example.com/g\(count)-\($0).jpg") }
+            var states: [String: MediaImageState] = [:]
+            for (index, item) in items.enumerated() {
+                states[item.url] = .loaded(makeMediaImage(width: 900, height: 700, seed: index + count))
+            }
+            let card = ImageCard(id: "g\(count)", title: "\(count) frames", items: items)
+            try renderMediaCard(ImageCardView(card: card, states: states),
+                                size: padded(MediaPolicy.cardSize(for: .image(card))!),
+                                name: "media-gallery-\(count)")
+        }
+    }
 }

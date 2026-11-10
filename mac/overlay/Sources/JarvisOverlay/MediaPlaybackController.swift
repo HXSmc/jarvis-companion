@@ -2,13 +2,15 @@ import AppKit
 import Combine
 import OverlayCore
 
-/// The one live inline player (YouTube web view or native video view) and its single teardown path.
+/// The one live inline player (the YouTube web view) and its single teardown path.
 @MainActor
 final class MediaPlaybackController: ObservableObject {
     static let shared = MediaPlaybackController()
 
     @Published private(set) var playingKey: String?
     @Published private(set) var failedKeys: Set<String> = []
+    /// Whether the playing key has shown a moving frame yet (before that the card says "Starting").
+    @Published private(set) var started = false
     /// Click time of the current player; nil when nothing plays.
     private(set) var playingSince: Date?
     /// The one live player container; weak because the card's panel owns the view hierarchy.
@@ -21,6 +23,12 @@ final class MediaPlaybackController: ObservableObject {
         playingSince = Date()
     }
 
+    /// The player reported a moving frame: the "Starting" cover goes away.
+    func markStarted(key: String) {
+        guard key == playingKey else { return }
+        started = true
+    }
+
     /// THE teardown path: the live host's tearDown() runs synchronously here, so sound stops
     /// in the same main-loop turn, before any state is cleared.
     func stopAll() {
@@ -28,6 +36,7 @@ final class MediaPlaybackController: ObservableObject {
         host = nil
         playingKey = nil
         playingSince = nil
+        started = false
     }
 
     func failed(key: String) {
@@ -60,7 +69,7 @@ final class MediaPlaybackController: ObservableObject {
     }
 
     func phase(for key: String) -> VideoPhase {
-        if key == playingKey { return .playing }
+        if key == playingKey { return started ? .playing : .starting }
         return failedKeys.contains(key) ? .failed : .idle
     }
 }

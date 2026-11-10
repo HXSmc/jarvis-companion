@@ -68,12 +68,12 @@ struct LiveMediaCard: View {
         }
     }
 
-    /// The inline player for a video card: YouTube embed, direct file, or nothing.
+    /// The inline player for a video card: the YouTube embed only. A direct video file shows its
+    /// thumbnail and "Open in browser" (no inline player: its redirects and segments would
+    /// bypass the address guard).
     @ViewBuilder private func player(_ p: VideoCard) -> some View {
         if let id = p.youtubeID {
             YouTubePlayerView(id: id, key: card.listKey)
-        } else if let urlString = p.url, let url = URL(string: urlString) {
-            VideoFilePlayerView(url: url, key: card.listKey)
         } else {
             EmptyView()
         }

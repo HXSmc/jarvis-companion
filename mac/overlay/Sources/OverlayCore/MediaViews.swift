@@ -22,9 +22,10 @@ public enum MediaImageState: Equatable {
     }
 }
 
-/// Lifecycle of the inline video area.
+/// Lifecycle of the inline video area: starting = clicked, no frame yet.
 public enum VideoPhase: Equatable {
     case idle
+    case starting
     case playing
     case failed
 }
@@ -272,21 +273,18 @@ public struct ImageCardView: View {
             .mediaTileLabel(state: state, fallback: item.alt ?? card.title)
     }
 
-    /// Row-major square tiles with policy gaps; cells past the item count stay empty.
+    /// Full rows from MediaPolicy.galleryRows (no empty cell), one row height, policy gaps.
     private func gallery(_ images: [ImageItem]) -> some View {
         let shown = Array(images.prefix(MediaPolicy.maxMediaItems))
-        let grid = MediaPolicy.galleryGrid(count: shown.count)
-        let side = MediaPolicy.galleryTileSide(count: shown.count)
+        let rows = MediaPolicy.galleryRows(count: shown.count)
+        let height = MediaPolicy.galleryRowHeight(count: shown.count)
+        let starts = rows.indices.map { rows[..<$0].reduce(0, +) }
         return VStack(alignment: .leading, spacing: MediaPolicy.gridGap) {
-            ForEach(0..<grid.rows, id: \.self) { row in
+            ForEach(rows.indices, id: \.self) { row in
                 HStack(spacing: MediaPolicy.gridGap) {
-                    ForEach(0..<grid.columns, id: \.self) { column in
-                        let index = row * grid.columns + column
-                        if index < shown.count {
-                            galleryTile(shown[index], side: side)
-                        } else {
-                            Color.clear.frame(width: side, height: side)
-                        }
+                    ForEach(0..<rows[row], id: \.self) { column in
+                        galleryTile(shown[starts[row] + column],
+                                    size: CGSize(width: MediaPolicy.galleryTileWidth(columns: rows[row]), height: height))
                     }
                 }
             }
@@ -294,10 +292,10 @@ public struct ImageCardView: View {
         .frame(width: MediaPolicy.cardWidth, alignment: .leading)
     }
 
-    private func galleryTile(_ item: ImageItem, side: CGFloat) -> some View {
+    private func galleryTile(_ item: ImageItem, size: CGSize) -> some View {
         let state = states[item.url] ?? .loading
         return MediaImageView(state: state, alt: item.alt, sourcePage: item.sourcePage)
-            .frame(width: side, height: side)
+            .frame(width: size.width, height: size.height)
             .clipped()
             .mediaTileLabel(state: state, fallback: item.alt ?? card.title)
     }
@@ -330,27 +328,81 @@ public struct VideoCardView<Player: View>: View {
                     media: { area }, footer: { footerRow })
     }
 
+    /// Only YouTube plays inside the card; a direct video file opens in the browser.
+    private var playsInline: Bool { card.youtubeID != nil }
+
     @ViewBuilder
     private var area: some View {
         ZStack {
             Color.black
-            switch phase {
-            case .playing:
-                player
-                    .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
-            case .idle:
+            if !playsInline {
                 thumbnailView
-                playButton
-            case .failed:
-                thumbnailView
-                    .opacity(0.4)
-                Text("Can't play here")
-                    .font(Theme.fontBody)
-                    .foregroundStyle(.white)
+            } else {
+                switch phase {
+                case .playing:
+                    player
+                        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                case .starting:
+                    // The player loads underneath; this cover hides its first paint until a frame plays.
+                    player
+                        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                    poster.opacity(0.4)
+                    startingMark
+                case .idle:
+                    poster
+                    VStack(spacing: 10) {
+                        playButton
+                        if let posterCaption {
+                            Text(posterCaption)
+                                .font(Theme.fontSmall)
+                                .foregroundStyle(Color.white.opacity(0.72))
+                        }
+                    }
+                case .failed:
+                    poster.opacity(0.4)
+                    Text("Can't play here. Open it in your browser.")
+                        .font(Theme.fontBody)
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                }
             }
         }
         .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
         .clipped()
+    }
+
+    /// The loaded thumbnail, else a plain tile with no text (the play button and its caption sit on it).
+    @ViewBuilder
+    private var poster: some View {
+        if case .loaded(let image) = thumbnail {
+            MediaImageView(state: .loaded(image), alt: card.title)
+                .accessibilityLabel(card.title)
+        } else {
+            Rectangle().fill(Color.white.opacity(0.06))
+        }
+    }
+
+    /// Below the play button while the thumbnail is not there.
+    private var posterCaption: String? {
+        switch thumbnail {
+        case .loading?: return "Loading preview"
+        case .failed?: return "No preview"
+        default: return nil
+        }
+    }
+
+    private var startingMark: some View {
+        VStack(spacing: 8) {
+            if !Theme.reduceMotion {
+                ProgressView().controlSize(.small)
+            }
+            Text("Starting video")
+                .font(Theme.fontSmall)
+                .foregroundStyle(Color.white.opacity(0.85))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Starting video")
     }
 
     @ViewBuilder
@@ -403,11 +455,6 @@ public struct VideoCardView<Player: View>: View {
 
     private var footerRow: some View {
         HStack(spacing: 8) {
-            if case .failed = phase {
-                Text("Can't play here")
-                    .font(Theme.fontSmall)
-                    .foregroundStyle(Color.white.opacity(0.72))
-            }
             Spacer(minLength: 8)
             if let url = card.browserURL, isSafeHTTPSURL(url.absoluteString) {
                 Button {

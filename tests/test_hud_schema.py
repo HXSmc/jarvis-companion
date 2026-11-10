@@ -121,7 +121,8 @@ def test_video_youtube_forms(url):
                                  "https://www.youtube.com/watch?v=short",
                                  "http://youtu.be/" + YT_ID,
                                  "https://youtu.be/" + YT_ID + "x",
-                                 "https://youtu.be/dQw4w9/gXcQ"])
+                                 "https://youtu.be/dQw4w9/gXcQ",
+                                 "https://www.youtube-nocookie.com/shorts/" + YT_ID])
 def test_youtube_lookalikes_refused(url):
     out = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": url})
     assert out is None or (out["type"] == "link" and "youtube_id" not in out)
@@ -138,6 +139,8 @@ def test_video_media_urls():
     assert out["url"] == "https://cdn.example.com/a.MP4?x=1" and "youtube_id" not in out
     html = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": "https://example.com/a.html"})
     assert html["type"] == "link" and html["url"] == "https://example.com/a.html"
+    hls = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": "https://cdn.example.com/live.m3u8"})
+    assert hls["type"] == "link" and "youtube_id" not in hls  # HLS is never played inline
     for url in ("javascript:alert(1)", "file:///etc/passwd", "data:video/mp4,xx"):
         assert hud.validate_card({"id": "v", "type": "video", "title": "T", "url": url}) is None
 

@@ -105,8 +105,8 @@ final class HUDWindow: NSPanel {
     /// A press on a live player bypasses all of this: the player sees the raw event stream.
     override func sendEvent(_ event: NSEvent) {
         guard let dragged else { return super.sendEvent(event) }
-        // A press on a live player goes to it untouched: no drag, no held mouse-down (WebKit and
-        // AVKit track their own clicks, seeks and drags).
+        // A press on a live player goes to it untouched: no drag, no held mouse-down (WebKit
+        // tracks its own clicks, seeks and drags).
         if event.type == .leftMouseDown { pressOnPlayer = isOnPlayer(event) }
         if pressOnPlayer {
             if event.type == .leftMouseUp { pressOnPlayer = false }

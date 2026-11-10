@@ -16,7 +16,7 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
       image: url (https) or file_id; alt?: str<=120, source_page?: https, gallery
              items?: [{url, alt?, source_page?}] <= 6 (kept only with 2+; url = first item)
       video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
-             .mp4/.mov/.m4v/.m3u8, thumbnail_url? (file urls only), source_page?;
+             .mp4/.mov/.m4v (no HLS), thumbnail_url? (file urls only), source_page?;
              no usable media -> link card on source_page/url, else dropped
     hud   = {shapes: [shape], cards: [card]}
 """
@@ -101,8 +101,11 @@ def youtube_id_from_url(value) -> str | None:
     vid = ""
     if host in ("www.youtube.com", "youtube.com", "m.youtube.com") and path == "/watch":
         vid = parse_qs(parts.query).get("v", [""])[0]
-    elif host in ("www.youtube.com", "www.youtube-nocookie.com"):
+    elif host == "www.youtube.com":
         m = re.fullmatch(r"/(?:shorts|embed)/([^/]+)", path)
+        vid = m.group(1) if m else ""
+    elif host == "www.youtube-nocookie.com":  # embed only, same rule as the Swift parser
+        m = re.fullmatch(r"/embed/([^/]+)", path)
         vid = m.group(1) if m else ""
     elif host == "youtu.be":
         m = re.fullmatch(r"/([^/]+)", path)
@@ -279,7 +282,7 @@ def _video(raw: dict, out: dict) -> dict | None:
     raw_url, source_page = safe_https_url(raw.get("url")), safe_https_url(raw.get("source_page"))
     if isinstance(yid, str):  # YouTube cards never carry thumbnail_url
         out["youtube_id"] = yid
-    elif raw_url and urlsplit(raw_url).path.lower().endswith((".mp4", ".mov", ".m4v", ".m3u8")):
+    elif raw_url and urlsplit(raw_url).path.lower().endswith((".mp4", ".mov", ".m4v")):
         out["url"] = raw_url
         thumb = safe_https_url(raw.get("thumbnail_url"))
         if thumb:

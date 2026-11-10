@@ -63,11 +63,7 @@ private final class FetchDelegate: NSObject, URLSessionDataDelegate, @unchecked 
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
         redirectCount += 1
-        guard redirectCount <= ImageLimits.maxRedirects,
-              let url = request.url,
-              let host = url.host(percentEncoded: false),
-              isSafeHTTPSURL(url.absoluteString),
-              HostGuard.isAllowedHostName(host) else {
+        guard let host = MediaPolicy.redirectHost(request.url, hop: redirectCount) else {
             completionHandler(nil)
             return
         }
@@ -145,6 +141,9 @@ final class MediaLoader {
         queue.maxConcurrentOperationCount = 1
         session = URLSession(configuration: config, delegate: nil, delegateQueue: queue)
         cache.totalCostLimit = ImageLimits.cacheCostLimit
+        // Process-wide defense in depth, set before the first remote decode: ImageIO refuses
+        // every other format (the magic-byte check in MediaPolicy runs first anyway).
+        _ = CGImageSourceSetAllowableTypes(Array(ImageLimits.allowedImageTypes) as CFArray)
     }
 
     // MARK: public API

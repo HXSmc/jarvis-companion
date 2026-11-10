@@ -286,9 +286,13 @@ public struct VideoCard: Codable, Equatable {
             if let found = MediaPolicy.youtubeID(fromURL: raw) {
                 youtubeID = found
                 url = nil
-            } else {
+            } else if MediaPolicy.isDirectVideoURL(raw) {
                 youtubeID = nil
                 url = raw
+            } else {
+                // Same rule as common/hud.py: anything else is not a video (the service sends a link card).
+                throw DecodingError.dataCorruptedError(forKey: .url, in: c,
+                                                       debugDescription: "video url must be YouTube or an .mp4/.mov/.m4v file")
             }
         } else {
             throw DecodingError.dataCorruptedError(forKey: .youtubeID, in: c,

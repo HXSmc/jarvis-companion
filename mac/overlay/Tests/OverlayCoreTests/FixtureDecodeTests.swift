@@ -157,4 +157,13 @@ final class FixtureDecodeTests: XCTestCase {
             }
         }
     }
+
+    func testVideoURLThatIsNotAVideoIsSkipped() throws {
+        for url in ["https://example.com/a.html", "https://cdn.example.com/live.m3u8"] {
+            let json = #"{"shapes":[],"cards":[{"id":"v3","type":"video","title":"Not a video","url":"URL"}]}"#
+                .replacingOccurrences(of: "URL", with: url)
+            let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(json.utf8))
+            XCTAssertTrue(msg.cards.isEmpty, url)
+        }
+    }
 }

@@ -56,11 +56,21 @@ public enum MediaPolicy {
         return url.path.hasPrefix("/embed/")
     }
 
-    /// Path (lowercased, no query/fragment) ends in .mp4, .mov, .m4v or .m3u8.
+    /// Path (lowercased, no query/fragment) ends in .mp4, .mov or .m4v. HLS (.m3u8) is refused:
+    /// its playlists fan out to hosts no guard sees.
     public static func isDirectVideoURL(_ string: String) -> Bool {
         guard let url = URL(string: string) else { return false }
         let path = url.path.lowercased()
-        return [".mp4", ".mov", ".m4v", ".m3u8"].contains { path.hasSuffix($0) }
+        return [".mp4", ".mov", ".m4v"].contains { path.hasSuffix($0) }
+    }
+
+    /// The synchronous part of the per-hop redirect check: hop number (1-based) within
+    /// ImageLimits.maxRedirects, a safe https URL and an allowed host name. Returns the host the
+    /// caller must still resolve and check (HostGuard.isPublic on every address), else nil.
+    public static func redirectHost(_ url: URL?, hop: Int) -> String? {
+        guard hop <= ImageLimits.maxRedirects, let url, isSafeHTTPSURL(url.absoluteString),
+              let host = url.host(percentEncoded: false), HostGuard.isAllowedHostName(host) else { return nil }
+        return host
     }
 
     /// Content-Type header value whose media type (before ";", trimmed, lowercased) is in
@@ -71,9 +81,30 @@ public enum MediaPolicy {
         return ImageLimits.allowedContentTypes.contains(mediaType)
     }
 
+    /// Image type from the leading magic bytes, BEFORE any ImageIO call: one of
+    /// ImageLimits.allowedImageTypes, or nil for anything else (DNG, EXR, TIFF, SVG, ...).
+    public static func sniffImageType(_ data: Data) -> String? {
+        let b = [UInt8](data.prefix(16))
+        func at(_ offset: Int, _ bytes: [UInt8]) -> Bool {
+            b.count >= offset + bytes.count && Array(b[offset..<offset + bytes.count]) == bytes
+        }
+        if at(0, [0xff, 0xd8, 0xff]) { return "public.jpeg" }
+        if at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) { return "public.png" }
+        if at(0, Array("GIF87a".utf8)) || at(0, Array("GIF89a".utf8)) { return "com.compuserve.gif" }
+        if at(0, Array("RIFF".utf8)) && at(8, Array("WEBP".utf8)) { return "org.webmproject.webp" }
+        // ISO BMFF: "ftyp" at 4, then a HEIF/HEIC major brand.
+        let heicBrands = ["heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1"]
+        if at(4, Array("ftyp".utf8)), b.count >= 12,
+           let brand = String(bytes: b[8..<12], encoding: .ascii), heicBrands.contains(brand) {
+            return "public.heic"
+        }
+        return nil
+    }
+
     /// Pixel size WITHOUT decoding pixels: PNG IHDR bytes first (signature + "IHDR", big-endian
     /// width at 16..<20, height at 20..<24), else ImageIO properties (kCGImagePropertyPixelWidth/Height).
     public static func imagePixelDimensions(data: Data) -> (width: Int, height: Int)? {
+        guard sniffImageType(data) != nil else { return nil }
         if data.count >= 24,
            data.prefix(8) == Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
            data[12..<16] == Data("IHDR".utf8) {
@@ -91,11 +122,13 @@ public enum MediaPolicy {
     /// nil when: no image source, its type (CGImageSourceGetType) not in ImageLimits.allowedImageTypes,
     /// no dimensions, width*height > ImageLimits.maxSourcePixels. Else an ImageIO thumbnail.
     public static func downsample(data: Data) -> CGImage? {
-        guard let dimensions = imagePixelDimensions(data: data),
+        // The magic-byte check runs first; ImageIO never sees another format.
+        guard let sniffed = sniffImageType(data),
+              let dimensions = imagePixelDimensions(data: data),
               dimensions.width * dimensions.height <= ImageLimits.maxSourcePixels,
               let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let type = CGImageSourceGetType(source) as String?,
-              ImageLimits.allowedImageTypes.contains(type) else { return nil }
+              type == sniffed else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -126,28 +159,38 @@ public enum MediaPolicy {
         return CGSize(width: cardWidth, height: min(maxCardHeight - titleBarHeight, cardWidth / aspect))
     }
 
-    /// 2 -> (2,1); 3...4 -> (2,2); 5...6 -> (3,2); otherwise (1,1).
-    public static func galleryGrid(count: Int) -> (columns: Int, rows: Int) {
+    /// Tiles per row, top to bottom; every row is full, so no grid has a hole:
+    /// 2 -> [2], 3 -> [3], 4 -> [2, 2], 5 -> [2, 3], 6 -> [3, 3]; anything else -> [].
+    public static func galleryRows(count: Int) -> [Int] {
         switch count {
-        case 2: return (2, 1)
-        case 3...4: return (2, 2)
-        case 5...6: return (3, 2)
-        default: return (1, 1)
+        case 2: return [2]
+        case 3: return [3]
+        case 4: return [2, 2]
+        case 5: return [2, 3]
+        case 6: return [3, 3]
+        default: return []
         }
     }
 
-    /// Square tile side: (cardWidth - (columns - 1) * gridGap) / columns.
-    public static func galleryTileSide(count: Int) -> CGFloat {
-        let columns = galleryGrid(count: count).columns
-        return (cardWidth - CGFloat(columns - 1) * gridGap) / CGFloat(columns)
+    /// Width of one tile in a row of `columns`: (cardWidth - (columns - 1) * gridGap) / columns.
+    public static func galleryTileWidth(columns: Int) -> CGFloat {
+        (cardWidth - CGFloat(max(columns, 1) - 1) * gridGap) / CGFloat(max(columns, 1))
     }
 
-    /// cardWidth x (rows * side + (rows - 1) * gridGap).
+    /// One height for every row: square for the narrowest tile, but the whole grid stays within
+    /// maxCardHeight - titleBarHeight (two rows crop to landscape tiles).
+    public static func galleryRowHeight(count: Int) -> CGFloat {
+        let rows = galleryRows(count: count)
+        guard let widest = rows.max() else { return 0 }
+        let fit = (maxCardHeight - titleBarHeight - CGFloat(rows.count - 1) * gridGap) / CGFloat(rows.count)
+        return min(galleryTileWidth(columns: widest), fit)
+    }
+
+    /// cardWidth x (rows * rowHeight + (rows - 1) * gridGap).
     public static func galleryAreaSize(count: Int) -> CGSize {
-        let grid = galleryGrid(count: count)
-        let side = galleryTileSide(count: count)
+        let rows = CGFloat(galleryRows(count: count).count)
         return CGSize(width: cardWidth,
-                      height: CGFloat(grid.rows) * side + CGFloat(grid.rows - 1) * gridGap)
+                      height: rows * galleryRowHeight(count: count) + max(rows - 1, 0) * gridGap)
     }
 
     /// Whole card size for media cards, nil for other types:

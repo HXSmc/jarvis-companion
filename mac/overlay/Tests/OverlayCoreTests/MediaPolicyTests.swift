@@ -29,6 +29,7 @@ final class MediaPolicyTests: XCTestCase {
             "http://youtu.be/dQw4w9WgXcQ",
             "https://youtu.be/dQw4w9WgXcQx",
             "https://youtu.be/dQw4w9/gXcQ",
+            "https://www.youtube-nocookie.com/shorts/dQw4w9WgXcQ",  // same rule as common/hud.py
         ]
         for url in refuse {
             XCTAssertNil(MediaPolicy.youtubeID(fromURL: url), url)
@@ -82,7 +83,45 @@ final class MediaPolicyTests: XCTestCase {
         }
     }
 
+    // MARK: Direct video and redirects
+
+    func testDirectVideoURLRefusesHLS() {
+        XCTAssertTrue(MediaPolicy.isDirectVideoURL("https://cdn.example.com/a.MP4?x=1"))
+        XCTAssertTrue(MediaPolicy.isDirectVideoURL("https://cdn.example.com/a.mov"))
+        XCTAssertFalse(MediaPolicy.isDirectVideoURL("https://cdn.example.com/live.m3u8"))
+        XCTAssertFalse(MediaPolicy.isDirectVideoURL("https://example.com/a.html"))
+    }
+
+    func testRedirectHostDecision() {
+        let ok = URL(string: "https://upload.wikimedia.org/x.jpg")
+        XCTAssertEqual(MediaPolicy.redirectHost(ok, hop: 1), "upload.wikimedia.org")
+        XCTAssertEqual(MediaPolicy.redirectHost(ok, hop: ImageLimits.maxRedirects), "upload.wikimedia.org")
+        XCTAssertNil(MediaPolicy.redirectHost(ok, hop: ImageLimits.maxRedirects + 1))
+        XCTAssertNil(MediaPolicy.redirectHost(nil, hop: 1))
+        XCTAssertNil(MediaPolicy.redirectHost(URL(string: "http://upload.wikimedia.org/x.jpg"), hop: 1))
+        XCTAssertNil(MediaPolicy.redirectHost(URL(string: "https://localhost/x.jpg"), hop: 1))
+        XCTAssertNil(MediaPolicy.redirectHost(URL(string: "https://router.local/x.jpg"), hop: 1))
+        XCTAssertNil(MediaPolicy.redirectHost(URL(string: "https://127.0.0.1/x.jpg"), hop: 1))
+        XCTAssertNil(MediaPolicy.redirectHost(URL(string: "https://[::1]/x.jpg"), hop: 1))
+    }
+
     // MARK: Image bytes
+
+    func testSniffImageTypeFromMagicBytes() {
+        XCTAssertEqual(MediaPolicy.sniffImageType(Data([0xff, 0xd8, 0xff, 0xe0, 0, 0])), "public.jpeg")
+        XCTAssertEqual(MediaPolicy.sniffImageType(Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0])), "public.png")
+        XCTAssertEqual(MediaPolicy.sniffImageType(Data("GIF89a....".utf8)), "com.compuserve.gif")
+        XCTAssertEqual(MediaPolicy.sniffImageType(Data("RIFF\0\0\0\0WEBPVP8 ".utf8)), "org.webmproject.webp")
+        XCTAssertEqual(MediaPolicy.sniffImageType(Data([0, 0, 0, 24] + Array("ftypheic".utf8))), "public.heic")
+        // Formats ImageIO could parse but we never hand it: TIFF/DNG, OpenEXR, SVG, BMP, an MP4 box.
+        XCTAssertNil(MediaPolicy.sniffImageType(Data([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0])))
+        XCTAssertNil(MediaPolicy.sniffImageType(Data([0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0])))
+        XCTAssertNil(MediaPolicy.sniffImageType(Data("<svg xmlns=".utf8)))
+        XCTAssertNil(MediaPolicy.sniffImageType(Data("BM".utf8)))
+        XCTAssertNil(MediaPolicy.sniffImageType(Data([0, 0, 0, 24] + Array("ftypisom".utf8))))
+        XCTAssertNil(MediaPolicy.sniffImageType(Data()))
+        XCTAssertNil(MediaPolicy.imagePixelDimensions(data: Data([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0])))
+    }
 
     func testDownsampleCapsDecodedSide() throws {
         let png = try Self.makePNG(width: 4000, height: 3000)
@@ -143,19 +182,23 @@ final class MediaPolicyTests: XCTestCase {
         let single = HUDCard.image(ImageCard(id: "s", title: "Single", url: "https://example.com/a.jpg"))
         XCTAssertEqual(MediaPolicy.cardSize(for: single, imagePixels: CGSize(width: 1600, height: 400)),
                        CGSize(width: MediaPolicy.cardWidth, height: MediaPolicy.titleBarHeight + 168))
-        XCTAssertEqual(MediaPolicy.galleryGrid(count: 2).columns, 2)
-        XCTAssertEqual(MediaPolicy.galleryGrid(count: 2).rows, 1)
-        XCTAssertEqual(MediaPolicy.galleryGrid(count: 4).columns, 2)
-        XCTAssertEqual(MediaPolicy.galleryGrid(count: 4).rows, 2)
-        XCTAssertEqual(MediaPolicy.galleryGrid(count: 6).columns, 3)
-        XCTAssertEqual(MediaPolicy.galleryGrid(count: 6).rows, 2)
-        for count in [2, 3, 4, 5, 6] {
-            let grid = MediaPolicy.galleryGrid(count: count)
-            let side = (MediaPolicy.cardWidth - CGFloat(grid.columns - 1) * MediaPolicy.gridGap) / CGFloat(grid.columns)
-            let height = CGFloat(grid.rows) * side + CGFloat(grid.rows - 1) * MediaPolicy.gridGap
-            XCTAssertEqual(MediaPolicy.galleryAreaSize(count: count),
-                           CGSize(width: MediaPolicy.cardWidth, height: height))
+        // Every row is full (no hole) and the grid stays within the 320 pt card.
+        XCTAssertEqual(MediaPolicy.galleryRows(count: 2), [2])
+        XCTAssertEqual(MediaPolicy.galleryRows(count: 3), [3])
+        XCTAssertEqual(MediaPolicy.galleryRows(count: 4), [2, 2])
+        XCTAssertEqual(MediaPolicy.galleryRows(count: 5), [2, 3])
+        XCTAssertEqual(MediaPolicy.galleryRows(count: 6), [3, 3])
+        XCTAssertEqual(MediaPolicy.galleryRows(count: 7), [])
+        for count in 2...6 {
+            XCTAssertEqual(MediaPolicy.galleryRows(count: count).reduce(0, +), count)
+            XCTAssertLessThanOrEqual(MediaPolicy.galleryAreaSize(count: count).height,
+                                     MediaPolicy.maxCardHeight - MediaPolicy.titleBarHeight)
         }
+        XCTAssertEqual(MediaPolicy.galleryTileWidth(columns: 2), 208)
+        XCTAssertEqual(MediaPolicy.galleryRowHeight(count: 2), 208)   // one row: square tiles
+        XCTAssertEqual(MediaPolicy.galleryRowHeight(count: 3), MediaPolicy.galleryTileWidth(columns: 3))
+        XCTAssertEqual(MediaPolicy.galleryRowHeight(count: 5), 134)   // two rows: (272 - 4) / 2
+        XCTAssertEqual(MediaPolicy.galleryAreaSize(count: 5), CGSize(width: 420, height: 272))
         XCTAssertEqual(MediaPolicy.videoAreaSize, CGSize(width: 420, height: 236))
         let video = HUDCard.video(VideoCard(id: "v", title: "Video", youtubeID: "aqz-KE-bpKQ"))
         XCTAssertEqual(MediaPolicy.cardSize(for: video),

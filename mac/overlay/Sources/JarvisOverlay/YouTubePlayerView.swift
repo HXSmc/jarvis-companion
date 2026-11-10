@@ -33,15 +33,19 @@ struct YouTubePlayerView: NSViewRepresentable {
         webView.uiDelegate = coordinator
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = false
+        webView.underPageBackgroundColor = .black
         host.addSubview(webView)
+
+        // Teardown is wired before attach, so a stale view (its card no longer playing) is torn
+        // down through the normal path and never loads.
+        host.onTearDown = { [weak coordinator] in coordinator?.tearDown() }
+        coordinator.startStartCheck(webView)
+        MediaPlaybackController.shared.attach(host, key: key)
+        guard MediaPlaybackController.shared.playingKey == key else { return host }
 
         var request = URLRequest(url: MediaPolicy.embedURL(id: id))
         request.setValue(MediaPolicy.embedReferer, forHTTPHeaderField: "Referer")
         webView.load(request)
-
-        MediaPlaybackController.shared.attach(host, key: key)
-        host.onTearDown = { [weak coordinator] in coordinator?.tearDown() }
-        coordinator.startStartCheck(webView)
         return host
     }
 
@@ -63,21 +67,27 @@ extension YouTubePlayerView {
             self.key = key
         }
 
-        /// "Did not start" guard: 8 s from load, the page must show a playing (or started)
-        /// video element or the card fails (covers error 150/153, unavailable videos and a
-        /// page that never finishes). Started in makeNSView so exactly one task exists per
-        /// player, whether or not didFinish ever comes.
-        /// playing = from click to teardown or error; read once here, no JS bridge.
+        /// Start check: every 0.5 s for at most 8 s, ask the page once whether its video element
+        /// has moved past 0 s. Yes -> the card drops its "Starting" cover; still no at 8 s -> the
+        /// card fails with "Open in browser" (covers error 150/153, unavailable videos and a page
+        /// that never loads). One task per player, cancelled in tearDown; no JS bridge.
         func startStartCheck(_ webView: WKWebView) {
             self.webView = webView
             let key = self.key
             startCheck = Task { [weak webView] in
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
-                guard !Task.isCancelled, let webView else { return }
-                let playing = (try? await webView.evaluateJavaScript(
-                    "(function(){var v=document.querySelector('video');return !!v&&(v.currentTime>0||!v.paused);})()"
-                )) as? Bool ?? false
-                if !playing { MediaPlaybackController.shared.failed(key: key) }
+                for _ in 0..<16 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard !Task.isCancelled, let webView else { return }
+                    let moving = (try? await webView.evaluateJavaScript(
+                        "(function(){var v=document.querySelector('video');return !!v&&v.currentTime>0;})()"
+                    )) as? Bool ?? false
+                    if moving {
+                        MediaPlaybackController.shared.markStarted(key: key)
+                        return
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                MediaPlaybackController.shared.failed(key: key)
             }
         }
 
