@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import OverlayCore
 
@@ -160,6 +161,17 @@ final class AppController {
         model.orb = .idle
     }
 
+    /// Wake chime, resolved once on the first wake; nil = off or unknown name (no retry).
+    private lazy var wakeSound: NSSound? = {
+        guard let name = WakeChime.soundName(env: ProcessInfo.processInfo.environment) else { return nil }
+        guard let sound = NSSound(named: name) else {
+            log("wake sound '\(name)' not found, chime off")
+            return nil
+        }
+        sound.volume = WakeChime.volume
+        return sound
+    }()
+
     /// followUp: the open-mic window after a reply (no wake word, same conversation).
     private func handleWake(followUp: Bool = false) async {
         listenSerial += 1
@@ -171,6 +183,10 @@ final class AppController {
             if !model.missingPermissions.isEmpty { speakPermissionNeed() }
             model.orb = .listening
             audio.stop()  // barge-in
+            if model.missingPermissions.isEmpty, let chime = wakeSound {
+                chime.stop()  // replay from the start if the last one still rings
+                chime.play()
+            }
         }
         // Screen capture starts at wake; only awaited when an utterance lands.
         let screenTask = Task { await ScreenContext.capture() }
