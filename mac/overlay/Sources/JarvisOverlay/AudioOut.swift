@@ -20,7 +20,8 @@ final class AudioOut {
     /// All scheduled audio finished playing.
     var onDrain: (() -> Void)?
 
-    var isBusy: Bool { player.isPlaying || pendingBuffers > 0 || synthSpeaking }
+    /// Not player.isPlaying: that stays true after the last buffer played, until stop().
+    var isBusy: Bool { pendingBuffers > 0 || synthSpeaking }
 
     init() {
         engine.attach(player)

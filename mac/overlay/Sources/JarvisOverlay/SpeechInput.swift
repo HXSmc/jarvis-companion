@@ -3,6 +3,8 @@ import Foundation
 import Speech
 import os
 
+import OverlayCore
+
 /// Always-on mic tap with a 2 s ring buffer; one wake-word turn at a time.
 /// macOS 26 SpeechTranscriber when available, SFSpeechRecognizer otherwise.
 @MainActor
@@ -17,6 +19,8 @@ final class SpeechInput {
     private var isRunning = false
     private var currentTurn: Turn?
     private var turnTask: Task<Void, Never>?
+    /// How the last finished turn was heard (STT path, counters, what ended it): debug page only.
+    private(set) var lastDiagnosis = ""
     private let log = Logger(subsystem: "JarvisOverlay", category: "SpeechInput")
 
     init() {}
@@ -42,16 +46,21 @@ final class SpeechInput {
     // MARK: one turn of speech
 
     /// Replays the ring buffer (so the first words are not lost), then live
-    /// audio. Ends 700 ms after the last partial-text change; 5 s with no
-    /// speech, an empty final, or 30 s hard cap -> onNothing.
+    /// audio. Ends per TurnEndpointer (0.7 s quiet, 2.7 s when the words trail off);
+    /// 5 s with no speech, an empty final, or 30 s hard cap -> onNothing(why), why = a short
+    /// diagnosis for the debug page (STT path, buffers fed, results, errors).
+    /// followUp: the open-mic window after a reply. No ring replay (it holds Jarvis's own
+    /// voice) and 8 s to start speaking.
     func listenAfterWake(
+        followUp: Bool = false,
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void,
-        onNothing: @escaping () -> Void
+        onNothing: @escaping (_ why: String) -> Void
     ) {
-        guard isRunning else { onNothing(); return }
+        guard isRunning else { onNothing("mic engine not running"); return }
         cancel()
         let turn = Turn()
+        turn.followUp = followUp
         turn.onPartial = onPartial
         turn.onFinal = onFinal
         turn.onNothing = onNothing
@@ -105,7 +114,13 @@ final class SpeechInput {
         var cancelHandler: (() -> Void)?
         var onPartial: ((String) -> Void)?
         var onFinal: ((_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void)?
-        var onNothing: (() -> Void)?
+        var onNothing: ((String) -> Void)?
+        var followUp = false
+        var path = ""  // STT path + why it was taken, for the debug page
+        var endNote = ""  // how long the end-of-turn silence was, for the debug page
+        let stats = FeedStats()
+
+        var diagnosis: String { "\(path)\(endNote); \(stats.summary)" }
     }
 
     private func handlePartial(_ raw: String, turn: Turn) {
@@ -122,6 +137,7 @@ final class SpeechInput {
     private func completeTurn(_ turn: Turn, nothing: Bool = false, rawText: String? = nil) {
         guard !turn.finished, !turn.cancelled else { return }
         turn.finished = true
+        lastDiagnosis = turn.diagnosis
         if currentTurn === turn { currentTurn = nil }
         turnTask = nil
         tap.setSink(nil)
@@ -129,11 +145,11 @@ final class SpeechInput {
         turn.cancelHandler = nil
         cancel?()
         guard !nothing, let end = turn.endOfSpeech, let raw = rawText else {
-            turn.onNothing?()
+            turn.onNothing?(turn.diagnosis)
             return
         }
         let text = Self.stripWake(raw)
-        guard !text.isEmpty else { turn.onNothing?(); return }
+        guard !text.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
         log.debug("final \(text, privacy: .private)")
         turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end)
     }
@@ -162,8 +178,14 @@ final class SpeechInput {
             let now = Date()
             if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
             if !turn.hasSpeech {
-                if now.timeIntervalSince(turn.startedAt) >= 5 { return .nothing }
-            } else if let end = turn.endOfSpeech, now.timeIntervalSince(end) >= 0.7 {
+                if now.timeIntervalSince(turn.startedAt) >= (turn.followUp ? 8 : 5) { return .nothing }
+            } else if let end = turn.endOfSpeech,
+                      TurnEndpointer.shouldEnd(text: turn.lastText, lastTextAt: end,
+                                               lastVoiceAt: tap.lastVoicedAt, now: now) {
+                // Not on partial-text silence alone: partials lag the audio and people pause
+                // after "the last, uh" (owner, 02:18). Voiced audio and a trailing word hold it open.
+                let wait = TurnEndpointer.silence(after: turn.lastText)
+                turn.endNote = wait > TurnEndpointer.fast ? " (trailed off: waited \(wait) s)" : ""
                 return .endOfSpeech
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -182,6 +204,7 @@ final class SpeechInput {
         finalize: @escaping @Sendable (String) -> Void,
         nothing: @escaping @Sendable () -> Void
     ) async -> Bool {
+        turn.path = "SpeechAnalyzer"
         let transcriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
@@ -193,28 +216,37 @@ final class SpeechInput {
                 try await request.downloadAndInstall()
             }
         } catch {
+            turn.path = "SpeechAnalyzer assets failed (\(error.localizedDescription))"
             return false
         }
         guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
               let converter = AVAudioConverter(from: format, to: target)
-        else { return false }
+        else {
+            turn.path = "SpeechAnalyzer: no audio format/converter from \(format)"
+            return false
+        }
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         do {
             try await analyzer.start(inputSequence: stream)
         } catch {
             continuation.finish()
+            turn.path = "SpeechAnalyzer start failed (\(error.localizedDescription))"
             return false
         }
         let collected = TranscriptBox()
+        let stats = turn.stats
         let resultsTask = Task {
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
                     collected.update(text, isFinal: result.isFinal)
+                    stats.result()
                     partial(collected.text)
                 }
-            } catch {}
+            } catch {
+                stats.fail(error.localizedDescription)
+            }
         }
         turn.cancelHandler = {
             continuation.finish()
@@ -224,15 +256,20 @@ final class SpeechInput {
         // shortcut: the converter is used from the audio thread only after the ring
         // snapshot below has been fed, so it stays single-threaded.
         let feed: @Sendable (AVAudioPCMBuffer, Date) -> Void = { buffer, _ in
-            if let out = Self.convert(converter: converter, from: buffer, to: target) {
+            let out = Self.convert(converter: converter, from: buffer, to: target)
+            stats.fed(converted: out.map { Int($0.frameLength) })
+            if let out {
                 continuation.yield(AnalyzerInput(buffer: out))
             }
         }
-        for chunk in tap.ringSnapshot() { feed(chunk.buffer, chunk.at) }
+        if !turn.followUp {
+            for chunk in tap.ringSnapshot() { feed(chunk.buffer, chunk.at) }
+        }
         tap.setSink(feed)
         let verdict = await watch(turn: turn)
         guard !turn.cancelled, !turn.finished else { return true }
         tap.setSink(nil)
+        turn.path += ", ended by \(verdict)"
         switch verdict {
         case .nothing:
             completeTurn(turn, nothing: true)
@@ -258,26 +295,35 @@ final class SpeechInput {
         finalize: @escaping @Sendable (String) -> Void,
         nothing: @escaping @Sendable () -> Void
     ) {
+        turn.path = turn.path.isEmpty ? "SFSpeechRecognizer" : "SFSpeechRecognizer after \(turn.path)"
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
               recognizer.isAvailable
-        else { completeTurn(turn, nothing: true); return }
+        else {
+            turn.path += " (recognizer unavailable)"
+            completeTurn(turn, nothing: true)
+            return
+        }
+        let stats = turn.stats
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         let task = recognizer.recognitionTask(with: request) { result, error in
             if let result {
+                stats.result()
                 let text = result.bestTranscription.formattedString
                 partial(text)
                 if result.isFinal { finalize(text) }
-            } else if error != nil {
+            } else if let error {
+                stats.fail(error.localizedDescription)
                 nothing()
             }
         }
         turn.cancelHandler = { task.cancel() }
-        for chunk in tap.ringSnapshot() {
+        for chunk in tap.ringSnapshot() where !turn.followUp {
             request.append(chunk.buffer)
         }
         tap.setSink { [weak request] buffer, _ in
+            stats.fed(converted: Int(buffer.frameLength))
             request?.append(buffer)
         }
         Task { @MainActor [weak self] in
@@ -285,6 +331,7 @@ final class SpeechInput {
             let verdict = await self.watch(turn: turn)
             guard !turn.cancelled, !turn.finished else { return }
             self.tap.setSink(nil)
+            turn.path += ", ended by \(verdict)"
             switch verdict {
             case .nothing: self.completeTurn(turn, nothing: true)
             case .endOfSpeech, .timedOut: request.endAudio()
@@ -315,6 +362,41 @@ final class SpeechInput {
         var error: NSError?
         let result = converter.convert(to: out, error: &error, withInputFrom: inputBlock)
         guard result != .error, out.frameLength > 0 else { return nil }
+        return out
+    }
+}
+
+// MARK: - per-turn STT counters (debug page)
+
+/// Fed from the audio thread, read on main when a turn ends empty.
+private final class FeedStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers = 0
+    private var dropped = 0
+    private var frames = 0
+    private var results = 0
+    private var error: String?
+
+    func fed(converted: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        buffers += 1
+        if let converted { frames += converted } else { dropped += 1 }
+    }
+
+    func result() {
+        lock.lock(); defer { lock.unlock() }
+        results += 1
+    }
+
+    func fail(_ message: String) {
+        lock.lock(); defer { lock.unlock() }
+        error = message
+    }
+
+    var summary: String {
+        lock.lock(); defer { lock.unlock() }
+        var out = "mic buffers \(buffers) (\(dropped) failed to convert), frames \(frames), STT results \(results)"
+        if let error { out += ", STT error: \(error)" }
         return out
     }
 }
@@ -354,6 +436,15 @@ private final class MicTap: @unchecked Sendable {
     private var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
     private var levelHandler: ((Double) -> Void)?
     private var lastLevelAt = Date.distantPast
+    private var vad = VoiceActivity()
+    private var voicedAt: Date?
+
+    /// Last mic buffer clearly above the noise floor (the user is still talking).
+    var lastVoicedAt: Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return voicedAt
+    }
 
     func install(on node: AVAudioInputNode, format: AVAudioFormat) {
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
@@ -363,13 +454,15 @@ private final class MicTap: @unchecked Sendable {
             var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
             var handler: ((Double) -> Void)?
             var level: Double?
+            let rms = Self.rms(copy)
             lock.lock()
+            if vad.isVoiced(rms: rms) { voicedAt = now }
             ring.append((copy, now))
             ring.removeAll { now.timeIntervalSince($0.at) > 2 }
             sink = self.sink
             if now.timeIntervalSince(lastLevelAt) >= 0.05 {
                 lastLevelAt = now
-                level = Self.rms(copy)
+                level = rms
                 handler = levelHandler
             }
             lock.unlock()

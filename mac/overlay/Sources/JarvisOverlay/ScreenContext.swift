@@ -19,6 +19,14 @@ struct ScreenPayload: Encodable {
     var height_px: Int
     var ax: [AXItem]
     var ocr: [OCRItem]
+    var windows: [WindowItem]
+}
+
+/// A visible window, front to back. box = [x0, y0, x1, y1] in points, top-left.
+struct WindowItem: Encodable {
+    var app: String
+    var title: String
+    var box: [Double]
 }
 
 /// Points, top-left of the main display. box = [x0, y0, x1, y1].
@@ -74,8 +82,34 @@ enum ScreenContext {
             width_px: shot.image.width,
             height_px: shot.image.height,
             ax: items,
-            ocr: Array(ocr)
+            ocr: Array(ocr),
+            windows: visibleWindows()
         )
+    }
+
+    /// Normal on-screen windows of other apps, front to back (titles need Screen Recording,
+    /// which capture() already checked). "highlight the last debugging session" -> the
+    /// Safari window titled "Jarvis voice debug".
+    static func visibleWindows() -> [WindowItem] {
+        let own = ProcessInfo.processInfo.processIdentifier
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                              kCGNullWindowID) as? [[String: Any]] ?? []
+        var out: [WindowItem] = []
+        for info in list {
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowOwnerPID as String] as? Int32) != own,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  rect.width >= 80, rect.height >= 60
+            else { continue }
+            let app = info[kCGWindowOwnerName as String] as? String ?? ""
+            let title = info[kCGWindowName as String] as? String ?? ""
+            guard !app.isEmpty || !title.isEmpty else { continue }
+            out.append(WindowItem(app: String(app.prefix(60)), title: String(title.prefix(120)),
+                                  box: [rect.minX, rect.minY, rect.maxX, rect.maxY]))
+            if out.count == 20 { break }
+        }
+        return out
     }
 
     /// Fresh AX frame of the same element, or nil when it vanished/moved >400 pt.

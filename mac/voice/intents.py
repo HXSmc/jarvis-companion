@@ -17,7 +17,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | ground | git_diff | answer
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | answer
     arg: str = ""
 
 
@@ -28,6 +28,8 @@ APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utili
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _PATH_RE = re.compile(r"^[/A-Za-z0-9._~%-]*$")
 _WAKE_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
+# STT often turns the wake phrase into other words: "Hey, John Pierce. What time is it".
+_MISHEARD_WAKE_RE = re.compile(r"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+", re.I)
 _GROUND_LEADS = ("show me", "where is", "where's", "which button", "point to",
                  "point at", "highlight", "find the")
 # UI things on screen; anything else after a lead is a question for the model.
@@ -40,7 +42,29 @@ _CHANGES_RE = re.compile(r"\bchang(e|es|ed)\b")
 _MERGE_RE = re.compile(r"\bmerge[sd]?\b")
 _GROUND_LEAD_RE = re.compile(r"\b(" + "|".join(_GROUND_LEADS) + r")\b")
 _UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
-_APP_SUFFIX_RE = re.compile(r"\.app$", re.I)
+# "open the clock app" -> "clock"; "notes.app" is a bundle, not a domain.
+_APP_NOISE_RE = re.compile(r"^the\s+|(?:\.app|\s+app)$", re.I)
+# Whole-utterance clock questions only: "what time is it in Tokyo" still goes to the brain.
+_TIME_RE = re.compile(r"^(?:what(?:'s| is) the time|what time is it|tell me the time)(?: now| right now| please)?$")
+# "highlight the last debugging session": a visual verb about something on screen but no UI
+# noun -> "look" (ground against windows/text first, else the brain with screen context).
+_LOOK_STRONG_RE = re.compile(r"\b(highlight|circle|underline|point (?:to|at|out))\b")
+_LOOK_LEAD_RE = re.compile(r"\b(show me|where is|where's|where are|find|which)\b")
+# Weak leads only count for "the last <...>" or a definite screen noun ("the debug page"):
+# "the latest news", "this or that", "a good page on X" are questions for the brain.
+_LOOK_REF_RE = re.compile(r"\b(?:the|my) (?:last|newest|previous)\b"
+                          r"|\b(?:the|this|that|these|those|my)\s+(?:[\w-]+\s+){0,2}?"
+                          r"(?:window|page|tab|screen|session|message|error|turn|line|section"
+                          r"|panel|dialog|notification|card|button|field|link|menu|icon)s?\b")
+# The utterance stops mid-thought: filler, article, possessive or conjunction at the end, or a
+# trailing comma ("Can you show me the last, uh"). The user is still talking: wait for the rest.
+FILLERS = ("uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah")  # STT wrote "uh" as "huh"
+_TRAILING = FILLERS + ("the", "a", "an", "my", "your", "our", "their", "his", "her", "and",
+                       "or", "but", "to", "of", "last", "next", "plus", "minus")
+_INCOMPLETE_RE = re.compile(r"(?:,|\b(?:" + "|".join(_TRAILING) + r"))\W*$", re.I)
+_FILLER_TAIL_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(FILLERS) + r"))+[\s,.?!]*$", re.I)
+_DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|what day is (?:it|today)"
+                      r"|what date is it|tell me the date)(?: today| now| please)?$")
 
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
@@ -49,10 +73,15 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
     to a real installed app before the domain check.
     """
-    t = _WAKE_RE.sub("", text.strip(), count=1).strip().rstrip(".?!").strip()
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
     low = t.lower()
     if low in ("clear", "clear the screen"):
         return Intent("clear")
+    if _TIME_RE.match(low):
+        return Intent("clock", "time")
+    if _DATE_RE.match(low):
+        return Intent("clock", "date")
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.
     if _DIFF_RE.search(low) or (_CHANGES_RE.search(low) and _MERGE_RE.search(low)):
@@ -62,15 +91,34 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     lead = _GROUND_LEAD_RE.search(low)
     if lead and _UI_NOUN_RE.search(low, lead.end()):
         return Intent("ground", t)
+    if _LOOK_STRONG_RE.search(low):
+        return Intent("look", t)
+    look = _LOOK_LEAD_RE.search(low)
+    if look and _LOOK_REF_RE.search(low, look.end()):
+        return Intent("look", t)
     if low.startswith("open "):
         arg = t[5:].strip()
-        name = _APP_SUFFIX_RE.sub("", arg)  # "notes.app" is a bundle, not a domain
+        name = _APP_NOISE_RE.sub("", arg).strip()
         if _match_app(name, apps if apps is not None else list_apps()):
             return Intent("open_app", name)
         host = arg.lower().partition("/")[0]
         kind = "open_site" if _HOST_RE.match(host) else "open_app"
         return Intent(kind, arg)
     return Intent("answer", t)
+
+
+def looks_incomplete(text: str) -> bool:
+    """True when the transcript trails off ("show me the last, uh"): more words are coming."""
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    if _FILLER_TAIL_RE.search(" " + t):  # "the last, huh?" is still mid-thought
+        return True
+    return bool(t) and not t.endswith((".", "?", "!")) and bool(_INCOMPLETE_RE.search(t))
+
+
+def join_continuation(head: str, tail: str) -> str:
+    """'show me the last, uh' + 'debugging session' -> 'show me the last debugging session'."""
+    head = _FILLER_TAIL_RE.sub("", head.strip()).rstrip(" ,")
+    return f"{head} {tail.strip()}".strip()
 
 
 def list_apps(dirs: tuple[str, ...] = APP_DIRS) -> dict[str, str]:

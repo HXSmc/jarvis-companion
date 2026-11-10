@@ -3,7 +3,8 @@ import SwiftUI
 /// Assistant presence orb (44 pt, bottom-right). Pulse/rotation stop when the
 /// user has Reduce Motion on.
 public enum OrbState: String, CaseIterable {
-    case idle, listening, thinking, speaking, error
+    /// followUp: the quiet open-mic window after a reply (no wake word needed).
+    case idle, listening, followUp, thinking, speaking, error
 }
 
 @MainActor
@@ -29,6 +30,8 @@ public struct OrbView: View {
             case .listening:
                 Circle().stroke(Theme.accent, lineWidth: 3)
                     .modifier(Pulse())
+            case .followUp:
+                Circle().stroke(Theme.accent.opacity(0.5), lineWidth: 2)
             case .thinking:
                 Circle()
                     .trim(from: 0, to: 0.25)
@@ -56,6 +59,7 @@ public struct OrbView: View {
         switch state {
         case .idle: return "Jarvis idle"
         case .listening: return "Jarvis listening"
+        case .followUp: return "Jarvis listening for a follow-up"
         case .thinking: return "Jarvis thinking"
         case .speaking: return "Jarvis speaking"
         case .error: return "Jarvis needs attention"

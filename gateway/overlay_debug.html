@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis voice debug</title>
+<style>
+  :root { color-scheme: dark; --ok: #5ad19a; --bad: #ff6b6b; --dim: #8a93a3; --line: #262b35; }
+  body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+         background: #0f1218; color: #e6e9ef; }
+  header { position: sticky; top: 0; background: #0f1218ee; border-bottom: 1px solid var(--line);
+           padding: 12px 20px; display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; }
+  #listener, #status { color: var(--dim); }
+  main { padding: 12px 20px 40px; max-width: 980px; }
+  .turn { border: 1px solid var(--line); border-radius: 10px; margin: 12px 0; padding: 10px 14px; }
+  .turn.err { border-color: var(--bad); }
+  .when { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+  ol { margin: 0; padding: 0; list-style: none; }
+  li { display: grid; grid-template-columns: 110px 70px 1fr; gap: 10px; padding: 3px 0; }
+  .step { font-weight: 600; }
+  .t { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .fail .step, .fail .v { color: var(--bad); }
+  .v { word-break: break-word; }
+  q { color: #ffd479; }
+  .empty { color: var(--dim); padding: 30px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Jarvis voice debug</h1>
+  <span id="listener">wake listener: …</span>
+  <span id="status">connecting…</span>
+</header>
+<main id="turns"><p class="empty">No turns yet. Say "Hey Jarvis …".</p></main>
+<script>
+"use strict";
+// Token comes from the URL fragment (never sent to the server), then leaves the address bar.
+const fromHash = new URLSearchParams(location.hash.slice(1)).get("token");
+if (fromHash) { sessionStorage.setItem("overlayToken", fromHash); history.replaceState(null, "", location.pathname); }
+const token = sessionStorage.getItem("overlayToken");
+
+const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "transcribed",
+                intent: "intent", spoke: "Jarvis spoke", done: "response done",
+                no_speech: "no speech", app_error: "app error",
+                incomplete: "waiting for more", continued: "continued after a pause" };
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function describe(s) {
+  switch (s.step) {
+    case "wake": return `score ${s.score ?? "?"} (${s.source})`;
+    case "voice": return (s.followup ? "follow-up, no wake word · " : "") + `${s.audio_ms != null ? (s.audio_ms / 1000).toFixed(1) + " s of audio" : "audio length unknown"}`
+                       + (s.stt_final_ms != null ? `, STT final ${Math.round(s.stt_final_ms)} ms` : "")
+                       + (s.stt ? ` · ${s.stt}` : "");
+    case "transcribed": return null;  // rendered as a quote
+    case "continued": return `as one request: "${s.text}"`;
+    case "intent": return s.kind + (s.arg ? ` → ${s.arg}` : "");
+    case "spoke": return null;
+    case "done": return `${s.cards} cards, ${s.shapes} shapes` +
+                        (s.first_audio_ms != null ? `, first audio ${s.first_audio_ms} ms` : ", no audio") +
+                        (s.total_s != null ? `, total ${s.total_s} s` : "") +
+                        (s.error ? `, ERROR: ${s.error}` : "");
+    default: return s.detail || "";
+  }
+}
+
+function render(data) {
+  const l = data.listener || {};
+  let lt = `wake listener: ${l.state || "?"}`;
+  if (l.mic) lt += ` · mic ${l.mic}`;
+  if (l.peak_level_10s != null) lt += ` · last 10 s: level ${l.peak_level_10s}, best score ${l.peak_score_10s}`;
+  const lis = document.getElementById("listener");
+  lis.textContent = lt;
+  lis.style.color = l.state === "listening" ? "var(--ok)" : "var(--bad)";
+
+  const root = document.getElementById("turns");
+  root.replaceChildren();
+  if (!data.turns.length) { root.append(el("p", "empty", 'No turns yet. Say "Hey Jarvis …".')); return; }
+  for (const turn of data.turns) {
+    const box = el("section", "turn");
+    const t0 = turn.steps.length ? turn.steps[0].at : 0;
+    box.append(el("div", "when", new Date(t0 * 1000).toLocaleTimeString()));
+    const ol = el("ol");
+    for (const s of turn.steps) {
+      const failed = (s.step === "done" && s.error) || s.step === "no_speech" || s.step === "app_error";
+      if (failed) box.classList.add("err");
+      const li = el("li", failed ? "fail" : "");
+      li.append(el("span", "step", LABEL[s.step] || s.step));
+      li.append(el("span", "t", `+${((s.at - t0)).toFixed(2)} s`));
+      const v = el("span", "v");
+      const d = describe(s);
+      if (d !== null) v.textContent = d;
+      if (s.step === "transcribed") v.append(el("q", "", s.text));
+      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : ` · text at ${s.ms} ms, no audio`); }
+      li.append(v);
+      ol.append(li);
+    }
+    box.append(ol);
+    root.append(box);
+  }
+}
+
+async function tick() {
+  const status = document.getElementById("status");
+  if (!token) { status.textContent = "no token: open this page with scripts/jarvis-overlay-debug.sh"; return; }
+  try {
+    const r = await fetch("/overlay/debug/turns", { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+    status.textContent = "live · " + new Date().toLocaleTimeString();
+    status.style.color = "";
+  } catch (e) {
+    status.textContent = "service unreachable (" + e.message + ")";
+    status.style.color = "var(--bad)";
+  }
+}
+tick();
+setInterval(tick, 1500);
+</script>
+</body>
+</html>

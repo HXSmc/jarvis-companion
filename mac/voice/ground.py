@@ -50,12 +50,20 @@ def _keep(source: str, role: str, label, box) -> dict | None:
 
 
 def build_candidates(ax: list[dict], ocr: list[dict], scale: float = 1.0,
-                     iou_threshold: float = 0.5) -> list[dict]:
-    """AX elements first (kept as is), then OCR boxes scaled to points and
-    dropped when they overlap an already kept box (IoU > threshold)."""
+                     iou_threshold: float = 0.5, windows: list[dict] = ()) -> list[dict]:
+    """Visible windows first ("App: title", frames in points), then AX elements (kept as
+    is), then OCR boxes scaled to points and dropped when they overlap an already kept
+    non-window box (IoU > threshold)."""
     if not scale or scale <= 0:
         scale = 1.0
     out: list[dict] = []
+    for w in windows if isinstance(windows, list) else []:
+        if isinstance(w, dict):
+            title = w.get("title") if isinstance(w.get("title"), str) else ""
+            app = w.get("app") if isinstance(w.get("app"), str) else ""
+            c = _keep("window", "window", f"{app}: {title}" if title else app, w.get("box"))
+            if c:
+                out.append(c)
     for el in ax if isinstance(ax, list) else []:
         if not isinstance(el, dict):
             continue
@@ -71,7 +79,8 @@ def build_candidates(ax: list[dict], ocr: list[dict], scale: float = 1.0,
                 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box)):
             box = [v / scale for v in box]  # capture px -> screen points
         c = _keep("ocr", "text", el.get("text"), box)
-        if c and not any(iou(c["box"], k["box"]) > iou_threshold for k in out):
+        if c and not any(iou(c["box"], k["box"]) > iou_threshold for k in out
+                         if k["source"] != "window"):
             out.append(c)
     out = out[:MAX_CANDIDATES]
     for i, c in enumerate(out, 1):
