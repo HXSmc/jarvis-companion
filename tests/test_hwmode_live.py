@@ -383,7 +383,7 @@ def test_a_find_task_is_one_instruction_with_no_extra_jobs(gateway_server, task)
         assert not any(w in said for w in ("unplug", "shut down", "power down", "open the case", "unscrew")), said
         done = (await phone.ask("found it, thanks"))["data"]
         assert not done.get("next_ready"), f"job over, no new work: {done}"
-        assert not any(w in str(done.get("say") or "").lower() for w in ("next", "step 2", "now unplug")), done
+        assert not any(w in str(done.get("say") or "").lower() for w in ("next step", "step 2", "now unplug")), done  # "the next move" in a sign-off is fine
     run_live(gateway_server, body)
 
 
