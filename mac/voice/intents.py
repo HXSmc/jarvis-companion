@@ -135,15 +135,42 @@ def list_apps(dirs: tuple[str, ...] = APP_DIRS) -> dict[str, str]:
     return apps
 
 
-def _match_app(name: str, apps: dict[str, str]) -> str | None:
-    """Real app name for a transcript name (exact, then unique prefix); None = no match."""
-    low = name.strip().lower()
-    if not low:
-        return None
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def app_candidates(name: str, apps: dict[str, str]) -> list[str]:
+    """Every installed app the spoken name could mean: the first tier with a hit wins.
+
+    Tiers: exact, same words in any order, abbreviation ("vs code"), every word of
+    the name is a word of the app, prefix. 2+ results = a tie (caller must not launch).
+    """
+    low = _APP_NOISE_RE.sub("", name.strip()).strip().lower()
+    q = _tokens(low)
+    if not q:
+        return []
     if low in apps:
-        return apps[low]
-    matches = [v for k, v in apps.items() if k.startswith(low)]
-    return matches[0] if len(matches) == 1 else None
+        return [apps[low]]
+    compact = "".join(q)
+    qset = set(q)
+    tiers = (
+        lambda k, t: set(t) == qset,
+        lambda k, t: any("".join(w[0] for w in t[:i]) + "".join(t[i:]) == compact
+                         for i in range(1, len(t) + 1)),
+        lambda k, t: qset <= set(t),
+        lambda k, t: k.startswith(low),
+    )
+    for hit in tiers:
+        found = sorted({real for key, real in apps.items() if hit(key, _tokens(key))})
+        if found:
+            return found
+    return []
+
+
+def _match_app(name: str, apps: dict[str, str]) -> str | None:
+    """Real app name for a transcript name; None = no match or a tie."""
+    found = app_candidates(name, apps)
+    return found[0] if len(found) == 1 else None
 
 
 def open_app(name: str, *, run=subprocess.run, apps: dict[str, str] | None = None) -> str | None:

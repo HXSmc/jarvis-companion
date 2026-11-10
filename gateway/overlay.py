@@ -58,6 +58,7 @@ Reply ONLY as JSON Lines - one JSON object per line, nothing else:
   {"say": "..."}    one or two short sentences, spoken immediately
   {"card": {...}}   an overlay card (schema below)
   {"shape": {...}}  rare: one highlight shape
+  {"open": "<app name>"}  open an installed app (see below)
 
 Speak the first {"say"} line as soon as you have the first sentence of thought, then continue.
 
@@ -73,7 +74,7 @@ Shape schema: {"kind": "rect"|"circle"|"triangle", "box": [x0, y0, x1, y1], "lab
 
 Explanations, charts, flowcharts and links go in cards, never in say lines. Never write step counters or plan text ("Step 1 of 3"). Use the WebSearch/WebFetch tools only when the question needs fresh facts.
 
-Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. Opening apps and https sites is built in: if asked to open one, say to ask "open" plus its name (for example "open Clock"), never that you cannot open apps.
+Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. To open an app, reply with ONLY {"open": "<app name as the owner said it>"} (one line, nothing else). Do this whenever the owner clearly asks to open, launch, pull up or bring up an app, in any wording, even if the name is rough ("a VS code"). Never ask the owner to rephrase or to say "open" plus a name. For a website, show a link card instead.
 
 If the request is clearly cut off mid-sentence (it trails off, for example "can you show me the last"), reply with ONLY {"incomplete": true} and nothing else: the mic stays open and the rest of the sentence comes in the next message. Never ask the user to repeat a cut-off request.
 
@@ -365,6 +366,32 @@ def _installed_apps(clock=time.monotonic) -> dict:
     return _apps_cache[1]
 
 
+_OPEN_STOP = frozenset("me my a an the it is in on of to and app you can for some up i please".split())
+_OPEN_VERBS = tuple(tuple(v.split()) for v in (
+    "open", "launch", "start", "run", "pull up", "pull a", "pull the", "pull", "bring up",
+    "show me", "fire up", "get me", "switch to", "go to"))
+_OPEN_BAD_CHARS = set("/\\:;|&$`<>~(){}\n\r")
+
+
+def _owner_asked_to_open(text: str, real: str, apps: dict) -> bool:
+    """True when the owner's own words name this app (1-4 word window) right after an open verb."""
+    words = [re.sub(r"[^a-z0-9]", "", w) for w in text.lower().split()]
+    for i in range(len(words)):
+        for n in range(1, 5):
+            win = words[i:i + n]
+            if len(win) < n or any(len(w) < 2 for w in win):
+                continue
+            if win[0] in _OPEN_STOP or win[-1] in _OPEN_STOP:
+                continue
+            if intents.app_candidates(" ".join(win), apps) != [real]:
+                continue
+            ctx = words[max(0, i - 3):i + n - 1]  # the verb must end before the window does
+            for v in _OPEN_VERBS:
+                if any(tuple(ctx[j:j + len(v)]) == v for j in range(len(ctx) - len(v) + 1)):
+                    return True
+    return False
+
+
 def _cmd(argv: list[str]) -> str:
     """stdout of a quick macOS query, "" on any failure (never blocks a turn for long)."""
     try:
@@ -486,9 +513,14 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                 kwargs["apps"] = apps
             opened = await asyncio.to_thread(opener, intent.arg, **kwargs)
             shown = (opened or intent.arg)[:60]
-            async for ev in _speak(f"Opening {shown}." if opened else f"I couldn't find {shown}.", deps):
+            line = f"Opening {shown}." if opened else f"I couldn't find {shown}."
+            if not opened and intent.kind == "open_app":
+                tie = intents.app_candidates(intent.arg, apps)
+                if len(tie) > 1:
+                    line = f"Did you mean {tie[0]} or {tie[1]}?"
+            async for ev in _speak(line, deps):
                 yield ev
-            said.append(shown)
+            said.append(line if line.startswith("Did you") else shown)
 
         elif intent.kind == "look":
             # A visual verb with no UI noun ("highlight the last debugging session"): ground
@@ -640,6 +672,8 @@ def _screen_text(screen: ScreenBody) -> str:
 async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        metrics: dict, said: list[str], start: float,
                        screen_ref: bool = False) -> AsyncIterator[dict]:
+    apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
+    open_seen = False  # one model-driven launch per turn
     parts = [text]
     history = _history.get(body.conv_id) or []
     if history:
@@ -681,6 +715,26 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     task = asyncio.get_running_loop().create_task(asyncio.to_thread(run_ask))
     buf = ""
 
+    async def model_open(name: str) -> AsyncIterator[dict]:
+        """The model asked to open an app: launch only an installed app the owner's words asked for."""
+        nonlocal open_seen
+        if open_seen:
+            return
+        open_seen = True
+        line = "I couldn't find that app."
+        name = name.strip()
+        if name and len(name) <= 60 and not _OPEN_BAD_CHARS & set(name):
+            found = intents.app_candidates(name, apps)
+            if len(found) > 1:
+                line = f"Did you mean {found[0]} or {found[1]}?"
+            elif len(found) == 1 and _owner_asked_to_open(text, found[0], apps):
+                real = await asyncio.to_thread(intents.open_app, found[0], run=deps.run, apps=apps)
+                if real:
+                    line = f"Opening {real}."
+        async for ev in _speak(line, deps):
+            yield ev
+        said.append(line)
+
     async def flush_line(line: str) -> AsyncIterator[dict]:
         line = line.strip()
         if not line:
@@ -705,6 +759,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                     metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
             elif metrics["first_answer_audio_s"] is None:
                 metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+        if isinstance(obj.get("open"), str):
+            async for ev in model_open(obj["open"]):
+                yield ev
         card = hud.validate_card(obj.get("card")) if "card" in obj else None
         if card:
             seen = _card_ids.setdefault(body.conv_id, set())
