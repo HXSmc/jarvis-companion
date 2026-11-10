@@ -126,7 +126,8 @@ final class SnapshotTests: XCTestCase {
         let visible = CGRect(x: 0, y: 33, width: 1512, height: 949)
         let sample = HUDShape(kind: .rect, box: [606, 451, 906, 531], label: "Sample")
         var parked: (cards: [HUDCard], frames: [String: CGRect]) = ([], [:])
-        for count in [1, 6, 14] {
+        var overlapLog = ""
+        for count in [1, 6, 14, 18] {
             let cards = LayoutDebugCommand.demoCards(count: count)
             let shapes = count > 1 ? [sample] : []
             let keepOut = [ScatterLayout.orbKeepOut(screen: screen)]
@@ -136,11 +137,24 @@ final class SnapshotTests: XCTestCase {
                 let size = NSHostingView(rootView: CardView(card: card)).fittingSize
                 state.cardAdded(card.listKey, size: size, visible: visible, keepOut: keepOut)
             }
-            XCTAssertEqual(state.order.count, count)
+            if count < 18 { XCTAssertEqual(state.order.count, count) }
+            let frames = state.order.compactMap { state.frames[$0] }
+            var ratios: [String] = []
+            for i in frames.indices {
+                for j in frames.indices where j > i {
+                    let overlap = ScatterLayout.overlapArea(frames[i], frames[j])
+                    guard overlap > 0 else { continue }
+                    let ratio = overlap / min(ScatterLayout.area(frames[i]), ScatterLayout.area(frames[j]))
+                    ratios.append(String(format: "%.3f", Double(ratio)))
+                }
+            }
+            overlapLog += "scatter-\(count): \(ratios.count) overlapping pairs \(ratios)\n"
+            guard count < 18 else { continue }
             try renderScatter(cards: cards, frames: state.frames, shapes: shapes, chips: false, name: "scatter-\(count)")
             parked = (cards, ScatterLayout.chipFrames(keys: state.order, visible: visible, orbOnRight: true))
         }
         try renderScatter(cards: parked.cards, frames: parked.frames, shapes: [], chips: true, name: "scatter-aside-14")
+        try overlapLog.write(to: Self.outDir.appendingPathComponent("scatter-overlaps.txt"), atomically: true, encoding: .utf8)
     }
 
     private func renderScatter(cards: [HUDCard], frames: [String: CGRect], shapes: [HUDShape],

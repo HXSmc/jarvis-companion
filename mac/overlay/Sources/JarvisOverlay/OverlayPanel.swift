@@ -59,15 +59,16 @@ final class HUDWindow: NSPanel {
     override var canBecomeMain: Bool { false }
 
     /// Fades to `alpha` in 0.2 s ease-out (instant with Reduce Motion); 0 orders the window out
-    /// when the fade ends. Below full opacity the window lets clicks through (a card dimmed
-    /// over a highlight box must not eat clicks meant for it). Orders front only when it was
-    /// out, so z-order stays arrival order instead of churning on every refit.
+    /// when the fade ends. Clicks pass through until a fade to full opacity has finished: a
+    /// card dimmed over a highlight box, or one still appearing, must not eat clicks meant for
+    /// the app below. Orders front only when it was out, so z-order stays arrival order
+    /// instead of churning on every refit.
     func fade(to alpha: CGFloat) {
         guard alpha != targetAlpha else { return }
         targetAlpha = alpha
         fadeSerial += 1
         let serial = fadeSerial
-        ignoresMouseEvents = alpha < 1
+        ignoresMouseEvents = true
         if alpha > 0, !isVisible { orderFrontRegardless() }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Theme.reduceMotion ? 0 : 0.2
@@ -75,7 +76,8 @@ final class HUDWindow: NSPanel {
             self.animator().alphaValue = alpha
         }, completionHandler: { [self] in
             MainActor.assumeIsolated {
-                if serial == fadeSerial, alpha == 0 { orderOut(nil) }
+                guard serial == fadeSerial else { return }
+                if alpha == 0 { orderOut(nil) } else if alpha == 1 { ignoresMouseEvents = false }
             }
         })
     }
@@ -89,7 +91,7 @@ final class HUDWindow: NSPanel {
 
 /// One clickable panel per card, scattered over the visible screen by ScatterLayout (frames
 /// stored in the model, so a card never moves when another comes or goes). The permission
-/// card keeps its own panel top-right; parked cards share one chip-strip panel on the left
+/// card keeps its own panel top-right; parked cards become small chip panels on the left
 /// edge. Everything outside these panels stays click-through.
 @MainActor
 final class CardPanel: NSObject {
@@ -104,13 +106,13 @@ final class CardPanel: NSObject {
     private var model: OverlayModel?
     private var entries: [String: Entry] = [:]
     private let permissionWindow: HUDWindow
-    private let chipWindow: HUDWindow
+    /// One small panel per parked chip, so the gaps between chips stay click-through.
+    private var chipWindows: [String: (window: HUDWindow, host: NSHostingView<CardChipButton>)] = [:]
     private var cancellables: [AnyCancellable] = []
 
     init(surface: NSWindow) {
         self.surface = surface
         permissionWindow = HUDWindow()
-        chipWindow = HUDWindow()
         super.init()
     }
 
@@ -121,7 +123,6 @@ final class CardPanel: NSObject {
     func host(_ model: OverlayModel) {
         self.model = model
         permissionWindow.contentView = NSHostingView(rootView: PermissionCard(missing: []))
-        chipWindow.contentView = NSHostingView(rootView: ChipStrip(model: model, chips: []))
         model.pointerOnPanel = { [weak self] in self?.pointerOnPanel() ?? false }
         // @Published fires before the value lands: sync on the next main-loop turn.
         let refit = { [weak self] (_: Any) in DispatchQueue.main.async { self?.sync() } }
@@ -153,7 +154,7 @@ final class CardPanel: NSObject {
 
     /// Whether the pointer rests on a shown, clickable card, chip or permission panel now.
     private func pointerOnPanel() -> Bool {
-        let windows = entries.values.map(\.window) + [permissionWindow, chipWindow]
+        let windows = entries.values.map(\.window) + chipWindows.values.map(\.window) + [permissionWindow]
         let frames = windows.filter { $0.isVisible && !$0.ignoresMouseEvents }.map(\.frame)
         return ScatterLayout.pointerRests(NSEvent.mouseLocation, onAnyOf: frames)
     }
@@ -231,20 +232,27 @@ final class CardPanel: NSObject {
         return frame
     }
 
-    /// While aside, one strip panel holds every parked card as a chip on the edge away from the orb.
+    /// While aside, every parked card is a chip in its own small panel on the edge away from the orb.
     private func syncChips(_ model: OverlayModel, visible: CGRect, highlights: [CGRect], aside: Bool) {
-        let keys = model.layout.chipKeys
-        guard aside, !keys.isEmpty, let host = chipWindow.contentView as? NSHostingView<ChipStrip> else {
-            chipWindow.fade(to: 0)
-            return
+        let frames = aside ? ScatterLayout.chipFrames(keys: model.layout.chipKeys, visible: visible, orbOnRight: true) : [:]
+        for (key, chip) in chipWindows where frames[key] == nil {
+            chip.window.fade(to: 0)
+            chipWindows[key] = nil
         }
-        let frames = ScatterLayout.chipFrames(keys: keys, visible: visible, orbOnRight: true)
-        let strip = frames.values.reduce(CGRect.null) { $0.union($1) }
-        let chips = model.cards.compactMap { card in
-            frames[card.listKey].map { ChipStrip.Chip(card: card, offset: CGPoint(x: $0.minX - strip.minX, y: $0.minY - strip.minY)) }
+        for card in model.cards {
+            guard let frame = frames[card.listKey] else { continue }
+            let button = CardChipButton(model: model, card: card)
+            let chip: (window: HUDWindow, host: NSHostingView<CardChipButton>)
+            if let existing = chipWindows[card.listKey] {
+                chip = existing
+                chip.host.rootView = button
+            } else {
+                chip = (HUDWindow(), NSHostingView(rootView: button))
+                chip.window.contentView = chip.host
+                chipWindows[card.listKey] = chip
+            }
+            chip.window.place(frame)
+            chip.window.fade(to: highlights.contains { $0.intersects(frame) } ? 0.25 : 1)
         }
-        host.rootView = ChipStrip(model: model, chips: chips)
-        chipWindow.place(strip)
-        chipWindow.fade(to: highlights.contains { $0.intersects(strip) } ? 0.25 : 1)
     }
 }

@@ -2,8 +2,8 @@ import Foundation
 import CoreGraphics
 
 /// Card placement over the whole visible screen: seeded, loose and layered (3x3 zones, least
-/// occupied first), never on a keep-out (orb, highlight boxes), pairwise overlap at most 30 %
-/// of the smaller card. All rects are top-left global points, the space of `HUDShape.rect`.
+/// occupied first), never on a keep-out (orb, highlight boxes), pairwise overlap 8-30 % of the
+/// smaller card or a 20 pt gap. All rects are top-left global points, the space of `HUDShape.rect`.
 /// Pure: no AppKit, so every rule here is unit-tested.
 public enum ScatterLayout {
     /// Most cards on screen at once; the model drops the oldest beyond this.
@@ -14,6 +14,12 @@ public enum ScatterLayout {
     public static let maxOverlap: CGFloat = 0.30
     /// Summed overlaps of one card (an upper bound on how much of it is covered).
     public static let maxCoverage: CGFloat = 0.60
+    /// Smallest overlap that reads as layered, not as a near miss.
+    public static let minOverlap: CGFloat = 0.08
+    /// Overlap a layered card looks for, as a share of the smaller card.
+    public static let layerBand: ClosedRange<CGFloat> = 0.08...0.25
+    /// Cards that do not overlap keep at least this gap.
+    public static let minGap: CGFloat = 20
     static let candidatesPerZone = 24
 
     // Orb geometry, mirrors OverlayRootView.swift:26-30 (`.padding(24)`, bottom-right) and
@@ -24,6 +30,9 @@ public enum ScatterLayout {
 
     public static let chipSize = CGSize(width: 200, height: 28)
     public static let chipGap: CGFloat = 6
+    /// The chip column starts this far below the top of the visible frame, clear of the
+    /// window buttons of a window at the left edge.
+    public static let chipTopClearance: CGFloat = 120
 
     public enum Placement: Equatable {
         case at(CGRect)
@@ -33,8 +42,11 @@ public enum ScatterLayout {
         case noRoom
     }
 
-    /// Places one card. `existing` is oldest first. With `allowRetire` false (parked cards are
-    /// never retired) the least-overlap spot wins even past the overlap caps.
+    /// Places one card. `existing` is oldest first. Zones fill least occupied first; a card
+    /// either overlaps another by 8-30 % of the smaller one or keeps a 20 pt gap to it. From the
+    /// 7th card on, about one in three (`prefersLayer`) looks for a spot overlapping exactly one
+    /// older card by 8-25 % before anything else. With `allowRetire` false (parked cards are
+    /// never retired) the least-overlap spot wins, past the caps and the gap.
     public static func place(size: CGSize, key: String, visible: CGRect, existing: [CGRect],
                              keepOut: [CGRect], allowRetire: Bool = true) -> Placement {
         let area = insetArea(visible)
@@ -50,43 +62,86 @@ public enum ScatterLayout {
         let tieBreak = (0..<9).map { _ in rng.next() }
         let zones = (0..<9).sorted { (occupied[$0], tieBreak[$0]) < (occupied[$1], tieBreak[$1]) }
         let zoneSize = CGSize(width: area.width / 3, height: area.height / 3)
+        let layered = prefersLayer(key: key, existingCount: existing.count)
         var best: (frame: CGRect, score: CGFloat)?
         var clearOfKeepOut = false
         for zone in zones {
             let zoneOrigin = CGPoint(x: area.minX + CGFloat(zone % 3) * zoneSize.width,
                                      y: area.minY + CGFloat(zone / 3) * zoneSize.height)
+            var origins: [CGPoint] = []
             for _ in 0..<candidatesPerZone {
-                let centre = CGPoint(x: zoneOrigin.x + rng.unit() * zoneSize.width,
-                                     y: zoneOrigin.y + rng.unit() * zoneSize.height)
-                let frame = clamp(CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
-                                         width: size.width, height: size.height), into: area)
+                origins.append(CGPoint(x: zoneOrigin.x + rng.unit() * zoneSize.width - size.width / 2,
+                                       y: zoneOrigin.y + rng.unit() * zoneSize.height - size.height / 2))
+            }
+            if layered {
+                for other in existing {
+                    for origin in layerOrigins(size: size, over: other)
+                    where self.zone(of: CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2), in: area) == zone {
+                        origins.insert(origin, at: 0)
+                    }
+                }
+            }
+            var layer: CGRect?
+            for origin in origins {
+                let frame = clamp(CGRect(origin: origin, size: size), into: area)
                 if keepOut.contains(where: { $0.intersects(frame) }) { continue }
                 clearOfKeepOut = true
-                guard let score = overlapScore(frame, existing: existing, covered: covered, capped: allowRetire)
+                guard let fit = fitness(frame, existing: existing, covered: covered, capped: allowRetire)
                 else { continue }
-                if score < (best?.score ?? .infinity) { best = (frame, score) }
+                if layered, layer == nil, fit.layers { layer = frame }
+                if fit.overlap < (best?.score ?? .infinity) { best = (frame, fit.overlap) }
             }
-            if let best, best.score == 0 { return .at(best.frame) }
+            if let layer { return .at(layer) }
+            if !layered, let best, best.score == 0 { return .at(best.frame) }
         }
         if let best { return .at(best.frame) }
         return clearOfKeepOut && !existing.isEmpty ? .retireOldest : .noRoom
     }
 
-    /// Sum of overlap areas with the existing cards; nil when `capped` and a pair passes
-    /// `maxOverlap` of the smaller card or any card would pass `maxCoverage`.
-    static func overlapScore(_ frame: CGRect, existing: [CGRect], covered: [CGFloat], capped: Bool) -> CGFloat? {
+    /// From the 7th card on, about one card in three, fixed by its key's seed.
+    static func prefersLayer(key: String, existingCount: Int) -> Bool {
+        existingCount >= 6 && (seed(key) >> 7) % 3 == 0
+    }
+
+    /// Four origins that put a card of `size` over one corner of `other`, overlapping about 15 %
+    /// of the smaller of the two.
+    static func layerOrigins(size: CGSize, over other: CGRect) -> [CGPoint] {
+        let overlapWidth = min(size.width, other.width) * 0.4
+        let overlapHeight = min(size.height, other.height,
+                                0.15 * min(size.width * size.height, area(other)) / overlapWidth)
+        var origins: [CGPoint] = []
+        for x in [other.maxX - overlapWidth, other.minX - size.width + overlapWidth] {
+            for y in [other.maxY - overlapHeight, other.minY - size.height + overlapHeight] {
+                origins.append(CGPoint(x: x, y: y))
+            }
+        }
+        return origins
+    }
+
+    /// Summed overlap with the existing cards, and whether it overlaps exactly one of them by
+    /// `layerBand`. Nil when `capped` and a pair is closer than `minGap` without overlapping,
+    /// overlaps outside 8-30 % of the smaller card, or any card would pass `maxCoverage`.
+    static func fitness(_ frame: CGRect, existing: [CGRect], covered: [CGFloat],
+                        capped: Bool) -> (overlap: CGFloat, layers: Bool)? {
         var total: CGFloat = 0
+        var overlapped = 0
+        var inBand = true
         for (index, other) in existing.enumerated() {
             let overlap = overlapArea(frame, other)
-            guard overlap > 0 else { continue }
-            if capped {
-                if overlap / min(area(frame), area(other)) > maxOverlap { return nil }
-                if (covered[index] + overlap) / area(other) > maxCoverage { return nil }
+            guard overlap > 0 else {
+                if capped, frame.intersects(other.insetBy(dx: -minGap, dy: -minGap)) { return nil }
+                continue
+            }
+            let ratio = overlap / min(area(frame), area(other))
+            overlapped += 1
+            if !layerBand.contains(ratio) { inBand = false }
+            if capped, ratio < minOverlap || ratio > maxOverlap || (covered[index] + overlap) / area(other) > maxCoverage {
+                return nil
             }
             total += overlap
         }
         if capped, area(frame) > 0, total / area(frame) > maxCoverage { return nil }
-        return total
+        return (total, overlapped == 1 && inBand)
     }
 
     /// The orb, its padding and the banner band, bottom-right of the screen.
@@ -115,12 +170,13 @@ public enum ScatterLayout {
     public static func chipFrames(keys: [String], visible: CGRect, orbOnRight: Bool) -> [String: CGRect] {
         let area = insetArea(visible)
         var frames: [String: CGRect] = [:]
+        let top = max(area.minY, visible.minY + chipTopClearance)
         var column: CGFloat = 0
-        var y = area.minY
+        var y = top
         for key in keys {
-            if y + chipSize.height > area.maxY, y > area.minY {
+            if y + chipSize.height > area.maxY, y > top {
                 column += 1
-                y = area.minY
+                y = top
             }
             let step = column * (chipSize.width + chipGap)
             let x = orbOnRight ? area.minX + step : area.maxX - chipSize.width - step

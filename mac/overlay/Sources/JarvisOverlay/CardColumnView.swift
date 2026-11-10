@@ -22,26 +22,15 @@ struct CardTile: View {
     }
 }
 
-/// Parked cards as chips at their strip offsets; a click on any chip restores every card.
+/// One parked card as a chip in its own panel; a click on any chip restores every card.
 @MainActor
-struct ChipStrip: View {
-    struct Chip {
-        let card: HUDCard
-        let offset: CGPoint
-    }
-
+struct CardChipButton: View {
     let model: OverlayModel
-    let chips: [Chip]
+    let card: HUDCard
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(chips, id: \.card.listKey) { chip in
-                Button { model.setLayout(.restore) } label: { CardChip(card: chip.card) }
-                    .buttonStyle(.plain)
-                    .offset(x: chip.offset.x, y: chip.offset.y)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        Button { model.setLayout(.restore) } label: { CardChip(card: card) }
+            .buttonStyle(.plain)
     }
 }
 

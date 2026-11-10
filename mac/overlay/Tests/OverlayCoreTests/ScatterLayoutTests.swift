@@ -170,13 +170,13 @@ final class ScatterLayoutTests: XCTestCase {
         let keys = (0..<6).map { "k\($0)" }
         let frames = ScatterLayout.chipFrames(keys: keys, visible: V, orbOnRight: true)
         for (i, key) in keys.enumerated() {
-            XCTAssertEqual(frames[key], CGRect(x: 16, y: 49 + 34 * CGFloat(i), width: 200, height: 28))
+            XCTAssertEqual(frames[key], CGRect(x: 16, y: 153 + 34 * CGFloat(i), width: 200, height: 28))
         }
         let many = (0..<40).map { "k\($0)" }
         let wrapped = ScatterLayout.chipFrames(keys: many, visible: CGRect(x: 0, y: 0, width: 1512, height: 600),
                                                orbOnRight: true)
-        XCTAssertEqual(wrapped["k15"]?.minX, 16)
-        XCTAssertEqual(wrapped["k16"], CGRect(x: 222, y: 16, width: 200, height: 28))
+        XCTAssertEqual(wrapped["k12"]?.minX, 16)
+        XCTAssertEqual(wrapped["k13"], CGRect(x: 222, y: 120, width: 200, height: 28))
         let left = ScatterLayout.chipFrames(keys: ["k0"], visible: V, orbOnRight: false)
         XCTAssertEqual(left["k0"]?.minX, 1512 - 16 - 200)
     }
@@ -260,5 +260,100 @@ final class ScatterLayoutTests: XCTestCase {
         // The hovered card was replaced or removed: its frame is gone, so the deadline clears.
         XCTAssertFalse(ScatterLayout.pointerRests(CGPoint(x: 150, y: 150), onAnyOf: Array(cards.dropFirst())))
         XCTAssertFalse(ScatterLayout.pointerRests(CGPoint(x: 150, y: 150), onAnyOf: []))
+    }
+
+    // MARK: round 1 (hub amendment A2)
+
+    /// Demo cards with fixed per-kind sizes (info, stat, bar, link, flow), as CardView measures them.
+    private func demoRun(_ count: Int, keepOut: [CGRect] = [orb]) -> ScatterLayout.LayoutState {
+        let kindSizes = [CGSize(width: 300, height: 93), CGSize(width: 300, height: 127), CGSize(width: 360, height: 136),
+                         CGSize(width: 300, height: 127), CGSize(width: 360, height: 204)]
+        var state = ScatterLayout.LayoutState()
+        for (index, card) in LayoutDebugCommand.demoCards(count: count).enumerated() {
+            state.cardAdded(card.listKey, size: kindSizes[index % 5], visible: V, keepOut: keepOut)
+        }
+        return state
+    }
+
+    private func overlapRatios(_ frames: [CGRect]) -> [CGFloat] {
+        var ratios: [CGFloat] = []
+        for i in frames.indices {
+            for j in frames.indices where j > i {
+                let overlap = ScatterLayout.overlapArea(frames[i], frames[j])
+                if overlap > 0 { ratios.append(overlap / min(ScatterLayout.area(frames[i]), ScatterLayout.area(frames[j]))) }
+            }
+        }
+        return ratios
+    }
+
+    func testFourteenDemoCardsAreLayered() {
+        let state = demoRun(14)
+        XCTAssertEqual(state.order.count, 14)
+        let frames = state.order.compactMap { state.frames[$0] }
+        let ratios = overlapRatios(frames)
+        XCTAssertTrue((3...6).contains(ratios.count), "overlapping pairs: \(ratios)")
+        for ratio in ratios { XCTAssertTrue((0.08...0.30).contains(ratio), "pair overlap \(ratio)") }
+        assertOverlapBounds(frames)
+        XCTAssertEqual(demoRun(14).frames, state.frames)
+    }
+
+    func testFirstSixCardsDoNotOverlap() {
+        let state = demoRun(6)
+        XCTAssertTrue(overlapRatios(state.order.compactMap { state.frames[$0] }).isEmpty)
+    }
+
+    func testCardsOverlapOrKeepATwentyPointGap() {
+        for count in [6, 14, 18] {
+            let state = demoRun(count)
+            let frames = state.order.compactMap { state.frames[$0] }
+            for i in frames.indices {
+                for j in frames.indices where j > i {
+                    let overlap = ScatterLayout.overlapArea(frames[i], frames[j])
+                    if overlap > 0 {
+                        XCTAssertGreaterThanOrEqual(
+                            overlap / min(ScatterLayout.area(frames[i]), ScatterLayout.area(frames[j])), 0.08 - 1e-9)
+                    } else {
+                        XCTAssertFalse(frames[i].intersects(frames[j].insetBy(dx: -20, dy: -20)),
+                                       "\(count) cards: pair \(i),\(j) closer than 20 pt")
+                    }
+                }
+            }
+            assertOverlapBounds(frames)
+        }
+    }
+
+    func testEveryZoneFillsBeforeASecondCard() {
+        let area = inset
+        func zone(_ frame: CGRect) -> Int {
+            let col = min(2, Int((frame.midX - area.minX) / (area.width / 3)))
+            let row = min(2, Int((frame.midY - area.minY) / (area.height / 3)))
+            return row * 3 + col
+        }
+        var state = ScatterLayout.LayoutState()
+        let kindSizes = [CGSize(width: 300, height: 93), CGSize(width: 300, height: 127), CGSize(width: 360, height: 136),
+                         CGSize(width: 300, height: 127), CGSize(width: 360, height: 204)]
+        for (index, card) in LayoutDebugCommand.demoCards(count: 9).enumerated() {
+            var occupied = [Int](repeating: 0, count: 9)
+            for frame in state.frames.values { occupied[zone(frame)] += 1 }
+            let layered = ScatterLayout.prefersLayer(key: card.listKey, existingCount: state.order.count)
+            state.cardAdded(card.listKey, size: kindSizes[index % 5], visible: V, keepOut: [orb])
+            guard let frame = state.frames[card.listKey] else { return XCTFail("no frame for \(card.listKey)") }
+            // A layered card sits on an older one on purpose; every other card takes a least-used zone.
+            if !layered { XCTAssertEqual(occupied[zone(frame)], occupied.min(), "\(card.listKey) skipped an emptier zone") }
+        }
+        let zones = Set(state.frames.values.map(zone))
+        XCTAssertGreaterThanOrEqual(zones.count, 8)
+    }
+
+    func testNoRoomWhenOnlyAKeepOutIsInTheWay() {
+        let size = CGSize(width: 300, height: 120)
+        XCTAssertEqual(ScatterLayout.place(size: size, key: "c1", visible: V, existing: [], keepOut: [V]), .noRoom)
+        XCTAssertEqual(ScatterLayout.place(size: size, key: "c2", visible: V,
+                                           existing: [CGRect(x: 100, y: 100, width: 300, height: 120)], keepOut: [V]),
+                       .noRoom)
+        var state = ScatterLayout.LayoutState()
+        XCTAssertTrue(state.cardAdded("c3", size: size, visible: V, keepOut: [V]).isEmpty)
+        XCTAssertNil(state.frames["c3"])
+        XCTAssertTrue(state.order.isEmpty)
     }
 }
