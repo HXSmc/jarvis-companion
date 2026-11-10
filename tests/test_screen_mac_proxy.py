@@ -110,3 +110,103 @@ def test_mac_unreachable_is_offline(gateway_server, monkeypatch):
                 frame = await c.get("/screen/mac/frame")
                 assert frame.status_code == 503 and frame.json()["detail"] == screen.MAC_OFFLINE_DETAIL
     asyncio.run(run())
+
+
+@pytest.fixture
+def mac_lock(monkeypatch):
+    """Fake Mac gateway for focus-lock proxy tests; the test drives it via `state`."""
+    state = {"focus_lock": True, "status": 200, "detail": None, "bodies": []}
+    mac = FastAPI()
+
+    @mac.get("/screen/mac/status")
+    async def status():
+        payload = {"target": "mac", "online": True, "tcc_ok": True, "display_asleep": False}
+        if state["focus_lock"] != "absent":
+            payload["focus_lock"] = state["focus_lock"]
+        return payload
+
+    @mac.post("/screen/mac/input")
+    async def input_(request: Request):
+        state["bodies"].append(await request.json())
+        if state["status"] == 200:
+            return {"ok": True}
+        raise HTTPException(status_code=state["status"], detail=state["detail"])
+
+    transport = httpx.ASGITransport(app=mac)
+    monkeypatch.setenv(screen.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(screen, "_mac_client", lambda: httpx.AsyncClient(transport=transport))
+    monkeypatch.setattr(screen, "_input_times", {})
+    return state
+
+
+def test_proxy_forwards_lock_fields(gateway_server, mac_lock):
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                resp = await c.post(
+                    "/screen/mac/input",
+                    json={"events": [{"type": "text", "text": "hi",
+                                      "require_app": "TextEdit", "require_window": "Doc"}]},
+                )
+                assert resp.status_code == 200, resp.text
+        event = mac_lock["bodies"][0]["events"][0]
+        assert event["require_app"] == "TextEdit", event
+        assert event["require_window"] == "Doc", event
+
+    asyncio.run(run())
+
+
+def test_proxy_passes_mac_409_through(gateway_server, mac_lock):
+    detail = {
+        "error": "focus_mismatch", "reason": "point", "expected_app": "TextEdit",
+        "actual_app": "Finder", "window_matched": None, "refused_index": 0,
+        "events_run": 0, "partial": False, "message": "x",
+    }
+    mac_lock["status"] = 409
+    mac_lock["detail"] = detail
+
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                tap = {"type": "tap", "x": 0.5, "y": 0.5}
+                resp = await c.post("/screen/mac/input", json={"events": [tap]})
+                assert resp.status_code == 409, resp.text
+                assert resp.json()["detail"] == detail, resp.text
+                mac_lock["status"] = 500
+                resp = await c.post("/screen/mac/input", json={"events": [tap]})
+                assert resp.status_code == 503, resp.text
+
+    asyncio.run(run())
+
+
+def test_proxy_refuses_lock_when_mac_is_old(gateway_server, mac_lock):
+    mac_lock["focus_lock"] = "absent"
+
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                locked_tap = {"type": "tap", "x": 0.5, "y": 0.5, "require_app": "Safari"}
+                resp = await c.post("/screen/mac/input", json={"events": [locked_tap]})
+                assert resp.status_code == 409, resp.text
+                assert resp.json()["detail"] == screen.FOCUS_LOCK_UNSUPPORTED, resp.text
+                assert mac_lock["bodies"] == [], mac_lock["bodies"]
+                mac_lock["focus_lock"] = None
+                resp = await c.post("/screen/mac/input", json={"events": [dict(locked_tap)]})
+                assert resp.status_code == 409, resp.text
+                assert mac_lock["bodies"] == [], mac_lock["bodies"]
+
+    asyncio.run(run())
+
+
+def test_proxy_unlocked_batch_skips_status_check(gateway_server, mac_lock):
+    mac_lock["focus_lock"] = "absent"
+
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                resp = await c.post("/screen/mac/input",
+                                    json={"events": [{"type": "tap", "x": 0.5, "y": 0.5}]})
+                assert resp.status_code == 200, resp.text
+                assert len(mac_lock["bodies"]) == 1, mac_lock["bodies"]
+
+    asyncio.run(run())

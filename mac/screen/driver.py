@@ -319,7 +319,7 @@ def _ax_pid(el) -> int | None:
 
 def _focus_probe(system, want_window: bool):
     """(focused app title, its pid, focused window title or None). The pid is
-    read while the app element is alive, so nothing outlives its release."""
+    read while the app element is still valid, so nothing outlives its release."""
     app = _ax_copy(system, "AXFocusedApplication")
     if not app:
         return (None, None, None)
