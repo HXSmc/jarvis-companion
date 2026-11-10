@@ -55,7 +55,8 @@ function describe(s) {
   switch (s.step) {
     case "wake": return `score ${s.score ?? "?"} (${s.source})`;
     case "voice": return `${s.audio_ms != null ? (s.audio_ms / 1000).toFixed(1) + " s of audio" : "audio length unknown"}`
-                       + (s.stt_final_ms != null ? `, STT final ${Math.round(s.stt_final_ms)} ms` : "");
+                       + (s.stt_final_ms != null ? `, STT final ${Math.round(s.stt_final_ms)} ms` : "")
+                       + (s.stt ? ` · ${s.stt}` : "");
     case "transcribed": return null;  // rendered as a quote
     case "intent": return s.kind + (s.arg ? ` → ${s.arg}` : "");
     case "spoke": return null;

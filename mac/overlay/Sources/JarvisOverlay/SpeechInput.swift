@@ -17,6 +17,8 @@ final class SpeechInput {
     private var isRunning = false
     private var currentTurn: Turn?
     private var turnTask: Task<Void, Never>?
+    /// How the last finished turn was heard (STT path, counters, what ended it): debug page only.
+    private(set) var lastDiagnosis = ""
     private let log = Logger(subsystem: "JarvisOverlay", category: "SpeechInput")
 
     init() {}
@@ -127,6 +129,7 @@ final class SpeechInput {
     private func completeTurn(_ turn: Turn, nothing: Bool = false, rawText: String? = nil) {
         guard !turn.finished, !turn.cancelled else { return }
         turn.finished = true
+        lastDiagnosis = turn.diagnosis
         if currentTurn === turn { currentTurn = nil }
         turnTask = nil
         tap.setSink(nil)
@@ -250,6 +253,7 @@ final class SpeechInput {
         let verdict = await watch(turn: turn)
         guard !turn.cancelled, !turn.finished else { return true }
         tap.setSink(nil)
+        turn.path += ", ended by \(verdict)"
         switch verdict {
         case .nothing:
             completeTurn(turn, nothing: true)
@@ -311,6 +315,7 @@ final class SpeechInput {
             let verdict = await self.watch(turn: turn)
             guard !turn.cancelled, !turn.finished else { return }
             self.tap.setSink(nil)
+            turn.path += ", ended by \(verdict)"
             switch verdict {
             case .nothing: self.completeTurn(turn, nothing: true)
             case .endOfSpeech, .timedOut: request.endAudio()

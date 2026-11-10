@@ -200,7 +200,7 @@ final class AppController {
         do {
             for try await event in client.utterance(text: text, convId: conv,
                                                     sttFinalMs: sttFinalMs, audioMs: audioMs,
-                                                    screen: screen) {
+                                                    stt: speech.lastDiagnosis, screen: screen) {
                 handle(event)
             }
         } catch {

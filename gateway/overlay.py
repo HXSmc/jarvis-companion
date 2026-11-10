@@ -105,6 +105,7 @@ class TurnBody(BaseModel):
     conv_id: str = Field("default", max_length=64)
     stt_final_ms: float | None = None
     audio_ms: float | None = None  # speech heard after the wake, for the debug page
+    stt: str | None = Field(None, max_length=500)  # how the app heard it (debug page only)
     screen: ScreenBody | None = None
 
 
@@ -631,7 +632,8 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
 
     async def stream() -> AsyncIterator[str]:
         rec = debug_log.for_utterance()
-        debug_log.add(rec, "voice", audio_ms=body.audio_ms, stt_final_ms=body.stt_final_ms)
+        debug_log.add(rec, "voice", audio_ms=body.audio_ms, stt_final_ms=body.stt_final_ms,
+                      stt=body.stt)
         debug_log.add(rec, "transcribed", text=body.text)
         start = time.monotonic()
         cards = shapes = 0
