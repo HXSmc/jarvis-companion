@@ -199,7 +199,7 @@ public struct MediaImageView: View {
         if let sourcePage, isSafeHTTPSURL(sourcePage) {
             Button {
                 // Only https, re-checked here (payload is untrusted).
-                if let sourcePage, isSafeHTTPSURL(sourcePage), let url = URL(string: sourcePage) {
+                if isSafeHTTPSURL(sourcePage), let url = URL(string: sourcePage) {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
