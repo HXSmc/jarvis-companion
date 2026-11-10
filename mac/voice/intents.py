@@ -28,6 +28,8 @@ APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utili
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _PATH_RE = re.compile(r"^[/A-Za-z0-9._~%-]*$")
 _WAKE_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
+# STT often turns the wake phrase into other words: "Hey, John Pierce. What time is it".
+_MISHEARD_WAKE_RE = re.compile(r"^(?:hey|hi|ok(?:ay)?)[\s,]+\w+(?:\s\w+)?[.,!?]\s+", re.I)
 _GROUND_LEADS = ("show me", "where is", "where's", "which button", "point to",
                  "point at", "highlight", "find the")
 # UI things on screen; anything else after a lead is a question for the model.
@@ -54,15 +56,14 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
     to a real installed app before the domain check.
     """
-    t = _WAKE_RE.sub("", text.strip(), count=1).strip().rstrip(".?!").strip()
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
     low = t.lower()
     if low in ("clear", "clear the screen"):
         return Intent("clear")
-    # Last sentence only: STT often turns the wake phrase into words ("Hey, John Pierce. What time is it").
-    question = re.split(r"[.,!?]\s+", low)[-1]
-    if _TIME_RE.match(question):
+    if _TIME_RE.match(low):
         return Intent("clock", "time")
-    if _DATE_RE.match(question):
+    if _DATE_RE.match(low):
         return Intent("clock", "date")
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.

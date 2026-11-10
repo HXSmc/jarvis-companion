@@ -36,6 +36,8 @@ def test_clock_questions_parse_to_the_local_clock_intent():
         assert (parse(text).kind, parse(text).arg) == ("clock", "date"), text
     # Anything more specific still goes to the brain (which has the context below).
     assert parse("what time is it in Tokyo").kind == "answer"
+    # A real sentence after "Hi" is kept whole.
+    assert parse("Hi, I'm stuck. What time is it").kind == "answer"
 
 
 def test_time_answered_locally_without_the_brain(client):
@@ -65,7 +67,8 @@ def test_every_brain_turn_carries_local_context(client):
 
 def test_open_the_clock_app():
     apps = {"clock": "Clock", "safari": "Safari"}
-    for text in ("open Clock", "open the clock", "open the clock app", "open clock.app"):
+    for text in ("open Clock", "open the clock", "open the clock app", "open clock.app",
+                 "Hey, Jonvis. Open the clock app"):  # real Mac transcript
         intent = parse(text, apps=apps)
         assert (intent.kind, intent.arg.lower()) == ("open_app", "clock"), text
     calls = []

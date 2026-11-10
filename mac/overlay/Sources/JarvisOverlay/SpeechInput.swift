@@ -171,7 +171,9 @@ final class SpeechInput {
             if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
             if !turn.hasSpeech {
                 if now.timeIntervalSince(turn.startedAt) >= 5 { return .nothing }
-            } else if let end = turn.endOfSpeech, now.timeIntervalSince(end) >= 0.7 {
+            } else if let end = turn.endOfSpeech, now.timeIntervalSince(end) >= 1.2 {
+                // 1.2 s, not 0.7: SpeechAnalyzer partials can lag the audio by more than 0.7 s,
+                // which cut "Open the clock app" to "Open the" (debug page, 3 repros).
                 return .endOfSpeech
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
