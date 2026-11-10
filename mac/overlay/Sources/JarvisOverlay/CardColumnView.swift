@@ -54,19 +54,3 @@ private struct PermissionCard: View {
         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Theme.cardBorder, lineWidth: 1))
     }
 }
-
-extension HUDCard {
-    /// The card's own id (the service always sets one); type + title when a card has none.
-    var listKey: String { id ?? "\(typeName):\(title)" }
-
-    var title: String {
-        switch self {
-        case .info(let p): return p.title
-        case .stat(let p): return p.title
-        case .bar(let p): return p.title
-        case .flow(let p): return p.title
-        case .link(let p): return p.title
-        case .image(let p): return p.title
-        }
-    }
-}
