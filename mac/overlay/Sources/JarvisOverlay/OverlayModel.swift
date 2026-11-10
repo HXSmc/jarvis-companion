@@ -18,12 +18,14 @@ final class OverlayModel: ObservableObject {
     @Published var banner: String?
 
     private var idleTask: Task<Void, Never>?
+    private static let maxShapes = 40
 
     /// Any content event (shape/card/say) restarts the 60 s idle countdown.
     func activity() { bumpIdle() }
 
     func add(shape: HUDShape) {
         shapes.append(shape)
+        shapes.dropOldest(keeping: Self.maxShapes)
         bumpIdle()
     }
 
