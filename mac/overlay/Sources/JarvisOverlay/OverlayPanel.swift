@@ -45,6 +45,14 @@ final class HUDWindow: NSPanel {
     /// Bumped by every fade; a fade-out that ends after a later fade-in must not hide the window.
     private var fadeSerial = 0
     private var targetAlpha: CGFloat = 0
+    /// Card panels only (nil on chips and the permission card, which stay put): called with the
+    /// AppKit frame when a drag starts (`ended` false) and when it is dropped (true).
+    var dragged: (@MainActor (CGRect, _ ended: Bool) -> Void)?
+    /// AppKit rect a dragged panel stays fully inside (the visible frame of the overlay's screen).
+    var dragBounds: CGRect = .zero
+    /// The held mouse-down of a press on a card panel, its pointer and the panel origin then.
+    private var press: (event: NSEvent, pointer: CGPoint, origin: CGPoint)?
+    private(set) var isDragging = false
 
     init() {
         super.init(contentRect: .zero,
@@ -66,6 +74,10 @@ final class HUDWindow: NSPanel {
     func fade(to alpha: CGFloat) {
         guard alpha != targetAlpha else { return }
         targetAlpha = alpha
+        if alpha == 0 {
+            press = nil
+            isDragging = false
+        }
         fadeSerial += 1
         let serial = fadeSerial
         ignoresMouseEvents = true
@@ -82,8 +94,47 @@ final class HUDWindow: NSPanel {
         })
     }
 
+    /// Press-move-release on a card panel: past `ScatterLayout.dragThreshold` the panel follows
+    /// the pointer and is dropped on release; the press never reaches the card, so no button
+    /// fires. A shorter press is a click: the held mouse-down is delivered on release, with
+    /// the mouse-up put back at the head of the queue so a control that tracks the mouse in
+    /// its mouse-down still finds it. The panel is never key, so a drag never takes focus.
+    override func sendEvent(_ event: NSEvent) {
+        guard let dragged else { return super.sendEvent(event) }
+        switch event.type {
+        case .leftMouseDown:
+            press = (event, NSEvent.mouseLocation, frame.origin)
+        case .leftMouseDragged:
+            guard let press else { return super.sendEvent(event) }
+            let pointer = NSEvent.mouseLocation
+            if !isDragging {
+                guard ScatterLayout.isDrag(from: press.pointer, to: pointer) else { return }
+                isDragging = true
+                orderFrontRegardless()
+                dragged(frame, false)
+            }
+            let moved = CGRect(x: press.origin.x + pointer.x - press.pointer.x,
+                               y: press.origin.y + pointer.y - press.pointer.y,
+                               width: frame.width, height: frame.height)
+            setFrameOrigin(ScatterLayout.clamp(moved, into: dragBounds).origin)
+        case .leftMouseUp:
+            guard let held = press else { return super.sendEvent(event) }
+            press = nil
+            if isDragging {
+                isDragging = false
+                dragged(frame, true)
+            } else {
+                postEvent(event, atStart: true)
+                super.sendEvent(held.event)
+            }
+        default:
+            super.sendEvent(event)
+        }
+    }
+
     /// Top-left global rect (HUD space) to this panel's AppKit frame; no-op when unchanged.
     func place(_ rect: CGRect) {
+        guard !isDragging else { return }
         let frame = CardPanel.flip(rect)
         if frame != self.frame { setFrame(frame, display: false) }
     }
@@ -108,6 +159,8 @@ final class CardPanel: NSObject {
     private let permissionWindow: HUDWindow
     /// One small panel per parked chip, so the gaps between chips stay click-through.
     private var chipWindows: [String: (window: HUDWindow, host: NSHostingView<CardChipButton>)] = [:]
+    /// Card keys as last stacked on screen, back to front.
+    private var stacked: [String] = []
     private var cancellables: [AnyCancellable] = []
 
     init(surface: NSWindow) {
@@ -155,6 +208,8 @@ final class CardPanel: NSObject {
     /// Whether the pointer rests on a shown, clickable card, chip or permission panel now.
     private func pointerOnPanel() -> Bool {
         let windows = entries.values.map(\.window) + chipWindows.values.map(\.window) + [permissionWindow]
+        // A drag in progress holds the cards even where the clamp left the pointer outside.
+        if windows.contains(where: \.isDragging) { return true }
         let frames = windows.filter { $0.isVisible && !$0.ignoresMouseEvents }.map(\.frame)
         return ScatterLayout.pointerRests(NSEvent.mouseLocation, onAnyOf: frames)
     }
@@ -179,16 +234,12 @@ final class CardPanel: NSObject {
                 entry.host.rootView = CardTile(card: card)
                 entry.card = card
                 entries[key] = entry
-                let before = model.layout.frames[key]
                 model.resize(key: key, size: entry.host.fittingSize, visible: visible, keepOut: keepOut)
-                // Placed again as the newest card, so it goes on top like one.
-                if entry.window.isVisible, let frame = model.layout.frames[key], frame.origin != before?.origin {
-                    entry.window.orderFrontRegardless()
-                }
             } else {
                 let host = NSHostingView(rootView: CardTile(card: card))
                 let window = HUDWindow()
                 window.contentView = host
+                window.dragged = { [weak self] frame, ended in self?.cardDragged(key, frame: frame, ended: ended) }
                 entries[key] = Entry(window: window, host: host, card: card)
             }
         }
@@ -205,9 +256,11 @@ final class CardPanel: NSObject {
         }
 
         let aside = model.layout.mode == .aside
+        let dragBounds = Self.flip(visible)
         for card in model.cards {
             let key = card.listKey
-            guard let entry = entries[key] else { continue }
+            guard let entry = entries[key], !entry.window.isDragging else { continue }
+            entry.window.dragBounds = dragBounds
             guard !aside, let frame = model.layout.frames[key] else {
                 entry.window.fade(to: 0)
                 continue
@@ -216,7 +269,26 @@ final class CardPanel: NSObject {
             // A highlight that appears under a card dims it; the card never moves.
             entry.window.fade(to: highlights.contains { $0.intersects(frame) } ? 0.25 : 1)
         }
+        restack(aside ? [] : model.layout.order.filter { entries[$0] != nil })
         syncChips(model, visible: visible, highlights: highlights, aside: aside)
+    }
+
+    /// Stacks the shown card panels as `layout.order` (back to front), the one z-order for
+    /// arrival, re-place, drag and aside -> restore. Only what changed is ordered: new cards on
+    /// top go front one by one; any other change restacks all (a handful of calls, no churn).
+    private func restack(_ stack: [String]) {
+        let kept = stacked.filter { stack.contains($0) }
+        for key in stack[(stack.starts(with: kept) ? kept.count : 0)...] {
+            entries[key]?.window.orderFrontRegardless()
+        }
+        stacked = stack
+    }
+
+    /// A drag started (the card comes to the front) or ended (it stays where it was dropped).
+    private func cardDragged(_ key: String, frame: CGRect, ended: Bool) {
+        guard let model else { return }
+        model.drag(key: key, to: Self.flip(frame), visible: geometry.visible, ended: ended)
+        if ended { sync() }
     }
 
     /// Shows the permission card top-right (16 pt inset) while a permission is missing and

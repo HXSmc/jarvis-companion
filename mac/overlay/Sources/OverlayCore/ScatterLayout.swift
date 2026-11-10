@@ -24,6 +24,8 @@ public enum ScatterLayout {
     /// sits on a corner and never runs along a whole side (a full-side strip reads as two cards
     /// butted together, or hides the card's title and value).
     public static let maxCornerShare: CGFloat = 0.75
+    /// A press on a card that moves farther than this is a drag; less stays a click.
+    public static let dragThreshold: CGFloat = 4
     static let candidatesPerZone = 24
 
     // Orb geometry, mirrors OverlayRootView.swift:26-30 (`.padding(24)`, bottom-right) and
@@ -122,7 +124,9 @@ public enum ScatterLayout {
     /// Summed overlap with the existing cards, and whether it overlaps exactly one of them by
     /// `layerBand`. Nil when a pair is closer than `minGap` without overlapping, overlaps outside
     /// 8-30 % of the smaller card or off a corner, or any card would pass `maxCoverage`.
-    static func fitness(_ frame: CGRect, existing: [CGRect], covered: [CGFloat]) -> (overlap: CGFloat, layers: Bool)? {
+    /// `existing[newerFrom...]` lie on top of `frame`, so their corner rule runs the other way.
+    static func fitness(_ frame: CGRect, existing: [CGRect], covered: [CGFloat],
+                        newerFrom: Int = .max) -> (overlap: CGFloat, layers: Bool)? {
         var total: CGFloat = 0
         var overlapped = 0
         var inBand = true
@@ -134,7 +138,7 @@ public enum ScatterLayout {
             }
             let ratio = overlap / min(area(frame), area(other))
             if ratio < minOverlap || ratio > maxOverlap || (covered[index] + overlap) / area(other) > maxCoverage
-                || !isCornerOverlap(frame, over: other) {
+                || !(index < newerFrom ? isCornerOverlap(frame, over: other) : isCornerOverlap(other, over: frame)) {
                 return nil
             }
             overlapped += 1
@@ -246,6 +250,11 @@ public enum ScatterLayout {
         frames.contains { $0.contains(pointer) }
     }
 
+    /// Whether a press that started at `start` and is now at `pointer` has become a drag.
+    public static func isDrag(from start: CGPoint, to pointer: CGPoint) -> Bool {
+        hypot(pointer.x - start.x, pointer.y - start.y) > dragThreshold
+    }
+
     /// SplitMix64: small, seedable, the same sequence on every run and machine.
     struct SplitMix64 {
         var state: UInt64
@@ -267,20 +276,28 @@ public enum ScatterLayout {
     // MARK: - Layout state
 
     /// Stored scatter frames plus the normal / aside mode. A frame never changes when another
-    /// card comes or goes; only its own replacement, a screen change (reclamp) or removal does.
+    /// card comes or goes; only its own replacement, a drag, a screen change (reclamp) or
+    /// removal does. `order` is also the z-order every panel pass stacks by.
     public struct LayoutState: Equatable {
         public enum Mode: Equatable { case normal, aside }
 
         public private(set) var mode: Mode = .normal
         /// Stored frame per card key; kept while aside, so restore puts each card back.
         public private(set) var frames: [String: CGRect] = [:]
-        /// Placed keys, oldest first.
+        /// Placed keys, back to front: arrival order, a re-placed or dragged card moves to the end.
         public private(set) var order: [String] = []
+        /// Cards the user dragged: their frame is the user's choice, never re-placed.
+        public private(set) var pinned: Set<String> = []
+        /// Cards with no spot yet (no room while aside, or only a keep-out in the way), oldest first.
+        public private(set) var waiting: [String] = []
 
         public init() {}
 
-        /// Keys shown as chips: every placed card while aside, none otherwise.
-        public var chipKeys: [String] { mode == .aside ? order : [] }
+        /// Keys shown as chips: every card while aside (placed or still waiting), none otherwise.
+        public var chipKeys: [String] { mode == .aside ? order + waiting : [] }
+
+        /// Who goes first when room is needed: unpinned cards, back to front, then pinned ones.
+        public var retireOrder: [String] { order.filter { !pinned.contains($0) } + order.filter { pinned.contains($0) } }
 
         public mutating func aside() { mode = .aside }
         public mutating func restore() { mode = .normal }
@@ -304,49 +321,77 @@ public enum ScatterLayout {
                     order.append(key)
                     return retired
                 case .retireOldest:
-                    guard let oldest = order.first else { return retired }
+                    guard let oldest = retireOrder.first else { return retired }
                     retired.append(oldest)
                     cardRemoved(oldest)
                 case .noRoom:
+                    waiting.append(key)
                     return retired
                 }
             }
         }
 
-        /// A card replaced in place keeps its origin while its new size still keeps the caps,
-        /// the gap and the keep-outs; otherwise that card alone is placed again (no other card
-        /// moves), retiring the oldest if needed. Returns the retired keys, oldest first.
-        /// A highlight already under the old frame does not move it (the card dims instead).
+        /// A card replaced in place keeps its frame when its size is unchanged, and keeps its
+        /// origin while the new size still keeps the caps, the gap and the keep-outs against the
+        /// unpinned cards (older ones below it, newer ones on top); otherwise that card alone is
+        /// placed again (no other card moves), retiring the oldest if needed. Returns the retired
+        /// keys. A pinned card only stays on screen. A highlight already under the old frame
+        /// does not move it (the card dims instead).
         @discardableResult
         public mutating func cardResized(_ key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) -> [String] {
-            guard let old = frames[key] else { return [] }
-            let frame = ScatterLayout.clamp(CGRect(origin: old.origin, size: size), into: ScatterLayout.insetArea(visible))
-            let others = order.filter { $0 != key }.compactMap { frames[$0] }
-            // Newer cards lie on top of this one, so their corner rule runs the other way.
-            let newer = order.drop(while: { $0 != key }).dropFirst().compactMap { frames[$0] }
+            guard let old = frames[key], let position = order.firstIndex(of: key) else { return [] }
+            let moved = CGRect(origin: old.origin, size: size)
+            if pinned.contains(key) {
+                frames[key] = ScatterLayout.clamp(moved, into: visible)
+                return []
+            }
+            let frame = ScatterLayout.clamp(moved, into: ScatterLayout.insetArea(visible))
+            guard frame != old else { return [] }
+            // Overlaps with a pinned card are the user's choice, not something the new size broke.
+            let older = order[..<position].filter { !pinned.contains($0) }
+            let newer = order[(position + 1)...].filter { !pinned.contains($0) }
+            let others = (older + newer).compactMap { frames[$0] }
             if !keepOut.contains(where: { $0.intersects(frame) && !$0.intersects(old) }),
-               ScatterLayout.fitness(frame, existing: others, covered: ScatterLayout.coverage(others)) != nil,
-               newer.allSatisfy({ ScatterLayout.overlapArea($0, frame) == 0 || ScatterLayout.isCornerOverlap($0, over: frame) }) {
+               ScatterLayout.fitness(frame, existing: others, covered: ScatterLayout.coverage(others),
+                                     newerFrom: older.count) != nil {
                 frames[key] = frame
                 return []
             }
             return cardAdded(key, size: size, visible: visible, keepOut: keepOut)
         }
 
+        /// The user drags a card (called when the drag starts and when it is dropped): it comes
+        /// to the front, is pinned, and its frame is clamped fully inside the visible frame.
+        public mutating func cardDragged(_ key: String, to frame: CGRect, visible: CGRect) {
+            guard frames[key] != nil else { return }
+            frames[key] = ScatterLayout.clamp(frame, into: visible)
+            pinned.insert(key)
+            order.removeAll { $0 == key }
+            order.append(key)
+        }
+
         public mutating func cardRemoved(_ key: String) {
             frames[key] = nil
             order.removeAll { $0 == key }
+            pinned.remove(key)
+            waiting.removeAll { $0 == key }
         }
 
         /// Forgets every card not in `live` (cap, idle clear, clear).
         public mutating func keep(_ live: Set<String>) {
-            guard order.contains(where: { !live.contains($0) }) else { return }
             order.removeAll { !live.contains($0) }
+            waiting.removeAll { !live.contains($0) }
             frames = frames.filter { live.contains($0.key) }
+            pinned = pinned.filter { live.contains($0) }
         }
 
+        /// The screen changed: scattered cards move back into the inset area, a pinned card
+        /// only as far as it takes to stay fully inside the visible frame.
         public mutating func reclamp(visible: CGRect) {
-            frames = ScatterLayout.reclamp(frames: frames, visible: visible)
+            let area = ScatterLayout.insetArea(visible)
+            for (key, frame) in frames {
+                frames[key] = ScatterLayout.clamp(frame, into: pinned.contains(key) ? visible : area)
+            }
         }
     }
 }

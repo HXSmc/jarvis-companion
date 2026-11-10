@@ -110,7 +110,11 @@ final class OverlayModel: ObservableObject {
         } else {
             cards.append(card)
         }
-        if cards.count > ScatterLayout.maxCards { cards.removeFirst(cards.count - ScatterLayout.maxCards) }
+        // Over the cap the first card of the layout's retire order goes (pinned cards last).
+        while cards.count > ScatterLayout.maxCards {
+            let index = layout.retireOrder.compactMap { key in cards.firstIndex { $0.listKey == key } }.first ?? 0
+            cards.remove(at: index)
+        }
         bumpIdle()
     }
 
@@ -125,6 +129,13 @@ final class OverlayModel: ObservableObject {
     func resize(key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) {
         let retired = layout.cardResized(key, size: size, visible: visible, keepOut: keepOut)
         if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
+    }
+
+    /// The user drags a card: it comes to the front and stays where it is dropped. The idle
+    /// countdown restarts when the drag ends (during it the pointer rests on the card).
+    func drag(key: String, to frame: CGRect, visible: CGRect, ended: Bool) {
+        layout.cardDragged(key, to: frame, visible: visible)
+        if ended { bumpIdle() }
     }
 
     /// The screen changed: every stored frame moves the least distance back on screen.

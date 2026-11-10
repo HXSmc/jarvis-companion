@@ -242,10 +242,13 @@ final class ScatterLayoutTests: XCTestCase {
         XCTAssertTrue(retired.isEmpty)
         XCTAssertEqual(Array(parked.order.prefix(placedBefore.count)), placedBefore)
         XCTAssertNil(parked.frames["c10"])
+        // A card with no spot yet still shows as a chip while aside.
+        XCTAssertTrue(parked.chipKeys.contains("c10"))
         assertOverlapBounds(parked.order.compactMap { parked.frames[$0] })
         parked.restore()
         XCTAssertFalse(parked.cardAdded("c10", size: size, visible: small, keepOut: []).isEmpty)
         XCTAssertNotNil(parked.frames["c10"])
+        XCTAssertFalse(parked.waiting.contains("c10"))
     }
 
     // MARK: k
@@ -468,5 +471,130 @@ final class ScatterLayoutTests: XCTestCase {
         let grown = CGSize(width: 340, height: 160)
         XCTAssertTrue(state.cardResized("a", size: grown, visible: V, keepOut: [orb]).isEmpty)
         XCTAssertEqual(state.frames["a"], ScatterLayout.clamp(CGRect(origin: old.origin, size: grown), into: inset))
+    }
+
+    // MARK: round 3 (code lens finding, hub amendment A3)
+
+    /// A card replaced by id with the same size never moves, even with newer cards lying on its
+    /// lower-right corner (demo-6 of demo:14 and demo-6 / demo-10 of demo:18 used to jump).
+    func testUnchangedSizeReplaceNeverMovesACard() {
+        for (screen, visible) in [(F, V), (liveScreen, liveVisible)] {
+            let keepOut = [ScatterLayout.orbKeepOut(screen: screen)]
+            for count in [14, 18] {
+                var state = demoRun(count, visible: visible, keepOut: keepOut)
+                let before = state
+                for key in before.order {
+                    guard let frame = before.frames[key] else { continue }
+                    XCTAssertTrue(state.cardResized(key, size: frame.size, visible: visible, keepOut: keepOut).isEmpty)
+                }
+                XCTAssertEqual(state, before, "\(Int(screen.width)) demo:\(count): a same-size replace moved a card")
+            }
+        }
+    }
+
+    /// A newer card on the lower-right corner of a resized card lies on top of it, so the corner
+    /// rule is checked with the newer card over it, not the other way round.
+    func testResizeChecksNewerCardsWithTheCornerRuleReversed() {
+        let resized = CGRect(x: 100, y: 100, width: 300, height: 204)
+        let newer = CGRect(x: 300, y: 250, width: 300, height: 200)
+        let covered = ScatterLayout.coverage([newer])
+        XCTAssertNotNil(ScatterLayout.fitness(resized, existing: [newer], covered: covered, newerFrom: 0))
+        XCTAssertNil(ScatterLayout.fitness(resized, existing: [newer], covered: covered))
+    }
+
+    func testDragThreshold() {
+        let start = CGPoint(x: 100, y: 100)
+        XCTAssertFalse(ScatterLayout.isDrag(from: start, to: start))
+        XCTAssertFalse(ScatterLayout.isDrag(from: start, to: CGPoint(x: 104, y: 100)))
+        XCTAssertFalse(ScatterLayout.isDrag(from: start, to: CGPoint(x: 102, y: 103)))
+        XCTAssertTrue(ScatterLayout.isDrag(from: start, to: CGPoint(x: 103, y: 104)))
+        XCTAssertTrue(ScatterLayout.isDrag(from: start, to: CGPoint(x: 100, y: 95)))
+    }
+
+    /// A dragged card is pinned where it is dropped (clamped fully inside the visible frame, not
+    /// the inset area), comes to the front, and keeps its frame through a resize, a reclamp
+    /// that leaves it on screen, and aside -> restore (frames and z-order unchanged).
+    func testDraggedCardIsPinned() {
+        var state = demoRun(6)
+        guard let old = state.frames["demo-2"] else { return XCTFail("no frame for demo-2") }
+        let others = state.frames.filter { $0.key != "demo-2" }
+        state.cardDragged("demo-2", to: CGRect(origin: CGPoint(x: 700, y: 500), size: old.size), visible: V)
+        XCTAssertEqual(state.frames["demo-2"], CGRect(origin: CGPoint(x: 700, y: 500), size: old.size))
+        XCTAssertEqual(state.order.last, "demo-2")
+        XCTAssertEqual(state.pinned, ["demo-2"])
+        for (key, frame) in others { XCTAssertEqual(state.frames[key], frame, "\(key) moved on a drag") }
+
+        // Dropped past the bottom-left: clamped onto the visible frame's edge, inside it.
+        state.cardDragged("demo-2", to: CGRect(origin: CGPoint(x: -80, y: 2000), size: old.size), visible: V)
+        XCTAssertEqual(state.frames["demo-2"], CGRect(x: V.minX, y: V.maxY - old.height, width: old.width, height: old.height))
+        let edge = state.frames["demo-2"]
+
+        // Reclamp on the same screen keeps it (it is inside the visible frame, though not the inset area).
+        state.reclamp(visible: V)
+        XCTAssertEqual(state.frames["demo-2"], edge)
+        // A resize keeps the origin; a card that would leave the screen only clamps.
+        XCTAssertTrue(state.cardResized("demo-2", size: CGSize(width: old.width + 60, height: old.height + 60),
+                                        visible: V, keepOut: [orb]).isEmpty)
+        XCTAssertEqual(state.frames["demo-2"],
+                       CGRect(x: V.minX, y: V.maxY - old.height - 60, width: old.width + 60, height: old.height + 60))
+        XCTAssertEqual(state.order.last, "demo-2")
+
+        // A smaller screen: only clamped as far as needed to stay visible.
+        let small = CGRect(x: 0, y: 25, width: 1280, height: 775)
+        state.reclamp(visible: small)
+        guard let reclamped = state.frames["demo-2"] else { return XCTFail("pinned card lost on reclamp") }
+        XCTAssertTrue(small.contains(reclamped))
+        XCTAssertEqual(reclamped.maxY, small.maxY)
+
+        let saved = state
+        state.aside()
+        state.restore()
+        XCTAssertEqual(state.frames, saved.frames)
+        XCTAssertEqual(state.order, saved.order)
+        XCTAssertEqual(state.pinned, saved.pinned)
+        state.clear()
+        XCTAssertTrue(state.pinned.isEmpty)
+    }
+
+    /// New cards treat a pinned card as occupied: each keeps a 20 pt gap to it or lies over one
+    /// of its corners within the caps.
+    func testNewCardsAreLaidOutAroundAPinnedCard() {
+        var state = demoRun(4)
+        guard let old = state.frames["demo-1"] else { return XCTFail("no frame for demo-1") }
+        let pinnedFrame = CGRect(origin: CGPoint(x: 600, y: 380), size: old.size)
+        state.cardDragged("demo-1", to: pinnedFrame, visible: V)
+        for (index, card) in LayoutDebugCommand.demoCards(count: 14).enumerated().dropFirst(4) {
+            state.cardAdded(card.listKey, size: kindSizes[index % 5], visible: V, keepOut: [orb])
+            XCTAssertEqual(state.frames["demo-1"], pinnedFrame, "pinned card moved when \(card.listKey) came")
+            guard let frame = state.frames[card.listKey] else { continue }
+            let overlap = ScatterLayout.overlapArea(frame, pinnedFrame)
+            if overlap == 0 {
+                XCTAssertFalse(frame.intersects(pinnedFrame.insetBy(dx: -20, dy: -20)), "\(card.listKey) too close")
+            } else {
+                let ratio = overlap / min(ScatterLayout.area(frame), ScatterLayout.area(pinnedFrame))
+                XCTAssertTrue((0.08...0.30).contains(ratio), "\(card.listKey) overlaps the pinned card by \(ratio)")
+                XCTAssertTrue(ScatterLayout.isCornerOverlap(frame, over: pinnedFrame), "\(card.listKey) off a corner")
+            }
+        }
+    }
+
+    /// Room is made by retiring unpinned cards first, even when the pinned card is the oldest.
+    func testPinnedCardRetiresLast() {
+        let small = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let size = CGSize(width: 360, height: 260)
+        var state = ScatterLayout.LayoutState()
+        state.cardAdded("c1", size: size, visible: small, keepOut: [])
+        // Dropped in the top-left corner: the rest of the screen always has room for one more card.
+        state.cardDragged("c1", to: CGRect(x: -50, y: -50, width: 360, height: 260), visible: small)
+        let corner = CGRect(x: 0, y: 0, width: 360, height: 260)
+        XCTAssertEqual(state.frames["c1"], corner)
+        var retired: [String] = []
+        for i in 2...12 {
+            retired += state.cardAdded("c\(i)", size: size, visible: small, keepOut: [])
+            XCTAssertEqual(state.retireOrder.last, "c1")
+        }
+        XCTAssertFalse(retired.isEmpty, "the small screen never filled up")
+        XCTAssertFalse(retired.contains("c1"), "the pinned card retired while unpinned cards were left")
+        XCTAssertEqual(state.frames["c1"], corner)
     }
 }
