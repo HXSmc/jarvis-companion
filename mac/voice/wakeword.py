@@ -85,7 +85,7 @@ def score_wav(model: Model, wav_path: Path) -> tuple[bool, float, float | None]:
 def ffmpeg_argv(mic: str = MIC) -> list[str]:
     """ffmpeg mic capture: 16 kHz mono s16le on stdout, from avfoundation audio device `mic`."""
     return [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
         "-f", "avfoundation", "-i", f":{mic}",
         "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "s16le", "-",
     ]
@@ -104,7 +104,8 @@ def notify_wake(at_seconds: float, dry_run: bool, score: float | None = None) ->
     req = urllib.request.Request(
         f"http://127.0.0.1:{OVERLAY_PORT}/overlay/wake",
         data=json.dumps({"type": "wake", "source": "mac", "score": score}).encode(),
-        headers={"Authorization": f"Bearer {token}"},
+        # Without the JSON content type FastAPI answers 422 and the wake never reaches the app.
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
     urllib.request.urlopen(req, timeout=5)
@@ -132,7 +133,10 @@ def run_live(on_stats=None) -> None:
             peak_score = max(peak_score, score)
             peak_level = max(peak_level, float(np.abs(pcm).max()) / 32768 if pcm.size else 0.0)
             if score >= THRESHOLD:
-                notify_wake(total / SAMPLE_RATE, dry_run=False, score=round(float(score), 3))
+                try:
+                    notify_wake(total / SAMPLE_RATE, dry_run=False, score=round(float(score), 3))
+                except Exception as exc:  # one failed POST must not end wake listening
+                    logger.warning("wake POST failed (%s: %s)", type(exc).__name__, exc)
                 model.reset()
             frames += 1
             if on_stats and frames % 125 == 0:  # 125 x 80 ms = 10 s

@@ -95,3 +95,23 @@ def test_debug_gates(client):
     page = client.get("/overlay/debug")  # data-free shell: loopback only, token comes from the fragment
     assert page.status_code == 200 and "text/html" in page.headers["content-type"]
     assert "Bearer" in page.text and "location.hash" in page.text
+
+
+def test_wake_post_is_json_and_accepted(client, monkeypatch):
+    """The wake POST had no JSON content type: FastAPI answered 422 and the listener thread died."""
+    ww = _wakeword(monkeypatch)
+    sent = []
+    monkeypatch.setattr(ww.urllib.request, "urlopen", lambda req, timeout: sent.append(req))
+    ww.notify_wake(1.0, dry_run=False, score=0.8)
+    (req,) = sent
+    assert req.get_header("Content-type") == "application/json"
+    headers = {**AUTH_HEADER, "Content-Type": req.get_header("Content-type")}
+    assert client.post("/overlay/wake", content=req.data, headers=headers).status_code == 200
+    assert client.post("/overlay/wake", content=req.data, headers={
+        **AUTH_HEADER, "Content-Type": "application/x-www-form-urlencoded"}).status_code == 422
+
+
+def test_wake_service_agent_is_not_throttled():
+    """Without ProcessType launchd throttles the agent and the wake word stops hearing words."""
+    plist = (Path(__file__).resolve().parent.parent / "launchd/com.jarvis.overlay.service.plist").read_text()
+    assert "<key>ProcessType</key>\n\t<string>Interactive</string>" in plist
