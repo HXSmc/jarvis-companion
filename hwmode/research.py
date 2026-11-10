@@ -14,6 +14,13 @@ from common.hud import validate_card
 from hwmode.brain import LeanSession
 
 RESEARCH_TOOLS = "WebSearch,WebFetch"
+# WebFetch may not reach this box or the home network. Verified live (2026-11-10): hostname rules
+# and "*.suffix" wildcards are denied; IP-prefix wildcards ("10.*") are NOT matched by Claude Code,
+# so private IP ranges cannot be listed here. shortcut: exact hosts + local suffixes only; upgrade if
+# Claude Code gains CIDR rules.
+RESEARCH_DENY = tuple(f"WebFetch(domain:{d})" for d in (
+    "localhost", "127.0.0.1", "0.0.0.0", "[::1]", "169.254.169.254", "metadata.google.internal",
+    "*.local", "*.localhost", "*.internal", "*.lan", "*.home.arpa"))
 MAX_CARDS = 6
 FALLBACK_SAY = "I couldn't find anything solid on that."
 
@@ -105,7 +112,8 @@ class ResearchBrain:
 
     def ask(self, text: str, jpeg: bytes | None = None, on_text=None) -> ResearchResult:
         if self._session is None:
-            self._session = LeanSession(self.model, RESEARCH_PROMPT, self.claude_bin, tools=RESEARCH_TOOLS)
+            self._session = LeanSession(self.model, RESEARCH_PROMPT, self.claude_bin, tools=RESEARCH_TOOLS,
+                                        deny=RESEARCH_DENY)
         reply = self._session.ask(text, jpeg, on_text)
         say, cards = FALLBACK_SAY, []
         data = reply.data if isinstance(reply.data, dict) else None

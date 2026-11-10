@@ -694,7 +694,7 @@ class _Conn:
         out = " ".join(parts)[:3000]
         if self.research_lines:
             block = "\n".join(research.strip_fence(line) for line in self.research_lines)[:2800]
-            out += f"\n{research.FENCE_OPEN}\n{block}\n{research.FENCE_CLOSE}"
+            out += f"\n{research.FENCE_OPEN}\n{block}\n{research.FENCE_CLOSE}\n{research.GUARD_LINE}"
         return out
 
     async def report(self) -> None:

@@ -87,7 +87,7 @@ def parse_reply(text: str) -> dict | None:
 
 class LeanSession:
     def __init__(self, model: str = "sonnet", system_prompt: str = SYSTEM_PROMPT, claude_bin: str = "claude",
-                 tools: str = ""):
+                 tools: str = "", deny: tuple[str, ...] = ()):
         """`tools`: comma list of built-in tools this session may use without asking (the research
         turn's "WebSearch,WebFetch"); empty = no tools at all, the coaching brain's default."""
         # Empty cwd so no project CLAUDE.md / .mcp.json / hooks get picked up.
@@ -96,6 +96,8 @@ class LeanSession:
         cmd = [claude_bin, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                "--verbose", "--include-partial-messages", "--model", model,
                "--system-prompt", system_prompt, *flags]
+        if deny:  # last: --disallowedTools takes every following argument as a rule
+            cmd += ["--disallowedTools", *deny]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, cwd=self._cwd,
                                      env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})

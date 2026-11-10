@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from hwmode.research import (
+    RESEARCH_DENY,
     FALLBACK_SAY,
     FENCE_CLOSE,
     FENCE_OPEN,
@@ -153,6 +154,9 @@ def test_research_brain_uses_web_tools_only(fake_claude):
     assert "--tools WebSearch,WebFetch" in flags
     assert "--allowedTools WebSearch,WebFetch" in flags
     assert not {"Bash", "Edit", "Write"} & set(flags.split())
+    # WebFetch may not reach this box or the home network (rules come last: the flag is variadic)
+    assert flags.split("--disallowedTools ", 1)[1].split() == list(RESEARCH_DENY)
+    assert "WebFetch(domain:localhost)" in RESEARCH_DENY and "WebFetch(domain:*.local)" in RESEARCH_DENY
 
 
 def test_research_cards_are_validated(fake_claude, monkeypatch):
