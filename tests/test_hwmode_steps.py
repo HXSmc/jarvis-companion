@@ -20,7 +20,7 @@ import websockets
 
 from conftest import IOS_AUTH_HEADER
 from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
-from gateway.hwmode import InstructionGate, is_done_confirmation, step_navigation
+from gateway.hwmode import is_done_confirmation, step_navigation
 
 
 @pytest.mark.parametrize("text", ["done", "Done.", "ok done", "I'm done", "finished", "next", "next step",
@@ -35,16 +35,6 @@ def test_done_confirmations(text):
                                   "خلصت؟", "وين الكيبل", "ما خلصت", "تم ايش؟"])
 def test_not_done_confirmations(text):
     assert not is_done_confirmation(text)
-
-
-def test_gate_allows_a_new_instruction_only_on_confirmation():
-    g = InstructionGate()
-    assert g.count == 0
-    assert not g.allow(next_ready=True, confirmed=False)  # the brain's own jump is never enough
-    assert not g.allow(next_ready=False, confirmed=True)  # a confirmation without a new instruction
-    assert g.count == 0
-    assert g.allow(next_ready=True, confirmed=True)
-    assert g.count == 0  # the count is only fed by the connection, not by allow() itself
 
 
 # Fake `claude`: gives the first instruction on turn 1, then always TRIES to jump to a new

@@ -100,10 +100,13 @@ def test_research_turn_emits_cards(gateway_server, fake_claude, monkeypatch):
                 assert json.loads(await ws.recv())["type"] == "ready"
                 msgs = await _ask_until_reply(ws, "find out about the Busy Bar")
                 kinds = [f"{m['type']}:{m['state']}" if m["type"] == "research" else m["type"] for m in msgs]
-                assert kinds == ["ack", "research:started", "research:done", "reply"], kinds
+                assert kinds == ["ack", "research:started", "research:done", "aside", "reply"], kinds
+                aside = [m for m in msgs if m["type"] == "aside"]
+                assert aside and aside[0]["text"] == "It is a desk accessory."  # spoken to the side
                 reply = msgs[-1]
+                assert reply["data"]["research"] is True
                 assert reply["data"]["say"] == "It is a desk accessory."
-                assert reply["data"]["shape"] is None
+                assert "shape" not in reply["data"]  # a research reply draws no box
                 assert [c["id"] for c in reply["data"]["cards"]] == [INFO_CARD["id"]]
                 msgs = await _ask_until_reply(ws, "where is the latch?", use_frame=False)
                 assert msgs[-1]["data"]["say"] == "Press the latch."  # coaching still alive
@@ -118,9 +121,11 @@ def test_research_turn_emits_cards(gateway_server, fake_claude, monkeypatch):
     assert parts[parts.index("--tools") + 1] == ""  # coaching stays tool-less
 
 
-def test_start_session_from_research(gateway_server, fake_claude, monkeypatch):
+def test_start_session_from_research(gateway_server, fake_claude, monkeypatch, tmp_path):
     from gateway import central, hwmode
+    from hwmode.research import FENCE_OPEN, GUARD_LINE
     monkeypatch.setattr(hwmode, "get_acks", lambda voice: _StubAcks())
+    monkeypatch.setenv("JARVIS_ATTACH_DIR", str(tmp_path / "attach"))  # cards file never hits ~
     calls = []
 
     async def fake_route(thread_id, msg_id, text, source, *, engine=None, new_only=False):
@@ -146,6 +151,13 @@ def test_start_session_from_research(gateway_server, fake_claude, monkeypatch):
     text = call["text"]
     assert "Busy Bar desk display" in text and "It is a desk accessory." in text
     assert "Bearer" not in text and "ANTHROPIC" not in text
+    assert "It is a desk accessory." in text.split(FENCE_OPEN)[1]  # the summary stays fenced
+    assert GUARD_LINE in text.splitlines()  # the fence is guarded before the attachment note
+    assert text.rstrip().splitlines()[-1].endswith("hardware-research-cards.json (1 KB)")
+    assert '"type":"info"' not in text  # cards are an attachment, not inline instructions
+    assert "hardware-research-cards.json" in text and "The owner attached" in text
+    saved = list((tmp_path / "attach").rglob("hardware-research-cards.json"))
+    assert len(saved) == 1 and json.loads(saved[0].read_bytes())[0]["id"] == INFO_CARD["id"]
 
 
 def test_start_session_without_research_asks_first(gateway_server, fake_claude, monkeypatch):

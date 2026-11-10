@@ -98,6 +98,39 @@ def test_frame_then_ask_streams_say_and_reply(gateway_server, fake_claude):
     asyncio.run(run())
 
 
+# Same stub, but "say" streams before "next_ready": the jump verdict is not knowable
+# when the speech arrives, so no early say may go out (R9).
+FAKE_CLAUDE_SAY_FIRST = r'''#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    reply = json.dumps({"say": "Press the latch.", "next_ready": False, "done_seen": False,
+                        "shape": None})
+    half = len(reply) // 2
+    for part in (reply[:half], reply[half:]):
+        print(json.dumps({"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": part}}}), flush=True)
+    print(json.dumps({"type": "result", "result": reply, "usage": {}}), flush=True)
+'''
+
+
+def test_say_before_next_ready_is_not_spoken_early(gateway_server, tmp_path, monkeypatch):
+    path = tmp_path / "claude-sayfirst"
+    path.write_text(FAKE_CLAUDE_SAY_FIRST)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("HWMODE_CLAUDE_BIN", str(path))
+
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                await ws.recv()
+                await ws.send(json.dumps({"type": "ask", "text": "where is the latch?", "frame": False}))
+                msg = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                assert msg["type"] == "reply" and msg["data"]["say"] == "Press the latch."
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), 1)  # no early say may sneak in after either
+    asyncio.run(run())
+
+
 def test_first_utterance_is_task(gateway_server, fake_claude, monkeypatch):
     """Voice-first: no task on start, the first plain ask becomes it; a restart still knows it."""
     from gateway import hwmode
@@ -162,6 +195,43 @@ def test_report_back_posts_summary_and_frame(gateway_server, fake_claude, monkey
     assert "Task: reseat the SSD cable" in summary
     assert "«Press the latch.»" in summary and "«where is it?»" in summary
     assert "Last frame: card file file-42." in summary
+
+
+def test_plain_disconnect_reports_nothing(gateway_server, fake_claude, monkeypatch):
+    """Only an explicit end reports back: a dropped socket stays silent and keeps the row."""
+    from gateway import cards, central, hwmode
+    sent, saved, answered = [], [], []
+    hwmode._requests.clear()
+    hwmode._requests["sess-1234"] = {"task": "reseat the SSD cable", "at": 0}
+    monkeypatch.setattr(cards, "load", lambda: {"sess-1234": {
+        "need": {"id": "need1", "kind": "hardware", "question": "reseat the SSD cable", "answered": None}}})
+    monkeypatch.setattr(cards, "save_file",
+                        lambda sid, data, name, desc, mime: saved.append((sid, data, name)) or "file-42", raising=False)
+    monkeypatch.setattr(cards, "mark_answered", lambda sid, nid, ans: answered.append((sid, nid, ans)), raising=False)
+
+    async def fake_send(sid, msg_id, text, shown):
+        sent.append((sid, text))
+
+    monkeypatch.setattr(central, "_send_to_session", fake_send, raising=False)
+
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "reseat the SSD cable",
+                                          "session_id": "sess-1234"}))
+                await ws.recv()
+                await ws.send(json.dumps({"type": "ask", "text": "where is it?", "frame": False}))
+                for _ in range(2):
+                    await asyncio.wait_for(ws.recv(), 10)
+            # the socket just drops: no "end" was sent
+            for _ in range(100):  # wait for the server side to finish its close path
+                if hwmode._live_conns == 0:
+                    break
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)  # any (wrong) report would land here
+    asyncio.run(run())
+    assert sent == [] and saved == [] and answered == []
+    assert "sess-1234" in hwmode._requests  # the request row survives
 
 
 def test_hardware_requests_round_trip(gateway_server):
@@ -258,6 +328,35 @@ def test_request_cap(gateway_server, monkeypatch):
                      for i in range(3)]
             assert codes == [200, 200, 429]
     asyncio.run(run())
+
+
+def test_post_request_posts_need_only_with_router_id_and_free_card(gateway_server, monkeypatch):
+    """A hardware banner must not clobber an open approve ask; the row is kept either way."""
+    import httpx
+    from gateway import cards, hwmode
+    hwmode._requests.clear()
+    posted = []
+    state = {"cards": {}}
+    monkeypatch.setattr(cards, "resolve_session", lambda raw: {"uuid-1": "rs-1"}.get(raw))
+    monkeypatch.setattr(cards, "load", lambda: state["cards"])
+    monkeypatch.setattr(cards, "post_need", lambda *a: posted.append(a), raising=False)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            # unknown to the cards: row kept as sent, no need posted
+            await http.post("/hwmode/request", json={"session_id": "uuid-9", "task": "x"}, headers=AUTH_HEADER)
+            # resolved, but an open approve ask is on the card: no clobber, row still kept
+            state["cards"] = {"rs-1": {"need": {"id": "n1", "kind": "approve", "answered": None}}}
+            await http.post("/hwmode/request", json={"session_id": "uuid-1", "task": "swap the fan"},
+                            headers=AUTH_HEADER)
+            # resolved, the old ask is answered: the hardware need goes on the card
+            state["cards"] = {"rs-1": {"need": {"id": "n1", "kind": "approve", "answered": "ok"}}}
+            await http.post("/hwmode/request", json={"session_id": "uuid-1", "task": "swap the fan"},
+                            headers=AUTH_HEADER)
+            return (await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)).json()
+    live = asyncio.run(run())
+    assert posted == [("rs-1", "hardware", "swap the fan")]
+    assert live == {"uuid-9": "x", "rs-1": "swap the fan"}
 
 
 def test_hardware_request_is_filed_under_the_router_session_id(gateway_server, monkeypatch):

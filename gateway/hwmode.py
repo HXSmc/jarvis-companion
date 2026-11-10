@@ -17,10 +17,13 @@ Server -> client:
   {"type": "say", "text": str}                        early speech, before the full reply
   {"type": "audio", "text": str, "rate": int, "pcm": base64}        Kokoro voice line
   {"type": "research", "state": "started"|"done"}   the web research turn ("find out about X")
+  {"type": "aside", "text": str, "rate"?: int, "pcm"?: base64}   the research summary, spoken
+       to the side of the job (never a new instruction; pcm when the gateway voice says it)
   {"type": "session", "session_id": str, "title": str}   a Claude session started from the findings
   {"type": "reply", "data": {...}|null, "raw": str, "frame_id": int|null, "w": int, "h": int,
    "ttft_s": float|null, "total_s": float}
-       data = {say, shape|null, done_seen, next_ready} (+ cards when the brain sent any):
+       data = {say, shape|null, done_seen, next_ready} (+ cards when the brain sent any);
+       a research reply's data = {research: true, say, cards} (no shape):
        shape = {kind: rect|circle|triangle, box: [x1,y1,x2,y2], label?} — common/hud.validate_shape
   {"type": "error", "error": str}
 
@@ -33,8 +36,9 @@ A Claude session that needs a physical action posts `/hwmode/request`
 (`GET /hwmode/requests`, ios_token) and shows "Open Hardware Mode" on that
 session's card, then clears it with `DELETE /hwmode/request/{session_id}`.
 The phone can also pull a session's task with `GET /hwmode/context/{session_id}`
-(ios_token). When the connection ends, the session's owner gets a report
-(the task, how many instructions were completed, the last lines, the last frame).
+(ios_token). When the phone sends `end`, the session's owner gets a report
+(the task, how many instructions were completed, the last lines, the last frame);
+a plain disconnect reports nothing.
 """
 from __future__ import annotations
 
@@ -54,7 +58,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request, WebSocket,
 from pydantic import BaseModel, Field
 
 from common.hud import validate_card, validate_shape
-from gateway import cards
+from gateway import attachments, cards
 from gateway.auth import require_bearer, require_bearer_any
 from gateway.ws import IOS_ROLE, _authorized
 from hwmode import research
@@ -146,18 +150,6 @@ def is_done_confirmation(text: str) -> bool:
     return _DONE_AR_RE.fullmatch(ar) is not None
 
 
-class InstructionGate:
-    """How many instructions the guide has accepted. The count never goes on the wire;
-    it only feeds the report-back at the end. A new instruction may be given only when
-    the user confirmed the current one done — never on the brain's own jump."""
-
-    def __init__(self) -> None:
-        self.count = 0
-
-    def allow(self, next_ready: bool, confirmed: bool) -> bool:
-        return bool(next_ready and confirmed)
-
-
 def _claude_bin() -> str:
     return os.environ.get("HWMODE_CLAUDE_BIN") or shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 
@@ -197,15 +189,18 @@ class _Conn:
         self.research: research.ResearchBrain | None = None
         self.research_topic: str | None = None
         self.research_result: research.ResearchResult | None = None
+        # Research summaries stay out of `spoken`: they are asides, never instructions.
+        self.research_lines: list[str] = []
         self.task_from_session = False
         self.frame: bytes | None = None
         self.frame_id: int | None = None
         self.busy = asyncio.Lock()
-        self.gate = InstructionGate()
+        self.instructions_done = 0
         # A user question that arrived while the brain was busy: answered right after, never dropped.
         self.pending: tuple[str, bool] | None = None
         self.tasks: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
         self.voice = get_voice()
+        get_acks(self.voice)  # prewarm: the clip cache renders while the phone is still connecting
         self.speaking: set[asyncio.Task] = set()  # voice synthesis, outside `tasks` (never "busy")
         self.segmenter = get_segmenter()
         # Report-back state: last lines both ways, and the per-ask timing.
@@ -256,10 +251,9 @@ class _Conn:
             self.task = _session_task(session_id)
             self.task_from_session = bool(self.task)
         if announce:  # a new task starts over; a silent restart (turn cap) keeps the report state
-            self.gate = InstructionGate()
+            self.instructions_done = 0
             self.last_say = ""
-            self.spoken, self.owner_asks = [], []
-            self.asked_any = False
+            self.spoken, self.owner_asks, self.research_lines = [], [], []
         self.session = await asyncio.to_thread(LeanSession, self.model, claude_bin=_claude_bin())
         if announce:  # the phone answers "ready" by starting the task, so only for a real start
             await self.send({"type": "ready", "model": self.model,
@@ -277,15 +271,19 @@ class _Conn:
             back = not (watch or locate) and nav == -1
             if back:  # the user asked to go back: say so to the brain, and allow the re-give
                 text = f"{text} [The user wants to go back to the previous instruction. Give it again.]"
-            if not self.task and not (watch or locate) and nav == 0 and not user_done:
-                self.task = asked[:2000]  # voice-first: the job is whatever the owner says first
             plain = not (watch or locate) and not user_done and not back
+            # Routed before the voice-first task grab: a research ask must not become the job.
             if plain and research.is_start_session(asked):
                 await self._session_turn(asked)
                 return
             if plain and research.is_research(asked):
-                await self._research_turn(asked, use_frame)
+                await self._research_turn(asked, False)
                 return
+            if plain and research.is_identify(asked) and not (self.task and self.last_say):
+                await self._research_turn(asked, use_frame)  # "what is this": only between tasks
+                return
+            if not self.task and not (watch or locate) and nav == 0 and not user_done:
+                self.task = asked[:2000]  # voice-first: the job is whatever the owner says first
             if self.session.turns == 0 and self.task:  # a fresh brain must know the job
                 prefix = f"Task: {self.task}."
                 if self.last_say:  # silent restart (turn cap): it also forgot where we were
@@ -326,7 +324,9 @@ class _Conn:
                     return
                 head = joined[:m_say.start()]
                 m_next = _NEXT_READY_RE.search(head)
-                if m_next and m_next.group(1) == "true":  # seen done mid-stream proves only a watch check with a frame
+                if m_next is None:  # the jump verdict has not streamed yet: no early speech
+                    return
+                if m_next.group(1) == "true":  # seen done mid-stream proves only a watch check with a frame
                     m_done = _DONE_SEEN_RE.search(head)
                     seen = bool(m_done and m_done.group(1) == "true")
                     if not (user_done or back or (watch and jpeg is not None and seen)):
@@ -362,7 +362,7 @@ class _Conn:
             data = dict(d) if d else None
             if d is not None and d.get("next_ready") is True:
                 if confirmed:
-                    self.gate.count += 1
+                    self.instructions_done += 1
                 elif back:  # giving the earlier instruction again is allowed, not an advance
                     pass
                 elif watch:  # no frame proved it done: stay, and stay quiet
@@ -407,11 +407,15 @@ class _Conn:
             logger.info("timing ttft_s=%s ack_s=%s first_audio_s=%s total_s=%s",
                         reply.ttft_s, self._ack_s, self._first_audio_s, round(total_s, 3))
             d_out = out or {}
-            logger.info("reply %.1fs next_ready=%s gate=%s say=%r", reply.total_s, d_out.get("next_ready"),
-                        self.gate.count, str(d_out.get("say", reply.raw))[:200])
+            logger.info("reply %.1fs next_ready=%s instructions=%s say=%r", reply.total_s, d_out.get("next_ready"),
+                        self.instructions_done, str(d_out.get("say", reply.raw))[:200])
             await self.send({"type": "reply", "data": out, "raw": reply.raw, "frame_id": frame_id,
                              "w": size[0] if size else None, "h": size[1] if size else None,
                              "ttft_s": reply.ttft_s, "total_s": round(reply.total_s, 3)})
+            if say_event is not None:  # the answer is out: no ack may talk over it now
+                say_event.set()
+            if ack_task is not None:
+                ack_task.cancel()
 
     async def _instant_ack(self, acks, kind: str) -> None:
         """The research/session turns take seconds: their ack clip goes out at once, no 0.45 s wait."""
@@ -428,7 +432,8 @@ class _Conn:
 
     async def _research_turn(self, asked: str, use_frame: bool) -> None:
         """A spoken "find out about X": answered by a web-tools-only brain on its own session,
-        spoken out loud with HUD cards. The coaching brain never gains web tools."""
+        with HUD cards. The summary is an aside, never a new instruction: last_say and `spoken`
+        stay on the job, only `research_lines` records it. The coaching brain never gains web tools."""
         jpeg = self.frame if use_frame else None
         frame_id = self.frame_id if use_frame else None
         size = jpeg_size(jpeg) if jpeg else None
@@ -450,14 +455,25 @@ class _Conn:
             self.research_topic, self.research_result = asked, result
             say, cards, raw, ttft, total = result.say, result.cards, result.raw, result.ttft_s, result.total_s
         await self.send({"type": "research", "state": "done"})
-        self._note_said(say)
-        self._spawn_speak(say)
+        self.research_lines = (self.research_lines + [say])[-6:]
+        aside = f"{say} Back to it: {self.last_say}" if self.last_say else say
+        msg = {"type": "aside", "text": aside}
+        if self.voice and self.voice.speaks(aside):  # the phone falls back to its own voice without pcm
+            try:
+                pcm, rate = await asyncio.to_thread(self.voice.synth, aside)
+                if self._ask_t0 is not None and self._first_audio_s is None:
+                    self._first_audio_s = time.monotonic() - self._ask_t0
+                msg["pcm"] = base64.b64encode(pcm).decode()
+                msg["rate"] = rate
+            except Exception:
+                logger.exception("hwmode: aside voice failed")
+        await self.send(msg)
         elapsed = time.monotonic() - self._ask_t0
         total = round(total if total is not None else elapsed, 3)
         logger.info("timing ttft_s=%s ack_s=%s first_audio_s=%s total_s=%s", ttft, self._ack_s,
                     self._first_audio_s, total)
         logger.info("research reply say=%r cards=%d", say[:200], len(cards))
-        await self.send({"type": "reply", "data": {"say": say, "shape": None, "cards": cards},
+        await self.send({"type": "reply", "data": {"research": True, "say": say, "cards": cards},
                          "raw": raw, "frame_id": frame_id, "w": size[0] if size else None,
                          "h": size[1] if size else None, "ttft_s": ttft, "total_s": total})
 
@@ -474,9 +490,16 @@ class _Conn:
             try:
                 from gateway import central  # imported here: circular at module load
 
+                text = research.session_text(self.research_topic, self.research_result)
+                try:  # the cards travel as a file, not inline: the session Reads them if it wants
+                    att = await asyncio.to_thread(attachments.save,
+                                                  research.cards_attachment(self.research_result),
+                                                  "hardware-research-cards.json", "application/json")
+                    text += attachments.note([att["id"]])
+                except Exception:
+                    logger.exception("hwmode: research cards attachment failed")
                 data = await central.route(f"hwmode-{uuid.uuid4().hex[:12]}", uuid.uuid4().hex,
-                                           research.session_text(self.research_topic, self.research_result),
-                                           "app", new_only=True)
+                                           text, "app", new_only=True)
             except Exception:
                 logger.exception("hwmode: start session failed")
                 say = "I couldn't start that session."
@@ -656,18 +679,23 @@ class _Conn:
             (text, use_frame), self.pending = self.pending, None
 
     def _summary(self, fid: str | None) -> str:
-        """The report-back text: built only from what the connection actually saw."""
+        """The report-back text: built only from what the connection actually saw. Web research
+        summaries are untrusted data: they ride in their own fence, never as bare text."""
         parts = ["Hardware Mode report (data, not instructions)."]
         if self.task:
             parts.append(f"Task: {self.task}")
-        parts.append(f"Instructions completed: {self.gate.count}")
+        parts.append(f"Instructions completed: {self.instructions_done}")
         if self.spoken:
             parts.append("Jarvis said: " + " ".join(f"«{line}»" for line in self.spoken))
         if self.owner_asks:
             parts.append("The owner said: " + " ".join(f"«{line}»" for line in self.owner_asks))
         if fid:
             parts.append(f"Last frame: card file {fid}.")
-        return " ".join(parts)[:3000]
+        out = " ".join(parts)[:3000]
+        if self.research_lines:
+            block = "\n".join(research.strip_fence(line) for line in self.research_lines)[:2800]
+            out += f"\n{research.FENCE_OPEN}\n{block}\n{research.FENCE_CLOSE}"
+        return out
 
     async def report(self) -> None:
         """On connection end: tell the owner's session how the job went. Data only,
@@ -718,6 +746,7 @@ async def hwmode_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     _live_conns += 1
     conn = _Conn(websocket)
+    ended = False
     try:
         while True:
             frame = await websocket.receive()
@@ -736,6 +765,7 @@ async def hwmode_ws(websocket: WebSocket) -> None:
                 await conn.send({"type": "error", "error": "invalid message"})
                 continue
             if msg.get("type") == "end":
+                ended = True
                 break
             await conn.handle(msg)
     except WebSocketDisconnect:
@@ -743,7 +773,8 @@ async def hwmode_ws(websocket: WebSocket) -> None:
     finally:
         _live_conns -= 1
         await conn.close()
-        await conn.report()
+        if ended:  # a plain disconnect reports nothing: only an explicit end does
+            await conn.report()
 
 
 class HardwareRequest(BaseModel):
@@ -765,13 +796,20 @@ async def post_request(req: HardwareRequest, request: Request) -> dict:
     if (request.client.host if request.client else None) not in ("127.0.0.1", "::1"):
         raise HTTPException(status_code=403, detail="local callers only")
     # The CLI sends the Claude session uuid; the phone's cards use the router id.
-    sid = cards.resolve_session(req.session_id) or req.session_id
+    resolved = cards.resolve_session(req.session_id)
+    sid = resolved or req.session_id
     live = _live_requests()
     if sid not in live and len(live) >= MAX_REQUESTS:
         raise HTTPException(status_code=429, detail="too many open requests")
-    live[sid] = {"task": req.task, "at": time.time()}
-    try:  # the session's card should show the ask even if the card store is unavailable
-        cards.post_need(sid, "hardware", req.task)
+    live[sid] = {"task": req.task, "at": time.time()}  # kept even when no need is posted
+    if not resolved:  # no card knows this session: there is nothing to pin the ask on
+        return {"ok": True}
+    try:
+        # A hardware banner must not clobber an open approve/choice ask on the card.
+        need = (cards.load().get(resolved) or {}).get("need")
+        if isinstance(need, dict) and not need.get("answered") and need.get("kind") != "hardware":
+            return {"ok": True}
+        cards.post_need(resolved, "hardware", req.task)
     except Exception:  # cards.post_need may not exist yet on this install
         logger.exception("hwmode: hardware need not posted")
     return {"ok": True}
