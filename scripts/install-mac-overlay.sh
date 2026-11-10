@@ -14,7 +14,8 @@ Usage: scripts/install-mac-overlay.sh [--dry-run] [--help]
 Steps: tool checks (swift, brew, ffmpeg, espeak-ng, claude) -> brew install ffmpeg/espeak-ng
 -> .venv with the service deps -> Kokoro TTS model download (sha256-verified)
 -> swift build of mac/overlay
--> bundle + ad-hoc sign $HOME/Applications/JarvisOverlay.app
+-> bundle + sign $HOME/Applications/JarvisOverlay.app with the stable local identity
+   "JarvisOverlay Local Signing" (scripts/mac-overlay-sign.sh), so TCC grants survive reinstalls
 (the service writes its own dedicated overlay token on first start; no token step here)
 -> render launchd/ templates into $HOME/Library/LaunchAgents and bootstrap them
 -> refuse a taken OVERLAY_PORT -> print the TCC permissions to grant.
@@ -146,7 +147,7 @@ done
 # (e) overlay Swift package, release build
 run swift build -c release --package-path "$REPO/mac/overlay"
 
-# (f) app bundle + ad-hoc signature
+# (f) app bundle + stable signature (ad hoc would reset TCC grants on every reinstall)
 run mkdir -p "$APP/Contents/MacOS"
 run cp "$REPO/mac/overlay/.build/release/JarvisOverlay" "$APP/Contents/MacOS/JarvisOverlay"
 run mkdir -p "$APP/Contents/Resources"
@@ -185,7 +186,7 @@ else
 </plist>
 PLIST
 fi
-run codesign --force --sign - "$APP"
+run bash "$REPO/scripts/mac-overlay-sign.sh" "$APP"
 
 # (g) token: none written here — the service mints its own dedicated overlay
 # token (0600) on first start; the installer never touches token files.

@@ -17,7 +17,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | ground | git_diff | answer
+    kind: str  # open_app | open_site | clear | clock | ground | git_diff | answer
     arg: str = ""
 
 
@@ -40,7 +40,12 @@ _CHANGES_RE = re.compile(r"\bchang(e|es|ed)\b")
 _MERGE_RE = re.compile(r"\bmerge[sd]?\b")
 _GROUND_LEAD_RE = re.compile(r"\b(" + "|".join(_GROUND_LEADS) + r")\b")
 _UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
-_APP_SUFFIX_RE = re.compile(r"\.app$", re.I)
+# "open the clock app" -> "clock"; "notes.app" is a bundle, not a domain.
+_APP_NOISE_RE = re.compile(r"^the\s+|(?:\.app|\s+app)$", re.I)
+# Whole-utterance clock questions only: "what time is it in Tokyo" still goes to the brain.
+_TIME_RE = re.compile(r"^(?:what(?:'s| is) the time|what time is it|tell me the time)(?: now| right now| please)?$")
+_DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|what day is (?:it|today)"
+                      r"|what date is it|tell me the date)(?: today| now| please)?$")
 
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
@@ -53,6 +58,10 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     low = t.lower()
     if low in ("clear", "clear the screen"):
         return Intent("clear")
+    if _TIME_RE.match(low):
+        return Intent("clock", "time")
+    if _DATE_RE.match(low):
+        return Intent("clock", "date")
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.
     if _DIFF_RE.search(low) or (_CHANGES_RE.search(low) and _MERGE_RE.search(low)):
@@ -64,7 +73,7 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         return Intent("ground", t)
     if low.startswith("open "):
         arg = t[5:].strip()
-        name = _APP_SUFFIX_RE.sub("", arg)  # "notes.app" is a bundle, not a domain
+        name = _APP_NOISE_RE.sub("", arg).strip()
         if _match_app(name, apps if apps is not None else list_apps()):
             return Intent("open_app", name)
         host = arg.lower().partition("/")[0]

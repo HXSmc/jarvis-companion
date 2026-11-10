@@ -21,7 +21,7 @@ final class AppController {
 
     // Outage state.
     private var serviceVoice: String?
-    private var outageAnnounced = false
+    private var outage = OutageGate(grace: 30)
     private var bannerTask: Task<Void, Never>?
     private var permissionTimer: Task<Void, Never>?
 
@@ -115,28 +115,36 @@ final class AppController {
                     endOutage()
                     if name == "wake" { await handleWake() }
                 }
-                enterOutage()  // stream ended early = service gone
+                serviceUnreachable("event stream ended")
             } catch {
-                enterOutage()
+                serviceUnreachable("\(error)")
             }
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            // Retry fast: a reinstall or a Mac wake drops the service for only a few seconds.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
 
-    private func enterOutage() {
+    /// Says the outage only after 30 s of failed retries (see OutageGate), and says what to do.
+    private func serviceUnreachable(_ why: String) {
+        if outage.since == nil { log("service unreachable (\(why)), retrying") }
+        guard outage.failed(at: Date()) else { return }
+        log("service still unreachable after \(Int(outage.grace)) s: \(why)")
         bannerTask?.cancel()
         bannerTask = nil
-        if !outageAnnounced {
-            outageAnnounced = true
-            audio.speakLocally("My service is not running.")
-        }
+        audio.speakLocally("My service is not running. I've put the fix on screen.")
         model.orb = .error
-        model.banner = "Jarvis service is not running"
+        model.banner = "Jarvis service is not running. Fix: run scripts/install-mac-overlay.sh again. "
+            + "Details: ~/Library/Logs/JarvisOverlay/service.log"
+    }
+
+    private func log(_ line: String) {
+        FileHandle.standardError.write(Data("[overlay] \(Date()) \(line)\n".utf8))
     }
 
     private func endOutage() {
-        guard outageAnnounced else { return }
-        outageAnnounced = false
+        if outage.since != nil && !outage.announced { log("service reachable again") }
+        guard outage.reached() else { return }
+        log("service reachable again, outage over")
         bannerTask?.cancel()
         bannerTask = nil
         model.banner = nil
@@ -197,15 +205,28 @@ final class AppController {
         turnFirstAudio = false
         turnDone = false
 
-        do {
-            for try await event in client.utterance(text: text, convId: conv,
-                                                    sttFinalMs: sttFinalMs, audioMs: audioMs,
-                                                    stt: speech.lastDiagnosis, screen: screen) {
-                handle(event)
+        var gotEvent = false
+        var failure: Error?
+        for attempt in 1...2 {
+            do {
+                for try await event in client.utterance(text: text, convId: conv,
+                                                        sttFinalMs: sttFinalMs, audioMs: audioMs,
+                                                        stt: speech.lastDiagnosis, screen: screen) {
+                    gotEvent = true
+                    handle(event)
+                }
+                return
+            } catch {
+                failure = error
+                // Nothing played yet: the service may be mid-restart, so one retry is safe.
+                guard attempt == 1, !gotEvent else { break }
+                log("utterance request failed (\(error)), retrying once")
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
-        } catch {
+        }
+        if let failure {
             // A 401/500/timeout never surfaces on the events loop; say it out loud.
-            client.debugNote(step: "app_error", detail: "utterance request failed: \(error)")
+            client.debugNote(step: "app_error", detail: "utterance request failed: \(failure)")
             audio.speakLocally("I couldn't reach my service. Try again.")
             showBanner("Couldn't reach Jarvis service", for: 5)
             model.orb = .error  // until the next wake sets .listening

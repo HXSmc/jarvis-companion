@@ -16,6 +16,7 @@ on:
       - 'tests/test_overlay_*.py'
       - 'tests/test_mac_voice_*.py'
       - 'scripts/install-mac-overlay.sh'
+      - 'scripts/mac-overlay-sign.sh'
       - '.github/workflows/mac-overlay.yml'
   workflow_dispatch: {}
 
@@ -41,6 +42,27 @@ jobs:
 
       - name: Build OverlayCore + JarvisOverlay (release)
         run: swift build -c release --package-path mac/overlay
+
+      - name: Stable signature survives a re-sign (TCC grants depend on it)
+        env:
+          JARVIS_SIGN_DIR: ${{ runner.temp }}/sign
+          JARVIS_SIGN_KEYCHAIN: ${{ runner.temp }}/sign/test-signing.keychain-db
+        run: |
+          APP="$RUNNER_TEMP/JarvisOverlay.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp mac/overlay/.build/release/JarvisOverlay "$APP/Contents/MacOS/"
+          plutil -create xml1 "$APP/Contents/Info.plist"
+          plutil -insert CFBundleIdentifier -string com.jarvis.overlay "$APP/Contents/Info.plist"
+          plutil -insert CFBundleExecutable -string JarvisOverlay "$APP/Contents/Info.plist"
+          bash scripts/mac-overlay-sign.sh "$APP"
+          FIRST="$(codesign -d -r- "$APP" 2>&1 | grep designated)"
+          cp mac/overlay/.build/release/JarvisOverlay "$APP/Contents/MacOS/"   # a "reinstall"
+          bash scripts/mac-overlay-sign.sh "$APP"
+          SECOND="$(codesign -d -r- "$APP" 2>&1 | grep designated)"
+          echo "$SECOND"
+          codesign -dv "$APP" 2>&1 | grep -q 'Signature=adhoc' && { echo "still ad hoc"; exit 1; }
+          echo "$SECOND" | grep -q 'certificate leaf = H"' || { echo "no certificate pin"; exit 1; }
+          [ "$FIRST" = "$SECOND" ] || { echo "designated requirement changed on re-sign"; exit 1; }
 
       - name: App icon builds with iconutil
         run: iconutil -c icns mac/overlay/Resources/AppIcon.iconset -o "$RUNNER_TEMP/AppIcon.icns"
