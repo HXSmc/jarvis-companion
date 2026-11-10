@@ -115,28 +115,39 @@ class Conversations:
     def __init__(self, factory: Callable[[], object], max_sessions: int = 2):
         self._factory = factory
         self._max = max_sessions
+        self._lock = threading.Lock()  # guards _sessions and _spare; never held across close()
         self._sessions: OrderedDict[str, object] = OrderedDict()
         self._spare = None
 
     def prewarm(self) -> None:
         """Start one spare session now so a new conversation skips the CLI cold start."""
-        if self._spare is None:
-            self._spare = self._factory()
+        with self._lock:
+            if self._spare is None:
+                self._spare = self._factory()
 
     def get(self, conv_id: str):
-        if conv_id in self._sessions:
-            self._sessions.move_to_end(conv_id)
-            return self._sessions[conv_id]
-        session, self._spare = (self._spare or self._factory()), None
-        self.prewarm()
-        self._sessions[conv_id] = session
-        while len(self._sessions) > self._max:
-            _, evicted = self._sessions.popitem(last=False)
-            evicted.close()
+        evicted = []
+        with self._lock:
+            if conv_id in self._sessions:
+                self._sessions.move_to_end(conv_id)
+                return self._sessions[conv_id]
+            session, self._spare = (self._spare or self._factory()), None
+            self._spare = self._factory()  # next spare, inline: the lock is not reentrant
+            self._sessions[conv_id] = session
+            while len(self._sessions) > self._max:
+                evicted.append(self._sessions.popitem(last=False)[1])
+        self._close_later(evicted)
         return session
 
     def drop(self, conv_id: str) -> None:
         """Forget (and close) a conversation's session, e.g. after its process died."""
-        session = self._sessions.pop(conv_id, None)
+        with self._lock:
+            session = self._sessions.pop(conv_id, None)
         if session is not None:
-            session.close()
+            self._close_later([session])
+
+    @staticmethod
+    def _close_later(sessions: list) -> None:
+        """Close detached sessions on a daemon thread: close() can block up to 10 s."""
+        if sessions:
+            threading.Thread(target=lambda: [s.close() for s in sessions], daemon=True).start()
