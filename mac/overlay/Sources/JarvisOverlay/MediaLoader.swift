@@ -143,7 +143,10 @@ final class MediaLoader {
         cache.totalCostLimit = ImageLimits.cacheCostLimit
         // Process-wide defense in depth, set before the first remote decode: ImageIO refuses
         // every other format (the magic-byte check in MediaPolicy runs first anyway).
-        _ = CGImageSourceSetAllowableTypes(Array(ImageLimits.allowedImageTypes) as CFArray)
+        // (macOS 14.0-14.1 lack the call; the magic-byte check still holds there.)
+        if #available(macOS 14.2, *) {
+            _ = CGImageSourceSetAllowableTypes(Array(ImageLimits.allowedImageTypes) as CFArray)
+        }
     }
 
     // MARK: public API
