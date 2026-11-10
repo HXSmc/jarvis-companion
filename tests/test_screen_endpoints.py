@@ -286,3 +286,190 @@ def test_cursor_toggle_leads_scrollable_key_row(gateway_server):
                 assert html.index('id="cursor-toggle"') < html.index('class="key"'), target
 
     asyncio.run(run())
+
+
+@pytest.fixture
+def fresh_rate_limit(monkeypatch):
+    """Fresh rolling 60/2 s window (module state leaks across tests) and no
+    MAC_GATEWAY_URL, so target mac drives the local stubbed driver."""
+    monkeypatch.setattr(screen, "_input_times", {})
+    monkeypatch.delenv(screen.MAC_GATEWAY_ENV, raising=False)
+
+
+def test_lock_fields_accepted_on_all_types(gateway_server, fresh_rate_limit, fake_send_events):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            events = [
+                {"type": "move", "x": 0.1, "y": 0.1},
+                {"type": "tap", "x": 0.2, "y": 0.2},
+                {"type": "dblclick", "x": 0.3, "y": 0.3},
+                {"type": "right", "x": 0.4, "y": 0.4},
+                {"type": "drag", "x": 0.5, "y": 0.5},
+                {"type": "scroll", "dy": 0.5, "x": 0.6, "y": 0.6},
+                {"type": "text", "text": "hi"},
+                {"type": "key", "key": "return"},
+            ]
+            for event in events:
+                event["require_app"] = "Safari"
+                event["require_window"] = "Doc"
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": events})
+            assert resp.status_code == 200, resp.text
+            sent = fake_send_events[0]
+            assert len(sent) == 8, sent
+            for event in sent:
+                assert event["require_app"] == "Safari", event
+                assert event["require_window"] == "Doc", event
+
+    asyncio.run(run())
+
+
+def test_lock_require_window_without_app_is_422(gateway_server, fresh_rate_limit, fake_send_events):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/screen/mac/input",
+                headers=IOS_AUTH_HEADER,
+                json={"events": [{**_tap(), "require_window": "Doc"}]},
+            )
+            assert resp.status_code == 422, resp.text
+            assert fake_send_events == [], fake_send_events
+
+    asyncio.run(run())
+
+
+def test_lock_field_length_caps_are_422(gateway_server, fresh_rate_limit):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            url = "/screen/mac/input"
+            resp = await http.post(url, headers=IOS_AUTH_HEADER,
+                                   json={"events": [{**_tap(), "require_app": "A" * 65}]})
+            assert resp.status_code == 422, resp.text
+            resp = await http.post(url, headers=IOS_AUTH_HEADER,
+                                   json={"events": [{**_tap(), "require_app": "Safari",
+                                                     "require_window": "B" * 129}]})
+            assert resp.status_code == 422, resp.text
+            resp = await http.post(url, headers=IOS_AUTH_HEADER,
+                                   json={"events": [{**_tap(), "require_app": "A" * 64,
+                                                     "require_window": "B" * 128}]})
+            assert resp.status_code == 200, resp.text
+
+    asyncio.run(run())
+
+
+def test_locked_scroll_without_point_is_422(gateway_server, fresh_rate_limit):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            url = "/screen/mac/input"
+            resp = await http.post(url, headers=IOS_AUTH_HEADER,
+                                   json={"events": [{"type": "scroll", "dy": 0.5, "require_app": "Safari"}]})
+            assert resp.status_code == 422, resp.text
+            resp = await http.post(url, headers=IOS_AUTH_HEADER,
+                                   json={"events": [{"type": "scroll", "dy": 0.5}]})
+            assert resp.status_code == 200, resp.text
+
+    asyncio.run(run())
+
+
+def test_windows_target_rejects_lock_fields_before_rate_slot(gateway_server, fresh_rate_limit, monkeypatch):
+    calls: list = []
+
+    async def record(envelope):
+        calls.append(envelope)
+        return {"ok": True}
+
+    monkeypatch.setattr(screen, "agent_roundtrip", record)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post("/screen/windows/input", headers=IOS_AUTH_HEADER,
+                                   json={"events": [{**_tap(), "require_app": "Safari"}]})
+            assert resp.status_code == 422, resp.text
+            assert calls == [], calls
+            assert not screen._input_times.get("windows"), screen._input_times
+
+    asyncio.run(run())
+
+
+def test_events_without_lock_fields_send_none(gateway_server, fresh_rate_limit, fake_send_events):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": [_tap()]})
+            assert resp.status_code == 200, resp.text
+            event = fake_send_events[0][0]
+            assert event["require_app"] is None, event
+            assert event["require_window"] is None, event
+
+    asyncio.run(run())
+
+
+def test_focus_mismatch_is_409_without_titles(gateway_server, fresh_rate_limit, monkeypatch):
+    def refuse(events, *, locked=False):
+        raise mac_driver.FocusMismatch("window", expected_app="Mail", actual_app="Mail",
+                                       window_matched=False, index=0, partial=False)
+
+    monkeypatch.setattr(mac_driver, "send_events", refuse)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/screen/mac/input",
+                headers=IOS_AUTH_HEADER,
+                json={"events": [{"type": "text", "text": "hi",
+                                  "require_app": "Mail", "require_window": "WANTED"}]},
+            )
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert set(detail) == {"error", "reason", "expected_app", "actual_app", "window_matched",
+                                   "refused_index", "events_run", "partial", "message"}, detail
+            assert detail["error"] == "focus_mismatch", detail
+            assert detail["reason"] == "window", detail
+            assert detail["events_run"] == 0, detail
+            assert "WANTED" not in resp.text, resp.text
+            assert "SECRET-TITLE" not in resp.text, resp.text
+
+    asyncio.run(run())
+
+
+def test_focus_mismatch_partial_counts_event(gateway_server, fresh_rate_limit, monkeypatch):
+    def refuse(events, *, locked=False):
+        raise mac_driver.FocusMismatch("app", expected_app="Safari", actual_app="Terminal",
+                                       window_matched=None, index=2, partial=True)
+
+    monkeypatch.setattr(mac_driver, "send_events", refuse)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": [_tap()]})
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert detail["refused_index"] == 2, detail
+            assert detail["events_run"] == 3, detail
+            assert detail["partial"] is True, detail
+            assert detail["actual_app"] == "Terminal", detail
+
+    asyncio.run(run())
+
+
+def test_input_halted_is_409(gateway_server, fresh_rate_limit, monkeypatch):
+    def halt(events, *, locked=False):
+        raise mac_driver.InputHalted(index=1)
+
+    monkeypatch.setattr(mac_driver, "send_events", halt)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post("/screen/mac/input", headers=IOS_AUTH_HEADER, json={"events": [_tap()]})
+            assert resp.status_code == 409, resp.text
+            assert resp.json()["detail"] == {"error": "input_halted", "refused_index": 1, "events_run": 1}
+
+    asyncio.run(run())
+
+
+def test_mac_status_reports_focus_lock(gateway_server, fresh_rate_limit):
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.get("/screen/mac/status", headers=IOS_AUTH_HEADER)
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["focus_lock"] is True, resp.text
+
+    asyncio.run(run())

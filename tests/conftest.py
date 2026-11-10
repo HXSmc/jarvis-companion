@@ -21,13 +21,42 @@ from common import config
 try:
     from mac.screen import driver as _mac_driver  # noqa: F401
 except OSError:
+    import threading
     import types
 
     _mac_driver = types.ModuleType("mac.screen.driver")
     _mac_driver.capture_jpeg = lambda w, q: (b"", w, q)
-    _mac_driver.send_events = lambda events: None
+    _mac_driver.send_events = lambda events, *, locked=False: None
     _mac_driver.tcc_ok = lambda: True
     _mac_driver.display_asleep = lambda: False
+
+    class _FocusMismatch(Exception):
+        """Same constructor and attributes as mac/screen/driver.py's FocusMismatch."""
+
+        def __init__(self, reason, expected_app=None, actual_app=None, window_matched=None,
+                     index=0, partial=False):
+            super().__init__(reason)
+            self.reason = reason
+            self.expected_app = expected_app
+            self.actual_app = actual_app
+            self.window_matched = window_matched
+            self.index = index
+            self.partial = partial
+
+    class _InputHalted(Exception):
+        """Same constructor and attributes as mac/screen/driver.py's InputHalted."""
+
+        def __init__(self, index=0, partial=False):
+            super().__init__("input halted")
+            self.index = index
+            self.partial = partial
+
+    _halt = threading.Event()
+    _mac_driver.FocusMismatch = _FocusMismatch
+    _mac_driver.InputHalted = _InputHalted
+    _mac_driver.halt = _halt.set
+    _mac_driver.resume = _halt.clear
+    _mac_driver.is_halted = _halt.is_set
     _pkg = types.ModuleType("mac.screen")
     _pkg.driver = _mac_driver
     sys.modules["mac.screen"] = _pkg
