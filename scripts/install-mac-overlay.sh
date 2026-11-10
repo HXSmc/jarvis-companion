@@ -137,8 +137,10 @@ run swift build -c release --package-path "$REPO/mac/overlay"
 # (f) app bundle + ad-hoc signature
 run mkdir -p "$APP/Contents/MacOS"
 run cp "$REPO/mac/overlay/.build/release/JarvisOverlay" "$APP/Contents/MacOS/JarvisOverlay"
+run mkdir -p "$APP/Contents/Resources"
+run iconutil -c icns "$REPO/mac/overlay/Resources/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 if (( DRY_RUN )); then
-  echo "would: write $APP/Contents/Info.plist (com.jarvis.overlay, LSUIElement, mic + speech usage strings)"
+  echo "would: write $APP/Contents/Info.plist (com.jarvis.overlay, AppIcon, LSUIElement, mic + speech usage strings)"
 else
   cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -151,6 +153,8 @@ else
 	<string>JarvisOverlay</string>
 	<key>CFBundleExecutable</key>
 	<string>JarvisOverlay</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

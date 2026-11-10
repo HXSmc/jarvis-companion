@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>JarvisOverlay</title>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#0b1128"/>
+  <path d="M387 728.5A250 250 0 1 1 637 728.5" fill="none" stroke="#20d6d6" stroke-width="80" stroke-linecap="round"/>
+  <path d="M512 420L587 600H437Z" transform="rotate(45 512 520)" fill="#20d6d6" stroke="#20d6d6" stroke-width="24" stroke-linejoin="round"/>
+</svg>
