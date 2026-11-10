@@ -65,13 +65,17 @@ _DENY_HOME = (".ssh", ".gnupg", ".aws", ".azure", ".oci", ".config/gh", ".config
               "Library/Application Support/JarvisOverlay", ".claude.json")
 _DENY_NAMES = (".env", ".env.*", "*.pem", "*.key", "id_*", "*.p12", "*.pfx", "*.keychain*", "*credential*",
                "*token*.json", "*oauth*.json", "*.token", ".*_history", ".*history", ".pgpass", ".htpasswd",
-               "*.kdbx", "*.keystore", "*.jks")
+               "*.kdbx", "*.keystore", "*.jks", ".npmrc", ".pypirc", ".netrc", ".envrc", "secrets.*",
+               "*.tfvars", "*.tfstate", "*.tfstate.*", "auth.json")
 _SECRET_DIR = "secrets"  # any folder of this name (any case) is closed, OVERLAY_VAULT set or not
 _WALK_DIRS = 4000  # a search or git root bigger than this is refused: we could not rule out a secrets folder
 _WALK_DEPTH = 8
-_GREP_EXCLUDE = "!{.env,.env.*,*.pem,*.key,id_*,*.p12,*credential*,*token*.json,*oauth*.json}"
+# Appended after any model glob: the CLI's Grep runs rg --hidden and splits `glob` on whitespace into
+# --glob flags, and the later flag wins, so these stay excluded whatever the model asked for.
+_GREP_EXCLUDE = "!{" + ",".join(_DENY_NAMES) + "}"
 _SECRET_SAMPLES = (".env", ".env.local", "x.pem", "x.key", "id_rsa", "id_ed25519", "x.p12",
-                   "credentials.json", "token.json")
+                   "credentials.json", "token.json", ".npmrc", ".pypirc", ".netrc", ".envrc", "auth.json",
+                   "x.tfvars", "terraform.tfstate")
 _GLOB_RE = re.compile(r"^[A-Za-z0-9_*./-]+$")  # no { } [ ] ! ? : ripgrep would read those its own way
 _METACHARS = set(";|&<>()$`\n\r\\")
 _GIT_READ = {"log", "show", "diff", "status", "blame", "rev-parse", "ls-files", "shortlog", "branch"}
@@ -224,6 +228,8 @@ def _files(tool: str, inp: dict, ctx: Ctx) -> Allow | Deny:
         elif (not _GLOB_RE.match(pattern)
               or any(fnmatch.fnmatch(s, pattern.rsplit("/", 1)[-1]) for s in _SECRET_SAMPLES)):
             return Deny("that search would read secret files; use a plain glob, for example *.py")
+        else:
+            out["glob"] = f"{pattern} {_GREP_EXCLUDE}"  # *.production would otherwise reach .env.production
     return Allow(out)
 
 
@@ -290,6 +296,9 @@ def _git_arg_problem(a: str, sub: str, d: str, top: str, ctx: Ctx) -> str | None
     parts = [c.casefold() for c in re.split(r"[:/]", a)]
     if _secret_name(parts[-1]) or _SECRET_DIR in parts:
         return "that file holds secrets and is off limits"
+    if set("*?[") & set(a) and any(fnmatch.fnmatch(s, parts[-1]) for s in _SECRET_SAMPLES):
+        return "that pathspec would match secret files"  # git log -p -- '*.env'
+
     for v in values:
         if not v or not (v.startswith(("/", "~")) or ".." in v.split("/") or os.path.lexists(os.path.join(d, v))):
             continue

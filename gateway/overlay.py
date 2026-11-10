@@ -915,7 +915,11 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
         time.sleep(CONFIRM_POLL_S)
     if _take_confirm(run.conv_id, run) is not None:
         _deny_and_drop(run, deps)
-        _expired[run.conv_id] = (deps.clock(), run.confirm_summary)
+        now = deps.clock()
+        for conv, (when, _) in list(_expired.items()):  # a conversation that never came back
+            if now - when >= EXPIRED_TELL_S:
+                _expired.pop(conv, None)
+        _expired[run.conv_id] = (now, run.confirm_summary)
         debug_log.add(debug_log.for_utterance(), "agent_confirm", state="expired")
 
 
@@ -968,13 +972,18 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
                 yield ev
             yield _finish(body, deps, metrics, said, start)
             return
+        late = intents.is_confirm(body.text)  # a yes after the deadline, before the watchdog ran
         if on_step:
-            on_step("agent_confirm", state="denied")
+            on_step("agent_confirm", state="expired" if late else "denied")
         await asyncio.to_thread(_deny_and_drop, run, deps)
-        yield _settled_card(run.confirm_summary, "Not done")
-        async for ev in _line("not_confirmed", deps):
+        yield _settled_card(run.confirm_summary, "Not done: it timed out" if late else "Not done")
+        key = "expired" if late else "not_confirmed"
+        async for ev in _line(key, deps):
             yield ev
-        said.append(acks.PHRASES.get("not_confirmed", ""))
+        said.append(acks.PHRASES.get(key, ""))
+        if late:
+            yield _finish(body, deps, metrics, said, start)
+            return
         if intents.is_cancel(body.text) or intents.is_no(body.text):
             yield _finish(body, deps, metrics, said, start)
             return

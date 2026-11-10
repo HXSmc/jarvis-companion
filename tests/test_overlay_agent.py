@@ -606,3 +606,29 @@ def test_timeout_shows_a_card(client):
     pool, deps = setup(clock, lambda: FakeAgent(clock, script=[], tick=1.0))
     events = turn(client, "check my inbox", conv_id="to1")
     assert any(e["type"] == "card" and e["card"]["title"] == "Stopped" for e in events)
+
+
+def test_late_yes_before_watchdog_hears_expired(client, monkeypatch):
+    """R2 ux: a yes after the deadline that beats the watchdog's poll is told it expired, and denied."""
+    monkeypatch.setattr(overlay, "CONFIRM_POLL_S", 5.0)  # the watchdog sleeps through the late yes
+    clock = Clock()
+    pool, deps = setup(clock, push_script(clock))
+    turn(client, "commit and push my changes", conv_id="ly1")
+    clock.now += 31
+    events = turn(client, "yes", conv_id="ly1")
+    spoken = " ".join(says(events) + [e.get("text", "") for e in events if e["type"] == "audio"])
+    assert "That request expired, so I didn't do it." in spoken and "Alright, I won't." not in spoken
+    assert [r["behavior"] for r in pool.made[0].responses] == ["deny"]
+    assert any(e["type"] == "card" and e["card"]["title"] == "Not done: it timed out" for e in events)
+
+
+def test_expired_entries_are_pruned(client):
+    """R2 code: an expired confirmation whose conversation never returns does not stay in memory."""
+    clock = Clock()
+    pool, deps = setup(clock, push_script(clock))
+    overlay._expired["gone"] = (clock() - overlay.EXPIRED_TELL_S - 1, "old")
+    turn(client, "commit and push my changes", conv_id="pr1")
+    clock.now += 31
+    assert _wait(lambda: "pr1" in overlay._expired)
+    assert "gone" not in overlay._expired
+    overlay._expired.pop("pr1", None)

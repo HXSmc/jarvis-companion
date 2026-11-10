@@ -5,8 +5,10 @@ Real git repos in tmp_path; HOME is a fake folder under tmp_path, never the real
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -310,3 +312,55 @@ def test_other_bash_runs_exactly_what_was_spoken(env):
     """Code #5: a confirmed plain command is re-joined so the shell expands no glob, brace or ~."""
     d = bash(env[0], "ls ~/x* {a,b}")
     assert isinstance(d, ap.Confirm) and d.updated_input["command"] == "ls '~/x*' '{a,b}'"
+
+
+def _cli_grep_globs(glob: str) -> list[str]:
+    """How Claude Code's Grep tool turns its `glob` field into rg --glob flags (2.1.322: split on
+    whitespace; a part with braces stays whole, any other part is split on commas)."""
+    out = []
+    for part in glob.split():
+        out += [part] if "{" in part and "}" in part else [p for p in part.split(",") if p]
+    return out
+
+
+@pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not installed")
+def test_grep_model_glob_cannot_reach_env_variants(env):
+    """R2 security #1: a model glob like *.production must not let ripgrep (run with --hidden, as the
+    CLI does) read .env.production; plain code globs still work."""
+    ctx, home = env[0], env[1]
+    repo = _repo(home / "code/clean")
+    for name in (".env.production", ".env.prod", ".env.staging", ".env.py", "a.py", "b.production"):
+        (repo / name).write_text("CANARY\n")
+    for glob, expect in (("*.production", {"b.production"}), ("*.prod", set()), ("*.staging", set()),
+                         ("*.py", {"a.py"})):
+        d = decide(ctx, "Grep", pattern="CANARY", path=str(repo), glob=glob)
+        if isinstance(d, ap.Deny):
+            continue
+        assert isinstance(d, ap.Allow), (glob, d)
+        argv = ["rg", "--hidden", "-l", "CANARY"]
+        for g in _cli_grep_globs(d.updated_input["glob"]):
+            argv += ["--glob", g]
+        found = subprocess.run(argv + ["."], cwd=repo, capture_output=True, text=True).stdout.split()
+        assert {os.path.basename(f) for f in found} == expect, (glob, found)
+
+
+@pytest.mark.parametrize("name", [".npmrc", ".envrc", ".pypirc", ".netrc", "secrets.yaml", "secrets.json",
+                                  "prod.tfvars", "terraform.tfstate", "terraform.tfstate.backup", "auth.json"])
+def test_project_secret_files_denied(env, name):
+    """R2 security #2: project-level secret files (any depth) and generic CLI auth files are closed."""
+    ctx, home, _, repo = env
+    assert isinstance(decide(ctx, "Read", file_path=str(repo / "sub" / name)), ap.Deny), name
+    assert isinstance(decide(ctx, "Read", file_path=str(home / "Library/Application Support/com.vercel.cli"
+                                                      / "auth.json")), ap.Deny)
+    assert isinstance(decide(ctx, "Read", file_path=str(home / ".codex/auth.json")), ap.Deny)
+    assert ap._GREP_EXCLUDE.startswith("!{") and any(
+        fnmatch.fnmatch(name, g) for g in ap._GREP_EXCLUDE[2:-1].split(",")), name
+
+
+def test_git_glob_pathspec_to_secret_denied(env):
+    """R2 security #3: a glob pathspec that matches a secret file name is denied; plain ones still work."""
+    ctx, _, _, r = env
+    for spec in ("'*.env'", "'.env*'", "'*.pem'", "'id_*'", "'**/.npmrc'", "':(glob)**/.env'", "'*'"):
+        assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Deny), spec
+    for spec in ("'*.py'", "'src/*.swift'", "a.txt"):
+        assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Allow), spec
