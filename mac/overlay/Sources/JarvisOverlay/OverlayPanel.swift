@@ -52,6 +52,8 @@ final class HUDWindow: NSPanel {
     var dragBounds: CGRect = .zero
     /// The held mouse-down of a press on a card panel, its pointer and the panel origin then.
     private var press: (event: NSEvent, pointer: CGPoint, origin: CGPoint)?
+    /// A press that landed on a live player: its whole stream goes to the player untouched.
+    private var pressOnPlayer = false
     private(set) var isDragging = false
 
     init() {
@@ -76,6 +78,7 @@ final class HUDWindow: NSPanel {
         targetAlpha = alpha
         if alpha == 0 {
             press = nil
+            pressOnPlayer = false
             isDragging = false
         }
         fadeSerial += 1
@@ -99,8 +102,16 @@ final class HUDWindow: NSPanel {
     /// fires. A shorter press is a click: the held mouse-down is delivered on release, with
     /// the mouse-up put back at the head of the queue so a control that tracks the mouse in
     /// its mouse-down still finds it. The panel is never key, so a drag never takes focus.
+    /// A press on a live player bypasses all of this: the player sees the raw event stream.
     override func sendEvent(_ event: NSEvent) {
         guard let dragged else { return super.sendEvent(event) }
+        // A press on a live player goes to it untouched: no drag, no held mouse-down (WebKit
+        // tracks its own clicks, seeks and drags).
+        if event.type == .leftMouseDown { pressOnPlayer = isOnPlayer(event) }
+        if pressOnPlayer {
+            if event.type == .leftMouseUp { pressOnPlayer = false }
+            return super.sendEvent(event)
+        }
         switch event.type {
         case .leftMouseDown:
             press = (event, NSEvent.mouseLocation, frame.origin)
@@ -138,6 +149,17 @@ final class HUDWindow: NSPanel {
         let frame = CardPanel.flip(rect)
         if frame != self.frame { setFrame(frame, display: false) }
     }
+
+    /// True when the press lands inside a live player host, so its events go untouched.
+    private func isOnPlayer(_ event: NSEvent) -> Bool {
+        guard let contentView else { return false }
+        var view = contentView.hitTest(event.locationInWindow)
+        while let current = view {
+            if current is PlayerHostView { return true }
+            view = current.superview
+        }
+        return false
+    }
 }
 
 /// One clickable panel per card, scattered over the visible screen by ScatterLayout (frames
@@ -150,6 +172,8 @@ final class CardPanel: NSObject {
         let window: HUDWindow
         let host: NSHostingView<CardTile>
         var card: HUDCard
+        /// Whether media in this card may load right now (MediaPolicy.shouldAutoLoad).
+        var active = false
     }
 
     /// The orb/shape surface: all geometry follows the screen it is on.
@@ -161,6 +185,8 @@ final class CardPanel: NSObject {
     private var chipWindows: [String: (window: HUDWindow, host: NSHostingView<CardChipButton>)] = [:]
     /// Card keys as last stacked on screen, back to front.
     private var stacked: [String] = []
+    /// The keep-outs `sync` last placed with (orb, highlights, permission card), for remeasure.
+    private var keepOut: [CGRect] = []
     private var cancellables: [AnyCancellable] = []
 
     init(surface: NSWindow) {
@@ -225,18 +251,19 @@ final class CardPanel: NSObject {
         let highlights = model.shapes.map { ScatterLayout.shapeKeepOut($0.rect, screenWidth: screen.width) }
         var keepOut = [ScatterLayout.orbKeepOut(screen: screen)] + highlights
         if let permission = syncPermission(model, visible: visible) { keepOut.append(permission) }
+        self.keepOut = keepOut
 
         // Arrival order: a burst is placed oldest first, each card once it is measured.
         for card in model.cards {
             let key = card.listKey
             if var entry = entries[key] {
                 guard entry.card != card else { continue }
-                entry.host.rootView = CardTile(card: card)
+                entry.host.rootView = tile(card, active: entry.active)
                 entry.card = card
                 entries[key] = entry
                 model.resize(key: key, size: entry.host.fittingSize, visible: visible, keepOut: keepOut)
             } else {
-                let host = NSHostingView(rootView: CardTile(card: card))
+                let host = NSHostingView(rootView: tile(card, active: false))
                 let window = HUDWindow()
                 window.contentView = host
                 window.dragged = { [weak self] frame, ended in self?.cardDragged(key, frame: frame, ended: ended) }
@@ -259,8 +286,15 @@ final class CardPanel: NSObject {
         let dragBounds = Self.flip(visible)
         for card in model.cards {
             let key = card.listKey
-            guard let entry = entries[key], !entry.window.isDragging else { continue }
+            guard var entry = entries[key], !entry.window.isDragging else { continue }
             entry.window.dragBounds = dragBounds
+            let active = MediaPolicy.shouldAutoLoad(cardVisible: model.layout.frames[key] != nil,
+                                                    aside: aside, retired: false)
+            if active != entry.active {
+                entry.active = active
+                entry.host.rootView = tile(card, active: active)
+                entries[key] = entry
+            }
             guard !aside, let frame = model.layout.frames[key] else {
                 entry.window.fade(to: 0)
                 continue
@@ -282,6 +316,24 @@ final class CardPanel: NSObject {
             entries[key]?.window.orderFrontRegardless()
         }
         stacked = stack
+    }
+
+    /// The card's tile, live-capable: `remeasure` lets a just-arrived image refit its panel.
+    private func tile(_ card: HUDCard, active: Bool) -> CardTile {
+        CardTile(card: card, active: active,
+                 remeasure: { [weak self] in self?.remeasure(card.listKey) })
+    }
+
+    /// A single image card sets its size once, when its image arrives; the layout's same-spot
+    /// rule keeps it in place.
+    private func remeasure(_ key: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let model = self.model, let entry = self.entries[key],
+                  model.layout.frames[key] != nil else { return }
+            model.resize(key: key, size: entry.host.fittingSize,
+                         visible: self.geometry.visible, keepOut: self.keepOut)
+            self.sync()
+        }
     }
 
     /// A drag started (the card comes to the front) or ended (it stays where it was dropped).

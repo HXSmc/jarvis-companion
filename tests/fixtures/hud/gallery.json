@@ -1,0 +1,7 @@
+{"shapes": [], "cards": [
+  {"id": "c-gal", "type": "image", "title": "Landscapes", "url": "https://upload.wikimedia.org/wikipedia/commons/3/36/Hopetoun_falls.jpg", "items": [
+    {"url": "https://upload.wikimedia.org/wikipedia/commons/3/36/Hopetoun_falls.jpg", "alt": "Waterfall in a fern forest", "source_page": "https://commons.wikimedia.org/wiki/File:Hopetoun_falls.jpg"},
+    {"url": "https://upload.wikimedia.org/wikipedia/commons/4/41/Sunflower_from_Silesia2.jpg", "alt": "Sunflower against a blue sky"},
+    {"url": "https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg", "alt": "Eiffel Tower from below"}
+  ]}
+]}

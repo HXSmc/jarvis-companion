@@ -288,6 +288,43 @@
               "pattern": "^https://",
               "maxLength": 2048
             },
+            "alt": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "source_page": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https://",
+                    "maxLength": 2048
+                  },
+                  "alt": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "source_page": {
+                    "type": "string",
+                    "pattern": "^https://",
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "additionalProperties": false
+              }
+            },
             "file_id": {
               "type": "string",
               "pattern": "^[A-Za-z0-9_.-]{1,128}$"
@@ -308,6 +345,60 @@
             {
               "required": [
                 "file_id"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "video"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "youtube_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{11}$"
+            },
+            "url": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "thumbnail_url": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "source_page": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "youtube_id"
+              ]
+            },
+            {
+              "required": [
+                "url"
               ]
             }
           ]

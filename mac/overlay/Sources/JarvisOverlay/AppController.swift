@@ -336,6 +336,10 @@ final class AppController {
         case .clear: handle(.clear, captured: [])
         case .demo(let count):
             for card in LayoutDebugCommand.demoCards(count: count) { handle(.card(card), captured: []) }
+        case .demoMedia:
+            for card in LayoutDebugCommand.demoMediaCards() { handle(.card(card), captured: []) }
+        case .demoMediaBad:
+            for card in LayoutDebugCommand.demoMediaBadCards() { handle(.card(card), captured: []) }
         case .shape:
             let size = overlayPanel?.frame.size ?? .zero
             let box = [size.width / 2 - 150, size.height / 2 - 40, size.width / 2 + 150, size.height / 2 + 40]

@@ -250,6 +250,17 @@ public enum ScatterLayout {
         frames.contains { $0.contains(pointer) }
     }
 
+    /// A playing video holds the idle clear for at most this long from play start.
+    public static let maxPlayHold: TimeInterval = 600
+
+    /// Idle deadline: wait another round when the pointer rests on a panel, or a video started
+    /// playing less than maxPlayHold ago. playingSince nil = nothing playing.
+    public static func idleWaits(pointerOnPanel: Bool, playingSince: Date?, now: Date) -> Bool {
+        if pointerOnPanel { return true }
+        guard let playingSince else { return false }
+        return now.timeIntervalSince(playingSince) < maxPlayHold
+    }
+
     /// Whether a press that started at `start` and is now at `pointer` has become a drag.
     public static func isDrag(from start: CGPoint, to pointer: CGPoint) -> Bool {
         hypot(pointer.x - start.x, pointer.y - start.y) > dragThreshold
@@ -403,6 +414,10 @@ public enum ScatterLayout {
 public enum LayoutDebugCommand: Equatable {
     case aside, restore, clear, shape
     case demo(Int)
+    /// Sample media cards (2 images, a YouTube card and a video file card).
+    case demoMedia
+    /// Sample media cards that each fail a guard (private host, 404, unplayable id).
+    case demoMediaBad
 
     public static func parse(_ text: String?) -> LayoutDebugCommand? {
         switch text {
@@ -410,6 +425,9 @@ public enum LayoutDebugCommand: Equatable {
         case "restore"?: return .restore
         case "clear"?: return .clear
         case "shape"?: return .shape
+        // Only these exact strings parse (same rule as every case above); never a payload.
+        case "demo:media"?: return .demoMedia
+        case "demo:media-bad"?: return .demoMediaBad
         case let text? where text.hasPrefix("demo:"):
             let digits = text.dropFirst(5)
             guard !digits.isEmpty, digits.count <= 2, digits.allSatisfy({ $0.isASCII && $0.isNumber }),
@@ -446,5 +464,44 @@ public enum LayoutDebugCommand: Equatable {
                                       edges: [FlowEdge(from: "a", to: "b"), FlowEdge(from: "b", to: "c")]))
             }
         }
+    }
+
+    /// Sample media cards `media-1...media-4` for the live layout check: a single photo, a
+    /// 4-image gallery, a YouTube card and a direct video file card.
+    public static func demoMediaCards() -> [HUDCard] {
+        let gallery = [
+            ImageItem(url: "https://upload.wikimedia.org/wikipedia/commons/3/36/Hopetoun_falls.jpg",
+                      alt: "Waterfall in a fern forest"),
+            ImageItem(url: "https://upload.wikimedia.org/wikipedia/commons/4/41/Sunflower_from_Silesia2.jpg",
+                      alt: "Sunflower against a blue sky"),
+            ImageItem(url: "https://upload.wikimedia.org/wikipedia/commons/1/16/Fox_-_British_Wildlife_Centre_%2817429406401%29.jpg",
+                      alt: "Red fox"),
+            ImageItem(url: "https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg",
+                      alt: "Eiffel Tower from below"),
+        ]
+        return [
+            .image(ImageCard(id: "media-1", title: "Sample photo",
+                             url: "https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg",
+                             alt: "Cat portrait",
+                             sourcePage: "https://commons.wikimedia.org/wiki/File:Cat03.jpg")),
+            .image(ImageCard(id: "media-2", title: "Sample gallery", url: gallery[0].url, items: gallery)),
+            .video(VideoCard(id: "media-3", title: "Sample YouTube video", youtubeID: "aqz-KE-bpKQ")),
+            .video(VideoCard(id: "media-4", title: "Sample video file",
+                             url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.360p.mpeg4.mov",
+                             thumbnailURL: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Big_Buck_Bunny_4K.webm/960px--Big_Buck_Bunny_4K.webm.jpg",
+                             sourcePage: "https://commons.wikimedia.org/wiki/File:Big_Buck_Bunny_4K.webm")),
+        ]
+    }
+
+    /// Sample media cards `media-bad-1...3` that each fail a media guard (private host, HTTP
+    /// 404, unplayable id) so the fallback paths can be checked live.
+    public static func demoMediaBadCards() -> [HUDCard] {
+        [
+            .image(ImageCard(id: "media-bad-1", title: "Private host sample",
+                             url: "https://\([192, 168, 1, 1].map(String.init).joined(separator: "."))/x.jpg")),  // a LAN router address
+            .image(ImageCard(id: "media-bad-2", title: "Missing image sample",
+                             url: "https://example.com/does-not-exist.jpg", alt: "Missing sample image")),
+            .video(VideoCard(id: "media-bad-3", title: "Missing video sample", youtubeID: "zzzzzzzzzzz")),
+        ]
     }
 }
