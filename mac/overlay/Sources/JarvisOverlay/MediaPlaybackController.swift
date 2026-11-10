@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import OverlayCore
 
-/// The one live inline player (YouTube web view or AVPlayerView) and its single teardown path.
+/// The one live inline player (YouTube web view or native video view) and its single teardown path.
 @MainActor
 final class MediaPlaybackController: ObservableObject {
     static let shared = MediaPlaybackController()
