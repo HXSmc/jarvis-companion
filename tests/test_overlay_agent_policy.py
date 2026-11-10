@@ -258,7 +258,7 @@ def test_grep_glob_tricks_denied(env):
 
 @pytest.mark.parametrize("rel", [
     ".config/svc/credentials.json", ".config/gcloud/access_tokens.db", ".azure/msal_token_cache.json",
-    ".zsh_history", ".bash_history", ".gmail-mcp/token.json", "code/x/oauth_tokens.json",
+    ".zsh_history", ".bash_history", ".mail-mcp/token.json", "code/x/oauth_tokens.json",
     "Library/Application Support/Google/Chrome/Default/Login Data",
     "Library/Application Support/Firefox/Profiles/x/logins.json", "Library/Safari/History.db",
     "Library/Messages/chat.db", "Library/Mail/V10/x.emlx", ".claude/settings.json",
