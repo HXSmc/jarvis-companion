@@ -170,11 +170,8 @@ final class MediaLoader {
             }
         }
         // remoteAddress nil (metrics missing, e.g. through a proxy): the pre-connect host check stands.
-        guard let image = await Task.detached(priority: .utility) {
-            MediaPolicy.downsample(data: data)
-        }.value else {
-            return refuse(host, "failed")
-        }
+        let decoded = await Task.detached(priority: .utility) { MediaPolicy.downsample(data: data) }.value
+        guard let image = decoded else { return refuse(host, "failed") }
         cache.setObject(image, forKey: urlString as NSString, cost: image.width * image.height * 4)
         return image
     }
