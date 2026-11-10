@@ -88,7 +88,12 @@ public struct CardView: View {
         case .link(let p):
             CardChrome(meta: LinkBody.host(of: p), title: p.title, width: 300) { LinkBody(card: p) }
         case .image(let p):
-            CardChrome(meta: nil, title: p.title, width: 300) { ImageBody(card: p) }
+            ImageCardView(card: p)
+        case .video(let p):
+            VideoCardView(card: p,
+                          thumbnail: p.youtubeID != nil || p.thumbnailURL != nil ? .loading : nil,
+                          phase: .idle,
+                          onPlay: {})
         }
     }
 }
@@ -215,83 +220,6 @@ struct LinkBody: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .accessibilityLabel("Open \(host)")
-    }
-}
-
-@MainActor
-struct ImageBody: View {
-    let card: ImageCard
-
-    /// Remote images load only after an explicit click (payload is untrusted).
-    @State private var loadRequested = false
-
-    private var safeURL: URL? {
-        guard let urlString = card.url, isSafeHTTPSURL(urlString) else { return nil }
-        return URL(string: urlString)
-    }
-
-    var body: some View {
-        Group {
-            if let url = safeURL {
-                if loadRequested {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image.resizable().aspectRatio(contentMode: .fill)
-                        case .failure:
-                            tile(text: "Could not load image")
-                        default:
-                            tile(text: "Loading")
-                        }
-                    }
-                } else {
-                    loadTile
-                }
-            } else if let fileID = card.fileID, !fileID.isEmpty {
-                tile(text: "Saved image")
-            } else {
-                tile(text: "No image")
-            }
-        }
-        .frame(height: 150)
-        .frame(maxWidth: .infinity)
-        .clipped()
-        .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
-    }
-
-    private var loadTile: some View {
-        VStack(spacing: 8) {
-            if let host = safeURL?.host {
-                Text(host)
-                    .font(Theme.fontSmall)
-                    .foregroundStyle(Color.white.opacity(0.72))
-                    .lineLimit(1)
-            }
-            Button {
-                loadRequested = true
-            } label: {
-                Text("Load image")
-                    .font(Theme.fontSmall)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    // White on red is ~3.5:1; keep the text on dark and let the accent be the border.
-                    .background(RoundedRectangle(cornerRadius: Theme.radiusShape).fill(Color.white.opacity(0.12)))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusShape).strokeBorder(Theme.accent, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private func tile(text: String) -> some View {
-        ZStack {
-            Rectangle().fill(Color.white.opacity(0.06))
-            Text(text)
-                .font(Theme.fontSmall)
-                .foregroundStyle(Color.white.opacity(0.72))
-                .lineLimit(1)
-                .padding(.horizontal, 6)
-        }
     }
 }
 

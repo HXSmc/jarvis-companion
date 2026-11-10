@@ -1,0 +1,4 @@
+{"shapes": [], "cards": [
+  {"id": "c-yt", "type": "video", "title": "Big Buck Bunny (YouTube)", "youtube_id": "aqz-KE-bpKQ"},
+  {"id": "c-mov", "type": "video", "title": "Big Buck Bunny clip", "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.360p.mpeg4.mov", "thumbnail_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Big_Buck_Bunny_4K.webm/960px--Big_Buck_Bunny_4K.webm.jpg", "source_page": "https://commons.wikimedia.org/wiki/File:Big_Buck_Bunny_4K.webm"}
+]}

@@ -42,6 +42,7 @@ extension HUDCard {
         case .flow(let p): return p.title
         case .link(let p): return p.title
         case .image(let p): return p.title
+        case .video(let p): return p.title
         }
     }
 }
