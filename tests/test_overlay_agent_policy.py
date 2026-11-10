@@ -406,3 +406,19 @@ def test_git_transport_options_that_run_a_program_denied(env):
         assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
     # A repo-configured ext:: or fd:: remote is refused by git itself.
     assert "protocol.ext.allow=never" in bash(ctx, f"git -C {r} push").updated_input["command"]
+
+
+def test_read_only_gh_on_the_owners_own_repos_stays_allowed_after_a_read(env):
+    """Approver (Mac run 5 #4): with a scratch repo resolved (no github origin, so nothing trusted),
+    a local read set the taint and `gh pr list -R HXSmc/jarvis-companion` became a Confirm. A repo under
+    the owner's own login reaches no one else: Allow. Any other owner, writes and gh api keep their gates."""
+    ctx = env[0]
+    ctx.read_untrusted_remote = True
+    ctx.own_owners = frozenset({"hxsmc"})
+    assert isinstance(bash(ctx, "gh pr list -R HXSmc/jarvis-companion --state open"), ap.Allow)
+    assert isinstance(bash(ctx, "gh issue view 3 -R hxsmc/jarvis-companion"), ap.Allow)
+    assert isinstance(bash(ctx, "gh pr list -R evil/hxsmc"), ap.Confirm)
+    assert isinstance(bash(ctx, "gh pr create -R HXSmc/jarvis-companion"), ap.Confirm)
+    assert isinstance(bash(ctx, "gh api repos/HXSmc/jarvis-companion/pulls"), ap.Confirm)  # 30b unchanged
+    ctx.own_owners = frozenset()
+    assert isinstance(bash(ctx, "gh pr list -R HXSmc/jarvis-companion"), ap.Confirm)

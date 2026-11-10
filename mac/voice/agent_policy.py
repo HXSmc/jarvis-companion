@@ -51,6 +51,9 @@ class Ctx:
     # after any allowed call, kept for the session's life: from then on a new repo name could carry data out.
     read_untrusted_remote: bool = False
     trusted_repos: frozenset = frozenset()  # owner/repo values used before that happened (lower case)
+    # The owner's own GitHub login (lower case, from gh's local config): a read-only gh form on a repo
+    # under it stays Allow after the taint, since a repo name there reaches no one else.
+    own_owners: frozenset = frozenset()
     toplevel: Callable[[str], str | None] = _toplevel
     has_filters: Callable[[str], bool] = lambda d: gitdiff.has_filters(Path(d))
 
@@ -455,7 +458,8 @@ def _gh(tokens: list[str], inp: dict, ctx: Ctx) -> Allow | Deny | Confirm:
     group, verb = args[0], (args[1] if len(args) > 1 else "")
     if verb not in _GH_READ.get(group, ()):
         return side
-    if ctx.read_untrusted_remote and (repo or "").casefold() not in ctx.trusted_repos:
+    own = (repo or "").split("/")[0].casefold() in ctx.own_owners
+    if ctx.read_untrusted_remote and (repo or "").casefold() not in ctx.trusted_repos and not own:
         return side  # after reading untrusted text, a new repo name could carry data out
     return Allow({**inp, "command": command})
 

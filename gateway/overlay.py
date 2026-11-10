@@ -250,8 +250,12 @@ class DebugLog:
             entry.update(fields)
 
     def note(self, step: str, detail: str) -> None:
-        """App-side step (no speech heard, service unreachable) on the turn it belongs to."""
-        self.add(self.for_utterance(), step, detail=detail)
+        """App-side step on the turn it belongs to: a line highlight's outcome (`lines`, a reason
+        code) on the newest turn, whose `done` came before it; anything else (no speech heard,
+        service unreachable) on the waiting wake or a new turn."""
+        with self._lock:
+            newest = self._turns[-1] if self._turns and step == "lines" else None
+        self.add(newest if newest is not None else self.for_utterance(), step, detail=detail)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -941,12 +945,18 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
                 bus.publish("hud", ev)
 
 
-def _scroll_editor(run: AgentRun, line: int, deps: OverlayDeps) -> None:
-    """Scroll the editor on its own thread: a hung or missing CLI never holds the turn's stream."""
+def _scroll_editor(run: AgentRun, line: int, deps: OverlayDeps, on_step=None) -> None:
+    """Scroll the editor on its own thread: a hung or missing CLI never holds the turn's stream.
+    The debug page gets `editor_scroll` with the result ("code" = scrolled, "none" = CLI missing,
+    failed or timed out, "error") and how long it took, to line up with the app's `lines` row."""
+    started = time.monotonic()
     try:
-        gitdiff.open_in_editor(run.repo, run.screen_file, line, run=deps.run, editor=run.editor, fallback=False)
+        result = gitdiff.open_in_editor(run.repo, run.screen_file, line, run=deps.run, editor=run.editor,
+                                        fallback=False)
     except Exception:
-        pass
+        result = "error"
+    if on_step:
+        on_step("editor_scroll", detail=f"{result} in {round((time.monotonic() - started) * 1000)} ms")
 
 
 def _line_events(key: str, deps: OverlayDeps) -> list[dict]:
@@ -1052,22 +1062,38 @@ def _toplevel(path: Path) -> Path | None:
 _TERMINALS = {"Terminal": "Terminal", "iTerm2": "iTerm2", "Ghostty": "ghostty"}
 
 
-def _terminal_cwd(app: str) -> Path | None:
-    """The front terminal's newest shell cwd via pgrep + lsof (no TCC grant); None elsewhere."""
+def _terminal_cwd(app: str, title: str = "") -> Path | None:
+    """The front terminal's shell cwd via pgrep + lsof (no TCC grant); None elsewhere.
+
+    lsof cannot tell which window is in front, so with shells in several repos the one whose folder
+    name is in the front window's title (`title`, e.g. "jt-scratch32 — -zsh — 80×24") wins; no
+    single match -> None, and the agent asks which repo instead of guessing."""
     proc = _TERMINALS.get(app)
     if sys.platform != "darwin" or not proc:
         return None
-    pids = _cmd(["pgrep", "-n", "-x", proc]).split()
-    for _ in range(3):  # app -> login -> shell
-        children = _cmd(["pgrep", "-P", ",".join(pids)]).split() if pids else []
-        if not children:
-            break
-        pids = children
-    if not pids:
+    pids, every = _cmd(["pgrep", "-n", "-x", proc]).split(), []
+    for _ in range(3):  # app -> login -> shell; every level, so a shell running a program still counts
+        pids = _cmd(["pgrep", "-P", ",".join(pids)]).split() if pids else []
+        every += pids
+    if not every:
         return None
-    cwds = [ln[1:] for ln in _cmd(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(pids)]).splitlines()
+    cwds = [Path(ln[1:]) for ln in _cmd(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(every)]).splitlines()
             if ln.startswith("n/")]
-    return Path(cwds[-1]) if cwds else None
+    return _pick_terminal_cwd(cwds, title)
+
+
+def _pick_terminal_cwd(cwds: list[Path], title: str) -> Path | None:
+    """One repo among the shells' cwds: the only one, else the one the front window's title names."""
+    repos: dict[Path, list[Path]] = {}
+    for cwd in cwds:
+        top = _toplevel(cwd) if cwd.is_dir() else None
+        if top is not None:
+            repos.setdefault(top, []).append(cwd)
+    if len(repos) == 1:
+        return next(iter(repos))
+    named = [top for top, dirs in repos.items()
+             if any(d.name and re.search(rf"(?<![\w.-]){re.escape(d.name)}(?![\w.-])", title) for d in dirs)]
+    return named[0] if len(named) == 1 else None
 
 
 def _agent_repo(screen: ScreenBody | None) -> Path | None:
@@ -1077,11 +1103,24 @@ def _agent_repo(screen: ScreenBody | None) -> Path | None:
         parent = Path(doc).expanduser().parent
         if parent.is_dir() and (top := _toplevel(parent)):
             return top
-    cwd = _terminal_cwd(screen.app) if screen is not None else None
+    front = next((w for w in screen.windows if w.get("app") == screen.app), {}) if screen is not None else {}
+    cwd = _terminal_cwd(screen.app, str(front.get("title") or "")) if screen is not None else None
     if cwd is not None and cwd.is_dir() and (top := _toplevel(cwd)):
         return top
     env = os.environ.get("OVERLAY_GIT_REPO")
     return Path(env).expanduser() if env else None
+
+
+_GH_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
+_gh_login_cache: list[frozenset] = []
+
+
+def _own_owners() -> frozenset:
+    """The owner's GitHub login from gh's local config (no network), lower case; empty when unknown."""
+    if not _gh_login_cache:
+        out = _cmd(["gh", "config", "get", "-h", "github.com", "user"]).strip()
+        _gh_login_cache.append(frozenset({out.casefold()}) if _GH_LOGIN_RE.fullmatch(out) else frozenset())
+    return _gh_login_cache[0]
 
 
 def _origin_repo(repo: Path | None) -> str | None:
@@ -1191,7 +1230,8 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     ctx = getattr(session, "policy_ctx", None)
     if ctx is None:
         ctx = agent_policy.Ctx(home=str(Path.home()), vault=vault or None, cwd=getattr(session, "cwd", ""),
-                               read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools))
+                               read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools),
+                               own_owners=await asyncio.to_thread(_own_owners))
         session.policy_ctx = ctx
     origin = await asyncio.to_thread(_origin_repo, repo)
     if origin and not ctx.read_untrusted_remote:
@@ -1337,7 +1377,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     if lines:
                         if run.editor:  # the first change may be scrolled off: bring it into view
                             threading.Thread(target=_scroll_editor, daemon=True,
-                                             args=(run, lines["ranges"][0][0], deps)).start()
+                                             args=(run, lines["ranges"][0][0], deps, on_step)).start()
                         yield lines
                     elif run.model_lines:  # no host diff (e.g. the file's first commit): the model's
                         yield run.model_lines

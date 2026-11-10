@@ -10,7 +10,6 @@ while a confirmation is pending and the next utterance can answer it.
 
 from __future__ import annotations
 
-import itertools
 import json
 import os
 import queue
@@ -110,7 +109,6 @@ class AgentSession:
         self.pending: str | None = None  # request_id of a can_use_tool still waiting for us
         self._events: queue.Queue = queue.Queue()
         self._write_lock = threading.Lock()
-        self._ids = itertools.count(1)
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self) -> None:
@@ -150,10 +148,6 @@ class AgentSession:
             self.pending = None
         self._write({"type": "control_response",
                      "response": {"subtype": "success", "request_id": request_id, "response": response}})
-
-    def interrupt(self) -> None:
-        self._write({"type": "control_request", "request_id": f"jov-{next(self._ids)}",
-                     "request": {"subtype": "interrupt"}})
 
     def close(self) -> None:
         """Deny any pending tool call first (an evicted session must never leave a yes hanging)."""

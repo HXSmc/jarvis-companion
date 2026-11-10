@@ -48,7 +48,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 intent: "intent", spoke: "Jarvis spoke", done: "response done",
                 no_speech: "no speech", app_error: "app error",
                 agent: "agent started", agent_tool: "agent tool", agent_confirm: "confirmation",
-                agent_progress: "progress line",
+                agent_progress: "progress line", lines: "line highlight", editor_scroll: "editor scroll",
                 incomplete: "waiting for more", continued: "continued after a pause" };
 
 function el(tag, cls, text) {
@@ -107,7 +107,9 @@ function render(data) {
       const failed = (s.step === "done" && s.error) || s.step === "no_speech" || s.step === "app_error";
       // red row, not a failed turn: a denied tool call, or a confirmation that did not go ahead
       const denied = (s.step === "agent_tool" && s.decision === "deny")
-                     || (s.step === "agent_confirm" && s.state !== "asked" && s.state !== "allowed");
+                     || (s.step === "agent_confirm" && s.state !== "asked" && s.state !== "allowed")
+                     || (s.step === "lines" && !String(s.detail || "").startsWith("ok"))
+                     || (s.step === "editor_scroll" && !String(s.detail || "").startsWith("code"));
       if (failed) box.classList.add("err");
       const li = el("li", failed || denied ? "fail" : "");
       li.append(el("span", "step", LABEL[s.step] || s.step));

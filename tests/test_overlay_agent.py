@@ -137,7 +137,8 @@ def reset(monkeypatch, tmp_path):
     overlay.set_deps(None)
     monkeypatch.setattr(overlay, "CONFIRM_POLL_S", 0.01)
     monkeypatch.setattr(agent, "SUPPORT_DIR", tmp_path / "support")
-    monkeypatch.setattr(overlay, "_terminal_cwd", lambda app: None)
+    monkeypatch.setattr(overlay, "_terminal_cwd", lambda app, title="": None)
+    monkeypatch.setattr(overlay, "_own_owners", lambda: frozenset())  # never this box's gh login
     monkeypatch.delenv("OVERLAY_GIT_REPO", raising=False)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))  # policy home = a fake folder
@@ -974,3 +975,62 @@ def test_expiry_push_never_retitles_another_pending_confirm(client, monkeypatch)
         assert [e["type"] for _, e in bus.events] in (["say"], ["audio"])
     finally:
         overlay._confirm.pop("race2", None)
+
+
+# --- Round 6 (Mac run 5: no highlight drawn; approver's small issues) ----------
+
+
+def test_highlight_outcome_and_editor_scroll_reach_the_turn_record(client):
+    """R6: the app posts one reason code per `lines` event after the turn's `done`; it lands on that
+    turn (not a new one), next to the service's own `editor_scroll` row (result + time)."""
+    _changed_app_py(REPO)
+
+    def fake_run(cmd, **kw):
+        return type("P", (), {"returncode": 0, "stdout": ""})()
+
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two commits."})]), run=fake_run)
+    turn(client, "what changed in this file", conv_id="r6a", screen={"app": "Code", "document": str(REPO / "app.py")})
+    assert _wait(lambda: any(s["step"] == "editor_scroll"
+                             for s in overlay.debug_log.snapshot()["turns"][0]["steps"]))
+    overlay.debug_log.note("lines", "off_view win=title seen=1-45 try=3 want=936-949")
+    turns = overlay.debug_log.snapshot()["turns"]
+    assert len(turns) == 1
+    steps = {s["step"]: s for s in turns[0]["steps"]}
+    assert steps["editor_scroll"]["detail"].startswith("code in ")
+    assert steps["lines"]["detail"] == "off_view win=title seen=1-45 try=3 want=936-949"
+    # Other app notes still open their own turn (no speech heard after a wake, and so on).
+    overlay.debug_log.note("no_speech", "")
+    assert len(overlay.debug_log.snapshot()["turns"]) == 2
+
+
+def test_editor_scroll_row_says_why_it_did_not_scroll(client):
+    _changed_app_py(REPO)
+
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError
+
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two commits."})]), run=fake_run)
+    turn(client, "what changed in this file", conv_id="r6b", screen={"app": "Code", "document": str(REPO / "app.py")})
+    rows = lambda: [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "editor_scroll"]  # noqa: E731
+    assert _wait(lambda: len(rows()) == 1)
+    assert rows()[0]["detail"].startswith("none in ")
+
+
+def test_terminal_repo_is_the_front_windows_or_none(tmp_path):
+    """Approver: three Terminal windows, lsof lists every shell. One repo -> it; several -> the one
+    the front window's title names; no single match -> None (the agent asks which repo)."""
+    a, b = git_repo(tmp_path / "jt-scratch32"), git_repo(tmp_path / "other")
+    (a / "sub").mkdir()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    def pick(cwds, title):
+        found = overlay._pick_terminal_cwd(cwds, title)
+        return found.resolve() if found else None
+    assert pick([plain, a / "sub", a], "") == a.resolve()  # one repo, whatever the title
+    assert pick([a, b, plain], "jt-scratch32 — -zsh — 80×24") == a.resolve()
+    assert pick([a, b], "other — -zsh — 80×24") == b.resolve()
+    assert pick([a, b], "ali — -zsh — 80×24") is None
+    assert pick([a, b], "jt-scratch32-old — -zsh") is None  # a longer name is not this folder
+    assert pick([plain], "plain") is None
