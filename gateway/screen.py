@@ -151,8 +151,8 @@ def _mac_client() -> httpx.AsyncClient:
 async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
     """Forward one /screen/mac/<path> call to the Mac gateway.
 
-    422/429 pass through with the Mac's detail; anything else that is not a
-    200/304 (Mac down, auth mismatch, driver error) is 503 "mac offline".
+    409/422/429 pass through with the Mac's detail; anything else that is not
+    a 200/304 (Mac down, auth mismatch, driver error) is 503 "mac offline".
     The ios_token is never logged.
     """
     token = config.get_token(name="ios_token")
@@ -166,7 +166,7 @@ async def _mac_forward(method: str, path: str, **kwargs) -> httpx.Response:
         raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL) from None
     if resp.status_code in (200, 304):
         return resp
-    if resp.status_code in (422, 429):
+    if resp.status_code in (409, 422, 429):
         try:
             detail = resp.json().get("detail")
         except ValueError:
@@ -213,9 +213,17 @@ class ScreenEvent(BaseModel):
     text: str | None = Field(default=None, max_length=100)
     key: _Key | None = None
     mods: list[Literal["cmd", "ctrl", "alt", "shift"]] = []
+    # Focus lock (mac only): refuse the event (409) unless this app/window has
+    # focus and, for pointer events, owns the element under the point.
+    require_app: str | None = Field(default=None, min_length=1, max_length=64)
+    require_window: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def _fields_for_type(self) -> "ScreenEvent":
+        if self.require_window is not None and self.require_app is None:
+            raise ValueError("require_window needs require_app")
+        if self.type == "scroll" and self.require_app is not None and (self.x is None or self.y is None):
+            raise ValueError("a scroll with require_app needs x and y")
         if self.type in ("move", "tap", "dblclick", "right", "drag"):
             if self.x is None or self.y is None:
                 raise ValueError(f"{self.type} event requires x and y")
@@ -341,17 +349,18 @@ async def screen_status(request: Request, target: Target) -> dict:
         try:
             return (await _mac_forward("GET", "status")).json()
         except HTTPException:
-            return {"target": "mac", "online": False, "tcc_ok": None, "display_asleep": None}
+            return {"target": "mac", "online": False, "tcc_ok": None, "display_asleep": None, "focus_lock": None}
     if target == "mac":
         from mac.screen import driver
         return {
             "target": "mac", "online": True,
             "tcc_ok": driver.tcc_ok(), "display_asleep": driver.display_asleep(),
+            "focus_lock": True,  # the box proxy checks this before forwarding require_app
         }
     if target == "minipc":
         from gateway.vnc import online
-        return {"target": "minipc", "online": await online(), "tcc_ok": None, "display_asleep": None}
-    return {"target": "windows", "online": WINDOWS_ROLE in roles(), "tcc_ok": None, "display_asleep": None}
+        return {"target": "minipc", "online": await online(), "tcc_ok": None, "display_asleep": None, "focus_lock": None}
+    return {"target": "windows", "online": WINDOWS_ROLE in roles(), "tcc_ok": None, "display_asleep": None, "focus_lock": None}
 
 
 @router.get("/{target}/frame")
@@ -392,21 +401,60 @@ async def screen_frame(
     return Response(content=jpeg, media_type="image/jpeg", headers={"ETag": etag})
 
 
+def _refusal_detail(exc) -> dict:
+    """409 body for a refused batch (driver FocusMismatch / InputHalted).
+
+    Never echoes a window title (the caller's require_window or the real
+    one): app names and a window_matched boolean only. events_run counts the
+    events that posted anything, the refused one only when it was partial.
+    """
+    events_run = exc.index + (1 if exc.partial else 0)
+    if not hasattr(exc, "reason"):
+        return {"error": "input_halted", "refused_index": exc.index, "events_run": events_run}
+    msg = (f"Refused ({exc.reason}): {exc.actual_app or 'unknown app'} is focused or under the point, "
+           f"not the required app/window. Events before index {exc.index} already ran.")
+    if exc.partial:
+        msg += f" Event {exc.index} was partially sent."
+    return {"error": "focus_mismatch", "reason": exc.reason, "expected_app": exc.expected_app,
+            "actual_app": exc.actual_app, "window_matched": exc.window_matched,
+            "refused_index": exc.index, "events_run": events_run, "partial": exc.partial,
+            "message": msg}
+
+
+FOCUS_LOCK_UNSUPPORTED = {
+    "error": "focus_lock_unsupported",
+    "message": "The Mac gateway does not support require_app yet; nothing was sent.",
+}
+
+
 @router.post("/{target}/input")
 async def screen_input(request: Request, target: Target, body: InputBody) -> dict:
     _require(request)
     if target == "minipc":
         raise HTTPException(status_code=404, detail=MINIPC_VNC_DETAIL)
+    locked = any(e.require_app for e in body.events)
+    if target == "windows" and locked:
+        raise HTTPException(status_code=422, detail="require_app/require_window are only supported on target mac")
     if not _input_slot_available(target, len(body.events)):
         raise HTTPException(status_code=429, detail="too many input events")
     events = [event.model_dump() for event in body.events]
     # Audit trail: target, count, event types only — never coordinates or text.
     logger.info("screen input: %s %d events %s", target, len(events), [e["type"] for e in events])
     if target == "mac" and _mac_gateway():
+        # An older Mac gateway silently drops require_* (pydantic ignores
+        # unknown fields) and would post unlocked: refuse unless it says it
+        # enforces the lock.
+        if locked and (await _mac_forward("GET", "status")).json().get("focus_lock") is not True:
+            raise HTTPException(status_code=409, detail=FOCUS_LOCK_UNSUPPORTED)
         await _mac_forward("POST", "input", json={"events": events})
     elif target == "mac":
         from mac.screen import driver
-        await run_in_threadpool(driver.send_events, events)
+        try:
+            await run_in_threadpool(driver.send_events, events)
+        except (driver.FocusMismatch, driver.InputHalted) as exc:
+            detail = _refusal_detail(exc)
+            logger.info("screen input refused: %s at index %d", detail.get("reason", detail["error"]), exc.index)
+            raise HTTPException(status_code=409, detail=detail) from None
     else:
         _windows_online()
         reply = await agent_roundtrip(voice_router.request_envelope("screen_input", {"events": events}))
