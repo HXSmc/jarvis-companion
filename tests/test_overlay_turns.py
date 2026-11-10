@@ -91,10 +91,15 @@ def test_brain_judges_incomplete_and_keeps_listening(client):
 def test_visual_verbs_route_to_the_screen():
     for text in ("highlight for me the last debugging session", "circle the newest turn",
                  "Can you show me the last debugging session", "point to the error",
-                 "where is the debug page"):
+                 "where is the debug page", "show me the last, uh \u2026 debugging session",
+                 "highlight the URL of this page", "show me the previous window"):
         assert parse(text, apps={}).kind == "look", text
+    # Weak leads (show me / where / find / which) look only at screen nouns or "the last <noun>".
     for text in ("where is Paris", "show me how a transformer works",
-                 "show me the weather in Riyadh", "what is the capital of France"):
+                 "show me the weather in Riyadh", "what is the capital of France",
+                 "show me the latest news", "find the current price of bitcoin",
+                 "show me the top 10 restaurants", "show me this week's forecast",
+                 "which is better, this or that", "find a good page on python decorators"):
         assert parse(text, apps={}).kind == "answer", text
     assert parse("highlight the search field", apps={}).kind == "ground"
 

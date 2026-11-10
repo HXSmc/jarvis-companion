@@ -65,7 +65,7 @@ function describe(s) {
     case "done": return `${s.cards} cards, ${s.shapes} shapes` +
                         (s.first_audio_ms != null ? `, first audio ${s.first_audio_ms} ms` : ", no audio") +
                         (s.total_s != null ? `, total ${s.total_s} s` : "") +
-                        (s.error ? ` — ERROR ${s.error}` : "");
+                        (s.error ? `, ERROR: ${s.error}` : "");
     default: return s.detail || "";
   }
 }

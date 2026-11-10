@@ -50,10 +50,12 @@ _TIME_RE = re.compile(r"^(?:what(?:'s| is) the time|what time is it|tell me the 
 # noun -> "look" (ground against windows/text first, else the brain with screen context).
 _LOOK_STRONG_RE = re.compile(r"\b(highlight|circle|underline|point (?:to|at|out))\b")
 _LOOK_LEAD_RE = re.compile(r"\b(show me|where is|where's|where are|find|which)\b")
-_LOOK_REF_RE = re.compile(r"\b(?:the|my) (?:last|latest|newest|previous|current|top|bottom)\b"
-                          r"|\b(?:this|that|these|those)\b"
-                          r"|\b(?:window|page|tab|screen|session|message|error|turn|line|section"
-                          r"|panel|dialog|notification|card)s?\b")
+# Weak leads only count for "the last <...>" or a definite screen noun ("the debug page"):
+# "the latest news", "this or that", "a good page on X" are questions for the brain.
+_LOOK_REF_RE = re.compile(r"\b(?:the|my) (?:last|newest|previous)\b"
+                          r"|\b(?:the|this|that|these|those|my)\s+(?:[\w-]+\s+){0,2}?"
+                          r"(?:window|page|tab|screen|session|message|error|turn|line|section"
+                          r"|panel|dialog|notification|card|button|field|link|menu|icon)s?\b")
 # The utterance stops mid-thought: filler, article, possessive or conjunction at the end, or a
 # trailing comma ("Can you show me the last, uh"). The user is still talking: wait for the rest.
 FILLERS = ("uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah")  # STT wrote "uh" as "huh"
