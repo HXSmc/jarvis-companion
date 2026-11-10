@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -174,16 +175,48 @@ def test_conversations_lru():
             closed.append(self)
 
     convs = Conversations(FakeSession)
-    got = {i: convs.get(f"c{i}") for i in range(10)}
-    assert len(made) == 11  # one session per conv_id + one warm spare
-    # LRU cap 8: the two oldest were evicted and closed.
-    assert closed == [got[0], got[1]]
-    assert convs.get("c9") is got[9]  # still cached: no new session
-    assert len(made) == 11
+    got = {i: convs.get(f"c{i}") for i in range(4)}
+    assert len(made) == 5  # one session per conv_id + one warm spare
+    # LRU cap 2: the two oldest were evicted and closed.
+    _wait_until(lambda: closed == [got[0], got[1]])
+    assert convs.get("c3") is got[3]  # still cached: no new session
+    assert len(made) == 5
     convs.get("c2")  # touch: c2 becomes newest
-    convs.get("c10")
+    convs.get("c4")
+    _wait_until(lambda: len(closed) == 3)
     assert closed[-1] is got[3]  # the now-oldest is evicted instead
     assert convs.get("c2") is got[2]
+
+
+def _wait_until(cond, timeout=5.0):
+    """Poll so the assertion holds whether close() is synchronous or on a thread."""
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert cond()
+
+
+def test_conversations_default_cap_keeps_two_and_closes_older_in_order():
+    made: list[object] = []
+    closed: list[object] = []
+
+    class FakeSession:
+        def __init__(self):
+            made.append(self)
+
+        def close(self):
+            closed.append(self)
+
+    convs = Conversations(FakeSession)
+    got = [convs.get(f"c{i}") for i in range(5)]
+    assert len(made) == 6  # 5 conversation sessions + 1 warm spare
+    _wait_until(lambda: closed == got[:3])
+    assert convs.get("c3") is got[3] and convs.get("c4") is got[4]
+    assert len(made) == 6  # the two newest are still cached
+    spare = made[5]
+    assert spare not in closed  # eviction never closes the spare
+    again = convs.get("c0")  # evicted id: a NEW session, taken from the spare
+    assert again not in got and again is spare
 
 
 def test_lean_argv_preapproves_only_allowlisted_tools():

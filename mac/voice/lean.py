@@ -5,7 +5,7 @@ messages, stripped flags, scratch cwd, ANTHROPIC_API_KEY dropped) with one
 extra `tools` argument, hard-allowlisted to {"WebSearch", "WebFetch"}: the
 argv is built by the pure `lean_argv`, so a disallowed tool string raises
 ValueError before any process can start. Conversations keeps one session per
-conv_id and closes the sessions it evicts (LRU, max 8).
+conv_id and closes the sessions it evicts (LRU, max 2).
 """
 
 from __future__ import annotations
@@ -110,9 +110,9 @@ class LeanSession:
 
 
 class Conversations:
-    """One session per conv_id, LRU-capped at 8; evicted sessions are closed."""
+    """One session per conv_id, LRU-capped at 2; evicted sessions are closed."""
 
-    def __init__(self, factory: Callable[[], object], max_sessions: int = 8):
+    def __init__(self, factory: Callable[[], object], max_sessions: int = 2):
         self._factory = factory
         self._max = max_sessions
         self._sessions: OrderedDict[str, object] = OrderedDict()
