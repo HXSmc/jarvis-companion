@@ -484,9 +484,9 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
     said: list[str] = []
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
-    handled = False
+    handled = False  # the preflight answered the whole turn (it ends with `done`)
     async for ev in _agent_preflight(body, deps, metrics, said, start, on_step):
-        handled = True
+        handled = handled or ev.get("type") == "done"
         yield ev
     if handled:
         return
@@ -857,8 +857,8 @@ KEEPALIVE_S = 15  # the app's URLSession idles out at 90 s; stay far below
 PROGRESS_GAP_S = 4  # at most one templated progress line per 4 s
 CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
 CONFIRM_POLL_S = 0.5
-_NO_RE = re.compile(r"(?:no|nope|no thanks|no thank you|don'?t|do not)", re.I)
-_WAKE_PREFIX_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
+EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told it came too late
+_CONFIRM_CARD_ID = "agentconfirm"  # one id per conv, so the HUD replaces the card once settled
 
 
 @dataclass
@@ -875,12 +875,14 @@ class AgentRun:
     deadline: float = 0.0
     tool: tuple[str, float] | None = None  # (log label, clock) of the tool now running
     confirm_label: str = ""  # log label of the tool call waiting for a yes
+    confirm_summary: str = ""  # what the owner was asked, for the card that replaces the Confirm card
     cancelled: bool = False
 
 
 # conv_id -> run waiting for the owner's spoken yes (one per conv); conv_id -> run streaming now.
 _confirm: dict[str, AgentRun] = {}
 _agent_busy: dict[str, AgentRun] = {}
+_expired: dict[str, tuple[float, str]] = {}  # conv_id -> (clock, summary) of a confirmation that timed out
 _confirm_lock = threading.Lock()
 
 
@@ -913,6 +915,7 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
         time.sleep(CONFIRM_POLL_S)
     if _take_confirm(run.conv_id, run) is not None:
         _deny_and_drop(run, deps)
+        _expired[run.conv_id] = (deps.clock(), run.confirm_summary)
         debug_log.add(debug_log.for_utterance(), "agent_confirm", state="expired")
 
 
@@ -925,25 +928,38 @@ async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
         yield _say(text)
 
 
-def _stripped(text: str) -> str:
-    return _WAKE_PREFIX_RE.sub("", text.strip(), count=1).strip().rstrip(".!?").strip()
+def _settled_card(summary: str, outcome: str) -> dict:
+    """Replaces the Confirm card (same id) once the question is answered or dead."""
+    card = hud.validate_card({"id": _CONFIRM_CARD_ID, "type": "info", "title": outcome,
+                              "body": [summary or "The last request"]})
+    return {"type": "card", "card": card}
 
 
 async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, said: list[str],
                            start: float, on_step) -> AsyncIterator[dict]:
     """Settle a pending confirmation and refuse a second request while the agent works.
 
-    Yields nothing when the utterance should go through the normal pipeline.
+    Ends with a `done` event when it answered the turn; otherwise the utterance goes on through the
+    normal pipeline (after any "Alright, I won't." it yielded for a dropped confirmation).
     """
     for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
         run = _take_confirm(other)
         if run is not None:
             await asyncio.to_thread(_deny_and_drop, run, deps)
+    expired = _expired.pop(body.conv_id, None)
+    if expired and deps.clock() - expired[0] < EXPIRED_TELL_S and intents.is_confirm(body.text):
+        yield _settled_card(expired[1], "Not done: it timed out")
+        async for ev in _line("expired", deps):
+            yield ev
+        said.append(acks.PHRASES.get("expired", ""))
+        yield _finish(body, deps, metrics, said, start)
+        return
     run = _take_confirm(body.conv_id)
     if run is not None:
         if intents.is_confirm(body.text) and deps.clock() < run.deadline and not run.session.closed:
             if on_step:
                 on_step("agent_confirm", state="allowed")
+            yield _settled_card(run.confirm_summary, "Going ahead")
             await asyncio.to_thread(run.session.respond, run.request_id, True, run.updated_input)
             run.request_id = run.updated_input = None
             run.started = deps.clock()
@@ -955,13 +971,14 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         if on_step:
             on_step("agent_confirm", state="denied")
         await asyncio.to_thread(_deny_and_drop, run, deps)
-        if intents.is_cancel(body.text) or _NO_RE.fullmatch(_stripped(body.text)):
-            async for ev in _line("not_confirmed", deps):
-                yield ev
-            said.append(acks.PHRASES.get("not_confirmed", ""))
+        yield _settled_card(run.confirm_summary, "Not done")
+        async for ev in _line("not_confirmed", deps):
+            yield ev
+        said.append(acks.PHRASES.get("not_confirmed", ""))
+        if intents.is_cancel(body.text) or intents.is_no(body.text):
             yield _finish(body, deps, metrics, said, start)
             return
-        return  # anything else: denied, then handled as a normal utterance
+        return  # anything else: told it was dropped, then handled as a normal utterance (no `done`)
     busy = _agent_busy.get(body.conv_id)
     if busy is not None:
         if intents.is_cancel(body.text):
@@ -1027,18 +1044,11 @@ def _agent_repo(screen: ScreenBody | None) -> Path | None:
     return Path(env).expanduser() if env else None
 
 
-def _gh_repo(tool_input: dict) -> str | None:
-    """The -R/--repo value of a gh Bash command (for the trusted-repos list), else None."""
-    try:
-        tokens = shlex.split(str(tool_input.get("command", "")))
-    except ValueError:
-        return None
-    for i, tok in enumerate(tokens):
-        if tok in ("-R", "--repo") and i + 1 < len(tokens):
-            return tokens[i + 1]
-        if tok.startswith("--repo="):
-            return tok.split("=", 1)[1]
-    return None
+def _origin_repo(repo: Path | None) -> str | None:
+    """owner/repo (lower case) of the repo's github.com origin, else None."""
+    out = gitdiff._git(repo, "remote", "get-url", "origin") if repo is not None else ""
+    m = re.search(r"github\.com[:/]([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$", (out or "").strip())
+    return m.group(1).casefold() if m else None
 
 
 def _agent_lines(spec, run: AgentRun) -> dict | None:
@@ -1077,9 +1087,9 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     repo = await asyncio.to_thread(_agent_repo, body.screen)
     parts = [text]
     history = _history.get(body.conv_id) or []
-    if history:
+    if history:  # earlier replies may echo screen text: data, never instructions
         earlier = "\n".join(f"User: {u}\nJarvis: {s}" for u, s in list(history)[-3:])
-        parts.append(f"Earlier in this conversation:\n{earlier}")
+        parts.append(f'<context untrusted="true">\nEarlier in this conversation:\n{_scrub(earlier)}\n</context>')
     where = [f"repository: {repo}" if repo else "no repository resolved; ask which one if the request needs one"]
     if body.screen is not None and body.screen.document:
         where.append(f"file on screen: {body.screen.document}")
@@ -1094,11 +1104,18 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     metrics["agent_cold"] = cold
     if on_step:
         on_step("agent", cold=cold, repo=repo.name if repo else None)
-    run = AgentRun(
-        conv_id=body.conv_id, session=session, repo=repo, started=deps.clock(),
-        ctx=agent_policy.Ctx(home=str(Path.home()), vault=vault or None, cwd=getattr(session, "cwd", ""),
-                             read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools)),
-    )
+    # The policy state lives on the session: a warm session remembers what it read, so the taint
+    # (and the trusted repos) last until the session is dropped, not just one turn.
+    ctx = getattr(session, "policy_ctx", None)
+    if ctx is None:
+        ctx = agent_policy.Ctx(home=str(Path.home()), vault=vault or None, cwd=getattr(session, "cwd", ""),
+                               read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools))
+        session.policy_ctx = ctx
+    origin = await asyncio.to_thread(_origin_repo, repo)
+    if origin and not ctx.read_untrusted_remote:
+        ctx.trusted_repos = ctx.trusted_repos | {origin}
+    run = AgentRun(conv_id=body.conv_id, session=session, ctx=ctx, repo=repo, started=deps.clock(),
+                   last_progress=deps.clock())  # the ack just played: no progress line in the next 4 s
     await asyncio.to_thread(session.send_user, "\n\n".join(parts))
     async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
         yield ev
@@ -1118,16 +1135,20 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 async for ev in _line("timeout", deps):
                     yield ev
                 said.append(acks.PHRASES.get("timeout", "timeout"))
+                card = hud.validate_card({"type": "info", "title": "Stopped",
+                                          "body": [acks.PHRASES.get("timeout", "")]})
+                if card:
+                    yield {"type": "card", "card": card}
                 finished = True
                 return
             ev = await asyncio.to_thread(run.session.next_event, AGENT_TICK_S)
             if run.cancelled:  # "stop" from another request; it already spoke
                 finished = True
                 return
+            if deps.clock() - last_sent >= KEEPALIVE_S:  # partial-message events reach the client as nothing
+                last_sent = deps.clock()
+                yield {"type": "keepalive"}
             if ev is False:
-                if deps.clock() - last_sent >= KEEPALIVE_S:
-                    last_sent = deps.clock()
-                    yield {"type": "keepalive"}
                 continue
             if ev is None:
                 raise RuntimeError("agent session ended")
@@ -1144,25 +1165,27 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 rid = str(ev.get("request_id", ""))
                 name = str(req.get("tool_name") or "")
                 tool_input = req.get("input") if isinstance(req.get("input"), dict) else {}
-                decision = agent_policy.decide(name, tool_input, run.ctx)
+                # git subprocesses and tree walks: never on the event loop
+                decision = await asyncio.to_thread(agent_policy.decide, name, tool_input, run.ctx)
                 label = agent_policy.log_label(name, tool_input)
-                if not isinstance(decision, agent_policy.Deny):
-                    now = deps.clock()
-                    if run.last_progress is None or now - run.last_progress >= PROGRESS_GAP_S:
-                        run.last_progress = now
-                        key = acks.progress_key(agent_policy.kind_of(name, tool_input, run.ctx))
-                        if metrics.get("agent_first_progress_s") is None:
-                            metrics["agent_first_progress_s"] = round(now - start, 3)
-                        if on_step:
-                            on_step("agent_progress", text=acks.PHRASES.get(key, ""))
-                        async for out in _line(key, deps):
-                            yield out
-                        last_sent = deps.clock()
+                now = deps.clock()
+                if metrics.get("agent_first_progress_s") is None:
+                    metrics["agent_first_progress_s"] = round(now - start, 3)
+                if isinstance(decision, agent_policy.Allow) and (
+                        run.last_progress is None or now - run.last_progress >= PROGRESS_GAP_S):
+                    run.last_progress = now
+                    kind = await asyncio.to_thread(agent_policy.kind_of, name, tool_input, run.ctx)
+                    key = acks.progress_key(kind)
+                    if on_step:
+                        on_step("agent_progress", text=acks.PHRASES.get(key, ""))
+                    async for out in _line(key, deps):
+                        yield out
+                    last_sent = deps.clock()
                 if isinstance(decision, agent_policy.Allow):
-                    if not run.ctx.read_untrusted_remote and (repo := _gh_repo(tool_input)):
+                    if not run.ctx.read_untrusted_remote and (repo := agent_policy.gh_repo(tool_input.get("command"))):
                         run.ctx.trusted_repos = run.ctx.trusted_repos | {repo}
-                    if agent_policy.reads_remote_text(name, tool_input):
-                        run.ctx.read_untrusted_remote = True
+                    # Any result (file, commit text, PR, mail) is text the agent did not write.
+                    run.ctx.read_untrusted_remote = True
                     run.tool = (label, deps.clock())
                     await asyncio.to_thread(run.session.respond, rid, True, decision.updated_input)
                 elif isinstance(decision, agent_policy.Deny):
@@ -1174,7 +1197,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         on_step("agent_tool", tool=label, decision="confirm", ms=None)
                         on_step("agent_confirm", state="asked")
                     run.request_id, run.updated_input = rid, decision.updated_input
-                    run.confirm_label = label
+                    run.confirm_label, run.confirm_summary = label, decision.summary
                     run.session.pending = rid
                     run.deadline = deps.clock() + CONFIRM_S
                     with _confirm_lock:
@@ -1184,7 +1207,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     async for out in _speak(question, deps):
                         yield out
                     said.append(question)
-                    card = hud.validate_card({"type": "info", "title": "Confirm",
+                    card = hud.validate_card({"id": _CONFIRM_CARD_ID, "type": "info", "title": "Confirm",
                                               "body": [decision.summary, "Say yes to go ahead, or no."]})
                     if card:
                         yield {"type": "card", "card": card}
@@ -1203,6 +1226,10 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     async for out in _speak("I couldn't get an answer for that.", deps):
                         yield out
                     said.append("no answer")
+                    card = hud.validate_card({"type": "info", "title": "No answer",
+                                              "body": ["I couldn't get an answer for that."]})
+                    if card:
+                        yield {"type": "card", "card": card}
                 finished = True
                 return
     finally:
@@ -1243,7 +1270,7 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
     shape = hud.validate_shape(obj.get("shape")) if "shape" in obj else None
     if shape:
         yield {"type": "shape", "shape": shape}
-    lines = _agent_lines(obj.get("lines"), run) if "lines" in obj else None
+    lines = await asyncio.to_thread(_agent_lines, obj.get("lines"), run) if "lines" in obj else None
     if lines:
         yield lines
 

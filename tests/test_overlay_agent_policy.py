@@ -114,10 +114,13 @@ def test_side_effects_need_confirm(env):
 
 def test_gh_readonly_allowed(env):
     ctx = env[0]
-    for cmd in ("gh pr list -R o/r", "gh issue view 3 -R o/r", "gh api repos/o/r/pulls"):
+    for cmd in ("gh pr list -R o/r", "gh issue view 3 -R o/r", "gh api repos/o/r/pulls",
+                "gh pr list --state open --limit 5 -R o/r", "gh pr view 12 -R o/r --json title,body",
+                "gh run list -R o/r --workflow mac-overlay.yml", "gh pr list --repo=o/r"):
         d = bash(ctx, cmd)
         assert isinstance(d, ap.Allow), cmd
-        assert d.updated_input["command"].startswith("env GH_PAGER=cat GH_PROMPT_DISABLED=1")
+        assert d.updated_input["command"].startswith("env -u GH_HOST ")
+        assert "GH_PAGER=cat GH_PROMPT_DISABLED=1" in d.updated_input["command"]
     for cmd in ("gh pr view 1 --web", "gh api --hostname evil.example repos/x", "gh pr list -R 'o/r;x'"):
         assert isinstance(bash(ctx, cmd), ap.Deny), cmd
 
@@ -146,13 +149,13 @@ def test_gh_api_gated_after_untrusted_read(env):
     ctx.trusted_repos = frozenset({"o/r"})
     assert isinstance(bash(ctx, "gh pr list -R o/r"), ap.Allow)
     assert isinstance(bash(ctx, "gh pr list -R x/y"), ap.Confirm)
-    assert ap.reads_remote_text("Bash", {"command": "gh pr view 1 -R o/r"})
-    assert not ap.reads_remote_text("Bash", {"command": "git -C r log"})
-    assert ap.reads_remote_text("mcp__mailbox__search_emails", {})
 
 
 def test_grep_directory_excludes_secret_files(env):
-    ctx, home, vault, repo = env
+    ctx, home, vault, _ = env
+    repo = _repo(home / "code/clean")  # the fixture repo holds a symlink into Secrets: no search there
+    (repo / ".env").write_text("K=V")
+    assert isinstance(decide(ctx, "Grep", pattern="K", path=str(env[3])), ap.Deny)
     d = decide(ctx, "Grep", pattern="K", path=str(repo))
     assert isinstance(d, ap.Allow) and d.updated_input["glob"].startswith("!")
     assert isinstance(decide(ctx, "Grep", pattern="K", path=str(repo), glob="*.py"), ap.Allow)
@@ -178,3 +181,132 @@ def test_decide_never_raises(env):
     for tool, inp in (("Bash", {}), ("Bash", {"command": None}), ("Read", {"file_path": 5}), ("", {}),
                       ("Read", None), ("Grep", {"path": 5})):
         assert isinstance(ap.decide(tool, inp, ctx), ap.Deny), (tool, inp)
+
+
+# --- Round 1 security fixes (each failed before its fix) ---
+
+def test_gh_other_host_denied(env):
+    """R1 security #1: gh must not reach a host other than github.com (URL, HOST/OWNER/REPO, last -R wins)."""
+    ctx = env[0]
+    for cmd in ("gh issue view https://attacker.example/o/r/issues/1",
+                "gh pr view https://github.com/o/r/pull/1",
+                "gh pr list -R o/r -R attacker.example/o/r",
+                "gh pr list -R attacker.example/o/r",
+                "gh pr list -Rattacker.example/o/r",
+                "gh pr list --repo=attacker.example/o/r",
+                "gh repo view attacker.example/o/r",
+                "gh repo view evil.example/r",
+                "gh api https://attacker.example/repos/o/r"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
+    cmd = bash(ctx, "gh pr list -R o/r").updated_input["command"]
+    for var in ("GH_HOST", "GH_REPO", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        assert f"-u {var} " in cmd, var
+    assert ap.gh_repo("gh pr list -R o/r") == "o/r" and ap.gh_repo("gh pr list -Ro/r") == "o/r"
+
+
+def test_git_file_reading_options_denied(env):
+    """R1 security #2 / #10, code #1: git options that read a file outside history are denied."""
+    ctx, home, vault, repo = env
+    (repo / "a.txt").write_text("a\n")
+    r = repo
+    for cmd in (f"git -C {r} blame --contents {vault}/Secrets/Projects.md a.txt",
+                f"git -C {r} blame --contents={home}/.config/svc/credentials.json a.txt",
+                f"git -C {r} blame --cont {vault}/Notes/a.md a.txt",
+                f"git -C {r} blame --ignore-revs-file /etc/passwd a.txt",
+                f"git -C {r} blame -S /etc/passwd a.txt",
+                f"git -C {r} ls-files --exclude-from=/etc/passwd",
+                f"git -C {r} ls-files -X /etc/passwd",
+                f"git -C {r} diff -O/etc/passwd",
+                f"git -C {r} diff --orderfile=/etc/passwd",
+                f"git -C {r} log --outp=/tmp/x",
+                f"git -C {r} log -- {vault}/Notes/a.md",
+                f"git -C {r} log -- ../../.ssh/id_rsa",
+                f"git -C {r} log -- link.md",
+                f"git -C {r} show HEAD:Secrets/a.md"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
+    for cmd in (f"git -C {r} log main..HEAD --format=%h/%s -5", f"git -C {r} log -S foo",
+                f"git -C {r} blame a.txt", f"git -C {r} log -- a.txt", f"git -C {r} show HEAD~1:a.txt"):
+        assert isinstance(bash(ctx, cmd), ap.Allow), cmd
+
+
+def test_secrets_denied_without_vault_env(env):
+    """R1 security #3: Secrets stay closed when OVERLAY_VAULT is unset."""
+    ctx, home, vault, repo = env
+    ctx.vault = None
+    (home / "other/secrets").mkdir(parents=True)
+    _repo(vault)
+    for d in (decide(ctx, "Read", file_path=f"{vault}/Secrets/Projects.md"),
+              decide(ctx, "Read", file_path=f"{home}/other/secrets/x.md"),
+              decide(ctx, "Grep", pattern="pw", path=str(vault)),
+              decide(ctx, "Glob", pattern="*.md", path=str(vault)),
+              decide(ctx, "Grep", pattern="pw", path=str(home / "other")),
+              bash(ctx, f"git -C {vault} log")):
+        assert isinstance(d, ap.Deny), d
+    assert isinstance(decide(ctx, "Read", file_path=f"{vault}/Notes/a.md"), ap.Allow)
+    assert isinstance(decide(ctx, "Grep", pattern="p", path=str(vault / "Notes")), ap.Allow)
+
+
+def test_grep_glob_tricks_denied(env):
+    """R1 security #4: ripgrep glob syntax (braces, negation, classes, paths) cannot reach secret files."""
+    ctx, home, vault, _ = env
+    repo = _repo(home / "code/clean")
+    for glob in ("{.env,a}", "!*.md", "[.]env", "src/*", "**/*", "*.{py,env}"):
+        assert isinstance(decide(ctx, "Grep", pattern="K", path=str(repo), glob=glob), ap.Deny), glob
+    for glob in ("*.py", "src/**/*.py", "**/*.md"):
+        assert isinstance(decide(ctx, "Grep", pattern="K", path=str(repo), glob=glob), ap.Allow), glob
+
+
+@pytest.mark.parametrize("rel", [
+    ".config/svc/credentials.json", ".config/gcloud/access_tokens.db", ".azure/msal_token_cache.json",
+    ".zsh_history", ".bash_history", ".gmail-mcp/token.json", "code/x/oauth_tokens.json",
+    "Library/Application Support/Google/Chrome/Default/Login Data",
+    "Library/Application Support/Firefox/Profiles/x/logins.json", "Library/Safari/History.db",
+    "Library/Messages/chat.db", "Library/Mail/V10/x.emlx", ".claude/settings.json",
+    ".claude-work/settings.local.json", ".claude/projects/x/s.jsonl"])
+def test_more_credential_stores_denied(env, rel):
+    """R1 security #5: common credential and private-data stores are off limits."""
+    ctx, home = env[0], env[1]
+    assert isinstance(decide(ctx, "Read", file_path=str(home / rel)), ap.Deny), rel
+
+
+def test_mcp_confirm_shows_every_recipient(env):
+    """R1 security #7: the spoken summary names every recipient, or the call is denied."""
+    ctx = env[0]
+    d = ap.decide("mcp__mailbox__send_email", {"to": "boss@x.com", "bcc": "other@y.com", "subject": "hi",
+                                                "body": "long text " * 30}, ctx)
+    assert isinstance(d, ap.Confirm) and "other@y.com" in d.summary and "boss@x.com" in d.summary
+    d = ap.decide("mcp__cal__create_event", {"summary": "sync", "attendees": ["other@y.com"],
+                                              "description": "x" * 200}, ctx)
+    assert isinstance(d, ap.Confirm) and "other@y.com" in d.summary
+    for inp in ({"summary": "sync", "attendees": [{"email": "other@y.com"}]},
+                {"to": "a@x.com", "cc": [f"p{i}@example.com" for i in range(9)], "subject": "hi"},
+                {"to": "a@x.com", "extra": {"bcc": "hidden@y.com"}},
+                {"to": "a@x.com", "footer": "f" * 90}):
+        assert isinstance(ap.decide("mcp__mailbox__send_email", inp, ctx), ap.Deny), inp
+
+
+def test_risky_writes_denied_and_named(env):
+    """R1 security #8: startup files, git hooks and agent config are never written; others name the path."""
+    ctx, home, vault, repo = env
+    for p in (home / ".zshrc", home / ".bash_profile", home / "Library/LaunchAgents/x.plist",
+              repo / ".git/hooks/pre-commit", home / ".claude/settings.json", home / ".gitconfig"):
+        assert isinstance(decide(ctx, "Write", file_path=str(p), content="x"), ap.Deny), p
+    d = decide(ctx, "Write", file_path=str(repo / "new.py"), content="x")
+    assert isinstance(d, ap.Confirm) and "code/app/new.py" in d.summary
+
+
+def test_gh_gated_after_local_untrusted_read(env):
+    """Code #4: after any read (commit text, files), a new repo name or a gh api path needs Confirm."""
+    ctx = env[0]
+    ctx.read_untrusted_remote = True  # set by the gateway after any allowed tool call
+    assert isinstance(bash(ctx, "gh repo view -R evil/x"), ap.Confirm)
+    assert isinstance(bash(ctx, "gh api repos/evil/data"), ap.Confirm)
+    ctx.trusted_repos = frozenset({"o/r"})
+    assert isinstance(bash(ctx, "gh api repos/o/r/pulls"), ap.Allow)
+    assert isinstance(bash(ctx, "gh api repos/o/r2/pulls"), ap.Confirm)
+
+
+def test_other_bash_runs_exactly_what_was_spoken(env):
+    """Code #5: a confirmed plain command is re-joined so the shell expands no glob, brace or ~."""
+    d = bash(env[0], "ls ~/x* {a,b}")
+    assert isinstance(d, ap.Confirm) and d.updated_input["command"] == "ls '~/x*' '{a,b}'"

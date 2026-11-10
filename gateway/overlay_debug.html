@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Step-by-step log of recent Jarvis voice turns on this Mac.">
 <title>Jarvis voice debug</title>
 <style>
   /* Hallmark · shape: app screen · posture: restrained · hero: none · nav: header · footer: none */
@@ -13,7 +14,7 @@
          background: var(--bg); color: var(--fg); }
   header { position: sticky; top: 0; background: var(--bg-glass); border-bottom: 1px solid var(--line);
            padding: 12px 20px; display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap; }
-  h1 { font-size: 16px; margin: 0; }
+  h1 { font-size: 16px; margin: 0; text-wrap: balance; }
   #listener, #status { color: var(--dim); }
   main { padding: 12px 20px 40px; max-width: 980px; margin: 0 auto; }
   .turn { border: 1px solid var(--line); border-radius: 10px; margin: 12px 0; padding: 12px 16px; }
@@ -35,7 +36,7 @@
   <span id="listener">wake listener: …</span>
   <span id="status">connecting…</span>
 </header>
-<main id="turns"><p class="empty">No turns yet. Say "Hey Jarvis …".</p></main>
+<main id="turns"><p class="empty">No turns yet. Say “Hey Jarvis …”.</p></main>
 <script>
 "use strict";
 // Token comes from the URL fragment (never sent to the server), then leaves the address bar.
@@ -93,7 +94,7 @@ function render(data) {
 
   const root = document.getElementById("turns");
   root.replaceChildren();
-  if (!data.turns.length) { root.append(el("p", "empty", 'No turns yet. Say "Hey Jarvis …".')); return; }
+  if (!data.turns.length) { root.append(el("p", "empty", "No turns yet. Say “Hey Jarvis …”.")); return; }
   for (const turn of data.turns) {
     const box = el("section", "turn");
     const t0 = turn.steps.length ? turn.steps[0].at : 0;
@@ -101,7 +102,9 @@ function render(data) {
     const ol = el("ol");
     for (const s of turn.steps) {
       const failed = (s.step === "done" && s.error) || s.step === "no_speech" || s.step === "app_error";
-      const denied = s.step === "agent_tool" && s.decision === "deny";  // red row, not a failed turn
+      // red row, not a failed turn: a denied tool call, or a confirmation that did not go ahead
+      const denied = (s.step === "agent_tool" && s.decision === "deny")
+                     || (s.step === "agent_confirm" && s.state !== "asked" && s.state !== "allowed");
       if (failed) box.classList.add("err");
       const li = el("li", failed || denied ? "fail" : "");
       li.append(el("span", "step", LABEL[s.step] || s.step));

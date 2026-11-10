@@ -16,7 +16,7 @@ PHRASES = {
     "answer": "One moment.",
     "clear": "Cleared.",
     "generic": "Right away.",
-    "agent_git": "Checking the git history now.",
+    "agent_git": "Checking the git history.",
     "agent_gh": "Looking at GitHub.",
     "agent_notes": "Searching your notes.",
     "agent_mail": "Checking your mail.",
@@ -24,7 +24,7 @@ PHRASES = {
     "agent_code": "Looking at that file.",
     "progress_git": "Reading the git log.",
     "progress_gh": "Checking GitHub.",
-    "progress_notes": "Searching your notes.",
+    "progress_notes": "Reading your notes.",
     "progress_file": "Reading the file.",
     "progress_mail": "Reading your mail.",
     "progress_calendar": "Reading your calendar.",
@@ -33,6 +33,7 @@ PHRASES = {
     "timeout": "That took too long, so I stopped.",
     "busy": "Still working on the last one.",
     "not_confirmed": "Alright, I won't.",
+    "expired": "That request expired, so I didn't do it.",
 }
 
 _ACK_KEYS = {

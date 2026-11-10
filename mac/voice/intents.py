@@ -69,13 +69,16 @@ _DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|wha
                       r"|what date is it|tell me the date)(?: today| now| please)?$")
 # Owner-data agent work, first match in priority order picks the sub.
 _AGENT_SUBS = (
-    ("mail", re.compile(r"\b(?:inbox|unread|e-?mails?|my mail|any mail|new mail)\b")),
+    ("mail", re.compile(r"\b(?:inbox|unread|my e-?mails?|(?:any|new|latest|recent) (?:new )?e-?mails?"
+                        r"|e-?mails? from|my mail|any mail|new mail"
+                        r"|(?:read|check|search|find) (?:my |the )?(?:latest |last |recent |new )?e-?mails?)\b")),
     ("calendar", re.compile(r"\b(?:calendar|my meetings?|next meeting|meetings? (?:today|tomorrow|this week)"
                             r"|my schedule|agenda)\b")),
     ("notes", re.compile(r"\b(?:obsidian|vault|my notes|in my notes|note about)\b")),
-    ("gh", re.compile(r"\b(?:prs?|pull requests?|github|ci|workflow runs?|actions runs?|open issues"
-                      r"|github issues|issues? (?:on|in|for)|issue #?\d+|my repos|repos? on github|releases?)\b")),
-    ("git", re.compile(r"\b(?:commits?|committed|git history|commit history|file history"
+    ("gh", re.compile(r"\b(?:prs?|pull requests?|github|(?:the|my) ci|ci (?:runs?|status|checks?|builds?)"
+                      r"|workflow runs?|actions runs?|open issues|github issues|issues? (?:on|in|for)"
+                      r"|issue #?\d+|my repos|repos? on github|releases? (?:of|on|for|in)|my releases)\b")),
+    ("git", re.compile(r"\b(?:commits?|git history|commit history|file history"
                        r"|history of (?:this|the|that) (?:file|code|repo|function|project)|git log|commit log"
                        r"|blame|who changed|who wrote|what changed in|when did .* change|push my changes"
                        r"|my branch(?:es)?)\b")),
@@ -88,9 +91,15 @@ _AGENT_LEADS = ("what is ", "what's ", "what are ", "explain ", "define ",
                 "how does ", "how do ", "tell me about ")
 _AGENT_GUARD_RE = re.compile(r"\b(?:my|our|this|these|that|open|last|latest|recent|on my screen|the repo)\b")
 # Whole-utterance replies to the agent's confirmation question (or a cancel).
-_CONFIRM_RE = re.compile(r"(?:yes(?: please| go ahead| do it)?|yeah|yep|do it|go ahead|confirm(?:ed)?)",
-                         re.I)
-_CANCEL_RE = re.compile(r"(?:stop(?: it)?|cancel|never ?mind|forget it|that's enough|abort)", re.I)
+# Matched on the normalised whole utterance (lower case, commas gone): STT writes "Yes, please." and
+# "Yeah, do it". Politeness may trail; any other words make it a new request, never a yes.
+_POLITE = r"(?: (?:please|sir|jarvis|thanks|thank you))*"
+_CONFIRM_RE = re.compile(r"(?:(?:yes|yeah|yep)(?: (?:please|sir))?(?: (?:do it|go ahead))?|do it|go ahead"
+                         r"|confirm(?:ed)?)" + _POLITE)
+_CANCEL_RE = re.compile(r"(?:stop(?: it)?|cancel(?: it| that)?|never ?mind|forget it|that's enough|abort)"
+                        + _POLITE)
+_NO_RE = re.compile(r"(?:(?:no|nope)(?: (?:don't|do not|thanks|thank you|stop|cancel(?: it)?|leave it))?"
+                    r"|don't(?: do it)?|do not(?: do it)?)" + _POLITE)
 
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
@@ -155,14 +164,25 @@ def _clean(text: str) -> str:
     return _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
 
 
+def _answer(text: str) -> str:
+    """Whole-utterance form for yes/no/cancel: cleaned, lower case, punctuation as spaces."""
+    t = re.sub(r"[,;:.!?]+", " ", _clean(text).casefold().replace("’", "'"))
+    return " ".join(t.split())
+
+
 def is_confirm(text: str) -> bool:
     """Whole utterance is a yes to the agent's confirmation question."""
-    return bool(_CONFIRM_RE.fullmatch(_clean(text)))
+    return bool(_CONFIRM_RE.fullmatch(_answer(text)))
 
 
 def is_cancel(text: str) -> bool:
     """Whole utterance cancels the agent's work."""
-    return bool(_CANCEL_RE.fullmatch(_clean(text)))
+    return bool(_CANCEL_RE.fullmatch(_answer(text)))
+
+
+def is_no(text: str) -> bool:
+    """Whole utterance says no to the agent's confirmation question."""
+    return bool(_NO_RE.fullmatch(_answer(text)))
 
 
 def looks_incomplete(text: str) -> bool:
