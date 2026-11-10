@@ -374,3 +374,93 @@ def test_hardware_request_is_filed_under_the_router_session_id(gateway_server, m
                 assert (await http.post("/hwmode/request", json=body, headers=AUTH_HEADER)).status_code == 200
             return (await http.get("/hwmode/requests", headers=IOS_AUTH_HEADER)).json()
     assert asyncio.run(run()) == {"63a31002": "find the SATA drive", "unknown1": "find the SATA drive"}
+
+
+class _SlowCloseSession:
+    """Stands in for LeanSession: close() blocks the calling thread for 0.5 s."""
+    instances: list = []
+
+    def __init__(self, model, claude_bin=None):
+        self.turns = 0
+        self.closed = 0
+        _SlowCloseSession.instances.append(self)
+
+    def close(self):
+        import time
+        time.sleep(0.5)
+        self.closed += 1
+
+
+def test_start_closes_old_session_off_the_event_loop(gateway_server, monkeypatch):
+    """A slow session close must not stall the loop: the heartbeat gap stays small across `start`."""
+    from gateway import hwmode
+    _SlowCloseSession.instances = []
+    monkeypatch.setattr(hwmode, "LeanSession", _SlowCloseSession)
+    gaps: list[float] = []
+
+    async def heartbeat(stop: asyncio.Event):
+        last = asyncio.get_running_loop().time()
+        while not stop.is_set():
+            await asyncio.sleep(0.02)
+            now = asyncio.get_running_loop().time()
+            gaps.append(now - last)
+            last = now
+
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "one"}))
+                await ws.recv()
+                stop = asyncio.Event()
+                hb = asyncio.create_task(heartbeat(stop))
+                await asyncio.sleep(0.1)
+                gaps.clear()  # measure only across the second start (the first had nothing to close)
+                await ws.send(json.dumps({"type": "start", "task": "two"}))
+                await asyncio.wait_for(ws.recv(), 10)
+                stop.set()
+                await hb
+    asyncio.run(run())
+    print(f"max heartbeat gap: {max(gaps):.3f}s")
+    first = _SlowCloseSession.instances[0]
+    assert first.closed == 1  # closed exactly once, fully, before the new one existed
+    assert max(gaps) < 0.1, f"event loop stalled {max(gaps):.3f}s"
+
+
+def test_error_path_close_never_touches_a_newer_session(monkeypatch):
+    """The error path detaches on the loop, so a session assigned while its close is in flight stays open."""
+    import threading
+    from gateway import hwmode
+
+    class Stub:
+        def __init__(self, gate=None):
+            self.turns, self.closed, self.gate = 0, 0, gate
+            self.closing = threading.Event()
+
+        def close(self):
+            self.closing.set()
+            if self.gate:
+                self.gate.wait(5)
+            self.closed += 1
+
+    async def run():
+        gate = threading.Event()
+        old, new = Stub(gate), Stub()
+        conn = hwmode._Conn(None)
+        conn.session = old
+
+        async def boom(text, use_frame):
+            raise RuntimeError("brain crash")
+
+        async def quiet_send(msg):
+            pass
+
+        conn.ask, conn.send = boom, quiet_send
+        task = asyncio.create_task(conn._ask_safely("hi", False))
+        while not old.closing.is_set():
+            await asyncio.sleep(0.01)
+        conn.session = new  # a later `start` lands while the old close is still running
+        gate.set()
+        await task
+        assert old.closed == 1 and new.closed == 0
+        assert conn.session is new
+    asyncio.run(run())
