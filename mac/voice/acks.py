@@ -10,12 +10,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 PHRASES = {
-    "open": "On it.",
-    "look": "Let me look.",
-    "diff": "Pulling up the changes now.",
-    "answer": "One moment.",
-    "clear": "Cleared.",
-    "generic": "Right away.",
+    "open": "Of course.",
+    "look": "Having a look.",
+    "diff": "Pulling up the changes.",
+    "answer": "Just a moment.",
+    "clear": "All cleared.",
+    "generic": "Certainly.",
 }
 
 _ACK_KEYS = {

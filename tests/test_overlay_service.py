@@ -182,7 +182,7 @@ def test_stream_order_ack_first(client):
     # no voice: the ack degrades to text, still first, and the turn still ends done
     overlay.set_deps(make_deps(chunks=['{"say": "Hi."}\n']))
     events = turn(client, "what is the capital of France", conv_id="c2")
-    assert events[0] == {"type": "say", "text": "One moment."}
+    assert events[0] == {"type": "say", "text": "Just a moment."}
     assert events[-1]["type"] == "done"
 
 
@@ -204,7 +204,7 @@ def test_every_spoken_line_gets_audio_when_there_is_a_voice(client):
     overlay.set_deps(make_deps(synth=lambda text: (b"\x00\x00" * 10, 24000), apps={"safari": "Safari"}))
     events = turn(client, "open Safari", stt_final_ms=140.5)
     spoken = [e["text"] for e in events if e["type"] == "audio"]
-    assert spoken == ["On it.", "Opening Safari."]
+    assert spoken == ["Of course.", "Opening Safari."]
 
 
 def test_ground_turn_shape_and_check(client):
@@ -275,7 +275,7 @@ def test_answer_streams_cards_and_say(client):
     assert [e["type"] for e in events] == ["audio", "say", "audio", "card", "say", "audio", "done"]
     assert [e["card"]["title"] for e in events if e["type"] == "card"] == ["Why"]  # Bad card dropped
     assert says(events) == ["The quick answer.", "plain text line"]
-    assert events[0]["text"] == "One moment."  # the ack audio
+    assert events[0]["text"] == "Just a moment."  # the ack audio
 
 
 # --- untrusted context: reference-gated, scrubbed, tool-less ------------------
