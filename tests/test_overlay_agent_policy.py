@@ -385,5 +385,5 @@ def test_reason_codes_and_mcp_labels():
     assert ap.reason_code("git only runs in repositories in the owner's home folder") == "place"
     assert ap.reason_code("the WebFetch tool is not available") == "tool"
     assert ap.reason_code("something new") == "other"
-    assert ap.log_label("mcp__multi-gmail__search_emails", {}) == "mcp__multi-gmail__search_emails"
+    assert ap.log_label("mcp__mail-reader__search_emails", {}) == "mcp__mail-reader__search_emails"
     assert ap.log_label("mcp__x__a b", {}) == "unknown tool"

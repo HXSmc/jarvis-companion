@@ -556,7 +556,7 @@ def kind_of(tool_name: str, tool_input: dict, ctx: Ctx) -> str:
 def log_label(tool_name: str, tool_input: dict) -> str:
     """What the logs and the debug page may show: the tool and git/gh subcommand, never arguments."""
     if tool_name != "Bash":
-        # MCP server names carry hyphens (mcp__multi-gmail__search): a name, never an argument
+        # MCP server names carry hyphens (mcp__mail-reader__search): a name, never an argument
         return tool_name if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", tool_name or "") else "unknown tool"
     t = _tokens(tool_input)
     if t[:2] == ["git", "-C"] and len(t) >= 4 and re.fullmatch(r"[a-z-]{1,20}", t[3]):
