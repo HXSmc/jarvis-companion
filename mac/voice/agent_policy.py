@@ -323,7 +323,8 @@ def _bash(inp: dict, ctx: Ctx) -> Allow | Deny | Confirm:
         if len(parts) > 4:
             return Deny("too many steps in one command")
     if any(_METACHARS & set(p) for p in parts):
-        return Deny("one plain command per call: no pipes, redirects, substitutions or ;")
+        return Deny("one plain command per call: no pipes, redirects, substitutions, ; or newlines. "
+                    "Write a commit message as -m 'one short line'")
     try:
         token_lists = [shlex.split(p) for p in parts]
     except ValueError:
@@ -555,10 +556,28 @@ def kind_of(tool_name: str, tool_input: dict, ctx: Ctx) -> str:
 def log_label(tool_name: str, tool_input: dict) -> str:
     """What the logs and the debug page may show: the tool and git/gh subcommand, never arguments."""
     if tool_name != "Bash":
-        return tool_name if re.fullmatch(r"[A-Za-z0-9_]{1,80}", tool_name or "") else "unknown tool"
+        # MCP server names carry hyphens (mcp__multi-gmail__search): a name, never an argument
+        return tool_name if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", tool_name or "") else "unknown tool"
     t = _tokens(tool_input)
     if t[:2] == ["git", "-C"] and len(t) >= 4 and re.fullmatch(r"[a-z-]{1,20}", t[3]):
         return f"Bash git {t[3]}"
     if t and t[0] == "gh" and len(t) >= 2 and re.fullmatch(r"[a-z-]{1,20}", t[1]):
         return f"Bash gh {t[1]}"
     return "Bash other"
+
+
+_REASON_CODES = (  # first match wins; the debug page shows the code, never the reason's text
+    ("secret", ("secret", "off limits")),
+    ("form", ("one plain command", "could not parse", "use the form", "too long", "too many steps",
+              "split it", "a chain must", "no command given", "bad tool input")),
+    ("option", ("option", "browser", "another host", "not a valid owner")),
+    ("place", ("home folder", "not a git repository", "inside", "vault", "filters", "one repository",
+               "gh api only", "startup")),
+    ("tool", ("not available",)),
+)
+
+
+def reason_code(reason: str) -> str:
+    """A fixed word for why a call was denied (form | secret | option | place | tool | other)."""
+    low = (reason or "").casefold()
+    return next((code for code, keys in _REASON_CODES if any(k in low for k in keys)), "other")

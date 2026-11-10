@@ -640,7 +640,8 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                             f"git diff {base}:\n{diff_text}")
 
         elif intent.kind == "agent":
-            async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step):
+            async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step,
+                                           sub=intent.sub):
                 yield event
 
         else:  # answer
@@ -855,6 +856,7 @@ AGENT_WALL_S = 120  # hard limit per agent turn
 AGENT_TICK_S = 1.0  # how often the stream loop wakes up to check the clock
 KEEPALIVE_S = 15  # the app's URLSession idles out at 90 s; stay far below
 PROGRESS_GAP_S = 4  # at most one templated progress line per 4 s
+FIRST_PROGRESS_S = 1.5  # no tool call yet this long after the agent started: speak the sub's progress line
 CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
 CONFIRM_POLL_S = 0.5
 EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told it came too late
@@ -873,10 +875,14 @@ class AgentRun:
     request_id: str | None = None
     updated_input: dict | None = None
     deadline: float = 0.0
-    tool: tuple[str, float] | None = None  # (log label, clock) of the tool now running
+    tool: tuple[str, float, str] | None = None  # (log label, clock, kind_of family) of the tool now running
     confirm_label: str = ""  # log label of the tool call waiting for a yes
     confirm_summary: str = ""  # what the owner was asked, for the card that replaces the Confirm card
     cancelled: bool = False
+    opening_key: str | None = None  # progress line the 1.5 s timer speaks once if no tool call came first
+    opening_said: str | None = None  # the line it spoke; a tool's progress line never repeats it
+    screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
+    lines_sent: bool = False
 
 
 # conv_id -> run waiting for the owner's spoken yes (one per conv); conv_id -> run streaming now.
@@ -967,7 +973,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
             await asyncio.to_thread(run.session.respond, run.request_id, True, run.updated_input)
             run.request_id = run.updated_input = None
             run.started = deps.clock()
-            run.tool = (run.confirm_label, deps.clock())
+            run.tool = (run.confirm_label, deps.clock(), "")
             async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
                 yield ev
             yield _finish(body, deps, metrics, said, start)
@@ -1083,8 +1089,48 @@ def _agent_lines(spec, run: AgentRun) -> dict | None:
     return {"type": "lines", "file": str(target), "ranges": out}
 
 
+# "the code on my screen", "this file": the request is about the file in front of the owner.
+_SCREEN_FILE_RE = re.compile(r"\b(?:on (?:my|the) screen|this (?:file|code|function|class|method))\b", re.I)
+
+
+def _screen_file(body: TurnBody, repo: Path | None, sub: str) -> str | None:
+    """Repo-relative path of the file on screen when a git/code request points at it, else None."""
+    doc = body.screen.document if body.screen is not None else None
+    if repo is None or not doc or sub not in ("git", "code") or not _SCREEN_FILE_RE.search(body.text):
+        return None
+    root, target = Path(repo).resolve(), Path(doc).expanduser().resolve()
+    return str(target.relative_to(root)) if target.is_relative_to(root) and target.is_file() else None
+
+
+def _last_change(run: AgentRun) -> tuple[dict | None, dict | None]:
+    """(diff card, lines event) for the newest commit touching the file on screen, up to the working tree.
+
+    Line numbers are the working tree's, so they match the editor. Runs git with the defused prefix.
+    """
+    rel = run.screen_file
+    if not rel or run.repo is None:
+        return None, None
+    # Same gate as the agent's own git calls: no filters, no vault or secret-holding repo, no secret file.
+    probe = shlex.join(["git", "-C", str(run.repo), "diff", "HEAD", "--", rel])
+    if not isinstance(agent_policy.decide("Bash", {"command": probe}, run.ctx), agent_policy.Allow):
+        return None, None
+    out = gitdiff._git(run.repo, "log", "-1", "--format=%H", "--", rel)
+    sha = out.split()[0] if out else None
+    if not sha or not gitdiff._git(run.repo, "rev-parse", "--verify", "--quiet", f"{sha}^"):
+        return None, None  # never committed, or its first commit: nothing to compare against
+    hunks = [h for h in gitdiff.hunks(run.repo, f"{sha}^") if h["file"] == rel]
+    if not hunks:
+        return None, None
+    spans = [(h["start"], h["start"] + max(h["count"], 1) - 1) for h in hunks]
+    card = hud.validate_card({"type": "info", "title": f"Changed in {Path(rel).name}",
+                              "body": [f"Since {sha[:8]}^: {len(hunks)} changed part{'s' if len(hunks) > 1 else ''}",
+                                       *[f"Lines {a}-{b}" if b > a else f"Line {a}" for a, b in spans]]})
+    lines = _agent_lines({"file": rel, "ranges": [list(s) for s in spans[:20]]}, run)
+    return card, lines
+
+
 async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dict, said: list[str],
-                      start: float, on_step) -> AsyncIterator[dict]:
+                      start: float, on_step, sub: str = "") -> AsyncIterator[dict]:
     pool = deps.agent_conversations
     if pool is None:
         async for ev in _speak("My tools aren't available right now.", deps):
@@ -1124,7 +1170,9 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     if origin and not ctx.read_untrusted_remote:
         ctx.trusted_repos = ctx.trusted_repos | {origin}
     run = AgentRun(conv_id=body.conv_id, session=session, ctx=ctx, repo=repo, started=deps.clock(),
-                   last_progress=deps.clock())  # the ack just played: no progress line in the next 4 s
+                   last_progress=deps.clock(),  # the ack just played: no tool progress line in the next 4 s
+                   opening_key=acks.progress_key({"code": "file"}.get(sub, sub)),
+                   screen_file=await asyncio.to_thread(_screen_file, body, repo, sub))
     await asyncio.to_thread(session.send_user, "\n\n".join(parts))
     async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
         yield ev
@@ -1150,7 +1198,23 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     yield {"type": "card", "card": card}
                 finished = True
                 return
-            ev = await asyncio.to_thread(run.session.next_event, AGENT_TICK_S)
+            wait = AGENT_TICK_S
+            if run.opening_key is not None:  # no tool call yet: speak the sub's line at 1.5 s, once
+                due = run.started + FIRST_PROGRESS_S - deps.clock()
+                if due <= 0:
+                    key, run.opening_key = run.opening_key, None
+                    run.opening_said = key
+                    run.last_progress = deps.clock()
+                    if metrics.get("agent_first_progress_s") is None:
+                        metrics["agent_first_progress_s"] = round(deps.clock() - start, 3)
+                    if on_step:
+                        on_step("agent_progress", text=acks.PHRASES.get(key, ""))
+                    async for out in _line(key, deps):
+                        yield out
+                    last_sent = deps.clock()
+                else:
+                    wait = min(wait, due)
+            ev = await asyncio.to_thread(run.session.next_event, wait)
             if run.cancelled:  # "stop" from another request; it already spoke
                 finished = True
                 return
@@ -1162,11 +1226,14 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
             if ev is None:
                 raise RuntimeError("agent session ended")
             kind = ev.get("type")
+            if metrics.get("agent_first_token_s") is None and kind in ("stream_event", "assistant"):
+                metrics["agent_first_token_s"] = round(deps.clock() - start, 3)  # the model's first output
             if kind == "user" and run.tool is not None:  # tool result arrived (content never logged)
-                label, began = run.tool
+                label, began, family = run.tool
                 run.tool = None
                 if on_step:
-                    on_step("agent_tool", tool=label, decision="allow", ms=round((deps.clock() - began) * 1000))
+                    on_step("agent_tool", tool=label, decision="allow", kind=family,
+                            ms=round((deps.clock() - began) * 1000))
             elif kind == "control_request":
                 req = ev.get("request") if isinstance(ev.get("request"), dict) else {}
                 if req.get("subtype") != "can_use_tool":
@@ -1177,14 +1244,17 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 # git subprocesses and tree walks: never on the event loop
                 decision = await asyncio.to_thread(agent_policy.decide, name, tool_input, run.ctx)
                 label = agent_policy.log_label(name, tool_input)
+                family = await asyncio.to_thread(agent_policy.kind_of, name, tool_input, run.ctx)
                 now = deps.clock()
+                run.opening_key = None  # a tool call came first: its own progress rules apply
+                if metrics.get("agent_first_tool_s") is None:
+                    metrics["agent_first_tool_s"] = round(now - start, 3)
                 if metrics.get("agent_first_progress_s") is None:
                     metrics["agent_first_progress_s"] = round(now - start, 3)
-                if isinstance(decision, agent_policy.Allow) and (
+                key = acks.progress_key(family)
+                if isinstance(decision, agent_policy.Allow) and key != run.opening_said and (
                         run.last_progress is None or now - run.last_progress >= PROGRESS_GAP_S):
                     run.last_progress = now
-                    kind = await asyncio.to_thread(agent_policy.kind_of, name, tool_input, run.ctx)
-                    key = acks.progress_key(kind)
                     if on_step:
                         on_step("agent_progress", text=acks.PHRASES.get(key, ""))
                     async for out in _line(key, deps):
@@ -1195,15 +1265,16 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         run.ctx.trusted_repos = run.ctx.trusted_repos | {repo}
                     # Any result (file, commit text, PR, mail) is text the agent did not write.
                     run.ctx.read_untrusted_remote = True
-                    run.tool = (label, deps.clock())
+                    run.tool = (label, deps.clock(), family)
                     await asyncio.to_thread(run.session.respond, rid, True, decision.updated_input)
                 elif isinstance(decision, agent_policy.Deny):
                     if on_step:
-                        on_step("agent_tool", tool=label, decision="deny", ms=None)
+                        on_step("agent_tool", tool=label, decision="deny", kind=family,
+                                reason=agent_policy.reason_code(decision.reason), ms=None)
                     await asyncio.to_thread(run.session.respond, rid, False, None, decision.reason)
                 else:  # Confirm: ask the owner, end this response, keep the CLI waiting
                     if on_step:
-                        on_step("agent_tool", tool=label, decision="confirm", ms=None)
+                        on_step("agent_tool", tool=label, decision="confirm", kind=family, ms=None)
                         on_step("agent_confirm", state="asked")
                     run.request_id, run.updated_input = rid, decision.updated_input
                     run.confirm_label, run.confirm_summary = label, decision.summary
@@ -1231,6 +1302,12 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 for line in str(ev.get("result") or "").splitlines():
                     async for out in _agent_flush(line, run, deps, metrics, said, start):
                         yield out
+                if run.screen_file and not run.lines_sent:  # "what changed" in the file on screen
+                    card, lines = await asyncio.to_thread(_last_change, run)
+                    if card:
+                        yield {"type": "card", "card": card}
+                    if lines:
+                        yield lines
                 if len(said) == spoke:
                     async for out in _speak("I couldn't get an answer for that.", deps):
                         yield out
@@ -1281,6 +1358,7 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         yield {"type": "shape", "shape": shape}
     lines = await asyncio.to_thread(_agent_lines, obj.get("lines"), run) if "lines" in obj else None
     if lines:
+        run.lines_sent = True
         yield lines
 
 
@@ -1296,7 +1374,7 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
                       stt=body.stt, followup=body.followup)
         debug_log.add(rec, "transcribed", text=body.text)
         start = time.monotonic()
-        cards = shapes = 0
+        cards = shapes = lines = 0
         first_audio_ms = None
         last_text = spoke = None
         on_step = lambda step, **fields: debug_log.add(rec, step, **fields)  # noqa: E731
@@ -1315,11 +1393,14 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
                 cards += 1
             elif kind == "shape":
                 shapes += 1
+            elif kind == "lines":
+                lines += 1
             elif kind == "done":
                 agent_metrics = {k: event["metrics"][k] for k in
-                                 ("agent_first_progress_s", "agent_total_s", "agent_cold")
+                                 ("agent_first_progress_s", "agent_first_token_s", "agent_first_tool_s",
+                                  "agent_total_s", "agent_cold")
                                  if k in event["metrics"]}
-                debug_log.add(rec, "done", cards=cards, shapes=shapes, error=event["error"],
+                debug_log.add(rec, "done", cards=cards, shapes=shapes, lines=lines, error=event["error"],
                               first_audio_ms=first_audio_ms, total_s=event["metrics"]["total_s"],
                               **agent_metrics)
             yield json.dumps(event) + "\n"

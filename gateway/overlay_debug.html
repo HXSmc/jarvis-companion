@@ -70,14 +70,17 @@ function describe(s) {
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
-    case "agent_tool": return `${s.tool} · ${s.decision}` + (s.ms != null ? ` · ${s.ms} ms` : "");
+    case "agent_tool": return `${s.tool} · ${s.decision}` + (s.kind ? ` · ${s.kind}` : "") +
+                              (s.reason ? ` · ${s.reason}` : "") + (s.ms != null ? ` · ${s.ms} ms` : "");
     case "agent_confirm": return s.state;
-    case "done": return `${s.cards} cards, ${s.shapes} shapes` +
+    case "done": return `${s.cards} cards, ${s.shapes} shapes` + (s.lines ? `, ${s.lines} line highlights` : "") +
                         (s.first_audio_ms != null ? `, first audio ${s.first_audio_ms} ms` : ", no audio") +
                         (s.total_s != null ? `, total ${s.total_s} s` : "") +
                         (s.error ? `, ERROR: ${s.error}` : "") +
                         (s.agent_first_progress_s != null || s.agent_total_s != null
                           ? `, first progress ${s.agent_first_progress_s ?? "?"} s, agent ${s.agent_total_s ?? "?"} s` : "") +
+                        (s.agent_first_token_s != null ? `, first model token ${s.agent_first_token_s} s` : "") +
+                        (s.agent_first_tool_s != null ? `, first tool ${s.agent_first_tool_s} s` : "") +
                         (s.agent_cold ? ", cold" : "");
     default: return s.detail || "";
   }

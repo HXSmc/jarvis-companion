@@ -632,3 +632,167 @@ def test_expired_entries_are_pruned(client):
     assert _wait(lambda: "pr1" in overlay._expired)
     assert "gone" not in overlay._expired
     overlay._expired.pop("pr1", None)
+
+
+# --- Round 3 (Mac run 3 findings) --------------------------------------------
+
+
+def test_confirm_turn_event_sequence_for_the_app(client):
+    """R3 #1: what the app needs to draw the Confirm card: the question, then the card, then `done`.
+
+    The Mac run saw the card count on `done` but no card on screen. The cause was the macOS
+    notification banner over the top of the card column; this pins the wire order the app relies on.
+    """
+    clock = Clock()
+    pcm = b"\x00\x00" * 2400
+    pool, deps = setup(clock, push_script(clock), ack_synth=lambda text: (pcm, 24000))
+    events = turn(client, "commit and push my changes", conv_id="seq1")
+    kinds = [e["type"] for e in events]
+    assert kinds[0] == "audio" and events[0]["text"] == overlay.acks.PHRASES["agent_git"]
+    assert "clear" not in kinds  # nothing may wipe the HUD in a confirm turn
+    asked = next(i for i, e in enumerate(events) if e["type"] in ("say", "audio")
+                 and e["text"].startswith("Shall I"))
+    card = next(i for i, e in enumerate(events) if e["type"] == "card")
+    assert asked < card == len(events) - 2 and kinds[-1] == "done"
+    assert events[card]["card"] == {"id": "agentconfirm", "type": "info", "title": "Confirm",
+                                    "body": [events[card]["card"]["body"][0], "Say yes to go ahead, or no."]}
+    assert events[card]["card"]["body"][0].startswith("run git push in ")
+    # The yes turn replaces that same card first, before anything is spoken.
+    events = turn(client, "yes", conv_id="seq1")
+    assert events[0] == {"type": "card", "card": {"id": "agentconfirm", "type": "info",
+                                                  "title": "Going ahead", "body": [events[0]["card"]["body"][0]]}}
+    assert events[-1]["type"] == "done" and "Pushed." in says(events)
+
+
+class SlowFirstTool(FakeAgent):
+    """Real wait semantics: an empty poll moves the fake clock by the timeout asked for."""
+
+    def __init__(self, clock, script, release_after):
+        super().__init__(clock, script=script)
+        self.release_after = release_after
+        self.timeouts: list[float] = []
+
+    def send_user(self, text):
+        super().send_user(text)
+        self.release = self.clock.now + self.release_after
+
+    def next_event(self, timeout):
+        self.timeouts.append(timeout)
+        if self.clock.now < self.release:
+            self.clock.now += min(timeout, self.release - self.clock.now)
+            return False
+        return super().next_event(timeout)
+
+
+def test_first_progress_line_on_a_timer_when_the_model_is_slow(client):
+    """R3 #3: the model's first tool call came 9.6 s in; the sub's progress line plays at 1.5 s, once."""
+    clock = Clock()
+    script = [can_use("r1", "Bash", {"command": f"gh pr list -R o/r"}), tool_result("[]"),
+              result({"say": "No open pull requests."})]
+    made = []
+    pool, deps = setup(clock, lambda: made.append(SlowFirstTool(clock, script, 9.6)) or made[-1])
+    events = turn(client, "any open PRs on jarvis-companion", conv_id="tm1")
+    line = overlay.acks.PHRASES["progress_gh"]
+    assert says(events).count(line) == 1
+    m = events[-1]["metrics"]
+    assert 1.5 <= m["agent_first_progress_s"] < 2.0, m
+    assert m["agent_first_tool_s"] >= 9.6, m
+    assert made[0].timeouts[0] <= overlay.FIRST_PROGRESS_S  # the loop wakes for the timer, not a 1 s tick
+    rows = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"]
+    assert rows[0]["agent_first_tool_s"] >= 9.6 and rows[0]["agent_first_progress_s"] < 2.0
+
+
+def test_no_timer_line_when_a_tool_call_comes_first(client):
+    """R3 #3: a fast first tool call (criterion 23's 0.5 s) cancels the timer line."""
+    clock = Clock()
+    script = [can_use("r1", "Bash", {"command": f"git -C {REPO} log -5"}), tool_result("log"),
+              result({"say": "Two commits."})]
+    pool, deps = setup(clock, lambda: SlowFirstTool(clock, script, 0.5))
+    events = turn(client, "who changed this file last", conv_id="tm2")
+    progress = {overlay.acks.PHRASES[k] for k in overlay.acks.PHRASES if k.startswith("progress_")}
+    assert not progress & set(says(events))
+    assert events[-1]["metrics"]["agent_first_progress_s"] == events[-1]["metrics"]["agent_first_tool_s"]
+
+
+def test_history_of_file_on_screen_gets_diff_card_and_lines(client):
+    """R3 #2: "the code on my screen" -> the host adds a diff card and a lines event for that file."""
+    repo = REPO
+    (repo / "app.py").write_text("print(1)\nprint(20)\nprint(3)\nprint(4)\n")
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "commit", "-qam", "second"], cwd=repo, check=True)
+    clock = Clock()
+    pool, deps = setup(clock, lambda: FakeAgent(clock, script=[
+        result({"say": "Two commits: 'second' and 'first'. The newest changed line 2 and added line 4."})]))
+    events = turn(client, "research the git history of the code on my screen and tell me what changed",
+                  conv_id="hs1", screen={"app": "Code", "document": str(repo / "app.py")})
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert cards and cards[-1]["title"] == "Changed in app.py"
+    assert cards[-1]["body"][1:] == ["Line 2", "Line 4"]
+    lines = [e for e in events if e["type"] == "lines"]
+    assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[2, 2], [4, 4]]}]
+    done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"]
+    assert done[0]["lines"] == 1
+    # Not about the screen ("commit and push"), or the model drew its own lines: no host diff.
+    events = turn(client, "what changed in the last commit", conv_id="hs2",
+                  screen={"app": "Code", "document": str(repo / "app.py")})
+    assert not [e for e in events if e["type"] == "lines"]
+
+
+def test_prompt_commit_form_passes_policy_and_heredoc_is_a_form_deny(client):
+    """R3 #4: the Mac's first `git commit` was denied (shell syntax) and the old prompt said never retry.
+
+    The prompt's one-call commit-and-push form must be a single Confirm the owner hears in full; the
+    heredoc form Claude Code's Bash tool teaches is denied with a `form` reason the model may fix once.
+    """
+    ctx = agent_policy.Ctx(home=str(Path.home()), vault=None, cwd="")
+    chain = (f"git -C {REPO} add a.txt b.txt && git -C {REPO} commit -m 'Update a.txt and add b.txt'"
+             f" && git -C {REPO} push")
+    d = agent_policy.decide("Bash", {"command": chain}, ctx)
+    assert isinstance(d, agent_policy.Confirm) and len(d.summary) <= 120
+    assert d.summary == "run git add a.txt b.txt, commit -m 'Update a.txt and add b.txt', push in repo"
+    assert "git -C REPO add <files> && git -C REPO commit -m 'One short line' && git -C REPO push".replace(
+        "REPO", "<repo>") in agent.AGENT_PROMPT
+    heredoc = f"git -C {REPO} commit -m \"$(cat <<'EOF'\nUpdate a.txt\n\nCo-Authored-By: x\nEOF\n)\""
+    d = agent_policy.decide("Bash", {"command": heredoc}, ctx)
+    assert isinstance(d, agent_policy.Deny) and agent_policy.reason_code(d.reason) == "form"
+    assert "try once more" in agent.AGENT_PROMPT and "Never ask him for permission" in agent.AGENT_PROMPT
+
+
+def test_deny_row_shows_reason_code_and_kind_not_input(client):
+    """R3 #4/#5: the debug page says why a call was denied (a fixed word) and what kind it was."""
+    clock = Clock()
+    heredoc = f"git -C {REPO} commit -m \"$(cat <<'EOF'\nSECRET-MSG\nEOF\n)\""
+    pool, deps = setup(clock, lambda: FakeAgent(clock, script=[can_use("r1", "Bash", {"command": heredoc})],
+                                                after={"deny": [result({"say": "I couldn't commit."})]}))
+    turn(client, "commit my changes", conv_id="dr1")
+    snap = json.dumps(overlay.debug_log.snapshot())
+    rows = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "agent_tool"]
+    assert rows == [{**rows[0], "tool": "Bash git commit", "decision": "deny", "kind": "git", "reason": "form"}]
+    assert "SECRET-MSG" not in snap and "EOF" not in snap
+
+
+def test_secrets_refusal_is_the_fixed_line():
+    """R3 #5: the model refuses a passwords ask before any tool; the line it must say is fixed."""
+    assert agent.SECRETS_LINE == "Your passwords and keys are off limits to me, sir."
+    assert len(agent.SECRETS_LINE.split()) <= 12
+    assert f'{{"say": "{agent.SECRETS_LINE}"}}' in agent.AGENT_PROMPT
+
+
+def test_host_diff_goes_through_the_policy(client):
+    """R3 #2: the host's own diff of the file on screen obeys the agent policy (secret file, filters)."""
+    repo = REPO
+    for text in ("A=1\n", "A=2\n"):
+        (repo / ".env").write_text(text)
+        subprocess.run(["git", "add", "-f", ".env"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "env"], cwd=repo, check=True)
+    clock = Clock()
+    pool, deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two commits."})]))
+    events = turn(client, "what changed in this file", conv_id="hp1",
+                  screen={"app": "Code", "document": str(repo / ".env")})
+    assert not [e for e in events if e["type"] == "lines"]
+    assert not [e for e in events if e["type"] == "card" and e["card"]["title"].startswith("Changed in")]
+    (repo / "app.py").write_text("print(9)\n")
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "commit", "-qam", "app"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "filter.x.clean", "cat"], cwd=repo, check=True)
+    events = turn(client, "what changed in this file", conv_id="hp2",
+                  screen={"app": "Code", "document": str(repo / "app.py")})
+    assert not [e for e in events if e["type"] == "lines"]

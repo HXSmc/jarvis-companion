@@ -374,3 +374,16 @@ def test_git_remote_list_is_read_only(env):
     for cmd in (f"git -C {r} remote add x https://example.com/x", f"git -C {r} remote set-url origin y",
                 f"git -C {r} remote show origin", f"git -C {r} remote update"):
         assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
+
+
+def test_reason_codes_and_mcp_labels():
+    """R3: deny reasons map to fixed words for the debug page; hyphenated MCP names keep their name."""
+    assert ap.reason_code("one plain command per call: no pipes") == "form"
+    assert ap.reason_code("that file holds secrets and is off limits") == "secret"
+    assert ap.reason_code("that search would read secret files; use a plain glob") == "secret"
+    assert ap.reason_code("git option --output is not allowed") == "option"
+    assert ap.reason_code("git only runs in repositories in the owner's home folder") == "place"
+    assert ap.reason_code("the WebFetch tool is not available") == "tool"
+    assert ap.reason_code("something new") == "other"
+    assert ap.log_label("mcp__multi-gmail__search_emails", {}) == "mcp__multi-gmail__search_emails"
+    assert ap.log_label("mcp__x__a b", {}) == "unknown tool"
