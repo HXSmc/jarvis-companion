@@ -38,7 +38,6 @@ final class AppController {
         audio.onLevel = { [weak self] level in self?.model.level = level }
         audio.onFirstAudio = { [weak self] in self?.markFirstAudio() }
         audio.onDrain = { [weak self] in self?.handleAudioDrained() }
-        speech.onLevel = { [weak self] level in self?.model.level = level }
 
         Task { await launch() }
     }

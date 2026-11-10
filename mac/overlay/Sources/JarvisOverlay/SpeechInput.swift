@@ -9,11 +9,6 @@ import OverlayCore
 /// macOS 26 SpeechTranscriber when available, SFSpeechRecognizer otherwise.
 @MainActor
 final class SpeechInput {
-    /// Mic level 0...1 for the orb, throttled to 20 Hz, delivered on main.
-    var onLevel: ((Double) -> Void)? {
-        didSet { tap.setLevelHandler(onLevel) }
-    }
-
     private let engine = AVAudioEngine()
     private let tap = MicTap()
     private var isRunning = false
@@ -429,13 +424,11 @@ private final class TranscriptBox: @unchecked Sendable {
 
 /// Tap buffers are only valid inside the callback, so everything is copied.
 /// State is lock-guarded: the tap callback runs on the audio thread while
-/// sink/level handler swaps and ring snapshots happen on main.
+/// sink swaps and ring snapshots happen on main.
 private final class MicTap: @unchecked Sendable {
     private let lock = NSLock()
     private var ring: [(buffer: AVAudioPCMBuffer, at: Date)] = []
     private var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
-    private var levelHandler: ((Double) -> Void)?
-    private var lastLevelAt = Date.distantPast
     private var vad = VoiceActivity()
     private var voicedAt: Date?
 
@@ -452,23 +445,13 @@ private final class MicTap: @unchecked Sendable {
             let copy = Self.copy(buffer)
             let now = Date()
             var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
-            var handler: ((Double) -> Void)?
-            var level: Double?
             let rms = Self.rms(copy)
             lock.lock()
             if vad.isVoiced(rms: rms) { voicedAt = now }
             ring.append((copy, now))
             ring.removeAll { now.timeIntervalSince($0.at) > 2 }
             sink = self.sink
-            if now.timeIntervalSince(lastLevelAt) >= 0.05 {
-                lastLevelAt = now
-                level = rms
-                handler = levelHandler
-            }
             lock.unlock()
-            if let level, let handler {
-                DispatchQueue.main.async { handler(level) }
-            }
             sink?(copy, now)
         }
     }
@@ -476,12 +459,6 @@ private final class MicTap: @unchecked Sendable {
     func setSink(_ newSink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?) {
         lock.lock()
         sink = newSink
-        lock.unlock()
-    }
-
-    func setLevelHandler(_ newHandler: ((Double) -> Void)?) {
-        lock.lock()
-        levelHandler = newHandler
         lock.unlock()
     }
 
