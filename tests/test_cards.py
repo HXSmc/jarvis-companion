@@ -165,6 +165,15 @@ def test_unknown_kind_and_stale_need_id_refused():
     assert resp.status_code == 404
 
 
+def test_hardware_ask_roundtrip():
+    resp = _event({"session": "s-done", "action": "ask", "kind": "hardware", "text": "Reseat the SATA cable"})
+    assert resp.status_code == 200, resp.text
+    need = _sessions()["s-done"]["card"]["need"]
+    assert need["kind"] == "hardware" and need["question"] == "Reseat the SATA cable"
+    assert cards.valid_answer(need, "done") is True
+    assert cards.valid_answer(need, "OK") is False
+
+
 def test_clear_removes_the_ask():
     _event({"session": "s-done", "action": "ask", "kind": "yesno", "text": "Restart?"})
     _event({"session": "s-done", "action": "clear"})
@@ -218,6 +227,15 @@ def test_same_name_file_replaces_the_old_one(tmp_path):
     second = _call("POST", "/cards/file?session=s-done&name=plan.md", headers=SHARED, content=b"v2").json()["file_id"]
     assert [f["id"] for f in _sessions()["s-done"]["card"]["files"]] == [second]
     assert not (tmp_path / "card_files" / "s-done" / f"{first}.md").exists()
+
+
+def test_post_need_and_save_file_helpers():
+    need = cards.post_need("s-done", "info", "Merged, nothing to do")
+    assert len(need["id"]) == 12 and all(c in "0123456789abcdef" for c in need["id"])
+    fid = cards.save_file("s-done", b"# helper", "helper.md", "Helper", "text/markdown")
+    assert len(fid) == 32 and all(c in "0123456789abcdef" for c in fid)
+    found = cards.file_path("s-done", fid)
+    assert found is not None and found[0].read_bytes() == b"# helper" and found[1] == "text/markdown"
 
 
 def test_card_question_replaces_router_prompt_line():

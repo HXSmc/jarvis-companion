@@ -4,7 +4,8 @@
 usage: jarvis-hw-request "what needs doing, e.g. reseat the SATA data cable on the SSD"
        [--session ID]   default: $CLAUDE_CODE_SESSION_ID (the calling Claude session)
 
-Puts an "Open Hardware Mode" button on this session's card in the Jarvis app.
+Puts an "Open Hardware Mode" button on this session's card in the Jarvis app;
+it also sets a `hardware` ask on the card (the gateway does that server-side).
 When the owner hangs up, the app posts a summary back into this session.
 The shared gateway token is read in-process from the vault and never printed.
 """

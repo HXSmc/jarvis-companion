@@ -87,9 +87,9 @@ jobs:
             || echo "speech grant via TCC.db failed: voice-in tests will skip"
           sqlite3 "$DB" "SELECT service, auth_value FROM access WHERE client='$APP'" || true
           xcrun simctl shutdown "$UDID" && xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b > /dev/null
-          # Card screenshots (CardSnapshotTests) land here; TEST_RUNNER_ passes it into the test process.
-          mkdir -p card-shots
-          TEST_RUNNER_CARD_SHOTS_DIR="$PWD/card-shots" xcodebuild test \
+          # Card + HUD screenshots (CardSnapshotTests, HUDCardSnapshotTests) land here; TEST_RUNNER_ passes them into the test process.
+          mkdir -p card-shots hud-shots
+          TEST_RUNNER_CARD_SHOTS_DIR="$PWD/card-shots" TEST_RUNNER_HUD_SHOTS_DIR="$PWD/hud-shots" xcodebuild test \
             -project ios/JarvisCompanion/JarvisCompanion.xcodeproj \
             -scheme JarvisCompanion \
             -destination "id=$UDID" \
@@ -113,6 +113,15 @@ jobs:
         with:
           name: card-shots
           path: card-shots/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload HUD card screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hud-shots
+          path: hud-shots/*.png
           if-no-files-found: warn
           retention-days: 14
 

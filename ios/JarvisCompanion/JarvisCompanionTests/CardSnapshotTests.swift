@@ -92,6 +92,18 @@ final class CardSnapshotTests: XCTestCase {
               "receipt": {"text": "Approve", "at": "\(now)", "status": "received"}}}
     """
 
+    static let hardware = """
+    {"session_id": "a1b2c3d4-0004", "title": "Fix the undetected SSD", "state": "idle",
+     "phase": "in_progress", "health": "waiting", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Waiting: physical check on the SSD",
+     "recap": ["Needs you: Reseat the SATA data cable on the SSD, then tell me what the drive light does."],
+     "last_activity_at": "\(now)", "role": "VERIFIER",
+     "card": {"need": {"id": "0123456789af", "kind": "hardware",
+                       "question": "Reseat the SATA data cable on the SSD, then tell me what the drive light does.",
+                       "options": [], "items": [], "file_id": null, "at": "\(now)", "answered": null},
+              "files": [], "links": [], "children": [], "parent": null, "receipt": null, "doing": null}}
+    """
+
     static let plan = """
     # Plan: new inbox
 
@@ -134,6 +146,14 @@ final class CardSnapshotTests: XCTestCase {
                        ["A", "B", "C", "Something else"])
         XCTAssertEqual(CardInfo.buttons(for: need("preview")).map { $0.label }, ["Looks good", "Change it"])
         XCTAssertEqual(CardInfo.buttons(for: need("checklist")).map { $0.label }, ["Send results", "Add a note"])
+    }
+
+    func testHardwareAskOpensHardwareMode() throws {
+        let s = try Self.session(Self.hardware)
+        XCTAssertEqual(s.card?.need?.kind, "hardware")
+        let buttons = CardInfo.buttons(for: try XCTUnwrap(s.card?.need))
+        XCTAssertEqual(buttons.first?.label, "Open in Hardware Mode")
+        XCTAssertEqual(buttons.map { $0.sends }, [false, false])  // neither posts an answer
     }
 
     func testReceiptLabels() {
@@ -181,6 +201,7 @@ final class CardSnapshotTests: XCTestCase {
         try shot("10-report-attachment-pdf",
                  screen: CardFileView(target: CardFileTarget(sessionID: "a1b2c3d4-0003", file: pdfFile),
                                       preloaded: Self.samplePDF()))
+        try shot("17-hardware", fit: try boardCard(Self.hardware))
     }
 
     // MARK: drawing

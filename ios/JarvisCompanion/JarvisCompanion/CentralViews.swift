@@ -289,8 +289,6 @@ struct ChatTarget: Identifiable {
 final class SessionsModel: ObservableObject {
     @Published var sessions: [CentralSession] = []
     @Published var error: String?
-    /// session id -> physical task the session asked the owner to do (Hardware Mode).
-    @Published var hardwareRequests: [String: String] = [:]
 
     func refresh() async {
         do {
@@ -299,11 +297,6 @@ final class SessionsModel: ObservableObject {
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             sessions = try decoder.decode([CentralSession].self, from: data)
             error = nil
-            // Optional: an older gateway without /hwmode just shows no buttons.
-            // A failed fetch keeps the buttons we had instead of flickering them off.
-            if let requests = try? await Central.json(Central.request("/hwmode/requests", timeout: 5)) {
-                hardwareRequests = requests.compactMapValues { $0 as? String }
-            }
         } catch is CancellationError {
             return
         } catch {
@@ -444,19 +437,8 @@ struct SessionsBoard: View {
                             CardExtras(session: session, card: card, model: model, compact: true,
                                        openChat: { openChat = $0 },
                                        openFile: { openFile = $0 },
-                                       openSession: { openRecap = RecapTarget(id: $0) })
-                        }
-                        if let task = model.hardwareRequests[session.sessionId] {
-                            Button {
-                                openHardware = HWTarget(id: session.sessionId, task: task)
-                            } label: {
-                                Label("Open Hardware Mode", systemImage: "wrench.and.screwdriver")
-                                    .font(.subheadline.weight(.bold))
-                                    .frame(maxWidth: .infinity, minHeight: 44)
-                                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.yellow))
-                                    .foregroundColor(.black)
-                            }
-                            .accessibilityHint(task)
+                                       openSession: { openRecap = RecapTarget(id: $0) },
+                                       openHardware: { openHardware = $0 })
                         }
                     }
                     if items.isEmpty {
@@ -1791,6 +1773,7 @@ struct CardInfo: Decodable, Equatable {
         case "yesno": return [("Yes", true), ("No", true)]
         case "choice": return (need.options ?? []).map { (label: $0, sends: true) } + [(label: "Something else", sends: false)]
         case "checklist": return [("Send results", true), ("Add a note", false)]
+        case "hardware": return [("Open in Hardware Mode", false), ("Reply", false)]
         default: return [("OK", true), ("Reply", false)]
         }
     }
@@ -1811,13 +1794,17 @@ struct CardExtras: View {
     let openChat: (ChatTarget) -> Void
     let openFile: (CardFileTarget) -> Void
     let openSession: (String) -> Void
+    /// Opens Hardware Mode for this session (card ask kind `hardware`); default no-op
+    /// for callers whose view cannot present it.
+    let openHardware: (HWTarget) -> Void
     @State private var sending: String?
     @State private var error: String?
     @State private var checked: [Bool] = []
 
     init(session: CentralSession, card: CardInfo, model: SessionsModel, compact: Bool,
          openChat: @escaping (ChatTarget) -> Void, openFile: @escaping (CardFileTarget) -> Void,
-         openSession: @escaping (String) -> Void) {
+         openSession: @escaping (String) -> Void,
+         openHardware: @escaping (HWTarget) -> Void = { _ in }) {
         self.session = session
         self.card = card
         self.model = model
@@ -1825,6 +1812,7 @@ struct CardExtras: View {
         self.openChat = openChat
         self.openFile = openFile
         self.openSession = openSession
+        self.openHardware = openHardware
     }
 
     var body: some View {
@@ -1952,8 +1940,9 @@ struct CardExtras: View {
     @ViewBuilder
     private func buttonRows(_ need: CardInfo.Need) -> some View {
         let buttons = CardInfo.buttons(for: need)
-        // Two short buttons sit side by side; longer lists (choices) stack full width.
-        if buttons.count == 2 {
+        // Two short buttons sit side by side; longer lists (choices) and the long
+        // hardware label stack full width so the label never truncates.
+        if buttons.count == 2, need.kind != "hardware" {
             HStack(spacing: 8) {
                 ForEach(Array(buttons.enumerated()), id: \.offset) { index, button in
                     actionButton(need, button.label, sends: button.sends, primary: index == 0)
@@ -1961,16 +1950,21 @@ struct CardExtras: View {
             }
         } else {
             VStack(spacing: 8) {
-                ForEach(Array(buttons.enumerated()), id: \.offset) { _, button in
-                    actionButton(need, button.label, sends: button.sends, primary: button.sends)
+                ForEach(Array(buttons.enumerated()), id: \.offset) { index, button in
+                    actionButton(need, button.label, sends: button.sends,
+                                 primary: need.kind == "hardware" ? index == 0 : button.sends)
                 }
             }
         }
     }
 
     private func actionButton(_ need: CardInfo.Need, _ label: String, sends: Bool, primary: Bool) -> some View {
-        Button {
-            if sends {
+        let opensHardware = need.kind == "hardware" && label == "Open in Hardware Mode"
+        return Button {
+            if opensHardware {
+                // No answer is posted here; the gateway's Hardware Mode report-back marks it done.
+                openHardware(HWTarget(id: session.sessionId, task: need.question))
+            } else if sends {
                 Task {
                     sending = label
                     error = await model.answer(sessionID: session.sessionId, needID: need.id,
@@ -1985,7 +1979,8 @@ struct CardExtras: View {
         } label: {
             HStack(spacing: 6) {
                 if sending == label { ProgressView().tint(primary ? Color.black : Color.jarvisAccent) }
-                Text(label).lineLimit(1)
+                if opensHardware { Image(systemName: "wrench.and.screwdriver") }
+                Text(label).lineLimit(1).minimumScaleFactor(0.85)
             }
             .font(.subheadline.weight(.bold))
             .frame(maxWidth: .infinity, minHeight: 44)
@@ -1993,7 +1988,9 @@ struct CardExtras: View {
             .foregroundColor(primary ? Color.black : Color.jarvisText)
         }
         .disabled(sending != nil)
-        .accessibilityHint(sends ? "Sends \(label) to the session" : "Opens the chat to write what to change")
+        .accessibilityHint(opensHardware ? need.question
+                           : sends ? "Sends \(label) to the session"
+                           : "Opens the chat to write what to change")
     }
 
     private func chip(_ text: String, icon: String) -> some View {

@@ -1,6 +1,6 @@
-"""Hardware Mode step gating: the guide cannot leave a step until it is confirmed done
-(the user says so, or a watch check SEES it finished in a frame). Never on a plain
-model turn, a question, or a timer-driven watch check without proof."""
+"""Hardware Mode instruction gating: a new instruction may be given only when the user
+confirmed the current one done (they say so, or a watch check SEES it finished in a
+frame). Never on a plain model turn, a question, or a watch check without proof."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import stat
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ import websockets
 
 from conftest import IOS_AUTH_HEADER
 from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
-from gateway.hwmode import StepGate, is_done_confirmation, step_navigation
+from gateway.hwmode import is_done_confirmation, step_navigation
 
 
 @pytest.mark.parametrize("text", ["done", "Done.", "ok done", "I'm done", "finished", "next", "next step",
@@ -36,36 +37,8 @@ def test_not_done_confirmations(text):
     assert not is_done_confirmation(text)
 
 
-def test_gate_starts_on_the_first_planned_step():
-    g = StepGate()
-    assert g.allow(1, confirmed=False) == 1  # the plan itself may open step 1
-
-
-def test_gate_blocks_advance_without_confirmation():
-    g = StepGate()
-    g.allow(1, confirmed=False)
-    assert g.allow(2, confirmed=False) == 1
-    assert g.allow(4, confirmed=False) == 1
-    assert g.current == 1
-
-
-def test_gate_advances_one_step_on_confirmation():
-    g = StepGate()
-    g.allow(1, confirmed=False)
-    assert g.allow(3, confirmed=True) == 2  # never skips past the next step
-    assert g.allow(2, confirmed=False) == 2  # staying is always fine
-    assert g.allow(1, confirmed=False) == 1  # going back is always fine
-
-
-def test_gate_ignores_missing_step():
-    g = StepGate()
-    g.allow(1, confirmed=False)
-    assert g.allow(None, confirmed=False) == 1
-    assert g.allow(0, confirmed=True) == 1
-
-
-# Fake `claude`: answers step 1 on the first turn, then always TRIES to jump to step 2,
-# unless told the user has not confirmed (the gateway's re-ask), when it stays on step 1.
+# Fake `claude`: gives the first instruction on turn 1, then always TRIES to jump to a new
+# one, unless told the user has not confirmed (the gateway's re-ask), when it stays.
 # done_seen is true only for a [watch] check that carries an image.
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, sys
@@ -76,14 +49,13 @@ for line in sys.stdin:
     has_img = any(c.get("type") == "image" for c in content)
     text = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
     if turn == 1:
-        d = {"say": "Step 1: unplug the power cable.", "step": 1, "of": 3, "overlay": None}
+        d = {"next_ready": False, "done_seen": False, "say": "Unplug the power cable first.", "shape": None}
     elif "NOT confirmed" in text:
-        d = {"say": "Finish step 1 first: unplug the power cable.", "step": 1, "of": 3, "overlay": None}
+        d = {"next_ready": False, "done_seen": False, "say": "Finish this one first: the power cable.", "shape": None}
     else:
-        d = {"say": "Step 2: remove the side panel.", "step": 2, "of": 3, "overlay": None,
-             "done_seen": "[watch]" in text and has_img}
-    reply = json.dumps(d)
-    print(json.dumps({"type": "result", "result": reply, "usage": {}}), flush=True)
+        d = {"next_ready": True, "done_seen": "[watch]" in text and has_img,
+             "say": "Now remove the side panel.", "shape": None}
+    print(json.dumps({"type": "result", "result": json.dumps(d), "usage": {}}), flush=True)
 '''
 
 
@@ -110,7 +82,7 @@ async def _reply(ws) -> dict:
             return msg["data"]
 
 
-def test_ws_step_only_advances_on_done_or_seen_done(gateway_server, fake_claude):
+def test_ws_new_instruction_only_on_done_or_seen_done(gateway_server, fake_claude):
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
@@ -121,44 +93,46 @@ def test_ws_step_only_advances_on_done_or_seen_done(gateway_server, fake_claude)
                     await ws.send(json.dumps({"type": "ask", "text": text, "frame": frame}))
                     return await _reply(ws)
 
-                assert (await ask("Plan the steps, then guide me through step 1."))["step"] == 1
-                # A question: the brain tries to jump, the gate re-asks, the guide stays on step 1.
+                assert (await ask("guide me"))["say"] == "Unplug the power cable first."
+                # A question: the brain tries to jump, the gate re-asks, the guide stays on it.
                 d = await ask("where is the cable")
-                assert (d["step"], d["say"]) == (1, "Finish step 1 first: unplug the power cable.")
+                assert (d["next_ready"], d["say"]) == (False, "Finish this one first: the power cable.")
                 # A watch check with no picture cannot prove anything: stays, and stays quiet.
                 d = await ask("[watch] the picture changed", frame=False)
-                assert (d["step"], d["say"]) == (1, "")
-                # The user's confirmation moves exactly one step.
-                assert (await ask("done"))["step"] == 2
+                assert (d["next_ready"], d["say"], d["shape"]) == (False, "", None)
+                # The user's confirmation is the only spoken way to move on.
+                d = await ask("done")
+                assert (d["next_ready"], d["say"]) == (True, "Now remove the side panel.")
     asyncio.run(run())
 
 
-def test_ws_watch_check_that_sees_the_step_done_may_advance(gateway_server, fake_claude):
+def test_ws_watch_check_that_sees_it_done_may_advance(gateway_server, fake_claude):
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "t"}))
                 await ws.recv()
-                await ws.send(json.dumps({"type": "ask", "text": "plan", "frame": False}))
-                assert (await _reply(ws))["step"] == 1
+                await ws.send(json.dumps({"type": "ask", "text": "guide me", "frame": False}))
+                assert (await _reply(ws))["say"] == "Unplug the power cable first."
                 await ws.send(json.dumps({"type": "frame", "id": 1, "jpeg": _jpeg()}))
                 await ws.send(json.dumps({"type": "ask", "text": "[watch] the picture changed", "frame": True}))
-                assert (await _reply(ws))["step"] == 2
+                d = await _reply(ws)
+                assert d["next_ready"] is True and d["done_seen"] is True
     asyncio.run(run())
 
 
-def test_ws_locate_moves_the_box_but_never_the_step(gateway_server, fake_claude):
+def test_ws_locate_moves_the_box_but_never_the_instruction(gateway_server, fake_claude):
     async def run():
         async with gateway_server() as base:
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "t"}))
                 await ws.recv()
-                await ws.send(json.dumps({"type": "ask", "text": "plan", "frame": False}))
-                assert (await _reply(ws))["step"] == 1
+                await ws.send(json.dumps({"type": "ask", "text": "guide me", "frame": False}))
+                assert (await _reply(ws))["say"] == "Unplug the power cable first."
                 await ws.send(json.dumps({"type": "ask", "text": "[locate] I lost the highlight.", "frame": False}))
                 d = await _reply(ws)
-                # the fake brain tries to jump to step 2 with next-step speech: no jump, no speech, no re-ask
-                assert (d["step"], d["say"]) == (1, "")
+                # the fake brain tries to jump with next-instruction speech: no jump, no speech, no re-ask
+                assert (d["next_ready"], d["say"]) == (False, "")
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(ws.recv(), 1)
     asyncio.run(run())
@@ -170,7 +144,7 @@ def test_ws_locate_while_busy_is_skipped(gateway_server, fake_claude):
             async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
                 await ws.send(json.dumps({"type": "start", "task": "t"}))
                 await ws.recv()
-                await ws.send(json.dumps({"type": "ask", "text": "plan", "frame": False}))
+                await ws.send(json.dumps({"type": "ask", "text": "guide me", "frame": False}))
                 await ws.send(json.dumps({"type": "ask", "text": "[locate] lost it", "frame": False}))
                 kinds = [json.loads(await asyncio.wait_for(ws.recv(), 10))["type"] for _ in range(2)]
                 assert sorted(kinds) == ["error", "reply"]
@@ -197,8 +171,64 @@ def test_ws_go_back_and_skip(gateway_server, fake_claude):
                     await ws.send(json.dumps({"type": "ask", "text": text, "frame": False}))
                     return await _reply(ws)
 
-                assert (await ask("plan"))["step"] == 1
-                assert (await ask("skip this step"))["step"] == 2  # skip is an explicit move on
-                assert (await ask("go back one step"))["step"] == 1  # the fake brain says 2: the gate follows the user
-                assert (await ask("where is the cable"))["step"] == 1  # and holds there
+                assert (await ask("guide me"))["say"] == "Unplug the power cable first."
+                assert (await ask("skip this step"))["next_ready"] is True  # skip is an explicit move on
+                d = await ask("go back one step")  # the brain jumps forward: the gate allows the re-give
+                assert d["next_ready"] is True
+                d = await ask("where is the cable")  # and holds there without a confirmation
+                assert (d["next_ready"], d["say"]) == (False, "Finish this one first: the power cable.")
     asyncio.run(run())
+
+
+def _keys(obj) -> set:
+    out = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.add(k)
+            out |= _keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            out |= _keys(v)
+    return out
+
+
+def test_no_step_numbers_in_wire(gateway_server, fake_claude):
+    """Plan, question, watch, done, back: nothing the server sends ever counts instructions."""
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "reseat the SATA cable"}))
+                msgs = [json.loads(await ws.recv())]
+                for text in ("guide me", "where is the cable", "[watch] still good?",
+                             "done", "go back one step"):
+                    await ws.send(json.dumps({"type": "ask", "text": text, "frame": False}))
+                    while True:
+                        msg = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                        msgs.append(msg)
+                        if msg["type"] == "reply":
+                            break
+                return msgs
+    msgs = asyncio.run(run())
+    assert not _keys(msgs) & {"step", "of"}  # no message counts instructions anywhere
+
+
+def test_say_has_no_step_count(gateway_server, fake_claude):
+    async def run():
+        async with gateway_server() as base:
+            async with websockets.connect(f"ws://{base}/hwmode/ws", **{_WS_HEADERS_KWARG: IOS_AUTH_HEADER}) as ws:
+                await ws.send(json.dumps({"type": "start", "task": "t"}))
+                await ws.recv()
+                said = []
+                for text in ("guide me", "where is the cable", "done", "go back one step"):
+                    await ws.send(json.dumps({"type": "ask", "text": text, "frame": False}))
+                    while True:
+                        msg = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                        if msg["type"] == "say":
+                            said.append(msg["text"])
+                        if msg["type"] == "reply":
+                            if msg["data"] and msg["data"]["say"]:
+                                said.append(msg["data"]["say"])
+                            break
+                return said
+    for line in asyncio.run(run()):
+        assert not re.search(r"step \d+ (of|/) \d+", line, re.I), line

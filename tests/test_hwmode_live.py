@@ -2,8 +2,12 @@
 real gateway app, fed synthetic frames from tests/hwmode_synth.py. Opt-in, because every
 test makes real model calls:  HWMODE_LIVE=1 python -m pytest tests/test_hwmode_live.py -v
 
-Suites: vision (the pointer lands on the asked part), step gating (no advance until the
-step is done; wrong action gets a correction), full-flow replay (event log order).
+No-step contract: instructions are given one at a time, never numbered. The wire carries
+"next_ready"/"done_seen" instead of step counters, and boxes come back as data.shape.box.
+
+Suites: vision (the pointer lands on the asked part), instruction gating (no new
+instruction until the current one is done; wrong action gets a correction), full-flow
+replay (event log order), tight boxes, one live research turn.
 """
 
 from __future__ import annotations
@@ -25,15 +29,17 @@ import websockets
 
 from conftest import IOS_AUTH_HEADER
 from conftest import WS_HEADERS_KWARG as _WS_HEADERS_KWARG
-from hwmode_synth import MINIPC_TASK, STEPS_HINT, TASK, W, H, center_in, iou, render, render_minipc, video
+from hwmode_synth import MINIPC_TASK, TASK, W, H, center_in, iou, render, render_minipc, video
 
 pytestmark = pytest.mark.skipif(os.environ.get("HWMODE_LIVE") != "1", reason="live model calls: set HWMODE_LIVE=1")
 
-# The phone's prompts, word for word (HardwareModeView.swift).
-PLAN = "Plan the steps, then guide me through step 1."
-WATCH = ('[watch] The picture just changed and is now still. If the image clearly SHOWS the current step '
-         'finished, set "done_seen": true and give the next step. If I did something wrong, warn me. '
-         'Otherwise reply with "say": "" and "overlay": null.')
+# The phone's prompts, word for word (voice-first: the first plain ask IS the task).
+WATCH = ('[watch] The picture just changed and is now still. If the image clearly SHOWS the current '
+         'instruction finished, set "done_seen": true and give the next instruction ("next_ready": true). '
+         'If I did something wrong, warn me. Otherwise reply with "say": "" and "shape": null.')
+LOCATE = ('[locate] I lost the highlight. Point again at the same part ({label}) in this picture. '
+          'If you see it, reply with its shape and "say": "". If it is not in view, set shape to null '
+          'and say where to aim.')
 
 
 class Phone:
@@ -51,27 +57,43 @@ class Phone:
         assert msg["type"] == "ready", msg
         self.log.append(("ready", msg))
 
+    async def begin(self, task: str) -> dict:
+        """Voice-first: no task on start; the first spoken ask becomes it and yields instruction 1."""
+        await self.start("")
+        reply = await self.ask(task)
+        assert reply["data"].get("say"), f"the first ask must give instruction 1: {reply['data']}"
+        return reply
+
     async def frame(self, jpeg: bytes) -> None:
         self.frame_id += 1
         await self.ws.send(json.dumps({"type": "frame", "id": self.frame_id, "jpeg": base64.b64encode(jpeg).decode()}))
 
     async def ask(self, text: str, frame: bool = True) -> dict:
-        kind = "watch" if text.startswith("[watch]") else "ask"
+        kind = "watch" if text.startswith(("[watch]", "[locate]")) else "ask"
         self.log.append((kind, {"text": text[:60]}))
+        t_ask = time.monotonic()
+        first_audio = None
         await self.ws.send(json.dumps({"type": "ask", "text": text, "frame": frame}))
         while True:
             msg = json.loads(await asyncio.wait_for(self.ws.recv(), 90))
-            if msg["type"] == "say":
+            if msg["type"] == "audio":
+                if first_audio is None:
+                    first_audio = time.monotonic() - t_ask
+            elif msg["type"] == "say":
                 self.log.append(("say", msg))
             elif msg["type"] == "reply":
                 d = msg["data"] or {}
                 self.log.append(("reply", d))
                 assert "!" not in str(d.get("say") or ""), f"Jarvis never exclaims: {d.get('say')!r}"
-                print(f"  {time.monotonic() - self.t0:5.1f}s {kind:5} {text[:34]!r:38} -> step {d.get('step')}/{d.get('of')}"
-                      f" seen={d.get('done_seen')} overlay={'Y' if d.get('overlay') else '-'} say={str(d.get('say'))[:80]!r}")
+                audio = f" audio={first_audio:.2f}s" if first_audio is not None else ""
+                print(f"  {time.monotonic() - self.t0:5.1f}s {kind:5} {text[:34]!r:38} ->"
+                      f" next_ready={d.get('next_ready')} done_seen={d.get('done_seen')}"
+                      f" shape={'Y' if (d.get('shape') or {}).get('box') else '-'}{audio}"
+                      f" say={str(d.get('say'))[:80]!r}")
                 return msg
             elif msg["type"] == "error":
                 raise AssertionError(f"gateway error: {msg}")
+            # ack / research / session messages are fine mid-turn; the reply closes it.
 
 
 def run_live(gateway_server, body):
@@ -84,9 +106,17 @@ def run_live(gateway_server, body):
 
 
 def _box(reply: dict):
-    o = (reply.get("data") or {}).get("overlay") or {}
-    px = o.get("target_px")
+    s = (reply.get("data") or {}).get("shape") or {}
+    px = s.get("box")
     return tuple(px) if isinstance(px, list) and len(px) == 4 else None
+
+
+def _said(reply: dict) -> str:
+    return str((reply.get("data") or {}).get("say") or "")
+
+
+def phone_last(phone: Phone) -> dict:
+    return {"data": [d for k, d in phone.log if k == "reply"][-1]}
 
 
 # ---------------------------------------------------------------- (c) vision
@@ -105,12 +135,12 @@ VISION_CASES = [
 @pytest.mark.parametrize("state,opts,question,part", VISION_CASES, ids=[f"{c[0]}-{c[3]}-{i}" for i, c in enumerate(VISION_CASES)])
 def test_vision_pointer_lands_on_the_asked_part(gateway_server, state, opts, question, part):
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
         scene = render(state, **opts)
+        await phone.start(TASK)  # task known up front here; the question is the first turn
         await phone.frame(scene.jpeg)
         reply = await phone.ask(question)
         box = _box(reply)
-        assert box, f"no overlay for {question!r}: {reply['data']}"
+        assert box, f"no box for {question!r}: {reply['data']}"
         truth = scene.boxes[part]
         print(f"  box={box} truth={truth} iou={iou(box, truth):.2f}")
         assert (reply["w"], reply["h"]) == (1024, 768)
@@ -118,78 +148,79 @@ def test_vision_pointer_lands_on_the_asked_part(gateway_server, state, opts, que
     run_live(gateway_server, body)
 
 
-# ---------------------------------------------------------------- (d) step gating
+# ---------------------------------------------------------------- (d) instruction gating
 
-def test_step1_not_done_stays_on_step1(gateway_server):
+def test_watch_before_done_keeps_the_same_instruction(gateway_server):
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
         await phone.frame(render("in_port1").jpeg)
-        assert (await phone.ask(PLAN))["data"]["step"] == 1
+        await phone.begin(TASK)
         for k, opts in enumerate([{"shift": (12, 8)}, {"shift": (-10, 5), "noise": 0.2, "seed": 1}]):
             await phone.frame(render("in_port1", **opts).jpeg)  # moved, but still plugged into SATA1
-            assert (await phone.ask(WATCH))["data"]["step"] == 1, f"watch {k} advanced with step 1 not done"
-        assert (await phone.ask("where is the SATA2 port"))["data"]["step"] == 1
-        assert (await phone.ask("is it ok to pull it now?"))["data"]["step"] == 1
+            d = (await phone.ask(WATCH))["data"]
+            assert not d.get("next_ready"), f"watch {k} moved on with the instruction not done"
+            assert not d.get("say") and d.get("shape") is None, f"nothing changed, nothing to say: {d}"
+        d = (await phone.ask("where is the SATA2 port"))["data"]
+        assert _box({"data": d}) and not d.get("next_ready"), d
+        d = (await phone.ask("is it ok to pull it now?"))["data"]
+        assert d.get("say") and not d.get("next_ready"), f"a side question is answered, not advanced on: {d}"
     run_live(gateway_server, body)
 
 
-def test_step1_seen_done_advances_to_step2(gateway_server):
+def test_watch_sees_done_gives_the_next_instruction(gateway_server):
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
         await phone.frame(render("in_port1").jpeg)
-        assert (await phone.ask(PLAN))["data"]["step"] == 1
+        await phone.begin(TASK)
         await phone.frame(render("unplugged").jpeg)
         d = (await phone.ask(WATCH))["data"]
-        assert d["step"] == 2 and d.get("done_seen") is True, d
-        assert d.get("say"), "advancing must tell the user the next step"
+        assert d.get("done_seen") is True and d.get("next_ready") is True, d
+        assert d.get("say"), "advancing must tell the user the next instruction"
     run_live(gateway_server, body)
 
 
-def test_user_done_advances_exactly_one_step(gateway_server):
+def test_user_done_gives_the_next_instruction(gateway_server):
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
         await phone.frame(render("in_port1").jpeg)
-        assert (await phone.ask(PLAN))["data"]["step"] == 1
+        await phone.begin(TASK)
         await phone.frame(render("unplugged").jpeg)
-        assert (await phone.ask("done"))["data"]["step"] == 2
+        d = (await phone.ask("done"))["data"]
+        assert d.get("next_ready") is True and d.get("say"), d
     run_live(gateway_server, body)
 
 
 def test_wrong_port_gets_a_correction_and_no_advance(gateway_server):
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
+        await phone.frame(render("in_port1").jpeg)
+        await phone.begin(TASK)
         await phone.frame(render("unplugged").jpeg)
-        assert (await phone.ask(PLAN))["data"]["step"] == 1
-        assert (await phone.ask("done"))["data"]["step"] == 2
+        assert (await phone.ask("done"))["data"]["next_ready"] is True
         await phone.frame(render("in_port3").jpeg)  # plugged into the WRONG port
         d = (await phone.ask(WATCH))["data"]
-        assert d["step"] == 2, f"wrong port advanced: {d}"
-        assert d.get("done_seen") is not True
+        assert not d.get("next_ready") and d.get("done_seen") is not True, f"wrong port advanced: {d}"
         say = (d.get("say") or "").lower()
-        assert say and ("sata2" in say or "wrong" in say or "sata 2" in say), f"no correction: {d}"
+        assert say and ("sata2" in say or "sata 2" in say or "wrong" in say), f"no correction: {d}"
     run_live(gateway_server, body)
 
 
 # ---------------------------------------------------------------- (e) full-flow replay
 
+@pytest.mark.live_voice
 def test_full_repair_replay_event_order(gateway_server):
     """Synthetic video (plugged -> unplugged -> in SATA2) plus a spoken script, start to done."""
     frames = video(["in_port1", "unplugged", "in_port2"], frames_per_state=3)
     script = {  # frame index -> what the user says (None: a watch check after the picture settles)
-        0: PLAN, 1: "where is the cable", 2: None,
-        3: None, 4: "where do I plug it in",
+        0: TASK, 1: "where is the cable", 2: None,
+        4: "where do I plug it in",
         6: None, 8: "is that everything?",
     }
 
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
-        steps: list[tuple[str, int, bool]] = []  # (event, step, seen_done)
+        await phone.start("")  # voice-first: no task yet, the first spoken line (TASK) becomes it
+        replies: list[tuple[int, str | None, dict]] = []  # (frame index, script text, reply data)
         for i, scene in enumerate(frames):
             await phone.frame(scene.jpeg)
             if i in script:
                 text = script[i] or WATCH
-                d = (await phone.ask(text))["data"]
-                steps.append(("watch" if script[i] is None else "ask", d["step"], d.get("done_seen") is True))
+                replies.append((i, script[i], (await phone.ask(text))["data"]))
         kinds = [k for k, _ in phone.log]
         assert kinds[0] == "ready"
         assert kinds.count("reply") == len(script)
@@ -197,40 +228,38 @@ def test_full_repair_replay_event_order(gateway_server):
         for a, b in zip(kinds, kinds[1:]):
             if a in ("ask", "watch"):
                 assert b in ("say", "reply"), kinds
-        seq = [s for _, s, _ in steps]
-        print("  step sequence:", seq)
-        assert seq == sorted(seq), f"step went backwards: {seq}"
-        assert seq[:3] == [1, 1, 1], f"left step 1 before the plug was out: {seq}"
-        for (kind, s, seen), prev in zip(steps[1:], seq):
-            if s > prev:  # every advance came from a watch check that SAW the step done
-                assert kind == "watch" and seen, steps
-        assert seq[-1] == 2, f"did not reach the last step: {seq}"
-        last = [d for k, d in phone.log if k == "reply"][-1]
-        print("  final:", last.get("say"))
+        assert replies[0][2].get("say"), "the task ask must open with instruction 1"
+        for idx, _, d in replies:
+            if idx <= 2:  # frames 0-2: cable still in SATA1, nothing may advance
+                assert not d.get("next_ready"), f"frame {idx} advanced early: {d}"
+        # every advance came from a watch check that SAW the instruction done
+        for idx, text, d in replies:
+            if d.get("next_ready"):
+                assert text is None and d.get("done_seen") is True, (idx, text, d)
+        assert any(d.get("next_ready") or d.get("done_seen") for _, _, d in replies), \
+            "never moved past instruction 1"  # the last instruction seen done ends the job without a new one
+        final = replies[-1][2]
+        assert final.get("say") and not final.get("next_ready"), f"job done: wrap up, no new work: {final}"
+        print("  final:", final.get("say"))
     run_live(gateway_server, body)
 
 
 # ---------------------------------------------------------------- owner's case: mini PC, cables on the back
 
-LOCATE = ('[locate] I lost the highlight. Point again at the same part ({label}) in this picture. '
-          'If you see it, reply with its overlay and "say": "". If it is not in view, set overlay to null and say where to aim.')
-
-
 def _area_share(box) -> float:
     return (box[2] - box[0]) * (box[3] - box[1]) / (W * H)
 
 
-def test_minipc_plan_boxes_one_part_not_a_whole_edge(gateway_server):
+def test_minipc_first_instruction_boxes_one_part_not_a_whole_edge(gateway_server):
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         scene = render_minipc()
         await phone.frame(scene.jpeg)
-        reply = await phone.ask(PLAN)
+        reply = await phone.begin(MINIPC_TASK)
         box = _box(reply)
-        if box is None:  # a first step with nothing to touch may have no box; then it must say where to look
+        if box is None:  # a first instruction with nothing to touch may have no box; then it says where to look
             assert reply["data"].get("say")
             return
-        print(f"  plan box={box} share={_area_share(box):.3f}")
+        print(f"  first box={box} share={_area_share(box):.3f}")
         assert _area_share(box) < 0.08, f"generic box over a wide area: {box}"
         assert any(center_in(box, t, margin=40) for t in scene.boxes.values()), f"box on no plug: {box}"
     run_live(gateway_server, body)
@@ -241,10 +270,9 @@ def test_minipc_plan_boxes_one_part_not_a_whole_edge(gateway_server):
                                            ("where is the white cable", "usb")])
 def test_minipc_points_at_the_named_cable(gateway_server, question, part):
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         scene = render_minipc(noise=0.2, seed=5)
         await phone.frame(scene.jpeg)
-        await phone.ask(PLAN)
+        await phone.begin(MINIPC_TASK)
         reply = await phone.ask(question)
         box = _box(reply)
         assert box, f"no box for {question!r}: {reply['data']}"
@@ -259,29 +287,24 @@ def test_minipc_points_at_the_named_cable(gateway_server, question, part):
 
 def test_minipc_locate_finds_the_plug_after_the_camera_moved(gateway_server):
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         await phone.frame(render_minipc().jpeg)
-        await phone.ask(PLAN)
+        await phone.begin(MINIPC_TASK)
         first = await phone.ask("Point at the power cable.")
         assert _box(first)
         moved = render_minipc(shift=(-120, 90))  # the phone moved: everything shifted
         await phone.frame(moved.jpeg)
-        label = (first["data"].get("overlay") or {}).get("label") or "power cable"
+        label = ((first["data"].get("shape") or {}).get("label")) or "power cable"
         reply = await phone.ask(LOCATE.format(label=label))
         box = _box(reply)
         assert box, f"locate gave no box: {reply['data']}"
         print(f"  relocated box={box} truth={moved.boxes['power']}")
         assert center_in(box, moved.boxes["power"], margin=30)
-        assert reply["data"]["step"] == first["data"]["step"], "locate changed the step"
+        assert not reply["data"].get("next_ready"), "locate is not a new instruction"
         assert not reply["data"].get("say"), "a found part needs no speech"
     run_live(gateway_server, body)
 
 
 # ---------------------------------------------------------------- owner's round-4 feedback (build 1.0.118)
-
-def _said(reply: dict) -> str:
-    return str((reply.get("data") or {}).get("say") or "")
-
 
 @pytest.mark.parametrize("question,screw", [("Point at the top left screw.", "screw_tl"),
                                             ("Which screw is at the bottom right? Show me.", "screw_br")])
@@ -289,10 +312,9 @@ def test_minipc_small_screw_is_boxed_tightly_with_the_zoom_pass(gateway_server, 
     caplog.set_level(logging.INFO, logger="gateway.hwmode")
 
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         scene = render_minipc(noise=0.1, seed=7)
         await phone.frame(scene.jpeg)
-        await phone.ask(PLAN)
+        await phone.begin(MINIPC_TASK)
         reply = await phone.ask(question)
         box = _box(reply)
         assert box, f"no box for {question!r}: {reply['data']}"
@@ -306,9 +328,8 @@ def test_minipc_small_screw_is_boxed_tightly_with_the_zoom_pass(gateway_server, 
 @pytest.mark.parametrize("finger,want", [("hdmi", "no"), ("power", "yes")])
 def test_minipc_is_this_it_looks_at_the_finger(gateway_server, finger, want):
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         await phone.frame(render_minipc().jpeg)
-        await phone.ask(PLAN)
+        await phone.begin(MINIPC_TASK)
         scene = render_minipc(finger=finger)
         await phone.frame(scene.jpeg)
         reply = await phone.ask("Is this the power cable?")
@@ -323,75 +344,77 @@ def test_minipc_is_this_it_looks_at_the_finger(gateway_server, finger, want):
     run_live(gateway_server, body)
 
 
-def test_minipc_side_question_mid_step_is_answered_with_a_box(gateway_server):
+def test_minipc_side_question_mid_instruction_is_answered_with_a_box(gateway_server):
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         scene = render_minipc()
         await phone.frame(scene.jpeg)
-        step = (await phone.ask(PLAN))["data"]["step"]
+        await phone.begin(MINIPC_TASK)
         reply = await phone.ask("Wait, point at the bottom right screw.")
         box = _box(reply)
         assert box, f"side question ignored: {reply['data']}"
         assert center_in(box, scene.boxes["screw_br"], margin=15), f"box {box} not on the screw"
-        assert reply["data"]["step"] == step, "a side question must not move the step"
+        assert not reply["data"].get("next_ready"), "a side question must not move the coaching on"
         assert _said(reply), "a side question is answered out loud"
     run_live(gateway_server, body)
 
 
-def test_go_back_one_step_by_voice(gateway_server):
+def test_go_back_one_instruction_by_voice(gateway_server):
     async def body(phone: Phone):
-        await phone.start(f"{TASK}. {STEPS_HINT}")
         await phone.frame(render("in_port1").jpeg)
-        assert (await phone.ask(PLAN))["data"]["step"] == 1
+        await phone.begin(TASK)
         await phone.frame(render("unplugged").jpeg)
-        assert (await phone.ask("done"))["data"]["step"] == 2
+        assert (await phone.ask("done"))["data"]["next_ready"] is True
         back = await phone.ask("go back one step")
-        assert back["data"]["step"] == 1, back["data"]
-        assert _said(back), "going back must repeat step 1 out loud"
+        assert _said(back), "going back must repeat the earlier instruction out loud"
     run_live(gateway_server, body)
 
 
 # ---------------------------------------------------------------- owner's round-5 feedback (build 1.0.122)
 
 @pytest.mark.parametrize("task", ["Help me find the SATA2 port", "Where is the HDMI cable on my mini PC?"])
-def test_a_find_task_is_one_step_with_no_extra_jobs(gateway_server, task):
+def test_a_find_task_is_one_instruction_with_no_extra_jobs(gateway_server, task):
     async def body(phone: Phone):
-        await phone.start(task)
-        await phone.frame((render("in_port1") if "SATA" in task else render_minipc()).jpeg)
-        plan = (await phone.ask(PLAN))["data"]
-        print(f"  plan: {plan.get('step')}/{plan.get('of')} {plan.get('say')!r}")
-        assert plan["of"] == 1, f"a find task grew extra steps: {plan}"
+        scene = render("in_port1") if "SATA" in task else render_minipc()
+        await phone.frame(scene.jpeg)
+        plan = (await phone.begin(task))["data"]
+        print(f"  plan: {plan.get('say')!r}")
         assert _box(phone_last(phone)), "finding means pointing at it"
         said = _said(phone_last(phone)).lower()
         assert not any(w in said for w in ("unplug", "shut down", "power down", "open the case", "unscrew")), said
         done = (await phone.ask("found it, thanks"))["data"]
-        assert done["step"] == 1 and done["of"] == 1, done
-        assert not any(w in _said({"data": done}).lower() for w in ("next", "step 2", "now unplug")), done
+        assert not done.get("next_ready"), f"job over, no new work: {done}"
+        assert not any(w in str(done.get("say") or "").lower() for w in ("next step", "step 2", "now unplug")), done  # "the next move" in a sign-off is fine
     run_live(gateway_server, body)
 
 
-def phone_last(phone: Phone) -> dict:
-    return {"data": [d for k, d in phone.log if k == "reply"][-1]}
-
+# ---------------------------------------------------------------- (f) tight boxes (was: masks)
 
 @pytest.mark.live_mask
 @pytest.mark.parametrize("question,part", [("Point at the power plug.", "power"), ("Where is the USB plug?", "usb"),
                                            ("Point at the top left screw.", "screw_tl")])
-def test_the_part_comes_back_as_a_tight_mask(gateway_server, question, part):
-    from hwmode.segment import Segmenter
-
-    if not Segmenter().available():
-        pytest.skip("SAM model not installed")
-
+def test_the_part_comes_back_as_a_tight_box(gateway_server, question, part):
     async def body(phone: Phone):
-        await phone.start(MINIPC_TASK)
         scene = render_minipc(noise=0.1, seed=7)
         await phone.frame(scene.jpeg)
-        await phone.ask(PLAN)
+        await phone.begin(MINIPC_TASK)
         reply = await phone.ask(question)
-        o = reply["data"].get("overlay") or {}
         box, truth = _box(reply), scene.boxes[part]
-        print(f"  mask={'Y' if o.get('mask_png') else '-'} score={o.get('mask_score')} box={box} truth={truth} iou={iou(box, truth):.2f}")
-        assert o.get("mask_png"), f"no mask for {part}: {o}"
-        assert center_in(box, truth, margin=15) and iou(box, truth) > 0.5, f"mask box {box} vs {truth}"
+        assert box, f"no box for {part}: {reply['data']}"
+        print(f"  box={box} truth={truth} iou={iou(box, truth):.2f}")
+        assert center_in(box, truth, margin=15) and iou(box, truth) > 0.5, f"box {box} vs {truth}"
+    run_live(gateway_server, body)
+
+
+# ---------------------------------------------------------------- (g) the research turn
+
+def test_live_research_turn_returns_cards(gateway_server):
+    """One real web-tools-only research call: spoken summary plus at least one HUD card."""
+    async def body(phone: Phone):
+        await phone.start("")
+        reply = await phone.ask("Look up the Busy Bar desk display from busy.app", frame=False)
+        d = reply["data"]
+        assert d.get("say"), f"no spoken summary: {d}"
+        assert d.get("shape") is None, d
+        assert d.get("cards"), f"no cards: {d}"
+        print(f"  say={d['say'][:100]!r} cards={[c.get('type') for c in d['cards']]}")
     run_live(gateway_server, body)
