@@ -11,10 +11,13 @@ Cost on this box: ~1.3 s to encode a frame (run while the brain thinks), ~150 ms
 from __future__ import annotations
 
 import io
+import logging
 import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 SIDE = 1024  # the encoder's input size
 MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
@@ -57,8 +60,18 @@ class Segmenter:
 
             opts = ort.SessionOptions()
             opts.log_severity_level = 3  # the export's harmless shape-merge warning
-            self._enc = ort.InferenceSession(str(self.encoder), opts, providers=["CPUExecutionProvider"])
-            self._dec = ort.InferenceSession(str(self.decoder), opts, providers=["CPUExecutionProvider"])
+            enc = ort.InferenceSession(str(self.encoder), opts, providers=["CPUExecutionProvider"])
+            dec = ort.InferenceSession(str(self.decoder), opts, providers=["CPUExecutionProvider"])
+            self._enc, self._dec = enc, dec  # both or neither: a failed load leaves no half state
+
+    def prewarm(self) -> None:
+        """Load both sessions now (under the lock every other `_load` caller holds), so the first
+        frame does not pay for it. A failure is logged once; the lazy path in embed/_decode retries."""
+        try:
+            with self._lock:
+                self._load()
+        except Exception:
+            log.warning("SAM prewarm failed; loading on first use instead", exc_info=True)
 
     def embed(self, jpeg: bytes) -> Embedding:
         """Encode one frame (blocking, ~1.3 s)."""
@@ -199,11 +212,19 @@ def _components(m):
 
 
 _segmenter: Segmenter | None = None
+_prewarm: threading.Thread | None = None  # joinable handle to the one-per-process load thread
+_start_lock = threading.Lock()
 
 
 def get_segmenter() -> Segmenter | None:
     """The process-wide segmenter, or None when it is not installed (the phone draws the box)."""
-    global _segmenter
-    if _segmenter is None:
-        _segmenter = Segmenter()
-    return _segmenter if _segmenter.available() else None
+    global _segmenter, _prewarm
+    with _start_lock:
+        if _segmenter is None:
+            _segmenter = Segmenter()
+        if not _segmenter.available():
+            return None
+        if _prewarm is None:
+            _prewarm = threading.Thread(target=_segmenter.prewarm, name="sam-prewarm", daemon=True)
+            _prewarm.start()
+        return _segmenter
