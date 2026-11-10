@@ -153,10 +153,11 @@ struct HUDCardView: View {
                     .frame(height: 6)
                 }
             }
-            if fit.dropped == 0, let caption = card.caption, !caption.isEmpty {
+            if fit.caption, let caption = card.caption {
                 Text("sourced from \(caption)")
                     .font(.system(size: rowSize, design: .monospaced))
                     .foregroundColor(hudBody)
+                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
             }
@@ -323,18 +324,24 @@ struct HUDCardView: View {
         return max(shown, 1)
     }
 
-    /// Micro label + a 2-line title + card padding, paid before any content row.
-    /// Estimates, deliberately generous so the border never gets cut.
-    private var headerHeight: CGFloat { microSize * 1.5 + 8 + titleSize * 2.6 + 24 }
+    /// Micro label + a 2-line title + the two 8 pt stack gaps + 12 pt padding top and bottom
+    /// + the 1 pt border, paid before any content row. Estimates, deliberately generous so
+    /// the border never gets cut.
+    private var headerHeight: CGFloat { microSize * 1.5 + titleSize * 2.6 + 16 + 24 + 2 }
 
-    /// Bar rows kept / dropped at the slot height (nil slot: everything).
-    var barFit: (rows: Int, dropped: Int) {
+    /// Bar rows kept / dropped at the slot height (nil slot: everything), and whether the
+    /// caption fits. The caption goes first, then whole rows from the end.
+    var barFit: (rows: Int, dropped: Int, caption: Bool) {
         let items = card.items ?? []
-        guard let maxHeight else { return (items.count, 0) }
+        let hasCaption = !(card.caption ?? "").isEmpty
+        guard let maxHeight else { return (items.count, 0, hasCaption) }
         let rowH = rowSize * 1.5 + 14  // label line + gap + 6 pt bar + row spacing
+        let budget = maxHeight - headerHeight
+        let captionH = rowSize * 1.4 * 2 + 7  // up to 2 lines + its top padding + row spacing
+        if hasCaption, CGFloat(items.count) * rowH + captionH <= budget { return (items.count, 0, true) }
         let shown = Self.fittingRows(heights: Array(repeating: rowH, count: items.count),
-                                     budget: maxHeight - headerHeight, moreHeight: rowSize * 1.7)
-        return (shown, items.count - shown)
+                                     budget: budget, moreHeight: rowSize * 1.7)
+        return (shown, items.count - shown, false)
     }
 
     /// Flow rows kept / dropped at the slot height: nodes first, then the "A -> B" lines.
@@ -416,7 +423,9 @@ private struct HUDCornerTicks: View {
 
 /// The card layer over the camera: up to 6 cards in edge slots around the subject.
 /// `avoid` is the active shape's rect in this view's own points; slots covering it are
-/// skipped, and the top 70 pt (status bar) and bottom 150 pt (controls) stay free.
+/// trimmed or skipped, and the top 70 pt (status bar) and bottom 150 pt (controls) stay free.
+/// From accessibility1 up the cards stack in one full-width column (max 3), so big text is
+/// not squeezed into a half-width slot.
 struct HUDLayer: View {
     let cards: [HUDCard]
     let avoid: CGRect?
@@ -426,64 +435,117 @@ struct HUDLayer: View {
         self.avoid = avoid
     }
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var shown = Set<Int>()
+    @Environment(\.dynamicTypeSize) private var typeSize
 
-    static func slots(in size: CGSize, avoid: CGRect?) -> [CGRect] {
+    static let top: CGFloat = 70, bottom: CGFloat = 150, margin: CGFloat = 8, gap: CGFloat = 8
+
+    /// Grid cells, [row][column]: 3 rows of 2 half-width columns (or 1 full-width column).
+    static func cells(in size: CGSize, singleColumn: Bool = false) -> [[CGRect]] {
         let w = size.width, h = size.height
         guard w > 60, h > 300 else { return [] }
-        let top: CGFloat = 70, bottom: CGFloat = 150, margin: CGFloat = 8, gap: CGFloat = 8
-        let cardW = min(w * 0.46, w - 2 * margin)
+        let cardW = singleColumn ? w - 2 * margin : min(w * 0.46, w - 2 * margin)
         let rowH = (h - top - bottom - 2 * gap) / 3
-        let xs: [CGFloat] = [margin, w - margin - cardW]
-        let ys: [CGFloat] = [top, top + rowH + gap, top + 2 * (rowH + gap)]
-        var out: [CGRect] = []
-        for y in ys { for x in xs { out.append(CGRect(x: x, y: y, width: cardW, height: rowH)) } }
-        // TL, TR, ML, MR, BL, BR is already the loop order. A slot over the subject is trimmed
-        // to the side of it (or above / below it); only a slot too small to read is dropped.
-        guard let avoid = avoid, !avoid.isNull else { return out }
-        let clear = avoid.insetBy(dx: -gap, dy: -gap)
-        // Sizes are checked as plain numbers: CGRect.width/height report negative sizes as positive.
-        return out.compactMap { slot in
-            guard slot.intersects(clear) else { return slot }
-            let leftW = clear.minX - slot.minX - 0.5, rightW = slot.maxX - clear.maxX - 0.5
-            if slot.minX < clear.minX, leftW >= 110 {
-                return CGRect(x: slot.minX, y: slot.minY, width: leftW, height: slot.height)
-            }
-            if slot.maxX > clear.maxX, rightW >= 110 {
-                return CGRect(x: clear.maxX + 0.5, y: slot.minY, width: rightW, height: slot.height)
-            }
-            let aboveH = clear.minY - slot.minY - 0.5, belowH = slot.maxY - clear.maxY - 0.5
-            if aboveH >= 90 { return CGRect(x: slot.minX, y: slot.minY, width: slot.width, height: aboveH) }
-            if belowH >= 90 { return CGRect(x: slot.minX, y: clear.maxY + 0.5, width: slot.width, height: belowH) }
-            return nil
+        let xs: [CGFloat] = singleColumn ? [margin] : [margin, w - margin - cardW]
+        return (0..<3).map { r in
+            xs.map { CGRect(x: $0, y: top + CGFloat(r) * (rowH + gap), width: cardW, height: rowH) }
         }
+    }
+
+    /// Every cell in fill order (TL, TR, ML, MR, BL, BR), trimmed around the subject.
+    static func slots(in size: CGSize, avoid: CGRect?) -> [CGRect] {
+        cells(in: size).flatMap { $0 }.compactMap { trim($0, avoid: avoid) }
+    }
+
+    /// A slot over the subject keeps its largest readable part beside, above or below it
+    /// (>= 110 pt wide or >= 90 pt tall); nil when no part is big enough.
+    static func trim(_ slot: CGRect, avoid: CGRect?) -> CGRect? {
+        guard let avoid = avoid, !avoid.isNull else { return slot }
+        let clear = avoid.insetBy(dx: -gap, dy: -gap)
+        guard slot.intersects(clear) else { return slot }
+        // Sizes are checked as plain numbers: CGRect.width/height report negative sizes as positive.
+        var options: [CGRect] = []
+        let leftW = clear.minX - slot.minX - 0.5, rightW = slot.maxX - clear.maxX - 0.5
+        if slot.minX < clear.minX, leftW >= 110 {
+            options.append(CGRect(x: slot.minX, y: slot.minY, width: leftW, height: slot.height))
+        }
+        if slot.maxX > clear.maxX, rightW >= 110 {
+            options.append(CGRect(x: clear.maxX + 0.5, y: slot.minY, width: rightW, height: slot.height))
+        }
+        let aboveH = clear.minY - slot.minY - 0.5, belowH = slot.maxY - clear.maxY - 0.5
+        if aboveH >= 90 { options.append(CGRect(x: slot.minX, y: slot.minY, width: slot.width, height: aboveH)) }
+        if belowH >= 90 { options.append(CGRect(x: slot.minX, y: clear.maxY + 0.5, width: slot.width, height: belowH)) }
+        return options.max { $0.width * $0.height < $1.width * $1.height }
+    }
+
+    /// A flow or bar card with more than 2 rows needs a double-height slot to explain anything.
+    static func isTall(_ card: HUDCard) -> Bool {
+        (card.type == "flow" && (card.nodes?.count ?? 0) > 2) || (card.type == "bar" && (card.items?.count ?? 0) > 2)
+    }
+
+    /// One rect per card shown, in card order (cards that find no slot are not shown).
+    /// A tall card also takes the free cell below it in its column.
+    static func placements(for cards: [HUDCard], in size: CGSize, avoid: CGRect?,
+                           singleColumn: Bool = false) -> [CGRect] {
+        let grid = cells(in: size, singleColumn: singleColumn)
+        let cols = grid.first?.count ?? 0
+        var used = Set<Int>()  // row * cols + column
+        var out: [CGRect] = []
+        for card in cards {
+            var placed = false
+            while !placed {
+                guard let next = (0..<grid.count * cols).first(where: { !used.contains($0) }) else { return out }
+                used.insert(next)
+                let r = next / cols, c = next % cols
+                if isTall(card), r + 1 < grid.count, !used.contains(next + cols),
+                   let tall = trim(grid[r][c].union(grid[r + 1][c]), avoid: avoid) {
+                    used.insert(next + cols)
+                    out.append(tall)
+                    placed = true
+                } else if let rect = trim(grid[r][c], avoid: avoid) {
+                    out.append(rect)
+                    placed = true
+                }
+            }
+        }
+        return out
     }
 
     var body: some View {
         GeometryReader { geo in
-            let rects = Self.slots(in: geo.size, avoid: avoid)
+            let rects = Self.placements(for: cards, in: geo.size, avoid: avoid,
+                                        singleColumn: typeSize >= .accessibility1)
             ZStack(alignment: .topLeading) {
-                ForEach(Array(cards.prefix(rects.count).enumerated()), id: \.offset) { i, card in
+                ForEach(Array(zip(cards, rects).enumerated()), id: \.offset) { i, pair in
                     // The card budgets its rows against the slot, so nothing is clipped
                     // mid-row and the border stays whole.
-                    HUDCardView(card: card, maxHeight: rects[i].height)
-                        .frame(width: rects[i].width)
-                        .frame(height: rects[i].height, alignment: .top)
-                        .position(x: rects[i].midX, y: rects[i].midY)
-                        .opacity(shown.contains(i) || reduceMotion ? 1 : 0)
-                        .scaleEffect(shown.contains(i) || reduceMotion ? 1 : 0.92)
+                    HUDCardView(card: pair.0, maxHeight: pair.1.height)
+                        .frame(width: pair.1.width)
+                        .frame(height: pair.1.height, alignment: .top)
+                        .position(x: pair.1.midX, y: pair.1.midY)
+                        .modifier(HUDAppear(index: i))
+                        .id("\(i)-\(pair.0.id)")  // a new card in this slot fades in again
                 }
             }
         }
         // Cards stay usable at giant sizes: growth stops at accessibility2.
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
-        .onAppear {
-            guard !reduceMotion else { shown = Set(cards.indices); return }
-            // Cards arrive 40 ms apart, like the reference; each fade is <= 250 ms.
-            for i in cards.indices {
-                withAnimation(.easeOut(duration: 0.22).delay(Double(i) * 0.04)) { shown.insert(i) }
+    }
+}
+
+/// Each card fades in on its own appear, so cards that arrive after the layer is on
+/// screen (every real reply) show up too. Cards come 40 ms apart; each fade is <= 250 ms.
+private struct HUDAppear: ViewModifier {
+    let index: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var visible = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(visible || reduceMotion ? 1 : 0)
+            .scaleEffect(visible || reduceMotion ? 1 : 0.92)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeOut(duration: 0.22).delay(Double(index) * 0.04)) { visible = true }
             }
-        }
     }
 }

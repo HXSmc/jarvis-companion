@@ -150,6 +150,39 @@ final class HUDCardSnapshotTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(HUDLayer.slots(in: size, avoid: nil).count, 6)
     }
 
+    func testTallCardsTakeADoubleSlotAndBigTypeUsesOneColumn() throws {
+        let size = CGSize(width: 390, height: 844)
+        let all = try cards(Self.layer)  // info, stat, bar (2 rows), flow (4 nodes), link, image
+        let cells = HUDLayer.cells(in: size)
+        let rects = HUDLayer.placements(for: all, in: size, avoid: nil)
+        XCTAssertEqual(rects.count, 5)  // the flow takes MR + BR, so the 6th card has no slot
+        XCTAssertEqual(rects[3], cells[1][1].union(cells[2][1]))  // flow: double height
+        XCTAssertEqual(rects[2], cells[1][0])                     // a 2-row bar stays single
+        XCTAssertGreaterThanOrEqual(HUDCardView(card: all[3], maxHeight: rects[3].height).flowFit.nodes, 3)
+        for a in rects {
+            for b in rects where b.minX == a.minX && b.minY > a.minY {
+                XCTAssertGreaterThanOrEqual(b.minY - a.maxY, 8, "cards in one column keep an 8 pt gap")
+            }
+        }
+        let big = HUDLayer.placements(for: all, in: size, avoid: nil, singleColumn: true)
+        XCTAssertLessThanOrEqual(big.count, 3)
+        for r in big { XCTAssertEqual(r.width, size.width - 16) }  // full width, never two columns
+        // with the subject mid-screen, no placement covers it
+        let avoid = CGRect(x: 140, y: 300, width: 120, height: 160)
+        for r in HUDLayer.placements(for: all, in: size, avoid: avoid) {
+            XCTAssertFalse(r.insetBy(dx: -8, dy: -8).intersects(avoid), "card \(r) covers the subject")
+        }
+    }
+
+    func testBarCaptionCountsInTheBudget() throws {
+        let bar = try XCTUnwrap(cards(Self.bar).first)  // 3 rows + caption
+        XCTAssertTrue(HUDCardView(card: bar).barFit.caption)              // no slot: everything
+        XCTAssertTrue(HUDCardView(card: bar, maxHeight: 900).barFit.caption)
+        let tight = HUDCardView(card: bar, maxHeight: 200).barFit
+        XCTAssertFalse(tight.caption)  // the caption goes before any row
+        XCTAssertEqual(tight.rows + tight.dropped, 3)
+    }
+
     // MARK: screenshots (one per type + the composed layer)
 
     func testInfoCardShot() throws {
@@ -194,6 +227,43 @@ final class HUDCardSnapshotTests: XCTestCase {
             HUDLayer(cards: all, avoid: avoid)
         }
         try draw("hud-07-layer", AnyView(view), size: CGSize(width: 390, height: 844))
+    }
+
+    /// Accessibility2 (the layer cap): one full-width column, labels readable.
+    func testLayerAx2Shot() throws {
+        let all = try cards(Self.layer)
+        let view = ZStack {
+            Color(white: 0.08)
+            HUDLayer(cards: all, avoid: nil)
+        }
+        .dynamicTypeSize(.accessibility2)
+        try draw("hud-07c-layer-ax2", AnyView(view), size: CGSize(width: 390, height: 844))
+    }
+
+    /// The real flow: the layer is on screen empty, the cards come with a later reply.
+    /// They must fade in (round-2 blocker: they stayed at opacity 0).
+    func testCardsArrivingLaterBecomeVisible() throws {
+        let all = try cards(Self.layer)
+        let size = CGSize(width: 390, height: 844)
+        let box = CardsBox()
+        let view = ZStack { Color.white; LateLayer(box: box) }
+        let image = try draw("hud-07b-layer-late", AnyView(view), size: size) { box.cards = all }
+        let slot = try XCTUnwrap(HUDLayer.placements(for: all, in: size, avoid: nil).first)
+        // The header band of the first card: a white backdrop would read ~1.0, the black card far lower.
+        let band = CGRect(x: slot.minX + 2, y: slot.minY + 2, width: slot.width - 4, height: 70)
+        XCTAssertLessThan(try meanLuminance(image, in: band), 0.5, "late cards are not visible")
+    }
+
+    /// The camera shape: yellow outline on its 8 pt dark halo + label tag, over a bright frame.
+    func testShapeHaloShot() throws {
+        let rect = CGRect(x: 120, y: 140, width: 150, height: 90)
+        let view = ZStack {
+            Self.busyBackdrop
+            HWShapeLayer(shape: HWShape(kind: "rect", rect: .zero, label: "SATA1", frameId: nil), rect: rect)
+            HWShapeLayer(shape: HWShape(kind: "circle", rect: .zero, label: "", frameId: nil),
+                         rect: CGRect(x: 160, y: 300, width: 70, height: 50))
+        }
+        try draw("hud-08-shape-halo", AnyView(view), size: CGSize(width: 390, height: 420))
     }
 
     // MARK: row budget (whole rows only, never a mid-row cut)
@@ -264,7 +334,8 @@ final class HUDCardSnapshotTests: XCTestCase {
                     HUDCardView(card: card)
                 }
             }
-            .frame(width: 179, alignment: .top)
+            // From accessibility1 the layer uses one full-width column (390 - 2 x 8 pt).
+            .frame(width: ax3 ? 374 : 179, alignment: .top)
             .padding(.top, 16)
         }
         try draw(name, AnyView(view), size: CGSize(width: 390, height: ax3 ? 820 : 320))
@@ -293,7 +364,29 @@ final class HUDCardSnapshotTests: XCTestCase {
         return dir
     }
 
-    private func draw(_ name: String, _ view: AnyView, size: CGSize) throws {
+    /// Mean brightness 0...1 of `rect` (points) in a rendered shot.
+    private func meanLuminance(_ image: UIImage, in rect: CGRect) throws -> Double {
+        let s = image.scale
+        let cg = try XCTUnwrap(image.cgImage?.cropping(to: CGRect(x: rect.minX * s, y: rect.minY * s,
+                                                                  width: rect.width * s, height: rect.height * s)))
+        let w = 32, h = 32
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        XCTAssertTrue(drawn)
+        var sum = 0.0
+        for i in stride(from: 0, to: px.count, by: 4) { sum += Double(px[i]) + Double(px[i + 1]) + Double(px[i + 2]) }
+        return sum / Double(w * h * 3) / 255
+    }
+
+    /// `change` runs once the view is on screen (a later reply), then the shot settles.
+    @discardableResult
+    private func draw(_ name: String, _ view: AnyView, size: CGSize, change: (() -> Void)? = nil) throws -> UIImage {
         let host = UIHostingController(rootView: view.preferredColorScheme(.dark))
         host.overrideUserInterfaceStyle = .dark
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
@@ -303,6 +396,10 @@ final class HUDCardSnapshotTests: XCTestCase {
         window.isHidden = false
         host.view.frame = window.bounds
         host.view.layoutIfNeeded()
+        if let change {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            change()
+        }
         RunLoop.main.run(until: Date().addingTimeInterval(0.8))  // let SwiftUI + the layer fade-in settle
         let format = UIGraphicsImageRendererFormat()
         format.scale = 3
@@ -318,5 +415,15 @@ final class HUDCardSnapshotTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+        return image
     }
+}
+
+private final class CardsBox: ObservableObject {
+    @Published var cards: [HUDCard] = []
+}
+
+private struct LateLayer: View {
+    @ObservedObject var box: CardsBox
+    var body: some View { HUDLayer(cards: box.cards, avoid: nil) }
 }
