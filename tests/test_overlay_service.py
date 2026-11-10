@@ -106,6 +106,7 @@ def reset_overlay_state():
     overlay._notes.clear()
     overlay._tainted.clear()
     overlay._card_ids.clear()
+    overlay._pending.clear()
     yield
     overlay.set_deps(None)
     overlay._history.clear()

@@ -18,6 +18,8 @@ final class AppController {
     private var turnConvId = ""
     private var turnFirstAudio = false
     private var turnDone = false
+    /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
+    private var listenSerial = 0
 
     // Outage state.
     private var serviceVoice: String?
@@ -151,19 +153,30 @@ final class AppController {
         model.orb = .idle
     }
 
-    private func handleWake() async {
-        refreshPermissions()
-        if !model.missingPermissions.isEmpty { speakPermissionNeed() }
-        model.orb = .listening
-        audio.stop()  // barge-in
+    /// followUp: the open-mic window after a reply (no wake word, same conversation).
+    private func handleWake(followUp: Bool = false) async {
+        listenSerial += 1
+        if followUp {
+            model.orb = .followUp
+        } else {
+            refreshPermissions()
+            if !model.missingPermissions.isEmpty { speakPermissionNeed() }
+            model.orb = .listening
+            audio.stop()  // barge-in
+        }
         // Screen capture starts at wake; only awaited when an utterance lands.
         let screenTask = Task { await ScreenContext.capture() }
         let listenStart = Date()
         speech.listenAfterWake(
-            onPartial: { _ in },
+            followUp: followUp,
+            onPartial: { [weak self] _ in
+                // Speech in the follow-up window: show the normal listening orb.
+                if followUp, self?.model.orb == .followUp { self?.model.orb = .listening }
+            },
             onFinal: { [weak self] text, sttFinalMs, endOfSpeech in
                 Task { @MainActor in
                     await self?.handleUtterance(text: text,
+                                          followUp: followUp,
                                           sttFinalMs: sttFinalMs,
                                           audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
                                           endOfSpeech: endOfSpeech,
@@ -173,6 +186,10 @@ final class AppController {
             onNothing: { [weak self] why in
                 Task { @MainActor in
                     guard let self else { return }
+                    if followUp {  // nobody spoke after the reply: close the window quietly
+                        if self.model.orb == .followUp { self.model.orb = .idle }
+                        return
+                    }
                     self.client.debugNote(step: "no_speech", detail: why)
                     // With no mic there is no speech to catch; the permission line covers it.
                     if !self.model.missingPermissions.contains(.microphone) {
@@ -186,6 +203,7 @@ final class AppController {
     // MARK: - Utterance turn
 
     private func handleUtterance(text: String,
+                                 followUp: Bool,
                                  sttFinalMs: Double,
                                  audioMs: Double,
                                  endOfSpeech: Date,
@@ -211,7 +229,8 @@ final class AppController {
             do {
                 for try await event in client.utterance(text: text, convId: conv,
                                                         sttFinalMs: sttFinalMs, audioMs: audioMs,
-                                                        stt: speech.lastDiagnosis, screen: screen) {
+                                                        stt: speech.lastDiagnosis, followUp: followUp,
+                                                        screen: screen) {
                     gotEvent = true
                     handle(event)
                 }
@@ -259,7 +278,7 @@ final class AppController {
         case .clear:
             model.clear()
         case .done:
-            if audio.isBusy { turnDone = true } else { model.orb = .idle }
+            if audio.isBusy { turnDone = true } else { replyFinished() }
         case .unknown:
             break
         }
@@ -316,6 +335,19 @@ final class AppController {
     private func handleAudioDrained() {
         guard turnDone else { return }
         turnDone = false
+        replyFinished()
+    }
+
+    /// Reply over: keep the mic open ~8 s so the user can go on without "Jarvis" (also how a
+    /// trailing-off request gets its rest). 300 ms first so the room echo of the reply dies out.
+    private func replyFinished() {
         model.orb = .idle
+        let serial = listenSerial
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self, self.listenSerial == serial, self.model.orb == .idle, !self.audio.isBusy
+            else { return }
+            await self.handleWake(followUp: true)
+        }
     }
 }

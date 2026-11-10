@@ -17,7 +17,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | git_diff | answer
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | answer
     arg: str = ""
 
 
@@ -46,6 +46,21 @@ _UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
 _APP_NOISE_RE = re.compile(r"^the\s+|(?:\.app|\s+app)$", re.I)
 # Whole-utterance clock questions only: "what time is it in Tokyo" still goes to the brain.
 _TIME_RE = re.compile(r"^(?:what(?:'s| is) the time|what time is it|tell me the time)(?: now| right now| please)?$")
+# "highlight the last debugging session": a visual verb about something on screen but no UI
+# noun -> "look" (ground against windows/text first, else the brain with screen context).
+_LOOK_STRONG_RE = re.compile(r"\b(highlight|circle|underline|point (?:to|at|out))\b")
+_LOOK_LEAD_RE = re.compile(r"\b(show me|where is|where's|where are|find|which)\b")
+_LOOK_REF_RE = re.compile(r"\b(?:the|my) (?:last|latest|newest|previous|current|top|bottom)\b"
+                          r"|\b(?:this|that|these|those)\b"
+                          r"|\b(?:window|page|tab|screen|session|message|error|turn|line|section"
+                          r"|panel|dialog|notification|card)s?\b")
+# The utterance stops mid-thought: filler, article, possessive or conjunction at the end, or a
+# trailing comma ("Can you show me the last, uh"). The user is still talking: wait for the rest.
+FILLERS = ("uh", "um", "er", "erm", "uhm", "hmm", "ah")
+_TRAILING = FILLERS + ("the", "a", "an", "my", "your", "our", "their", "his", "her", "and",
+                       "or", "but", "to", "of", "last", "next", "plus", "minus")
+_INCOMPLETE_RE = re.compile(r"(?:,|\b(?:" + "|".join(_TRAILING) + r"))\W*$", re.I)
+_FILLER_TAIL_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(FILLERS) + r"))+[\s,.]*$", re.I)
 _DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|what day is (?:it|today)"
                       r"|what date is it|tell me the date)(?: today| now| please)?$")
 
@@ -74,6 +89,11 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     lead = _GROUND_LEAD_RE.search(low)
     if lead and _UI_NOUN_RE.search(low, lead.end()):
         return Intent("ground", t)
+    if _LOOK_STRONG_RE.search(low):
+        return Intent("look", t)
+    look = _LOOK_LEAD_RE.search(low)
+    if look and _LOOK_REF_RE.search(low, look.end()):
+        return Intent("look", t)
     if low.startswith("open "):
         arg = t[5:].strip()
         name = _APP_NOISE_RE.sub("", arg).strip()
@@ -83,6 +103,18 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         kind = "open_site" if _HOST_RE.match(host) else "open_app"
         return Intent(kind, arg)
     return Intent("answer", t)
+
+
+def looks_incomplete(text: str) -> bool:
+    """True when the transcript trails off ("show me the last, uh"): more words are coming."""
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    return bool(t) and not t.endswith((".", "?", "!")) and bool(_INCOMPLETE_RE.search(t))
+
+
+def join_continuation(head: str, tail: str) -> str:
+    """'show me the last, uh' + 'debugging session' -> 'show me the last debugging session'."""
+    head = _FILLER_TAIL_RE.sub("", head.strip()).rstrip(" ,")
+    return f"{head} {tail.strip()}".strip()
 
 
 def list_apps(dirs: tuple[str, ...] = APP_DIRS) -> dict[str, str]:

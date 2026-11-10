@@ -52,7 +52,8 @@ final class ServiceClient {
 
     /// NDJSON utterance stream; one decoded event per line.
     func utterance(text: String, convId: String, sttFinalMs: Double, audioMs: Double,
-                   stt: String, screen: ScreenPayload?) -> AsyncThrowingStream<OverlayEvent, Error> {
+                   stt: String, followUp: Bool = false,
+                   screen: ScreenPayload?) -> AsyncThrowingStream<OverlayEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -65,6 +66,7 @@ final class ServiceClient {
                              sttFinalMs: sttFinalMs,
                              audioMs: audioMs,
                              stt: String(stt.prefix(500)),
+                             followup: followUp,
                              screen: screen))
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response)
@@ -128,9 +130,10 @@ final class ServiceClient {
         var sttFinalMs: Double
         var audioMs: Double
         var stt: String
+        var followup: Bool
         var screen: ScreenPayload?
         private enum CodingKeys: String, CodingKey {
-            case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", stt, screen
+            case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", stt, followup, screen
         }
     }
 }

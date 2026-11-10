@@ -22,6 +22,7 @@ _ACK_KEYS = {
     "open_app": "open",
     "open_site": "open",
     "ground": "look",
+    "look": "look",
     "git_diff": "diff",
     "clear": "clear",
     "answer": "answer",

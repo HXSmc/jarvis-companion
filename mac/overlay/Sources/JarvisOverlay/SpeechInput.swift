@@ -3,6 +3,8 @@ import Foundation
 import Speech
 import os
 
+import OverlayCore
+
 /// Always-on mic tap with a 2 s ring buffer; one wake-word turn at a time.
 /// macOS 26 SpeechTranscriber when available, SFSpeechRecognizer otherwise.
 @MainActor
@@ -44,10 +46,13 @@ final class SpeechInput {
     // MARK: one turn of speech
 
     /// Replays the ring buffer (so the first words are not lost), then live
-    /// audio. Ends 700 ms after the last partial-text change; 5 s with no
-    /// speech, an empty final, or 30 s hard cap -> onNothing(why), why = a short
+    /// audio. Ends per TurnEndpointer (0.7 s quiet, 2.7 s when the words trail off);
+    /// 5 s with no speech, an empty final, or 30 s hard cap -> onNothing(why), why = a short
     /// diagnosis for the debug page (STT path, buffers fed, results, errors).
+    /// followUp: the open-mic window after a reply. No ring replay (it holds Jarvis's own
+    /// voice) and 8 s to start speaking.
     func listenAfterWake(
+        followUp: Bool = false,
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void,
         onNothing: @escaping (_ why: String) -> Void
@@ -55,6 +60,7 @@ final class SpeechInput {
         guard isRunning else { onNothing("mic engine not running"); return }
         cancel()
         let turn = Turn()
+        turn.followUp = followUp
         turn.onPartial = onPartial
         turn.onFinal = onFinal
         turn.onNothing = onNothing
@@ -109,10 +115,12 @@ final class SpeechInput {
         var onPartial: ((String) -> Void)?
         var onFinal: ((_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void)?
         var onNothing: ((String) -> Void)?
+        var followUp = false
         var path = ""  // STT path + why it was taken, for the debug page
+        var endNote = ""  // how long the end-of-turn silence was, for the debug page
         let stats = FeedStats()
 
-        var diagnosis: String { "\(path); \(stats.summary)" }
+        var diagnosis: String { "\(path)\(endNote); \(stats.summary)" }
     }
 
     private func handlePartial(_ raw: String, turn: Turn) {
@@ -170,10 +178,14 @@ final class SpeechInput {
             let now = Date()
             if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
             if !turn.hasSpeech {
-                if now.timeIntervalSince(turn.startedAt) >= 5 { return .nothing }
-            } else if let end = turn.endOfSpeech, now.timeIntervalSince(end) >= 1.2 {
-                // 1.2 s, not 0.7: SpeechAnalyzer partials can lag the audio by more than 0.7 s,
-                // which cut "Open the clock app" to "Open the" (debug page, 3 repros).
+                if now.timeIntervalSince(turn.startedAt) >= (turn.followUp ? 8 : 5) { return .nothing }
+            } else if let end = turn.endOfSpeech,
+                      TurnEndpointer.shouldEnd(text: turn.lastText, lastTextAt: end,
+                                               lastVoiceAt: tap.lastVoicedAt, now: now) {
+                // Not on partial-text silence alone: partials lag the audio and people pause
+                // after "the last, uh" (owner, 02:18). Voiced audio and a trailing word hold it open.
+                let wait = TurnEndpointer.silence(after: turn.lastText)
+                turn.endNote = wait > TurnEndpointer.fast ? " (trailed off: waited \(wait) s)" : ""
                 return .endOfSpeech
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -250,7 +262,9 @@ final class SpeechInput {
                 continuation.yield(AnalyzerInput(buffer: out))
             }
         }
-        for chunk in tap.ringSnapshot() { feed(chunk.buffer, chunk.at) }
+        if !turn.followUp {
+            for chunk in tap.ringSnapshot() { feed(chunk.buffer, chunk.at) }
+        }
         tap.setSink(feed)
         let verdict = await watch(turn: turn)
         guard !turn.cancelled, !turn.finished else { return true }
@@ -305,7 +319,7 @@ final class SpeechInput {
             }
         }
         turn.cancelHandler = { task.cancel() }
-        for chunk in tap.ringSnapshot() {
+        for chunk in tap.ringSnapshot() where !turn.followUp {
             request.append(chunk.buffer)
         }
         tap.setSink { [weak request] buffer, _ in
@@ -422,6 +436,15 @@ private final class MicTap: @unchecked Sendable {
     private var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
     private var levelHandler: ((Double) -> Void)?
     private var lastLevelAt = Date.distantPast
+    private var vad = VoiceActivity()
+    private var voicedAt: Date?
+
+    /// Last mic buffer clearly above the noise floor (the user is still talking).
+    var lastVoicedAt: Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return voicedAt
+    }
 
     func install(on node: AVAudioInputNode, format: AVAudioFormat) {
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
@@ -431,13 +454,15 @@ private final class MicTap: @unchecked Sendable {
             var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
             var handler: ((Double) -> Void)?
             var level: Double?
+            let rms = Self.rms(copy)
             lock.lock()
+            if vad.isVoiced(rms: rms) { voicedAt = now }
             ring.append((copy, now))
             ring.removeAll { now.timeIntervalSince($0.at) > 2 }
             sink = self.sink
             if now.timeIntervalSince(lastLevelAt) >= 0.05 {
                 lastLevelAt = now
-                level = Self.rms(copy)
+                level = rms
                 handler = levelHandler
             }
             lock.unlock()
