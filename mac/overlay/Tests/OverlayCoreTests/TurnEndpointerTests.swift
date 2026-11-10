@@ -5,7 +5,7 @@ import XCTest
 final class TurnEndpointerTests: XCTestCase {
     /// Owner, 02:18:24: "Can you show me the last, uh" was ended by endOfSpeech after 0.7 s.
     func testTrailingOffWaitsLonger() {
-        for text in ["Can you show me the last, uh", "show me the", "Open the", "What is two plus",
+        for text in ["Can you show me the last, uh", "Can you show me the last, huh", "the last, huh?", "show me the", "Open the", "What is two plus",
                      "and the,", "um"] {
             XCTAssertEqual(TurnEndpointer.silence(after: text), TurnEndpointer.extended, text)
         }

@@ -56,11 +56,11 @@ _LOOK_REF_RE = re.compile(r"\b(?:the|my) (?:last|latest|newest|previous|current|
                           r"|panel|dialog|notification|card)s?\b")
 # The utterance stops mid-thought: filler, article, possessive or conjunction at the end, or a
 # trailing comma ("Can you show me the last, uh"). The user is still talking: wait for the rest.
-FILLERS = ("uh", "um", "er", "erm", "uhm", "hmm", "ah")
+FILLERS = ("uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah")  # STT wrote "uh" as "huh"
 _TRAILING = FILLERS + ("the", "a", "an", "my", "your", "our", "their", "his", "her", "and",
                        "or", "but", "to", "of", "last", "next", "plus", "minus")
 _INCOMPLETE_RE = re.compile(r"(?:,|\b(?:" + "|".join(_TRAILING) + r"))\W*$", re.I)
-_FILLER_TAIL_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(FILLERS) + r"))+[\s,.]*$", re.I)
+_FILLER_TAIL_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(FILLERS) + r"))+[\s,.?!]*$", re.I)
 _DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|what day is (?:it|today)"
                       r"|what date is it|tell me the date)(?: today| now| please)?$")
 
@@ -108,6 +108,8 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
 def looks_incomplete(text: str) -> bool:
     """True when the transcript trails off ("show me the last, uh"): more words are coming."""
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    if _FILLER_TAIL_RE.search(" " + t):  # "the last, huh?" is still mid-thought
+        return True
     return bool(t) and not t.endswith((".", "?", "!")) and bool(_INCOMPLETE_RE.search(t))
 
 

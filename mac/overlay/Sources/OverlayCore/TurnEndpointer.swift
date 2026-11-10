@@ -12,20 +12,23 @@ public enum TurnEndpointer {
     /// No new text for this long ends the turn even if the mic still "hears voice" (fan, TV).
     public static let stuckText: TimeInterval = 4
 
-    static let trailing: Set<String> = [
-        "uh", "um", "er", "erm", "uhm", "hmm", "ah", "like",
+    /// A filler ends a turn as incomplete even when STT punctuates it ("the last, huh?").
+    static let fillers: Set<String> = ["uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah"]  // Mac STT: "uh" -> "huh"
+    static let trailing: Set<String> = fillers.union([
+        "like",
         "the", "a", "an", "my", "your", "our", "their", "his", "her", "its", "this", "these",
         "and", "or", "but", "so", "because", "if", "than", "then",
         "to", "of", "for", "with", "from", "about", "into", "at", "by", "in", "on",
         "last", "next", "plus", "minus", "times", "is", "are", "was", "what", "which",
-    ]
+    ])
 
     public static func looksIncomplete(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let last = t.last else { return false }
         if last == "," { return true }
-        if ".?!".contains(last) { return false }
         let word = t.split(whereSeparator: { !$0.isLetter && $0 != "'" }).last.map { $0.lowercased() } ?? ""
+        if fillers.contains(word) { return true }
+        if ".?!".contains(last) { return false }
         return trailing.contains(word)
     }
 

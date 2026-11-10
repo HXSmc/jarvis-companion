@@ -41,7 +41,7 @@ DEBUG_SCREEN = {
 
 
 def test_trailing_off_detection():
-    for text in ("Can you show me the last, uh", "show me the", "open the", "what is two plus",
+    for text in ("Can you show me the last, uh", "Can you show me the last, huh", "the last, huh?", "show me the", "open the", "what is two plus",
                  "tell me about my", "um", "and the,"):
         assert looks_incomplete(text), text
     for text in ("Can you show me the last debugging session", "what time is it",
