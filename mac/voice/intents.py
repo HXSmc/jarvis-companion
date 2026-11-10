@@ -29,7 +29,7 @@ _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[
 _PATH_RE = re.compile(r"^[/A-Za-z0-9._~%-]*$")
 _WAKE_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
 # STT often turns the wake phrase into other words: "Hey, John Pierce. What time is it".
-_MISHEARD_WAKE_RE = re.compile(r"^(?:hey|hi|ok(?:ay)?)[\s,]+\w+(?:\s\w+)?[.,!?]\s+", re.I)
+_MISHEARD_WAKE_RE = re.compile(r"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+", re.I)
 _GROUND_LEADS = ("show me", "where is", "where's", "which button", "point to",
                  "point at", "highlight", "find the")
 # UI things on screen; anything else after a lead is a question for the model.
