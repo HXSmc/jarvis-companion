@@ -94,7 +94,19 @@ fi
 if [ -x "$PY" ]; then
   echo "venv present: $REPO/.venv"
 else
-  run python3 -m venv "$REPO/.venv"
+  # kokoro-onnx 0.6.1 has no wheels for Python 3.14+: use the newest 3.10-3.13 found.
+  BASE_PY=""
+  for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$cand" >/dev/null 2>&1 &&
+       "$cand" -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)'; then
+      BASE_PY="$cand"; break
+    fi
+  done
+  if [ -z "$BASE_PY" ]; then
+    echo "need Python 3.10-3.13 (kokoro-onnx has no 3.14 build): brew install python@3.13" >&2
+    exit 1
+  fi
+  run "$BASE_PY" -m venv "$REPO/.venv"
 fi
 run "$PY" -m pip install fastapi==0.143.2 uvicorn==0.54.0 httpx==0.28.1 numpy==2.5.4 openwakeword==0.6.0 kokoro-onnx==0.6.1
 
