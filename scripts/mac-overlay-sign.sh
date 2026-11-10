@@ -54,6 +54,16 @@ EOF
 fi
 
 security unlock-keychain -p "$(cat "$PASSFILE")" "$KC"
+# codesign finds identities only in the user keychain search list (--keychain alone gives
+# "no identity found"): append ours, keeping every keychain already listed.
+if ! security list-keychains -d user | grep -qF "$KC"; then
+  LIST=()
+  while IFS= read -r KEYCHAIN; do
+    KEYCHAIN="${KEYCHAIN//\"/}"
+    LIST+=("${KEYCHAIN#"${KEYCHAIN%%[![:space:]]*}"}")
+  done < <(security list-keychains -d user)
+  security list-keychains -d user -s "${LIST[@]}" "$KC"
+fi
 # codesign only uses a trusted identity. Trusting it for code signing only is a one-time
 # user trust setting: macOS asks for Touch ID or the login password once (never typed here).
 if ! security find-identity -v -p codesigning "$KC" | grep -q "\"$NAME\""; then
