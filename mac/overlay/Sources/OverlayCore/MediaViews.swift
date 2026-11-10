@@ -338,14 +338,18 @@ public struct VideoCardView<Player: View>: View {
             if !playsInline {
                 thumbnailView
             } else {
+                // Built once for .starting and .playing (one identity), so the web view is not
+                // recreated, and the video does not restart, when the cover goes away.
+                if phase == .starting || phase == .playing {
+                    player
+                        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                }
                 switch phase {
                 case .playing:
-                    player
-                        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                    EmptyView()
                 case .starting:
-                    // The player loads underneath; this cover hides its first paint until a frame plays.
-                    player
-                        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                    // Opaque cover: nothing of the loading page shows until a frame plays.
+                    Color.black
                     poster.opacity(0.4)
                     startingMark
                 case .idle:

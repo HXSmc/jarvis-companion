@@ -389,4 +389,31 @@ extension SnapshotTests {
                                 name: "media-gallery-\(count)")
         }
     }
+
+    /// Round 2: while .starting the cover is opaque, with or without a thumbnail. The player is a
+    /// white stand-in for a loading web page; a translucent cover would let it show through.
+    func testStartingCoverHidesThePlayer() throws {
+        guard case .video(let youTube)? = LayoutDebugCommand.demoMediaCards().first(where: { $0.id == "media-3" }) else {
+            return XCTFail("demoMediaCards has no media-3 video card")
+        }
+        let thumb = MediaImageState.loaded(makeMediaImage(width: 1600, height: 900, seed: 5))
+        for (name, thumbnail) in [("thumb", Optional(thumb)), ("none", nil)] {
+            let view = VideoCardView(card: youTube, thumbnail: thumbnail, phase: .starting, onPlay: {}) { Color.white }
+            let size = try XCTUnwrap(MediaPolicy.cardSize(for: .video(youTube)))
+            let renderer = ImageRenderer(content: view.frame(width: size.width, height: size.height))
+            renderer.scale = 1
+            let image = try XCTUnwrap(renderer.cgImage, "no image for \(name)")
+            // Sample the area's lower-left quarter, away from the centred "Starting video" text.
+            let x = Int(MediaPolicy.cardWidth * 0.15)
+            let y = Int(MediaPolicy.titleBarHeight + MediaPolicy.videoAreaSize.height * 0.85)
+            var pixel = [UInt8](repeating: 0, count: 4)
+            let ctx = try XCTUnwrap(CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            ctx.draw(image, in: CGRect(x: -x, y: -(image.height - 1 - y), width: image.width, height: image.height))
+            XCTAssertLessThan(Int(pixel[0]) + Int(pixel[1]) + Int(pixel[2]), 3 * 120,
+                              "starting cover lets the player show through (\(name)): \(pixel)")
+            try renderMediaCard(view, size: padded(size), name: "media-video-starting-\(name)")
+        }
+    }
 }
