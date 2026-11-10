@@ -4,7 +4,8 @@ import OverlayCore
 /// Moves anchored shapes with their windows. Polls the CG window list on a utility queue
 /// (no AX calls, window titles never read, nothing leaves the process) and hands each
 /// change to the main actor. Exists only while the model holds an anchored shape.
-final class WindowFollower {
+/// Sendable by confinement: `tracker` is touched only on `queue`.
+final class WindowFollower: @unchecked Sendable {
     typealias Window = (id: UInt32, pid: Int32, frame: CGRect)
 
     private let queue: DispatchQueue
@@ -25,7 +26,7 @@ final class WindowFollower {
     /// Full anchored set (key = model shape key); empty stops the timer.
     @MainActor func setAnchors(_ anchors: [Int: ShapeAnchor]) {
         let screens = [Self.panelScreen()]
-        queue.async { [tracker] in
+        queue.async { [self] in
             tracker.screens = screens
             tracker.setAnchors(anchors)
         }
