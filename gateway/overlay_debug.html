@@ -94,7 +94,7 @@ function render(data) {
       const d = describe(s);
       if (d !== null) v.textContent = d;
       if (s.step === "transcribed") v.append(el("q", "", s.text));
-      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(` at ${s.ms} ms${s.voiced ? "" : " (text only)"}`); }
+      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : ` · text at ${s.ms} ms, no audio`); }
       li.append(v);
       ol.append(li);
     }

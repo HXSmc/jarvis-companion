@@ -218,9 +218,15 @@ class DebugLog:
             self._turns.append(turn)
             return turn
 
-    def add(self, turn: dict, step: str, **fields) -> None:
+    def add(self, turn: dict, step: str, **fields) -> dict:
+        entry = {"step": step, "at": time.time(), **fields}
         with self._lock:
-            turn["steps"].append({"step": step, "at": time.time(), **fields})
+            turn["steps"].append(entry)
+        return entry
+
+    def update(self, entry: dict, **fields) -> None:
+        with self._lock:
+            entry.update(fields)
 
     def note(self, step: str, detail: str) -> None:
         """App-side step (no speech heard, service unreachable) on the turn it belongs to."""
@@ -630,7 +636,7 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
         start = time.monotonic()
         cards = shapes = 0
         first_audio_ms = None
-        last_text = None
+        last_text = spoke = None
         on_step = lambda step, **fields: debug_log.add(rec, step, **fields)  # noqa: E731
         async for event in run_turn(body, deps, on_step=on_step):
             kind = event["type"]
@@ -639,7 +645,10 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
                 first_audio_ms = ms
             if kind in ("say", "audio") and event["text"] != last_text:
                 last_text = event["text"]  # a say line and its audio are one spoken line
-                debug_log.add(rec, "spoke", text=last_text, ms=ms, voiced=kind == "audio")
+                spoke = debug_log.add(rec, "spoke", text=last_text, ms=ms,
+                                      audio_ms=ms if kind == "audio" else None)
+            elif kind == "audio" and spoke is not None:
+                debug_log.update(spoke, audio_ms=ms)
             elif kind == "card":
                 cards += 1
             elif kind == "shape":
