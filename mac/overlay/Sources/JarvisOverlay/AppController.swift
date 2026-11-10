@@ -268,7 +268,7 @@ final class AppController {
                let fresh = ScreenContext.recheck(role: check.role, label: check.label ?? "", near: shape.rect) {
                 updated.box = [Double(fresh.minX), Double(fresh.minY), Double(fresh.maxX), Double(fresh.maxY)]
             }
-            model.add(shape: updated)
+            anchorShapes([model.add(shape: updated): updated.rect])
         case .card(let card):
             model.activity()
             model.add(card: card)
@@ -289,12 +289,25 @@ final class AppController {
             // 900 ms: let the editor settle before the gutter OCR pass.
             try? await Task.sleep(nanoseconds: 900_000_000)
             guard !Task.isCancelled, let self else { return }
+            var batch: [Int: CGRect] = [:]
             for band in await ScreenContext.lineBands(ranges: ranges) {
-                self.model.add(shape: HUDShape(kind: .rect,
-                                               box: [Double(band.minX), Double(band.minY),
-                                                     Double(band.maxX), Double(band.maxY)],
-                                               label: "changed"))
+                let key = self.model.add(shape: HUDShape(kind: .rect,
+                                                         box: [Double(band.minX), Double(band.minY),
+                                                               Double(band.maxX), Double(band.maxY)],
+                                                         label: "changed"))
+                batch[key] = band
             }
+            self.anchorShapes(batch)
+        }
+    }
+
+    /// Finds each new shape's window (one window-list call per batch, off the main actor) so
+    /// the box follows it. The shape is already on screen; it stays static if no window owns it.
+    private func anchorShapes(_ rects: [Int: CGRect]) {
+        guard !rects.isEmpty else { return }
+        Task { [weak self] in
+            let anchors = await Task.detached(priority: .utility) { WindowFollower.anchors(for: rects) }.value
+            self?.model.anchor(anchors)
         }
     }
 
