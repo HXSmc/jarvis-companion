@@ -58,9 +58,11 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     low = t.lower()
     if low in ("clear", "clear the screen"):
         return Intent("clear")
-    if _TIME_RE.match(low):
+    # Last sentence only: STT often turns the wake phrase into words ("Hey, John Pierce. What time is it").
+    question = re.split(r"[.,!?]\s+", low)[-1]
+    if _TIME_RE.match(question):
         return Intent("clock", "time")
-    if _DATE_RE.match(low):
+    if _DATE_RE.match(question):
         return Intent("clock", "date")
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.

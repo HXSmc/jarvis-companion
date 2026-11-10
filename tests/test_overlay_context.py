@@ -28,7 +28,9 @@ NOW = datetime(2026, 11, 10, 16, 5, tzinfo=timezone(timedelta(hours=3)))
 
 
 def test_clock_questions_parse_to_the_local_clock_intent():
-    for text in ("Jarvis, what time is it?", "what's the time", "What is the time now"):
+    # The last one is a real Mac transcript: STT misheard "Hey Jarvis".
+    for text in ("Jarvis, what time is it?", "what's the time", "What is the time now",
+                 "Hey, John Pierce. What time is it"):
         assert (parse(text).kind, parse(text).arg) == ("clock", "time"), text
     for text in ("what's the date", "what day is it today", "what is today's date"):
         assert (parse(text).kind, parse(text).arg) == ("clock", "date"), text
