@@ -2,26 +2,65 @@ import AppKit
 import SwiftUI
 import OverlayCore
 
-/// Card stack hosted in the CardPanel: permission card first, then HUD cards
-/// with the newest at the bottom. Hovering pauses the idle clear.
+/// One card in its own panel: scales in from 0.96 on arrival (none with Reduce Motion; the
+/// panel itself fades in). Hovering pauses the idle clear.
 @MainActor
-struct CardColumnView: View {
-    @ObservedObject var model: OverlayModel
+struct CardTile: View {
+    let model: OverlayModel
+    let card: HUDCard
+    @State private var entered = false
 
     var body: some View {
-        VStack(spacing: 12) {
-            if !model.missingPermissions.isEmpty {
-                PermissionCard(missing: model.missingPermissions)
+        CardView(card: card)
+            .scaleEffect(entered ? 1 : 0.96)
+            .onAppear {
+                guard !Theme.reduceMotion else {
+                    entered = true
+                    return
+                }
+                withAnimation(.easeOut(duration: 0.2)) { entered = true }
             }
-            // Stable identity per card, so an insert or drop never re-binds a view to another card.
-            ForEach(model.cards, id: \.listKey) { card in
-                CardView(card: card)
-                    .transition(.opacity)
+            .onHover { model.setHovering(card.listKey, $0) }
+    }
+}
+
+/// Parked cards as chips at their strip offsets; a click on any chip restores every card.
+@MainActor
+struct ChipStrip: View {
+    static let hoverID = "chips"
+
+    struct Chip {
+        let card: HUDCard
+        let offset: CGPoint
+    }
+
+    let model: OverlayModel
+    let chips: [Chip]
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(chips, id: \.card.listKey) { chip in
+                Button { model.setLayout(.restore) } label: { CardChip(card: chip.card) }
+                    .buttonStyle(.plain)
+                    .offset(x: chip.offset.x, y: chip.offset.y)
             }
         }
-        .onHover { model.setIdlePaused($0) }
-        // 200 ms ease-out on inserts; nothing when the user set Reduce Motion.
-        .animation(Theme.reduceMotion ? nil : .easeOut(duration: 0.2), value: model.cards)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onHover { model.setHovering(Self.hoverID, $0) }
+    }
+}
+
+/// The permission card in its own top-right panel; hovering pauses the idle clear.
+@MainActor
+struct PermissionTile: View {
+    static let hoverID = "permission"
+
+    let model: OverlayModel
+    let missing: [Permission]
+
+    var body: some View {
+        PermissionCard(missing: missing)
+            .onHover { model.setHovering(Self.hoverID, $0) }
     }
 }
 

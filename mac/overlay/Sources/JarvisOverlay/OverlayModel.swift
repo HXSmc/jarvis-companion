@@ -6,8 +6,12 @@ import OverlayCore
 @MainActor
 final class OverlayModel: ObservableObject {
     @Published var shapes: [HUDShape] = []
-    /// Newest last (bottom of the column), max 5; a card with the same id replaces the old one.
-    @Published var cards: [HUDCard] = []
+    /// Newest last, at most ScatterLayout.maxCards; a card with the same id replaces the old one.
+    @Published var cards: [HUDCard] = [] {
+        didSet { layout.keep(Set(cards.map(\.listKey))) }
+    }
+    /// Stored scatter frame per card and the normal / aside mode (CardPanel draws it).
+    @Published private(set) var layout = ScatterLayout.LayoutState()
     /// Missing system permissions; drives the native permission card, which the
     /// idle timer and clear() must not remove.
     @Published var missingPermissions: [Permission] = []
@@ -18,6 +22,9 @@ final class OverlayModel: ObservableObject {
     @Published var banner: String?
 
     private var idleTask: Task<Void, Never>?
+    /// Panels under the pointer (cards, chips, permission card); idle is paused while any is.
+    /// A set, not a flag: moving between panels may deliver one's exit after the next one's enter.
+    private var hovered: Set<String> = []
     private static let maxShapes = 40
 
     /// Every shape held, oldest first; `shapes` is the visible part (hidden anchored shapes
@@ -103,41 +110,79 @@ final class OverlayModel: ObservableObject {
         } else {
             cards.append(card)
         }
-        if cards.count > 5 { cards.removeFirst(cards.count - 5) }
+        if cards.count > ScatterLayout.maxCards { cards.removeFirst(cards.count - ScatterLayout.maxCards) }
         bumpIdle()
     }
 
-    /// Oldest card (top of the column) goes first when the panel must shrink.
-    func dropOldestCard() {
-        guard !cards.isEmpty else { return }
-        cards.removeFirst()
+    /// Stores a measured card's scatter frame; cards retired to make room leave `cards`.
+    func place(key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) {
+        let retired = layout.cardAdded(key, size: size, visible: visible, keepOut: keepOut)
+        if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
     }
 
-    /// Pauses the 60 s idle clear while the pointer is over the card panel.
-    func setIdlePaused(_ paused: Bool) {
-        if paused {
+    /// A card replaced in place keeps its origin; only its new size is clamped.
+    func resize(key: String, size: CGSize, visible: CGRect) {
+        layout.cardResized(key, size: size, visible: visible)
+    }
+
+    /// The screen changed: every stored frame moves the least distance back on screen.
+    func reclamp(visible: CGRect) {
+        layout.reclamp(visible: visible)
+    }
+
+    /// Aside parks every card as a chip and drops the current highlight boxes; restore puts
+    /// each card back at its stored frame and restarts the idle countdown. Repeats are no-ops.
+    func setLayout(_ mode: LayoutMode) {
+        switch mode {
+        case .aside:
+            guard layout.mode == .normal else { return }
+            layout.aside()
+            clearShapes()
+        case .restore:
+            guard layout.mode == .aside else { return }
+            layout.restore()
+            bumpIdle()
+        }
+    }
+
+    /// Pauses the 60 s idle clear while the pointer is over any card, chip or the permission card.
+    func setHovering(_ id: String, _ on: Bool) {
+        let wasHovered = !hovered.isEmpty
+        if on { hovered.insert(id) } else { hovered.remove(id) }
+        if hovered.isEmpty {
+            if wasHovered { bumpIdle() }
+        } else {
             idleTask?.cancel()
             idleTask = nil
-        } else {
-            bumpIdle()
         }
     }
 
     func clear() {
         clearShapes()
         cards = []
+        layout.clear()
+        hovered = []
         idleTask?.cancel()
         idleTask = nil
     }
 
+    /// Restarts the 60 s countdown, unless the pointer is on a panel (its exit restarts it).
     private func bumpIdle() {
         idleTask?.cancel()
+        idleTask = nil
+        guard hovered.isEmpty else { return }
         idleTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 60_000_000_000)
             guard !Task.isCancelled else { return }
-            self?.clearShapes()
-            self?.cards = []
+            self?.idleExpired()
         }
+    }
+
+    /// Clears the highlight boxes; cards too, unless they are parked aside (chips wait for
+    /// restore or clear, with no timer).
+    private func idleExpired() {
+        clearShapes()
+        if layout.mode == .normal { cards = [] }
     }
 
     private func clearShapes() {

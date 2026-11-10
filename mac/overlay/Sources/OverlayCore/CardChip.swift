@@ -26,7 +26,7 @@ public struct CardChip: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.cardBorder, lineWidth: 1))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(card.typeTag.capitalized) card: \(card.title), parked. Click to restore all cards.")
+        .accessibilityLabel("Parked \(card.typeTag.lowercased()) card: \(card.title). Click to restore all cards.")
     }
 }
 

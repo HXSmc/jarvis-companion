@@ -71,4 +71,16 @@ final class FixtureDecodeTests: XCTestCase {
             FlowEdge(from: "c", to: "d", label: "shapes + cards")
         )
     }
+
+    func testLayoutEventFixtureDecodes() throws {
+        let url = Self.fixturesDir.deletingLastPathComponent()
+            .appendingPathComponent("overlay")
+            .appendingPathComponent("events")
+            .appendingPathComponent("layout.ndjson")
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let events = text.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .map { OverlayEvent.decode(line: Data($0.utf8)) }
+        XCTAssertEqual(events, [.layout(.aside), .layout(.restore), .clear])
+    }
 }

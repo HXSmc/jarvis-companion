@@ -9,6 +9,8 @@ final class AppController {
     private let speech = SpeechInput()
     private var overlayPanel: OverlayPanel?
     private var cardPanel: CardPanel?
+    /// Live-test trigger; nil unless the app started with the layout debug flag.
+    private var layoutDebug: LayoutDebug?
 
     // Conversation/turn state (latency log).
     private var convId = UUID().uuidString
@@ -35,10 +37,11 @@ final class AppController {
     func start() {
         let overlay = OverlayPanel()
         overlay.host(OverlayRootView(model: model))
-        let cards = CardPanel()
+        let cards = CardPanel(surface: overlay)
         cards.host(model)
         overlayPanel = overlay
         cardPanel = cards
+        layoutDebug = LayoutDebug.startIfEnabled { [weak self] command, text in self?.runDebug(command, text) }
 
         audio.onLevel = { [weak self] level in self?.model.level = level }
         audio.onFirstAudio = { [weak self] in self?.markFirstAudio() }
@@ -297,10 +300,29 @@ final class AppController {
                        template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: "changed"))
         case .clear:
             clearAll()
+        case .layout(let mode):
+            model.setLayout(mode)
         case .done:
             if audio.isBusy { turnDone = true } else { replyFinished() }
         case .unknown:
             break
+        }
+    }
+
+    /// Layout debug trigger (LayoutDebug): the same paths the service's events take.
+    private func runDebug(_ command: LayoutDebugCommand, _ text: String) {
+        log("layout debug: \(text)")
+        switch command {
+        case .aside: handle(.layout(.aside), captured: [])
+        case .restore: handle(.layout(.restore), captured: [])
+        case .clear: handle(.clear, captured: [])
+        case .demo(let count):
+            for card in LayoutDebugCommand.demoCards(count: count) { handle(.card(card), captured: []) }
+        case .shape:
+            let size = overlayPanel?.frame.size ?? .zero
+            let box = [size.width / 2 - 150, size.height / 2 - 40, size.width / 2 + 150, size.height / 2 + 40]
+            model.add(shape: HUDShape(kind: .rect, box: box.map { Double($0) }, label: "Sample"))
+            model.activity()
         }
     }
 
