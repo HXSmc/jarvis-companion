@@ -66,3 +66,51 @@ def test_real_mask_on_a_dim_table_is_the_part_not_the_table(segmenter):
     assert set(m) == {"target_px", "mask_score"}  # the mask image is gone: the box only tightens
     print(f"  dock: loose={loose} mask={m['target_px']} truth={t} iou={iou(m['target_px'], t):.2f}")
     assert iou(m["target_px"], t) > 0.8
+
+
+def test_get_segmenter_prewarms_once_without_an_embed(monkeypatch):
+    import hwmode.segment as seg
+
+    calls = []
+    monkeypatch.setattr(seg, "_segmenter", None)
+    monkeypatch.setattr(seg, "_prewarm", None)
+    monkeypatch.setattr(Segmenter, "available", lambda self: True)
+    monkeypatch.setattr(Segmenter, "_load", lambda self: calls.append(1))
+    first = seg.get_segmenter()
+    assert first is seg.get_segmenter()
+    seg._prewarm.join(timeout=5)
+    assert not seg._prewarm.is_alive()
+    assert calls == [1]
+
+
+def test_no_prewarm_thread_when_models_are_absent(monkeypatch):
+    import hwmode.segment as seg
+
+    monkeypatch.setattr(seg, "_segmenter", None)
+    monkeypatch.setattr(seg, "_prewarm", None)
+    monkeypatch.setattr(Segmenter, "available", lambda self: False)
+    assert seg.get_segmenter() is None
+    assert seg._prewarm is None
+
+
+def test_failed_load_is_logged_leaves_no_half_state(monkeypatch, caplog):
+    import sys
+    import types
+
+    class Boom(Exception):
+        pass
+
+    def session(path, *a, **k):
+        if str(path).endswith("decoder.onnx"):
+            raise Boom("decoder broken")
+        return object()
+
+    fake = types.SimpleNamespace(SessionOptions=lambda: types.SimpleNamespace(), InferenceSession=session)
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+    s = Segmenter()
+    with caplog.at_level("WARNING", logger="hwmode.segment"):
+        s.prewarm()
+    assert s._enc is None and s._dec is None
+    assert len([r for r in caplog.records if "prewarm failed" in r.message]) == 1
+    with pytest.raises(Boom):  # the lazy path behaves as before
+        s._load()
