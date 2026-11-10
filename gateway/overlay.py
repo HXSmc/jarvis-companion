@@ -373,8 +373,14 @@ _OPEN_VERBS = tuple(tuple(v.split()) for v in (
 _OPEN_BAD_CHARS = set("/\\:;|&$`<>~(){}\n\r")
 
 
-def _owner_asked_to_open(text: str, real: str, apps: dict) -> bool:
-    """True when the owner's own words name this app (1-4 word window) right after an open verb."""
+def _owner_said_open_verb(text: str) -> bool:
+    """True when the owner's words hold an open-type verb at all (no app named)."""
+    words = [re.sub(r"[^a-z0-9]", "", w) for w in text.lower().split()]
+    return any(tuple(words[j:j + len(v)]) == v for v in _OPEN_VERBS for j in range(len(words)))
+
+
+def _owner_asked_to_open(text: str, want: list[str], apps: dict) -> bool:
+    """True when the owner's own words name exactly these app(s) (1-4 word window) right after an open verb."""
     words = [re.sub(r"[^a-z0-9]", "", w) for w in text.lower().split()]
     for i in range(len(words)):
         for n in range(1, 5):
@@ -383,7 +389,7 @@ def _owner_asked_to_open(text: str, real: str, apps: dict) -> bool:
                 continue
             if win[0] in _OPEN_STOP or win[-1] in _OPEN_STOP:
                 continue
-            if intents.app_candidates(" ".join(win), apps) != [real]:
+            if intents.app_candidates(" ".join(win), apps) != want:
                 continue
             ctx = words[max(0, i - 3):i + n - 1]  # the verb must end before the window does
             for v in _OPEN_VERBS:
@@ -721,16 +727,23 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if open_seen:
             return
         open_seen = True
-        line = "I couldn't find that app."
+        line = None  # None = stay silent: the owner did not ask to open anything
+        if _owner_said_open_verb(text):
+            line = "I couldn't find that app."
         name = name.strip()
         if name and len(name) <= 60 and not _OPEN_BAD_CHARS & set(name):
             found = intents.app_candidates(name, apps)
             if len(found) > 1:
-                line = f"Did you mean {found[0]} or {found[1]}?"
-            elif len(found) == 1 and _owner_asked_to_open(text, found[0], apps):
+                if _owner_asked_to_open(text, found, apps):
+                    line = f"Did you mean {found[0]} or {found[1]}?"
+                else:
+                    line = None
+            elif len(found) == 1 and _owner_asked_to_open(text, found, apps):
                 real = await asyncio.to_thread(intents.open_app, found[0], run=deps.run, apps=apps)
                 if real:
                     line = f"Opening {real}."
+        if line is None:
+            return
         async for ev in _speak(line, deps):
             yield ev
         said.append(line)

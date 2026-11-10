@@ -112,7 +112,21 @@ def test_model_tie_asks(client):
 ])
 def test_no_owner_intent_no_launch(client, text, app):
     ran, events = run_turn(client, text, opens(app))
+    assert ran == [] and says(events)[1:] == []
+    assert not overlay._history["c1"][-1][1].count("find")
+
+
+def test_model_tie_needs_owner_intent(client):
+    ran, events = run_turn(client, "tell me a joke", opens("code"))
+    assert ran == [] and says(events)[1:] == []
+    assert not any(n in json.dumps(events) for n in ("Code Helper", "Code Runner"))
+
+
+def test_bad_name_speaks_only_after_open_intent(client):
+    ran, events = run_turn(client, "could you open photoshop", opens("Photoshop"))
     assert ran == [] and says(events)[1:] == ["I couldn't find that app."]
+    ran, events = run_turn(client, "tell me a joke", opens("Photoshop"), conv_id="c2")
+    assert ran == [] and says(events)[1:] == []
 
 
 def test_no_owner_intent_when_tainted(client):
