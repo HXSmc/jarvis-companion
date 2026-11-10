@@ -150,12 +150,14 @@ final class AppController {
         audio.stop()  // barge-in
         // Screen capture starts at wake; only awaited when an utterance lands.
         let screenTask = Task { await ScreenContext.capture() }
+        let listenStart = Date()
         speech.listenAfterWake(
             onPartial: { _ in },
             onFinal: { [weak self] text, sttFinalMs, endOfSpeech in
                 Task { @MainActor in
                     await self?.handleUtterance(text: text,
                                           sttFinalMs: sttFinalMs,
+                                          audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
                                           endOfSpeech: endOfSpeech,
                                           screenTask: screenTask)
                 }
@@ -163,6 +165,7 @@ final class AppController {
             onNothing: { [weak self] in
                 Task { @MainActor in
                     guard let self else { return }
+                    self.client.debugNote(step: "no_speech", detail: "speech-to-text heard no words after the wake")
                     // With no mic there is no speech to catch; the permission line covers it.
                     if !self.model.missingPermissions.contains(.microphone) {
                         self.audio.speakLocally("I didn't catch that.")
@@ -176,6 +179,7 @@ final class AppController {
 
     private func handleUtterance(text: String,
                                  sttFinalMs: Double,
+                                 audioMs: Double,
                                  endOfSpeech: Date,
                                  screenTask: Task<ScreenPayload?, Never>) async {
         model.orb = .thinking
@@ -195,11 +199,13 @@ final class AppController {
 
         do {
             for try await event in client.utterance(text: text, convId: conv,
-                                                    sttFinalMs: sttFinalMs, screen: screen) {
+                                                    sttFinalMs: sttFinalMs, audioMs: audioMs,
+                                                    screen: screen) {
                 handle(event)
             }
         } catch {
             // A 401/500/timeout never surfaces on the events loop; say it out loud.
+            client.debugNote(step: "app_error", detail: "utterance request failed: \(error)")
             audio.speakLocally("I couldn't reach my service. Try again.")
             showBanner("Couldn't reach Jarvis service", for: 5)
             model.orb = .error  // until the next wake sets .listening

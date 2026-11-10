@@ -49,6 +49,10 @@ def load_model() -> Model:
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz — openWakeWord's canonical chunk
 THRESHOLD = 0.5
+# The system default input, the same device the Swift app's speech-to-text hears.
+# Never a bare index: avfoundation index 0 can be an iPhone Continuity mic or a
+# virtual device (BlackHole, Teams), and then the wake word hears nothing.
+MIC = os.environ.get("OVERLAY_MIC", "default")
 
 # Local subscribers notified on every detection (live + test mode).
 wake_callbacks = []
@@ -78,7 +82,16 @@ def score_wav(model: Model, wav_path: Path) -> tuple[bool, float, float | None]:
     return False, peak, None
 
 
-def notify_wake(at_seconds: float, dry_run: bool) -> None:
+def ffmpeg_argv(mic: str = MIC) -> list[str]:
+    """ffmpeg mic capture: 16 kHz mono s16le on stdout, from avfoundation audio device `mic`."""
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "avfoundation", "-i", f":{mic}",
+        "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "s16le", "-",
+    ]
+
+
+def notify_wake(at_seconds: float, dry_run: bool, score: float | None = None) -> None:
     """Local callbacks always; gateway POST only in live mode (never when --dry-run)."""
     print(f"WAKE detected at {at_seconds:.2f}")
     for cb in wake_callbacks:
@@ -90,35 +103,41 @@ def notify_wake(at_seconds: float, dry_run: bool) -> None:
     token = overlay_token()
     req = urllib.request.Request(
         f"http://127.0.0.1:{OVERLAY_PORT}/overlay/wake",
-        data=json.dumps({"type": "wake", "source": "mac"}).encode(),
+        data=json.dumps({"type": "wake", "source": "mac", "score": score}).encode(),
         headers={"Authorization": f"Bearer {token}"},
         method="POST",
     )
     urllib.request.urlopen(req, timeout=5)
 
 
-def run_live() -> None:
-    """ffmpeg mic capture -> model -> POST + callbacks on detection."""
-    ffmpeg = subprocess.Popen(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-f", "avfoundation", "-i", ":0",
-            "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "s16le", "-",
-        ],
-        stdout=subprocess.PIPE,
-    )
+def run_live(on_stats=None) -> None:
+    """ffmpeg mic capture -> model -> POST + callbacks on detection.
+
+    on_stats(peak_score, peak_level) every ~10 s: a mic that stays at level 0
+    is the wrong device or a denied permission, visible on the debug page.
+    """
+    ffmpeg = subprocess.Popen(ffmpeg_argv(), stdout=subprocess.PIPE)
     assert ffmpeg.stdout is not None
     model = load_model()
     total = 0
+    peak_score = peak_level = 0.0
+    frames = 0
     try:
         while True:
             chunk = ffmpeg.stdout.read(FRAME_SAMPLES * 2)
             if not chunk:
                 raise SystemExit("mic capture ended (ffmpeg exited)")
-            scores = model.predict(np.frombuffer(chunk, dtype=np.int16))
-            if max(scores.values()) >= THRESHOLD:
-                notify_wake(total / SAMPLE_RATE, dry_run=False)
+            pcm = np.frombuffer(chunk, dtype=np.int16)
+            score = max(model.predict(pcm).values())
+            peak_score = max(peak_score, score)
+            peak_level = max(peak_level, float(np.abs(pcm).max()) / 32768 if pcm.size else 0.0)
+            if score >= THRESHOLD:
+                notify_wake(total / SAMPLE_RATE, dry_run=False, score=round(float(score), 3))
                 model.reset()
+            frames += 1
+            if on_stats and frames % 125 == 0:  # 125 x 80 ms = 10 s
+                on_stats(round(float(peak_score), 3), round(peak_level, 3))
+                peak_score = peak_level = 0.0
             total += len(chunk) // 2
     finally:
         ffmpeg.terminate()

@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import hud
@@ -104,12 +104,19 @@ class TurnBody(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     conv_id: str = Field("default", max_length=64)
     stt_final_ms: float | None = None
+    audio_ms: float | None = None  # speech heard after the wake, for the debug page
     screen: ScreenBody | None = None
 
 
 class WakeBody(BaseModel):
     type: str = Field("wake", max_length=16)
     source: str = Field("mac", max_length=32)
+    score: float | None = None
+
+
+class DebugNote(BaseModel):
+    step: str = Field(max_length=32)
+    detail: str = Field("", max_length=200)
 
 
 def _require_loopback(request: Request) -> None:
@@ -173,6 +180,64 @@ class EventBus:
 
 
 bus = EventBus()
+
+
+# --- Debug ring buffer (GET /overlay/debug): memory only, never written to disk ---
+
+class DebugLog:
+    """Last 50 turns, each a list of pipeline steps; plus the wake listener state.
+
+    Written from the event loop and the wake thread, hence the lock.
+    """
+
+    def __init__(self, maxlen: int = 50) -> None:
+        self._lock = threading.Lock()
+        self._turns: deque[dict] = deque(maxlen=maxlen)
+        self._listener: dict = {"state": "not started"}
+
+    def listener(self, **fields) -> None:
+        with self._lock:
+            self._listener.update(fields, updated=time.time())
+
+    def wake(self, score: float | None, source: str) -> dict:
+        turn = {"id": uuid.uuid4().hex[:8], "steps": []}
+        with self._lock:
+            self._turns.append(turn)
+        self.add(turn, "wake", score=score, source=source)
+        return turn
+
+    def for_utterance(self) -> dict:
+        """The newest turn when it is a wake still waiting for its words (<60 s), else a new one."""
+        with self._lock:
+            if self._turns:
+                last = self._turns[-1]
+                steps = [s["step"] for s in last["steps"]]
+                if steps and steps[-1] == "wake" and time.time() - last["steps"][0]["at"] < 60:
+                    return last
+            turn = {"id": uuid.uuid4().hex[:8], "steps": []}
+            self._turns.append(turn)
+            return turn
+
+    def add(self, turn: dict, step: str, **fields) -> None:
+        with self._lock:
+            turn["steps"].append({"step": step, "at": time.time(), **fields})
+
+    def note(self, step: str, detail: str) -> None:
+        """App-side step (no speech heard, service unreachable) on the turn it belongs to."""
+        self.add(self.for_utterance(), step, detail=detail)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            turns = [{"id": t["id"], "steps": [dict(s) for s in t["steps"]]}
+                     for t in reversed(self._turns)]
+            return {"listener": dict(self._listener), "turns": turns}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._turns.clear()
+
+
+debug_log = DebugLog()
 
 
 # --- Dependencies (tests replace the whole bundle via set_deps) ---
@@ -301,7 +366,8 @@ async def _audio(text: str, deps: OverlayDeps) -> dict | None:
 
 # --- The turn pipeline (pure: body + deps in, events out) ---
 
-async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
+async def run_turn(body: TurnBody, deps: OverlayDeps,
+                   on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     start = deps.clock()
     metrics: dict = {"stt_final_ms": body.stt_final_ms, "ack_ms": None,
                      "ttft_s": None, "first_answer_audio_s": None, "total_s": None}
@@ -310,6 +376,8 @@ async def run_turn(body: TurnBody, deps: OverlayDeps) -> AsyncIterator[dict]:
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         intent = intents.parse(body.text, apps=apps)
+        if on_step:
+            on_step("intent", kind=intent.kind, arg=intent.arg)
         ack_text, ack_pcm, ack_rate = deps.acks.get(acks.pick_key(intent.kind))
         if ack_pcm:
             yield {"type": "audio", "text": ack_text, "rate": ack_rate,
@@ -556,7 +624,29 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
     deps = get_deps()
 
     async def stream() -> AsyncIterator[str]:
-        async for event in run_turn(body, deps):
+        rec = debug_log.for_utterance()
+        debug_log.add(rec, "voice", audio_ms=body.audio_ms, stt_final_ms=body.stt_final_ms)
+        debug_log.add(rec, "transcribed", text=body.text)
+        start = time.monotonic()
+        cards = shapes = 0
+        first_audio_ms = None
+        last_text = None
+        on_step = lambda step, **fields: debug_log.add(rec, step, **fields)  # noqa: E731
+        async for event in run_turn(body, deps, on_step=on_step):
+            kind = event["type"]
+            ms = round((time.monotonic() - start) * 1000)
+            if kind == "audio" and first_audio_ms is None:
+                first_audio_ms = ms
+            if kind in ("say", "audio") and event["text"] != last_text:
+                last_text = event["text"]  # a say line and its audio are one spoken line
+                debug_log.add(rec, "spoke", text=last_text, ms=ms, voiced=kind == "audio")
+            elif kind == "card":
+                cards += 1
+            elif kind == "shape":
+                shapes += 1
+            elif kind == "done":
+                debug_log.add(rec, "done", cards=cards, shapes=shapes, error=event["error"],
+                              first_audio_ms=first_audio_ms, total_s=event["metrics"]["total_s"])
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -580,8 +670,34 @@ async def get_events() -> StreamingResponse:
 
 @router.post("/wake", dependencies=_LOOP_DEPS)
 async def post_wake(body: WakeBody | None = None) -> dict:
+    debug_log.wake(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}
+
+
+@router.post("/debug/note", dependencies=_LOOP_DEPS)
+async def post_debug_note(body: DebugNote) -> dict:
+    debug_log.note(body.step, body.detail)
+    return {"ok": True}
+
+
+@router.get("/debug/turns", dependencies=_LOOP_DEPS)
+async def get_debug_turns() -> dict:
+    return debug_log.snapshot()
+
+
+# The page itself holds no data, so it needs no token (a browser cannot send a
+# bearer header on navigation): its script reads the token from the URL fragment,
+# which never reaches the server or its logs, and calls /debug/turns with it.
+@router.get("/debug", dependencies=[Depends(_require_loopback)])
+async def get_debug_page() -> HTMLResponse:
+    return HTMLResponse(DEBUG_PAGE, headers={"Cache-Control": "no-store",
+                                             "Referrer-Policy": "no-referrer",
+                                             "Content-Security-Policy": "default-src 'self'; "
+                                             "script-src 'unsafe-inline'; style-src 'unsafe-inline'"})
+
+
+DEBUG_PAGE = (Path(__file__).with_name("overlay_debug.html")).read_text()
 
 
 @router.get("/health", dependencies=_LOOP_DEPS)

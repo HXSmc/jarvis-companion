@@ -6,6 +6,7 @@ on:
     paths:
       - 'mac/**'
       - 'gateway/overlay.py'
+      - 'gateway/overlay_debug.html'
       - 'gateway/app.py'
       - 'common/**'
       - 'tests/conftest.py'

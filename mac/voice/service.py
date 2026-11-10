@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from gateway.overlay import get_deps, overlay_token, router
+from gateway.overlay import debug_log, get_deps, overlay_token, router
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +31,18 @@ def _start_wake_thread() -> None:
     except Exception as exc:  # openwakeword not installed on this box
         logger.warning("wake word unavailable (%s), overlay continues without it",
                        type(exc).__name__)
+        debug_log.listener(state=f"unavailable ({type(exc).__name__})")
         return
 
     def run() -> None:
+        debug_log.listener(state="listening", mic=wakeword.MIC)
         try:
-            wakeword.run_live()
-        except Exception as exc:  # mic/model issues must not take the service down
-            logger.warning("wake word thread exited (%s)", type(exc).__name__)
+            wakeword.run_live(on_stats=lambda score, level: debug_log.listener(
+                peak_score_10s=score, peak_level_10s=level))
+            debug_log.listener(state="stopped")
+        except BaseException as exc:  # mic/model issues (SystemExit too) must not take the service down
+            logger.warning("wake word thread exited (%s: %s)", type(exc).__name__, exc)
+            debug_log.listener(state=f"stopped ({type(exc).__name__}: {exc})")
 
     threading.Thread(target=run, name="wakeword", daemon=True).start()
 

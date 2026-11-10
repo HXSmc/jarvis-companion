@@ -51,7 +51,8 @@ final class ServiceClient {
     }
 
     /// NDJSON utterance stream; one decoded event per line.
-    func utterance(text: String, convId: String, sttFinalMs: Double, screen: ScreenPayload?) -> AsyncThrowingStream<OverlayEvent, Error> {
+    func utterance(text: String, convId: String, sttFinalMs: Double, audioMs: Double,
+                   screen: ScreenPayload?) -> AsyncThrowingStream<OverlayEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -62,6 +63,7 @@ final class ServiceClient {
                         Body(text: String(text.prefix(500)),
                              convId: String(convId.prefix(64)),
                              sttFinalMs: sttFinalMs,
+                             audioMs: audioMs,
                              screen: screen))
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response)
@@ -74,6 +76,17 @@ final class ServiceClient {
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Fire-and-forget step for the debug page (no speech heard, service unreachable).
+    func debugNote(step: String, detail: String = "") {
+        Task {
+            guard var request = try? authorizedRequest(path: "/overlay/debug/note", method: "POST") else { return }
+            request.timeoutInterval = 2
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONEncoder().encode(["step": step, "detail": String(detail.prefix(200))])
+            _ = try? await URLSession.shared.data(for: request)
         }
     }
 
@@ -112,9 +125,10 @@ final class ServiceClient {
         var text: String
         var convId: String
         var sttFinalMs: Double
+        var audioMs: Double
         var screen: ScreenPayload?
         private enum CodingKeys: String, CodingKey {
-            case text, convId = "conv_id", sttFinalMs = "stt_final_ms", screen
+            case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", screen
         }
     }
 }
