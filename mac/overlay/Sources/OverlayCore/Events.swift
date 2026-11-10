@@ -11,6 +11,11 @@ public struct AXCheck: Codable, Equatable {
     }
 }
 
+/// Mode of a layout event: aside parks every card as a chip, restore puts each one back.
+public enum LayoutMode: String, Equatable {
+    case aside, restore
+}
+
 /// One NDJSON event line from POST /overlay/utterance. Unknown or malformed
 /// lines decode to .unknown; decode never throws. Wire ranges are bare
 /// [lo, hi] pairs; invalid pairs (lo > hi) are dropped element-wise below.
@@ -21,6 +26,7 @@ public enum OverlayEvent: Equatable {
     case card(HUDCard)
     case lines(file: String, ranges: [ClosedRange<Int>])
     case clear
+    case layout(LayoutMode)
     case done(metrics: [String: Double], error: String?)
     case unknown
 
@@ -62,6 +68,9 @@ public enum OverlayEvent: Equatable {
             return .lines(file: file, ranges: ranges)
         case "clear":
             return .clear
+        case "layout":
+            guard let raw = obj["mode"] as? String, let mode = LayoutMode(rawValue: raw) else { return .unknown }
+            return .layout(mode)
         case "done":
             var metrics: [String: Double] = [:]
             if let raw = obj["metrics"] as? [String: Any] {

@@ -118,4 +118,72 @@ final class SnapshotTests: XCTestCase {
             try renderPNG(light, size: CGSize(width: 120, height: 140), name: "orb-\(state.rawValue)-light.png")
         }
     }
+
+    /// Demo cards placed by ScatterLayout on a 1512x982 screen (menu bar 33 pt) with the orb
+    /// and, for 6 and 14 cards, one "Sample" highlight; then the 14 parked as chips.
+    func testRenderScatter() throws {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 33, width: 1512, height: 949)
+        let sample = HUDShape(kind: .rect, box: [606, 451, 906, 531], label: "Sample")
+        var parked: (cards: [HUDCard], frames: [String: CGRect]) = ([], [:])
+        var overlapLog = ""
+        for count in [1, 6, 14, 18] {
+            let cards = LayoutDebugCommand.demoCards(count: count)
+            let shapes = count > 1 ? [sample] : []
+            let keepOut = [ScatterLayout.orbKeepOut(screen: screen)]
+                + shapes.map { ScatterLayout.shapeKeepOut($0.rect, screenWidth: screen.width) }
+            var state = ScatterLayout.LayoutState()
+            for card in cards {
+                let size = NSHostingView(rootView: CardView(card: card)).fittingSize
+                state.cardAdded(card.listKey, size: size, visible: visible, keepOut: keepOut)
+            }
+            if count < 18 { XCTAssertEqual(state.order.count, count) }
+            let frames = state.order.compactMap { state.frames[$0] }
+            var ratios: [String] = []
+            for i in frames.indices {
+                for j in frames.indices where j > i {
+                    let overlap = ScatterLayout.overlapArea(frames[i], frames[j])
+                    guard overlap > 0 else { continue }
+                    let ratio = overlap / min(ScatterLayout.area(frames[i]), ScatterLayout.area(frames[j]))
+                    ratios.append(String(format: "%.3f", Double(ratio)))
+                }
+            }
+            overlapLog += "scatter-\(count): \(ratios.count) overlapping pairs \(ratios)\n"
+            guard count < 18 else { continue }
+            try renderScatter(cards: cards, frames: state.frames, shapes: shapes, chips: false, name: "scatter-\(count)")
+            parked = (cards, ScatterLayout.chipFrames(keys: state.order, visible: visible, orbOnRight: true))
+        }
+        try renderScatter(cards: parked.cards, frames: parked.frames, shapes: [], chips: true, name: "scatter-aside-14")
+        try overlapLog.write(to: Self.outDir.appendingPathComponent("scatter-overlaps.txt"), atomically: true, encoding: .utf8)
+    }
+
+    private func renderScatter(cards: [HUDCard], frames: [String: CGRect], shapes: [HUDShape],
+                               chips: Bool, name: String) throws {
+        let size = CGSize(width: 1512, height: 982)
+        try renderPNG(scatterScene(Color.black, cards: cards, frames: frames, shapes: shapes, chips: chips),
+                      size: size, name: "\(name).png")
+        try renderPNG(scatterScene(BusyLightBackdrop(), cards: cards, frames: frames, shapes: shapes, chips: chips),
+                      size: size, name: "\(name)-light.png")
+    }
+
+    private func scatterScene<Backdrop: View>(_ backdrop: Backdrop, cards: [HUDCard], frames: [String: CGRect],
+                                              shapes: [HUDShape], chips: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            backdrop
+            ForEach(Array(shapes.enumerated()), id: \.offset) { _, shape in
+                ShapeView(shape: shape)
+            }
+            ForEach(cards, id: \.listKey) { card in
+                if let frame = frames[card.listKey] {
+                    Group {
+                        if chips { CardChip(card: card) } else { CardView(card: card) }
+                    }
+                    .fixedSize()
+                    .offset(x: frame.minX, y: frame.minY)
+                }
+            }
+            OrbView(state: .idle, level: 0)
+                .offset(x: 1512 - 68, y: 982 - 68)
+        }
+    }
 }
