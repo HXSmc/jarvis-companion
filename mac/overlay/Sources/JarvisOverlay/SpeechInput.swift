@@ -43,13 +43,14 @@ final class SpeechInput {
 
     /// Replays the ring buffer (so the first words are not lost), then live
     /// audio. Ends 700 ms after the last partial-text change; 5 s with no
-    /// speech, an empty final, or 30 s hard cap -> onNothing.
+    /// speech, an empty final, or 30 s hard cap -> onNothing(why), why = a short
+    /// diagnosis for the debug page (STT path, buffers fed, results, errors).
     func listenAfterWake(
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void,
-        onNothing: @escaping () -> Void
+        onNothing: @escaping (_ why: String) -> Void
     ) {
-        guard isRunning else { onNothing(); return }
+        guard isRunning else { onNothing("mic engine not running"); return }
         cancel()
         let turn = Turn()
         turn.onPartial = onPartial
@@ -105,7 +106,11 @@ final class SpeechInput {
         var cancelHandler: (() -> Void)?
         var onPartial: ((String) -> Void)?
         var onFinal: ((_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void)?
-        var onNothing: (() -> Void)?
+        var onNothing: ((String) -> Void)?
+        var path = ""  // STT path + why it was taken, for the debug page
+        let stats = FeedStats()
+
+        var diagnosis: String { "\(path); \(stats.summary)" }
     }
 
     private func handlePartial(_ raw: String, turn: Turn) {
@@ -129,11 +134,11 @@ final class SpeechInput {
         turn.cancelHandler = nil
         cancel?()
         guard !nothing, let end = turn.endOfSpeech, let raw = rawText else {
-            turn.onNothing?()
+            turn.onNothing?(turn.diagnosis)
             return
         }
         let text = Self.stripWake(raw)
-        guard !text.isEmpty else { turn.onNothing?(); return }
+        guard !text.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
         log.debug("final \(text, privacy: .private)")
         turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end)
     }
@@ -182,6 +187,7 @@ final class SpeechInput {
         finalize: @escaping @Sendable (String) -> Void,
         nothing: @escaping @Sendable () -> Void
     ) async -> Bool {
+        turn.path = "SpeechAnalyzer"
         let transcriber = SpeechTranscriber(
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
@@ -193,28 +199,37 @@ final class SpeechInput {
                 try await request.downloadAndInstall()
             }
         } catch {
+            turn.path = "SpeechAnalyzer assets failed (\(error.localizedDescription))"
             return false
         }
         guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
               let converter = AVAudioConverter(from: format, to: target)
-        else { return false }
+        else {
+            turn.path = "SpeechAnalyzer: no audio format/converter from \(format)"
+            return false
+        }
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         do {
             try await analyzer.start(inputSequence: stream)
         } catch {
             continuation.finish()
+            turn.path = "SpeechAnalyzer start failed (\(error.localizedDescription))"
             return false
         }
         let collected = TranscriptBox()
+        let stats = turn.stats
         let resultsTask = Task {
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
                     collected.update(text, isFinal: result.isFinal)
+                    stats.result()
                     partial(collected.text)
                 }
-            } catch {}
+            } catch {
+                stats.fail(error.localizedDescription)
+            }
         }
         turn.cancelHandler = {
             continuation.finish()
@@ -224,7 +239,9 @@ final class SpeechInput {
         // shortcut: the converter is used from the audio thread only after the ring
         // snapshot below has been fed, so it stays single-threaded.
         let feed: @Sendable (AVAudioPCMBuffer, Date) -> Void = { buffer, _ in
-            if let out = Self.convert(converter: converter, from: buffer, to: target) {
+            let out = Self.convert(converter: converter, from: buffer, to: target)
+            stats.fed(converted: out.map { Int($0.frameLength) })
+            if let out {
                 continuation.yield(AnalyzerInput(buffer: out))
             }
         }
@@ -258,18 +275,26 @@ final class SpeechInput {
         finalize: @escaping @Sendable (String) -> Void,
         nothing: @escaping @Sendable () -> Void
     ) {
+        turn.path = turn.path.isEmpty ? "SFSpeechRecognizer" : "SFSpeechRecognizer after \(turn.path)"
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
               recognizer.isAvailable
-        else { completeTurn(turn, nothing: true); return }
+        else {
+            turn.path += " (recognizer unavailable)"
+            completeTurn(turn, nothing: true)
+            return
+        }
+        let stats = turn.stats
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         let task = recognizer.recognitionTask(with: request) { result, error in
             if let result {
+                stats.result()
                 let text = result.bestTranscription.formattedString
                 partial(text)
                 if result.isFinal { finalize(text) }
-            } else if error != nil {
+            } else if let error {
+                stats.fail(error.localizedDescription)
                 nothing()
             }
         }
@@ -278,6 +303,7 @@ final class SpeechInput {
             request.append(chunk.buffer)
         }
         tap.setSink { [weak request] buffer, _ in
+            stats.fed(converted: Int(buffer.frameLength))
             request?.append(buffer)
         }
         Task { @MainActor [weak self] in
@@ -315,6 +341,41 @@ final class SpeechInput {
         var error: NSError?
         let result = converter.convert(to: out, error: &error, withInputFrom: inputBlock)
         guard result != .error, out.frameLength > 0 else { return nil }
+        return out
+    }
+}
+
+// MARK: - per-turn STT counters (debug page)
+
+/// Fed from the audio thread, read on main when a turn ends empty.
+private final class FeedStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers = 0
+    private var dropped = 0
+    private var frames = 0
+    private var results = 0
+    private var error: String?
+
+    func fed(converted: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        buffers += 1
+        if let converted { frames += converted } else { dropped += 1 }
+    }
+
+    func result() {
+        lock.lock(); defer { lock.unlock() }
+        results += 1
+    }
+
+    func fail(_ message: String) {
+        lock.lock(); defer { lock.unlock() }
+        error = message
+    }
+
+    var summary: String {
+        lock.lock(); defer { lock.unlock() }
+        var out = "mic buffers \(buffers) (\(dropped) failed to convert), frames \(frames), STT results \(results)"
+        if let error { out += ", STT error: \(error)" }
         return out
     }
 }

@@ -116,7 +116,7 @@ class WakeBody(BaseModel):
 
 class DebugNote(BaseModel):
     step: str = Field(max_length=32)
-    detail: str = Field("", max_length=200)
+    detail: str = Field("", max_length=500)
 
 
 def _require_loopback(request: Request) -> None:

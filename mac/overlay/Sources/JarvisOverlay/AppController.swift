@@ -162,10 +162,10 @@ final class AppController {
                                           screenTask: screenTask)
                 }
             },
-            onNothing: { [weak self] in
+            onNothing: { [weak self] why in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.client.debugNote(step: "no_speech", detail: "speech-to-text heard no words after the wake")
+                    self.client.debugNote(step: "no_speech", detail: why)
                     // With no mic there is no speech to catch; the permission line covers it.
                     if !self.model.missingPermissions.contains(.microphone) {
                         self.audio.speakLocally("I didn't catch that.")

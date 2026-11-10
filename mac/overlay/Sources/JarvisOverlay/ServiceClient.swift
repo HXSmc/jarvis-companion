@@ -85,7 +85,7 @@ final class ServiceClient {
             guard var request = try? authorizedRequest(path: "/overlay/debug/note", method: "POST") else { return }
             request.timeoutInterval = 2
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONEncoder().encode(["step": step, "detail": String(detail.prefix(200))])
+            request.httpBody = try? JSONEncoder().encode(["step": step, "detail": String(detail.prefix(500))])
             _ = try? await URLSession.shared.data(for: request)
         }
     }
