@@ -38,3 +38,44 @@ def test_zoom_unzoom_round_trip():
     in_crop = [(box[0] - left) * k, (box[1] - top) * k, (box[2] - left) * k, (box[3] - top) * k]
     assert max(crop.size) == 768
     assert unzoom(in_crop, origin) == pytest.approx(box)
+
+
+class _FakePopen:
+    def __init__(self, *a, **kw):
+        self.cwd = kw["cwd"]
+        self.stdin = self
+    def poll(self):
+        return None
+    def close(self):
+        pass
+    def terminate(self):
+        pass
+    def wait(self, timeout=None):
+        return 0
+    def kill(self):
+        pass
+
+
+def test_close_removes_session_temp_dir(monkeypatch):
+    import os
+    from hwmode.brain import LeanSession
+    monkeypatch.setattr("hwmode.brain.subprocess.Popen", _FakePopen)
+    s = LeanSession()
+    assert os.path.isdir(s._cwd)
+    s.close()
+    assert not os.path.exists(s._cwd)
+    s.close()  # second close is a no-op
+
+
+def test_failed_start_removes_temp_dir(monkeypatch):
+    import os
+    from hwmode import brain
+    made = []
+    real = brain.tempfile.mkdtemp
+    monkeypatch.setattr("hwmode.brain.tempfile.mkdtemp", lambda **kw: made.append(real(**kw)) or made[-1])
+    def boom(*a, **kw):
+        raise FileNotFoundError("no claude")
+    monkeypatch.setattr("hwmode.brain.subprocess.Popen", boom)
+    with pytest.raises(FileNotFoundError):
+        brain.LeanSession()
+    assert made and not os.path.exists(made[0])

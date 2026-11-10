@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -98,9 +99,13 @@ class LeanSession:
                "--system-prompt", system_prompt, *flags]
         if deny:  # last: --disallowedTools takes every following argument as a rule
             cmd += ["--disallowedTools", *deny]
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, text=True, cwd=self._cwd,
-                                     env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
+        try:
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, cwd=self._cwd,
+                                         env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
+        except BaseException:
+            shutil.rmtree(self._cwd, ignore_errors=True)
+            raise
         self.turns = 0
 
     def ask(self, text: str, jpeg: bytes | None = None, on_text=None) -> Reply:
@@ -139,3 +144,5 @@ class LeanSession:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait()
+        shutil.rmtree(self._cwd, ignore_errors=True)
