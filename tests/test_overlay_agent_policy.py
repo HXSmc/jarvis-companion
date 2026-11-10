@@ -387,3 +387,22 @@ def test_reason_codes_and_mcp_labels():
     assert ap.reason_code("something new") == "other"
     assert ap.log_label("mcp__mail-reader__search_emails", {}) == "mcp__mail-reader__search_emails"
     assert ap.log_label("mcp__x__a b", {}) == "unknown tool"
+
+
+def test_git_transport_options_that_run_a_program_denied(env):
+    """R5 security 1: one spoken yes must never run a program hidden in a git push/fetch/clone option."""
+    ctx, home, vault, repo = env
+    r = repo
+    for cmd in (f"git -C {r} push --receive-pack=touch_pwned . HEAD:x", f"git -C {r} push --receive=x . HEAD:x",
+                f"git -C {r} push --exec=x . HEAD:x", f"git -C {r} fetch --upload-pack=x .",
+                f"git -C {r} pull --upload-pack x .", f"git -C {r} ls-remote -ux .", f"git -C {r} ls-remote -u x .",
+                f"git -C {r} clone -u x . y", f"git -C {r} clone -qc core.sshCommand=x . y",
+                f"git -C {r} clone --config core.sshCommand=x . y", f"git -C {r} fetch --config-env=a=B .",
+                f"git -C {r} push 'ext::sh -c touch% /tmp/x' HEAD:x", f"git -C {r} fetch fd::3",
+                f"git -C {r} remote add evil ext::sh", f"git -C {r} push --repo=EXT::sh HEAD"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
+    for cmd in (f"git -C {r} push -u origin main", f"git -C {r} push --set-upstream origin main",
+                f"git -C {r} fetch origin", f"git -C {r} pull --rebase origin main"):
+        assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
+    # A repo-configured ext:: or fd:: remote is refused by git itself.
+    assert "protocol.ext.allow=never" in bash(ctx, f"git -C {r} push").updated_input["command"]

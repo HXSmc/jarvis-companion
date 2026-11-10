@@ -933,8 +933,20 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
         debug_log.add(debug_log.for_utterance(), "agent_confirm", state="expired")
         # The turn that asked has ended: the app hears of it on its /events stream, as `hud` events
         # it handles like turn events (the Confirm card is replaced, the line is spoken when idle).
-        for ev in [_settled_card(run.confirm_summary, "Not done: it timed out"), *_line_events("expired", deps)]:
-            bus.publish("hud", ev)
+        # Under the lock: a new Confirm registers under it before its card goes out, so a pending one
+        # owns the shared card id and keeps it; one asked after this publish draws its card after ours.
+        with _confirm_lock:
+            card = [] if _confirm else [_settled_card(run.confirm_summary, "Not done: it timed out")]
+            for ev in [*card, *_line_events("expired", deps)]:
+                bus.publish("hud", ev)
+
+
+def _scroll_editor(run: AgentRun, line: int, deps: OverlayDeps) -> None:
+    """Scroll the editor on its own thread: a hung or missing CLI never holds the turn's stream."""
+    try:
+        gitdiff.open_in_editor(run.repo, run.screen_file, line, run=deps.run, editor=run.editor, fallback=False)
+    except Exception:
+        pass
 
 
 def _line_events(key: str, deps: OverlayDeps) -> list[dict]:
@@ -1324,12 +1336,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         yield {"type": "card", "card": card}
                     if lines:
                         if run.editor:  # the first change may be scrolled off: bring it into view
-                            try:
-                                await asyncio.to_thread(gitdiff.open_in_editor, run.repo, run.screen_file,
-                                                        lines["ranges"][0][0], run=deps.run,
-                                                        editor=run.editor, fallback=False)
-                            except (OSError, ValueError):
-                                pass
+                            threading.Thread(target=_scroll_editor, daemon=True,
+                                             args=(run, lines["ranges"][0][0], deps)).start()
                         yield lines
                     elif run.model_lines:  # no host diff (e.g. the file's first commit): the model's
                         yield run.model_lines

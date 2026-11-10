@@ -18,10 +18,12 @@ from pathlib import Path
 from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
 
 _TIMEOUT = 10
+_EDITOR_TIMEOUT = 2  # the editor CLI returns at once when healthy
 # Every git call runs with repo config defused — the repo may come from an
-# archive, so no fsmonitor, no hooks, no external diff driver, no pager.
+# archive, so no fsmonitor, no hooks, no external diff driver, no pager, no ext::/fd:: remote helper.
 _GIT_PREFIX = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-               "-c", "diff.external=", "-c", "core.pager=cat"]
+               "-c", "diff.external=", "-c", "core.pager=cat",
+               "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"]
 # New side of a unified=0 hunk header: +<start>[,<count>]; a missing ,count means 1.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -117,14 +119,21 @@ def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run,
     if not target.is_relative_to(root):
         raise ValueError(f"path escapes the repo: {file!r}")
     try:
-        proc = run([editor, "--goto", f"{target}:{int(line)}"], check=False, capture_output=True)
-        if proc is not None and proc.returncode == 0:
-            return "code"
+        if ":" not in target.name:  # --goto reads a trailing :N[:M] as line/column: `a:9` would open `a`
+            proc = run([editor, "--goto", f"{target}:{int(line)}"], check=False, capture_output=True,
+                       timeout=_EDITOR_TIMEOUT)
+            if proc is not None and proc.returncode == 0:
+                return "code"
     except FileNotFoundError:
         pass
+    except subprocess.SubprocessError:  # a hung CLI (stuck IPC): don't open a second editor too
+        return "none"
     if not fallback:
         return "none"
-    run(["open", "-t", str(target)], check=False, capture_output=True)
+    try:
+        run(["open", "-t", str(target)], check=False, capture_output=True, timeout=_EDITOR_TIMEOUT)
+    except subprocess.SubprocessError:
+        return "none"
     return "text-editor"
 
 

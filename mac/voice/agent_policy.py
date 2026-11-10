@@ -84,7 +84,11 @@ _GIT_READ = {"log", "show", "diff", "status", "blame", "rev-parse", "ls-files", 
 _GIT_BAD_LONG = ("--output", "--ext-diff", "--textconv", "--exec-path", "--git-dir", "--work-tree",
                  "--config-env", "--upload-pack", "--open-files-in-pager", "--no-index", "--contents",
                  "--ignore-revs-file", "--exclude-from", "--exclude-per-directory", "--pathspec-from-file",
-                 "--orderfile", "--stdin", "--output-directory")
+                 "--orderfile", "--stdin", "--output-directory", "--receive-pack")
+# Transport subcommands: there -u<cmd> (clone, ls-remote, pull, fetch) names the remote program and -c may
+# sit inside a short cluster (-qc core.sshCommand=...). git push -u (set upstream) stays usable.
+_GIT_NET = {"push", "fetch", "pull", "clone", "ls-remote", "archive", "submodule"}
+_REMOTE_HELPER_RE = re.compile(r"^(ext|fd)::", re.IGNORECASE)  # ext::<cmd> runs <cmd> as the transport
 _GIT_BAD_SHORT = set("ocOX")  # -o/-c as the first letter; -O<file>/-X<file> anywhere in a cluster
 _BRANCH_WRITE = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy", "--force",
                  "--set-upstream-to", "-u", "--unset-upstream", "--edit-description"}
@@ -295,7 +299,11 @@ def _git_arg_problem(a: str, sub: str, d: str, top: str, ctx: Ctx) -> str | None
     elif a.startswith("-") and len(a) > 1:
         if a[1] in _GIT_BAD_SHORT or "O" in a or "X" in a or (sub == "blame" and "S" in a):
             return f"git option {a[:2]} is not allowed"
+        if sub in _GIT_NET and ("c" in a or (sub != "push" and "u" in a)):
+            return "git options that run a program or set config are not allowed"
         values.append(a[2:])
+    if _REMOTE_HELPER_RE.match(a.split("=", 1)[-1]):
+        return "ext:: and fd:: remotes are not allowed: they run a program"
     parts = [c.casefold() for c in re.split(r"[:/]", a)]
     if _secret_name(parts[-1]) or _SECRET_DIR in parts:
         return "that file holds secrets and is off limits"

@@ -227,3 +227,27 @@ def test_open_in_editor_no_fallback_and_known_editors_only(repo):
         gitdiff.open_in_editor(r, "a.py", 3, run=fake_run, editor="sh", fallback=False)
     with pytest.raises(ValueError):
         gitdiff.open_in_editor(r, "../x.py", 3, run=fake_run, editor="code", fallback=False)
+
+
+def test_open_in_editor_times_out_and_skips_colon_names(repo):
+    """R5 design 1+2: a hung editor CLI is cut off after a short timeout (no second editor opens), and a
+    file named `a:9` is never passed to --goto (VS Code would read :9 as a line and open `a`)."""
+    r, _ = repo
+    calls = []
+
+    def hung(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("timeout")))
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    assert gitdiff.open_in_editor(r, "a.py", 3, run=hung) == "none"
+    assert len(calls) == 1 and calls[0][1] == gitdiff._EDITOR_TIMEOUT <= 3
+
+    (r / "a:9").write_text("x")
+    calls.clear()
+
+    def ok(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    assert gitdiff.open_in_editor(r, "a:9", 3, run=ok, fallback=False) == "none"
+    assert calls == []

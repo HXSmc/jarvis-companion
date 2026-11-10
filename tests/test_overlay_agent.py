@@ -828,7 +828,7 @@ def test_model_lines_never_suppress_the_host_card_and_the_first_change_is_scroll
     assert [c["title"] for c in cards] == ["Changed in app.py"]
     assert [e for e in events if e["type"] == "lines"] == [
         {"type": "lines", "file": str(target), "ranges": [[2, 2], [4, 4]]}]
-    assert calls == [["code", "--goto", f"{target}:2"]]
+    assert _wait(lambda: calls == [["code", "--goto", f"{target}:2"]])
     kinds = [e["type"] for e in events]
     assert kinds.index("card") < kinds.index("lines") < kinds.index("done")
     done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"]
@@ -837,7 +837,7 @@ def test_model_lines_never_suppress_the_host_card_and_the_first_change_is_scroll
     # Cursor gets its own CLI; any other front app (Xcode, a terminal) is never scrolled.
     calls.clear()
     turn(client, "what changed in this file", conv_id="r4b", screen={"app": "Cursor", "document": str(target)})
-    assert calls == [["cursor", "--goto", f"{target}:2"]]
+    assert _wait(lambda: calls == [["cursor", "--goto", f"{target}:2"]])
     calls.clear()
     events = turn(client, "what changed in this file", conv_id="r4c", screen={"app": "Xcode", "document": str(target)})
     assert calls == [] and [e for e in events if e["type"] == "lines"]
@@ -861,7 +861,7 @@ def test_editor_scroll_is_skipped_when_the_cli_is_missing(client):
     pool, deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two commits."})]), run=fake_run)
     events = turn(client, "what changed in this file", conv_id="r4e",
                   screen={"app": "Code", "document": str(REPO / "app.py")})
-    assert [c[0] for c in calls] == ["code"]
+    assert _wait(lambda: [c[0] for c in calls] == ["code"])
     assert [e["type"] for e in events].count("card") == 1 and [e for e in events if e["type"] == "lines"]
 
 
@@ -931,3 +931,46 @@ def test_event_bus_publish_from_another_thread():
             return await asyncio.wait_for(q.get(), 2)
 
     assert asyncio.run(main()) == ("hud", {"type": "say", "text": "x"})
+
+
+def test_hung_editor_cli_never_holds_the_turn(client):
+    """R5 design 1: `code --goto` hanging (stuck VS Code IPC) must not hold the highlight or `done`."""
+    _changed_app_py(REPO)
+    release = threading.Event()
+    timeouts: list = []
+
+    def hung_run(cmd, **kw):
+        timeouts.append(kw.get("timeout"))
+        release.wait(5)
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two commits."})]), run=hung_run)
+    try:
+        t0 = time.monotonic()
+        events = turn(client, "what changed in this file", conv_id="r5a",
+                      screen={"app": "Code", "document": str(REPO / "app.py")})
+        assert time.monotonic() - t0 < 3
+        kinds = [e["type"] for e in events]
+        assert "lines" in kinds and kinds[-1] == "done"
+        assert _wait(lambda: timeouts == [2])
+    finally:
+        release.set()
+
+
+def test_expiry_push_never_retitles_another_pending_confirm(client, monkeypatch):
+    """R5 security 3: the Confirm card id is shared. If another conversation's Confirm is pending when
+    this one expires, the push must not turn that live card into "Not done"; only the line goes out."""
+    bus = BusRecorder()
+    monkeypatch.setattr(overlay, "bus", bus)
+    clock = Clock()
+    setup(clock, push_script(clock))
+    turn(client, "commit and push my changes", conv_id="race1")
+    overlay._confirm["race2"] = object()  # a newer Confirm, already registered (its card is on screen)
+    try:
+        clock.now += 31
+        assert _wait(lambda: len(bus.events) >= 1)
+        time.sleep(0.1)
+        assert [e["type"] for _, e in bus.events] in (["say"], ["audio"])
+    finally:
+        overlay._confirm.pop("race2", None)
