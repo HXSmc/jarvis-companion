@@ -61,6 +61,7 @@ class FakeMac:
         self.released: list = []
         self.keys_made = 0
         self.keys_released = 0
+        self.front_errors: list = []  # AX error codes the next AXFocusedApplication reads return
 
     @property
     def posted(self) -> list:
@@ -81,6 +82,10 @@ class FakeMac:
         kind, data = self.handles[el]
         name = key.decode()
         value = None
+        if kind == "system" and name == "AXFocusedApplication":
+            self.log.append(("ax", name))
+            if self.front_errors:
+                return self.front_errors.pop(0)
         if kind == "system" and name == "AXFocusedApplication" and self.front:
             value = self._new("app", self.front)
         elif kind == "app" and name == "AXTitle":
@@ -106,7 +111,7 @@ class FakeMac:
         self.points.append((x, y))
         found = self.element_at(x, y)
         if found is None:
-            return -25205  # kAXErrorCannotComplete
+            return -25205  # kAXErrorAttributeUnsupported
         out._obj.value = self._new("el", found)
         return 0
 
@@ -593,6 +598,44 @@ def test_any_ax_failure_fails_closed(load, break_it):
     assert exc.value.reason == "probe_failed"
     assert mac.posted == []
     assert sorted(mac.created) == sorted(mac.released)
+
+
+# round 2: a cold process's first AX read returns kAXErrorCannotComplete
+CANNOT_COMPLETE, API_DISABLED = -25204, -25211
+FOCUS_READ = ("ax", "AXFocusedApplication")
+
+
+def probe_log(mac) -> list:
+    """Focus reads, sleeps and posts in order (event creation dropped)."""
+    return [e for e in mac.log if e[0] in ("ax", "sleep", "post")]
+
+
+def test_cannot_complete_once_then_success_posts_once(load):
+    mod, mac = load()
+    mac.front_errors = [CANNOT_COMPLETE]
+    mod.send_events([{"type": "key", "key": "return", "mods": [], **LOCK}])
+    assert [d for d in mac.posted if d[2] is True] == [("key", 36, True)]  # exactly one press
+    assert probe_log(mac)[:4] == [FOCUS_READ, ("sleep", 0.05), FOCUS_READ, ("post", "key", 36, True)]
+    assert sorted(mac.created) == sorted(mac.released) and mac.keys_made == mac.keys_released
+
+
+def test_cannot_complete_on_every_try_refuses(load):
+    mod, mac = load()
+    mac.front_errors = [CANNOT_COMPLETE] * 3
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([tap(**LOCK)])
+    assert exc.value.reason == "probe_failed"
+    assert mac.posted == []
+    assert probe_log(mac) == [FOCUS_READ, ("sleep", 0.05), FOCUS_READ, ("sleep", 0.05), FOCUS_READ]
+
+
+def test_other_ax_error_refuses_without_retry(load):
+    mod, mac = load()
+    mac.front_errors = [API_DISABLED]
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([tap(**LOCK)])
+    assert exc.value.reason == "probe_failed"
+    assert mac.posted == [] and probe_log(mac) == [FOCUS_READ]
 
 
 def test_system_wide_element_failure_fails_closed(load):
