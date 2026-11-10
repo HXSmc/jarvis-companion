@@ -246,7 +246,7 @@ final class HUDCardSnapshotTests: XCTestCase {
         let all = try cards(Self.layer)
         let size = CGSize(width: 390, height: 844)
         let box = CardsBox()
-        let view = ZStack { Color.white; LateLayer(box: box) }
+        let view = ZStack { Color.white; LateLayer(box: box) }.ignoresSafeArea()  // layer points = shot points
         let image = try draw("hud-07b-layer-late", AnyView(view), size: size) { box.cards = all }
         let slot = try XCTUnwrap(HUDLayer.placements(for: all, in: size, avoid: nil).first)
         // The header band of the first card: a white backdrop would read ~1.0, the black card far lower.
@@ -263,6 +263,7 @@ final class HUDCardSnapshotTests: XCTestCase {
             HWShapeLayer(shape: HWShape(kind: "circle", rect: .zero, label: "", frameId: nil),
                          rect: CGRect(x: 160, y: 300, width: 70, height: 50))
         }
+        .ignoresSafeArea()
         try draw("hud-08-shape-halo", AnyView(view), size: CGSize(width: 390, height: 420))
     }
 

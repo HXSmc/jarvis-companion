@@ -11,10 +11,13 @@ private let hudBody = Color.white.opacity(0.85)
 struct HUDCardView: View {
     let card: HUDCard
     var maxHeight: CGFloat? = nil
+    /// Info cards: first line + "+N more" (the layer's fallback when the full card does not fit).
+    var compact = false
 
-    init(card: HUDCard, maxHeight: CGFloat? = nil) {
+    init(card: HUDCard, maxHeight: CGFloat? = nil, compact: Bool = false) {
         self.card = card
         self.maxHeight = maxHeight
+        self.compact = compact
     }
 
     // Every size scales with Dynamic Type (the layer caps growth at accessibility2);
@@ -99,13 +102,17 @@ struct HUDCardView: View {
     }
 
     private var infoBody: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array((card.body ?? []).enumerated()), id: \.offset) { _, line in
+        let lines = card.body ?? []
+        let shown = compact ? Array(lines.prefix(1)) : lines
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { _, line in
                 Text(line)
                     .font(.system(size: bodySize))
                     .foregroundColor(hudBody)
+                    .lineLimit(compact ? 2 : nil)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if shown.count < lines.count { moreLineView(lines.count - shown.count) }
         }
     }
 
@@ -518,12 +525,17 @@ struct HUDLayer: View {
                 ForEach(Array(zip(cards, rects).enumerated()), id: \.offset) { i, pair in
                     // The card budgets its rows against the slot, so nothing is clipped
                     // mid-row and the border stays whole.
-                    HUDCardView(card: pair.0, maxHeight: pair.1.height)
-                        .frame(width: pair.1.width)
-                        .frame(height: pair.1.height, alignment: .top)
-                        .position(x: pair.1.midX, y: pair.1.midY)
-                        .modifier(HUDAppear(index: i))
-                        .id("\(i)-\(pair.0.id)")  // a new card in this slot fades in again
+                    // Info text is not row-budgeted: when the full card is taller than its
+                    // slot (big type), the compact one (first line + "+N more") is used.
+                    ViewThatFits(in: .vertical) {
+                        HUDCardView(card: pair.0, maxHeight: pair.1.height)
+                        HUDCardView(card: pair.0, maxHeight: pair.1.height, compact: true)
+                    }
+                    .frame(width: pair.1.width)
+                    .frame(height: pair.1.height, alignment: .top)
+                    .position(x: pair.1.midX, y: pair.1.midY)
+                    .modifier(HUDAppear(index: i))
+                    .id("\(i)-\(pair.0.id)")  // a new card in this slot fades in again
                 }
             }
         }
