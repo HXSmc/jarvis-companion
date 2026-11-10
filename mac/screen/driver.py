@@ -10,9 +10,12 @@ of the focused app) and optionally `require_window` (case-sensitive substring
 of the focused window's AX title) is checked by `_guard` immediately before
 each of its posts: the focused app/window must match and, for pointer events,
 the AX element under the target point must belong to the focused app (and
-window). Any AX failure refuses (fail closed); only the focused-app read
-retries kAXErrorCannotComplete (cold process), at most 3 tries, and never
-posts in between. A refusal raises FocusMismatch, which carries app names and booleans only, never a window title. Events
+window). Any AX failure refuses (fail closed). A fresh process's system-wide
+AXFocusedApplication read returns kAXErrorCannotComplete until that process
+has run one AX hit-test, so the first focus probe runs a read-only
+AXUIElementCopyElementAtPosition first (`_warm_ax`, once per process); the
+focused-app read then still retries kAXErrorCannotComplete, at most 3 tries,
+and never posts in between. A refusal raises FocusMismatch, which carries app names and booleans only, never a window title. Events
 without `require_app` post exactly as before and never probe AX.
 `send_events(..., locked=True)` refuses the whole batch before anything posts
 unless every event carries `require_app`. The guarantee is
@@ -290,8 +293,10 @@ def is_halted() -> bool:
 
 
 kAXErrorCannotComplete = -25204
-_AX_TRIES = 3  # a fresh process's first AX call returns CannotComplete until AX warms up
+_AX_TRIES = 3
 _AX_RETRY_GAP = 0.05
+# Set once a hit-test succeeded in this process (read under _LOCK only).
+_ax_warm = False
 
 
 def _ax_copy(el, name, tries: int = 1):
@@ -330,10 +335,27 @@ def _ax_pid(el) -> int | None:
     return pid.value
 
 
+def _warm_ax(system) -> None:
+    """Measured on a Mac: in a fresh process the system-wide
+    AXFocusedApplication read returns kAXErrorCannotComplete (-25204) on every
+    try until one AXUIElementCopyElementAtPosition has succeeded in that
+    process. This is that hit-test: a pure query (no click, focus or pointer
+    change) whose element is released unused. Its result never grants
+    anything; the focus read after it decides, and fails closed."""
+    global _ax_warm
+    el = ctypes.c_void_p()
+    if AX.AXUIElementCopyElementAtPosition(system, 0.0, 0.0, ctypes.byref(el)) == 0:
+        _ax_warm = True
+    if el.value:
+        CF.CFRelease(el.value)
+
+
 def _focus_probe(system, want_window: bool):
     """(focused app title, its pid, focused window title or None). The pid is
     read while the app element is still valid, so nothing outlives its release."""
-    app = _ax_copy(system, "AXFocusedApplication", tries=_AX_TRIES)  # first AX call of the guard
+    if not _ax_warm:
+        _warm_ax(system)
+    app = _ax_copy(system, "AXFocusedApplication", tries=_AX_TRIES)
     if not app:
         return (None, None, None)
     try:

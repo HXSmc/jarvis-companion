@@ -22,6 +22,7 @@ DRIVER_PATH = Path(__file__).resolve().parent.parent / "mac" / "screen" / "drive
 
 MOVED, LDOWN, LUP, RDOWN, RUP = 5, 1, 2, 3, 4
 SAFARI, TERMINAL = ("Safari", 100), ("Terminal", 300)
+WARM = (0.0, 0.0)  # the driver's once-per-process AX warm-up hit-test
 
 
 class CGPoint(ctypes.Structure):
@@ -62,6 +63,7 @@ class FakeMac:
         self.keys_made = 0
         self.keys_released = 0
         self.front_errors: list = []  # AX error codes the next AXFocusedApplication reads return
+        self.cold = False  # True = a fresh process: focus reads fail until one hit-test succeeded
 
     @property
     def posted(self) -> list:
@@ -86,6 +88,8 @@ class FakeMac:
             self.log.append(("ax", name))
             if self.front_errors:
                 return self.front_errors.pop(0)
+            if self.cold:
+                return -25204  # kAXErrorCannotComplete
         if kind == "system" and name == "AXFocusedApplication" and self.front:
             value = self._new("app", self.front)
         elif kind == "app" and name == "AXTitle":
@@ -112,6 +116,7 @@ class FakeMac:
         found = self.element_at(x, y)
         if found is None:
             return -25205  # kAXErrorAttributeUnsupported
+        self.cold = False
         out._obj.value = self._new("el", found)
         return 0
 
@@ -241,7 +246,7 @@ def test_locked_tap_match_posts_move_down_up(load):
     mod, mac = load()
     mod.send_events([tap(**LOCK)])
     assert mac.posted == tap_posts(50.0, 50.0)
-    assert mac.points == [(50.0, 50.0), (50.0, 50.0)]  # the posted point, checked before move and down
+    assert mac.points == [WARM, (50.0, 50.0), (50.0, 50.0)]  # the posted point, checked before move and down
 
 
 # b
@@ -435,7 +440,7 @@ def test_locked_drag_match_releases_at_end_point(load):
     assert mac.posted[-1] == ("mouse", LUP, 80.0, 20.0, 0)
     assert len(mac.posted) == 13
     # start (move), end (before the down), start (down), end (before the up)
-    assert mac.points == [(20.0, 20.0), (80.0, 20.0), (20.0, 20.0), (80.0, 20.0)]
+    assert mac.points == [WARM, (20.0, 20.0), (80.0, 20.0), (20.0, 20.0), (80.0, 20.0)]
 
 
 # j
@@ -453,7 +458,7 @@ def test_text_focus_loss_after_first_chunk_is_partial(load):
                          {"type": "text", "text": "b" * 45, **LOCK}])
     assert (exc.value.index, exc.value.partial, exc.value.reason) == (1, True, "app")
     assert mac.posted == [("key", 48, True), ("key", 48, False), ("key", 0, True), ("key", 0, False)]
-    assert mac.points == []  # keyboard events have no point check
+    assert mac.points == [WARM]  # keyboard events have no point check, only the warm-up
     assert_pairs(mac.posted)
 
 
@@ -517,7 +522,7 @@ def test_locked_scroll_checks_point_moves_then_scrolls(load):
     mod, mac = load()
     mod.send_events([{"type": "scroll", "dy": 0.5, "dx": None, "x": 0.25, "y": 0.75, **LOCK}])
     assert mac.posted == [("mouse", MOVED, 25.0, 75.0, 0), ("scroll", 1, 2, 5, 0, 0)]
-    assert mac.points == [(25.0, 75.0), (25.0, 75.0)]
+    assert mac.points == [WARM, (25.0, 75.0), (25.0, 75.0)]
 
 
 def test_locked_scroll_over_another_app_refuses(load):
@@ -645,6 +650,50 @@ def test_system_wide_element_failure_fails_closed(load):
         mod.send_events([{"type": "key", "key": "return", "mods": [], **LOCK}])
     assert exc.value.reason == "probe_failed"
     assert mac.posted == []
+
+
+# round 3: a fresh process cannot read the focused app until one hit-test ran
+KEY_RETURN = {"type": "key", "key": "return", "mods": [], **LOCK}
+
+
+@pytest.mark.parametrize("ev, posts", [
+    (tap(**LOCK), tap_posts(50.0, 50.0)),
+    (KEY_RETURN, [("key", 36, True), ("key", 36, False)]),
+])
+def test_fresh_process_first_locked_event_passes_with_right_app(load, ev, posts):
+    mod, mac = load()  # module loaded fresh = process state reset
+    mac.cold = True
+    mod.send_events([ev, ev])
+    assert mac.posted == posts * 2
+    assert mac.points.count(WARM) == 1  # warm-up once per process
+    assert mac.points[0] == WARM  # ...and before the first focus read
+    assert probe_log(mac)[:2] == [FOCUS_READ, ("post",) + posts[0]]  # first read succeeded, no retry
+    assert_pairs(mac.posted)
+    assert sorted(mac.created) == sorted(mac.released)
+
+
+def test_fresh_process_first_locked_tap_refused_with_wrong_app(load):
+    mod, mac = load()
+    mac.cold = True
+    mac.front = TERMINAL
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([tap(**LOCK)])
+    assert (exc.value.reason, exc.value.actual_app, exc.value.index) == ("app", "Terminal", 0)
+    assert mac.posted == []
+
+
+def test_fresh_process_failed_warm_up_fails_closed_and_retries_next_time(load):
+    mod, mac = load()
+    mac.cold = True
+    mac.element_at = lambda x, y: None  # every hit-test fails, so the process stays cold
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([KEY_RETURN])
+    assert exc.value.reason == "probe_failed" and mac.posted == []
+    assert mod._ax_warm is False
+    mac.element_at = lambda x, y: (SAFARI[1], "Inbox - Mail")
+    mod.send_events([tap(**LOCK)])  # next guard warms up again, then passes
+    assert mac.posted == tap_posts(50.0, 50.0)
+    assert mac.points.count(WARM) == 2 and mod._ax_warm is True
 
 
 # p
