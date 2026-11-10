@@ -156,6 +156,7 @@ final class AppController {
     /// followUp: the open-mic window after a reply (no wake word, same conversation).
     private func handleWake(followUp: Bool = false) async {
         listenSerial += 1
+        turnDone = false  // a barge-in's stale drain must not start a follow-up
         if followUp {
             model.orb = .followUp
         } else {
