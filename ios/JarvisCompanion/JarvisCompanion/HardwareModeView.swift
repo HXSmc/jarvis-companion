@@ -285,7 +285,7 @@ struct HardwareModeView: View {
     private func tearDown() {
         wasConnected = false  // our own disconnect is not a drop
         if hw.connected { hw.sendDiag(voice.diagnostics()) }
-        hw.end()  // the gateway posts the report back to the session itself
+        hw.endAndClose()  // the gateway posts the report back; the socket closes after `end` went out
         // Break the closure -> view -> object cycles so the camera, audio engine and socket are freed.
         hw.onSay = nil
         hw.onAck = nil
@@ -296,7 +296,6 @@ struct HardwareModeView: View {
         voice.onUtterance = nil
         camera.onPixelBuffer = nil
         tracker?.onUpdate = nil
-        hw.disconnect()
         voice.stop()
         camera.setTorch(false)
         camera.stop()

@@ -135,6 +135,28 @@ final class HWSession: ObservableObject {
         send(["type": "end"])
     }
 
+    /// Closing: send `end`, then close the socket only once it went out (or after 1.5 s).
+    /// The gateway reports back only on `end`, so a cancel racing the send would lose it.
+    func endAndClose() {
+        guard let ws = socket, let session = urlSession,
+              let data = try? JSONSerialization.data(withJSONObject: ["type": "end"]),
+              let text = String(data: data, encoding: .utf8) else {
+            disconnect()
+            return
+        }
+        socket = nil  // this object is free for a new connection at once; the old socket closes itself
+        urlSession = nil
+        connected = false
+        thinking = false
+        researching = false
+        let close = {
+            ws.cancel(with: .normalClosure, reason: nil)
+            session.finishTasksAndInvalidate()
+        }
+        ws.send(.string(text)) { _ in close() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { close() }  // cancelling twice is harmless
+    }
+
     /// The first ask after `ready`: a preloaded task starts at once; voice-first
     /// sends nothing, because the owner's first words become the task.
     static func firstAsk(initialTask: String) -> String? {

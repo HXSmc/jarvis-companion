@@ -216,6 +216,14 @@ final class HWLogicTests: XCTestCase {
         XCTAssertEqual(hw.say, instruction)
     }
 
+    func testEndAndCloseWithoutASocketIsSafe() {
+        let hw = HWSession()
+        hw.handle(["type": "ready"])
+        hw.endAndClose()  // no socket: falls back to a plain disconnect, never crashes
+        XCTAssertFalse(hw.connected)
+        XCTAssertFalse(hw.thinking)
+    }
+
     func testWordsBeforeReadyAreJoinedNotDropped() {
         let first = HWSession.joinedPending(nil, "fix the SSD", true)
         XCTAssertEqual(first.text, "fix the SSD")
