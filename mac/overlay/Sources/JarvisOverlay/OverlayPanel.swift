@@ -74,7 +74,7 @@ final class CardPanel: NSPanel {
         let refit = { [weak self] (_: Any) in DispatchQueue.main.async { self?.fit() } }
         cardsCancellable = model.$cards.sink(receiveValue: refit)
         permissionsCancellable = model.$missingPermissions.sink(receiveValue: refit)
-        shapesCancellable = model.$shapes.sink(receiveValue: refit)
+        shapesCancellable = model.$shapes.throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true).sink(receiveValue: refit)
         fit()
     }
 
