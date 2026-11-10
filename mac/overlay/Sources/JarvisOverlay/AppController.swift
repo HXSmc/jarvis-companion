@@ -117,9 +117,13 @@ final class AppController {
                 let health = try await client.health()
                 serviceVoice = health.voice
                 endOutage()
-                for try await name in client.events() {
+                for try await event in client.events() {
                     endOutage()
-                    if name == "wake" { await handleWake() }
+                    if event.name == "wake" {
+                        await handleWake()
+                    } else if event.name == "hud" {
+                        handlePush(OverlayEvent.decode(line: Data(event.data.utf8)))
+                    }
                 }
                 serviceUnreachable("event stream ended")
             } catch {
@@ -127,6 +131,20 @@ final class AppController {
             }
             // Retry fast: a reinstall or a Mac wake drops the service for only a few seconds.
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    /// A `hud` event pushed after its turn ended (an expired Confirm): card always, line only when idle.
+    private func handlePush(_ event: OverlayEvent) {
+        switch event.pushed(idle: model.orb == .idle && !audio.isBusy) {
+        case .card(let card)?:
+            model.add(card: card)
+        case .audio(_, let rate, let pcm)?:
+            audio.enqueue(pcm: pcm, rate: rate)
+        case .say(let text)?:
+            if serviceVoice == nil { audio.speakLocally(text) }
+        default:
+            break
         }
     }
 

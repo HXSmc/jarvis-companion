@@ -178,23 +178,26 @@ router = APIRouter(prefix="/overlay")
 # --- In-process event bus backing the SSE stream ---
 
 class EventBus:
-    """Fan-out to SSE subscribers; publish() from any coroutine, drop-in for tests."""
+    """Fan-out to SSE subscribers; publish() from any coroutine or thread, drop-in for tests."""
 
     def __init__(self) -> None:
-        self._queues: set[asyncio.Queue] = set()
+        self._queues: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = set()
 
     def publish(self, kind: str, data: dict | None = None) -> None:
-        for q in list(self._queues):
-            q.put_nowait((kind, data or {}))
+        for loop, q in list(self._queues):
+            try:  # asyncio.Queue is not thread-safe: hand the item to the subscriber's own loop
+                loop.call_soon_threadsafe(q.put_nowait, (kind, data or {}))
+            except RuntimeError:  # that loop has closed
+                self._queues.discard((loop, q))
 
     @asynccontextmanager
     async def subscribe(self):
-        q: asyncio.Queue = asyncio.Queue()
-        self._queues.add(q)
+        entry = (asyncio.get_running_loop(), asyncio.Queue())
+        self._queues.add(entry)
         try:
-            yield q
+            yield entry[1]
         finally:
-            self._queues.discard(q)
+            self._queues.discard(entry)
 
 
 bus = EventBus()
@@ -882,7 +885,8 @@ class AgentRun:
     opening_key: str | None = None  # progress line the 1.5 s timer speaks once if no tool call came first
     opening_said: str | None = None  # the line it spoke; a tool's progress line never repeats it
     screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
-    lines_sent: bool = False
+    editor: str | None = None  # VS Code/Cursor CLI that scrolls that file to its first change
+    model_lines: dict | None = None  # the model's validated lines, held while the host's may replace them
 
 
 # conv_id -> run waiting for the owner's spoken yes (one per conv); conv_id -> run streaming now.
@@ -927,15 +931,23 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
                 _expired.pop(conv, None)
         _expired[run.conv_id] = (now, run.confirm_summary)
         debug_log.add(debug_log.for_utterance(), "agent_confirm", state="expired")
+        # The turn that asked has ended: the app hears of it on its /events stream, as `hud` events
+        # it handles like turn events (the Confirm card is replaced, the line is spoken when idle).
+        for ev in [_settled_card(run.confirm_summary, "Not done: it timed out"), *_line_events("expired", deps)]:
+            bus.publish("hud", ev)
 
 
-async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
+def _line_events(key: str, deps: OverlayDeps) -> list[dict]:
     """A fixed, prerendered line (acks.PHRASES): audio when cached, else the say text."""
     text, pcm, rate = deps.acks.get(key)
     if pcm:
-        yield {"type": "audio", "text": text, "rate": rate, "pcm_b64": base64.b64encode(pcm).decode()}
-    else:
-        yield _say(text)
+        return [{"type": "audio", "text": text, "rate": rate, "pcm_b64": base64.b64encode(pcm).decode()}]
+    return [_say(text)]
+
+
+async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
+    for ev in _line_events(key, deps):
+        yield ev
 
 
 def _settled_card(summary: str, outcome: str) -> dict:
@@ -956,6 +968,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         run = _take_confirm(other)
         if run is not None:
             await asyncio.to_thread(_deny_and_drop, run, deps)
+            yield _settled_card(run.confirm_summary, "Not done")  # one card id for every conv
     expired = _expired.pop(body.conv_id, None)
     if expired and deps.clock() - expired[0] < EXPIRED_TELL_S and intents.is_confirm(body.text):
         yield _settled_card(expired[1], "Not done: it timed out")
@@ -1090,6 +1103,8 @@ def _agent_lines(spec, run: AgentRun) -> dict | None:
 
 
 # "the code on my screen", "this file": the request is about the file in front of the owner.
+# Front app (NSRunningApplication.localizedName) -> the editor CLI whose `--goto` scrolls it.
+_EDITOR_CLI = {"Code": "code", "Visual Studio Code": "code", "Cursor": "cursor"}
 _SCREEN_FILE_RE = re.compile(r"\b(?:on (?:my|the) screen|this (?:file|code|function|class|method))\b", re.I)
 
 
@@ -1172,7 +1187,8 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     run = AgentRun(conv_id=body.conv_id, session=session, ctx=ctx, repo=repo, started=deps.clock(),
                    last_progress=deps.clock(),  # the ack just played: no tool progress line in the next 4 s
                    opening_key=acks.progress_key({"code": "file"}.get(sub, sub)),
-                   screen_file=await asyncio.to_thread(_screen_file, body, repo, sub))
+                   screen_file=await asyncio.to_thread(_screen_file, body, repo, sub),
+                   editor=_EDITOR_CLI.get(body.screen.app if body.screen is not None else ""))
     await asyncio.to_thread(session.send_user, "\n\n".join(parts))
     async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
         yield ev
@@ -1302,12 +1318,21 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 for line in str(ev.get("result") or "").splitlines():
                     async for out in _agent_flush(line, run, deps, metrics, said, start):
                         yield out
-                if run.screen_file and not run.lines_sent:  # "what changed" in the file on screen
+                if run.screen_file:  # "what changed" in the file on screen: the host's card and lines
                     card, lines = await asyncio.to_thread(_last_change, run)
                     if card:
                         yield {"type": "card", "card": card}
                     if lines:
+                        if run.editor:  # the first change may be scrolled off: bring it into view
+                            try:
+                                await asyncio.to_thread(gitdiff.open_in_editor, run.repo, run.screen_file,
+                                                        lines["ranges"][0][0], run=deps.run,
+                                                        editor=run.editor, fallback=False)
+                            except (OSError, ValueError):
+                                pass
                         yield lines
+                    elif run.model_lines:  # no host diff (e.g. the file's first commit): the model's
+                        yield run.model_lines
                 if len(said) == spoke:
                     async for out in _speak("I couldn't get an answer for that.", deps):
                         yield out
@@ -1357,8 +1382,11 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
     if shape:
         yield {"type": "shape", "shape": shape}
     lines = await asyncio.to_thread(_agent_lines, obj.get("lines"), run) if "lines" in obj else None
-    if lines:
-        run.lines_sent = True
+    if lines and run.screen_file:
+        # The host's git-checked lines for the file on screen win; these are only its fallback
+        # (Mac run 4: the model's own line was off screen, and it switched the host's card off).
+        run.model_lines = lines
+    elif lines:
         yield lines
 
 

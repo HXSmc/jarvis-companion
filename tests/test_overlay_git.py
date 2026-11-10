@@ -210,3 +210,20 @@ def test_has_filters_ignores_global_filters(repo, tmp_path, monkeypatch):
     glob.write_text("[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(glob))
     assert gitdiff.has_filters(r) is False
+
+
+def test_open_in_editor_no_fallback_and_known_editors_only(repo):
+    """The agent tier's scroll: `cursor`/`code` only, and with fallback=False nothing else opens."""
+    r, _ = repo
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        raise FileNotFoundError
+
+    assert gitdiff.open_in_editor(r, "a.py", 3, run=fake_run, editor="cursor", fallback=False) == "none"
+    assert calls == [["cursor", "--goto", f"{(r / 'a.py').resolve()}:3"]]
+    with pytest.raises(ValueError):
+        gitdiff.open_in_editor(r, "a.py", 3, run=fake_run, editor="sh", fallback=False)
+    with pytest.raises(ValueError):
+        gitdiff.open_in_editor(r, "../x.py", 3, run=fake_run, editor="code", fallback=False)

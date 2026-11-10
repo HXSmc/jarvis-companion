@@ -731,7 +731,7 @@ def test_history_of_file_on_screen_gets_diff_card_and_lines(client):
     assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[2, 2], [4, 4]]}]
     done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"]
     assert done[0]["lines"] == 1
-    # Not about the screen ("commit and push"), or the model drew its own lines: no host diff.
+    # Not about the screen: no host diff.
     events = turn(client, "what changed in the last commit", conv_id="hs2",
                   screen={"app": "Code", "document": str(repo / "app.py")})
     assert not [e for e in events if e["type"] == "lines"]
@@ -796,3 +796,138 @@ def test_host_diff_goes_through_the_policy(client):
     events = turn(client, "what changed in this file", conv_id="hp2",
                   screen={"app": "Code", "document": str(repo / "app.py")})
     assert not [e for e in events if e["type"] == "lines"]
+
+
+# --- Round 4 (Mac run 4 findings) --------------------------------------------
+
+
+def _changed_app_py(repo: Path) -> None:
+    (repo / "app.py").write_text("print(1)\nprint(20)\nprint(3)\nprint(4)\n")
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "commit", "-qam", "second"], cwd=repo, check=True)
+
+
+def test_model_lines_never_suppress_the_host_card_and_the_first_change_is_scrolled_into_view(client):
+    """R4 #1 (Mac run 4, criterion 26): the model sent its own `lines` (an off-screen line 559), which
+    used to switch the host's diff card off: `done cards:0 lines:1`. Now the host's card and git-checked
+    lines always come for the file on screen, the model's guess for that file is dropped, and VS Code
+    is scrolled to the first change with `code --goto <file in repo>:<line>` (no fallback, no shell)."""
+    _changed_app_py(REPO)
+    target = (REPO / "app.py").resolve()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return type("P", (), {"returncode": 0, "stdout": ""})()
+
+    clock = Clock()
+    reply = [{"say": "Two commits: 'second' and 'first'."}, {"lines": {"file": "app.py", "ranges": [[1, 1]]}}]
+    pool, deps = setup(clock, lambda: FakeAgent(clock, script=[result(*reply)]), run=fake_run)
+    events = turn(client, "research the git history of the code on my screen and tell me what changed",
+                  conv_id="r4a", screen={"app": "Code", "document": str(REPO / "app.py")})
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert [c["title"] for c in cards] == ["Changed in app.py"]
+    assert [e for e in events if e["type"] == "lines"] == [
+        {"type": "lines", "file": str(target), "ranges": [[2, 2], [4, 4]]}]
+    assert calls == [["code", "--goto", f"{target}:2"]]
+    kinds = [e["type"] for e in events]
+    assert kinds.index("card") < kinds.index("lines") < kinds.index("done")
+    done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"]
+    assert done[0]["cards"] == 1 and done[0]["lines"] == 1
+
+    # Cursor gets its own CLI; any other front app (Xcode, a terminal) is never scrolled.
+    calls.clear()
+    turn(client, "what changed in this file", conv_id="r4b", screen={"app": "Cursor", "document": str(target)})
+    assert calls == [["cursor", "--goto", f"{target}:2"]]
+    calls.clear()
+    events = turn(client, "what changed in this file", conv_id="r4c", screen={"app": "Xcode", "document": str(target)})
+    assert calls == [] and [e for e in events if e["type"] == "lines"]
+
+    # A request not about the screen keeps the model's validated lines (no host card, no scroll).
+    events = turn(client, "what changed in the last commit", conv_id="r4d",
+                  screen={"app": "Code", "document": str(target)})
+    assert calls == [] and [e["ranges"] for e in events if e["type"] == "lines"] == [[[1, 1]]]
+
+
+def test_editor_scroll_is_skipped_when_the_cli_is_missing(client):
+    """No `code` on PATH: the card and lines still come, and nothing else is opened (no `open -t`)."""
+    _changed_app_py(REPO)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        raise FileNotFoundError
+
+    clock = Clock()
+    pool, deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two commits."})]), run=fake_run)
+    events = turn(client, "what changed in this file", conv_id="r4e",
+                  screen={"app": "Code", "document": str(REPO / "app.py")})
+    assert [c[0] for c in calls] == ["code"]
+    assert [e["type"] for e in events].count("card") == 1 and [e for e in events if e["type"] == "lines"]
+
+
+class BusRecorder:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def publish(self, kind, data=None):
+        self.events.append((kind, data or {}))
+
+
+def test_expired_confirm_is_pushed_to_the_app(client, monkeypatch):
+    """R4 #2 (Mac run 4, criterion 32): after the 30 s expiry the Confirm card stayed 20 s and more.
+    The HTTP turn has ended, so the watchdog pushes `hud` events on /overlay/events: the same card id
+    retitled "Not done: it timed out", then the expired line. The app handles them like turn events."""
+    bus = BusRecorder()
+    monkeypatch.setattr(overlay, "bus", bus)
+    clock = Clock()
+    pool, deps = setup(clock, push_script(clock))
+    first = turn(client, "commit and push my changes", conv_id="ex1")
+    confirm = next(e["card"] for e in first if e["type"] == "card")
+    assert confirm["title"] == "Confirm" and bus.events == []
+    clock.now += 31
+    assert _wait(lambda: len(bus.events) >= 2)
+    assert [r["behavior"] for r in pool.made[0].responses] == ["deny"]
+    (k1, card), (k2, line) = bus.events
+    assert k1 == k2 == "hud"
+    assert card == {"type": "card", "card": {**confirm, "title": "Not done: it timed out",
+                                             "body": [confirm["body"][0]]}}
+    assert line["type"] in ("say", "audio") and line["text"] == "That request expired, so I didn't do it."
+    assert len(line["text"].split()) <= 12
+
+
+def test_yes_or_no_in_time_pushes_nothing(client, monkeypatch):
+    """Only the watchdog pushes: a settled confirmation answers inside its own turn."""
+    bus = BusRecorder()
+    monkeypatch.setattr(overlay, "bus", bus)
+    clock = Clock()
+    pool, deps = setup(clock, push_script(clock))
+    turn(client, "commit and push my changes", conv_id="ex2")
+    turn(client, "no", conv_id="ex2")
+    clock.now += 31
+    time.sleep(0.1)
+    assert bus.events == []
+
+
+def test_new_conversation_replaces_the_old_confirm_card(client):
+    """R4 #2: a confirm dropped because a new conversation started also loses its Confirm card."""
+    clock = Clock()
+    pool, deps = setup(clock, push_script(clock), chunks=['{"say": "Noon."}\n'])
+    first = turn(client, "commit and push my changes", conv_id="nc-a")
+    card_id = next(e["card"]["id"] for e in first if e["type"] == "card")
+    events = turn(client, "what time is it", conv_id="nc-b")
+    assert [r["behavior"] for r in pool.made[0].responses] == ["deny"]
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert cards[0]["id"] == card_id and cards[0]["title"] == "Not done"
+
+
+def test_event_bus_publish_from_another_thread():
+    """The watchdog runs on its own thread; the bus hands items to the subscriber's loop safely."""
+    import asyncio
+
+    async def main():
+        bus = overlay.EventBus()
+        async with bus.subscribe() as q:
+            threading.Thread(target=bus.publish, args=("hud", {"type": "say", "text": "x"})).start()
+            return await asyncio.wait_for(q.get(), 2)
+
+    assert asyncio.run(main()) == ("hud", {"type": "say", "text": "x"})
