@@ -8,7 +8,10 @@ final class OverlayModel: ObservableObject {
     @Published var shapes: [HUDShape] = []
     /// Newest last, at most ScatterLayout.maxCards; a card with the same id replaces the old one.
     @Published var cards: [HUDCard] = [] {
-        didSet { layout.keep(Set(cards.map(\.listKey))) }
+        didSet {
+            layout.keep(Set(cards.map(\.listKey)))
+            MediaPlaybackController.shared.cardsChanged(old: oldValue, new: cards)
+        }
     }
     /// Stored scatter frame per card and the normal / aside mode (CardPanel draws it).
     @Published private(set) var layout = ScatterLayout.LayoutState()
@@ -150,6 +153,7 @@ final class OverlayModel: ObservableObject {
         case .aside:
             guard layout.mode == .normal else { return }
             layout.aside()
+            MediaPlaybackController.shared.stopAll()
             clearShapes()
         case .restore:
             guard layout.mode == .aside else { return }
@@ -175,11 +179,13 @@ final class OverlayModel: ObservableObject {
         }
     }
 
-    /// At the deadline: the pointer resting on a panel (read now) waits another round; otherwise
-    /// clears the highlight boxes, and the cards unless they are parked aside (chips wait for
-    /// restore or clear, with no timer).
+    /// At the deadline: the pointer resting on a panel (read now), or a video plays — held at
+    /// most 10 min from its start — waits another round; otherwise clears the highlight boxes,
+    /// and the cards unless they are parked aside (chips wait for restore or clear, no timer).
     private func idleExpired() {
-        if pointerOnPanel() {
+        if ScatterLayout.idleWaits(pointerOnPanel: pointerOnPanel(),
+                                   playingSince: MediaPlaybackController.shared.playingSince,
+                                   now: Date()) {
             bumpIdle()
             return
         }

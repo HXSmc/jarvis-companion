@@ -138,14 +138,180 @@ public struct LinkCard: Codable, Equatable {
     }
 }
 
+/// One image of a gallery card. An unsafe `url` throws (the item is dropped
+/// element-wise); an unsafe `source_page` decodes as nil.
+public struct ImageItem: Codable, Equatable {
+    public var url: String
+    public var alt: String?
+    public var sourcePage: String?
+
+    public init(url: String, alt: String? = nil, sourcePage: String? = nil) {
+        self.url = url; self.alt = alt; self.sourcePage = sourcePage
+    }
+
+    private enum CodingKeys: String, CodingKey { case url, alt, sourcePage = "source_page" }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard let raw = try c.decodeIfPresent(String.self, forKey: .url), isSafeHTTPSURL(raw) else {
+            throw DecodingError.dataCorruptedError(forKey: .url, in: c, debugDescription: "item url must be a safe https URL")
+        }
+        url = raw
+        if let raw = try c.decodeIfPresent(String.self, forKey: .alt) {
+            alt = String(raw.prefix(MediaPolicy.maxAlt))
+        } else {
+            alt = nil
+        }
+        sourcePage = Self.safeHTTPS(try c.decodeIfPresent(String.self, forKey: .sourcePage))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(url, forKey: .url)
+        try c.encodeIfPresent(alt, forKey: .alt)
+        try c.encodeIfPresent(sourcePage, forKey: .sourcePage)
+    }
+
+    /// nil unless the string is a safe https URL.
+    private static func safeHTTPS(_ string: String?) -> String? {
+        string.flatMap { isSafeHTTPSURL($0) ? $0 : nil }
+    }
+}
+
 public struct ImageCard: Codable, Equatable {
     public var id: String?
     public var title: String
     public var url: String?
     public var fileID: String?
-    private enum CodingKeys: String, CodingKey { case id, title, url, fileID = "file_id" }
-    public init(id: String? = nil, title: String, url: String? = nil, fileID: String? = nil) {
+    public var alt: String?
+    public var sourcePage: String?
+    public var items: [ImageItem]?
+
+    public init(id: String? = nil, title: String, url: String? = nil, fileID: String? = nil,
+                alt: String? = nil, sourcePage: String? = nil, items: [ImageItem]? = nil) {
         self.id = id; self.title = title; self.url = url; self.fileID = fileID
+        self.alt = alt; self.sourcePage = sourcePage; self.items = items
+    }
+
+    /// What the card shows: `items` when 2+ survived decoding, else the top-level url as one
+    /// item (with the card's alt and sourcePage), else [] (file_id-only or no image).
+    public var images: [ImageItem] {
+        if let items { return items }
+        guard let url, isSafeHTTPSURL(url) else { return [] }
+        return [ImageItem(url: url, alt: alt, sourcePage: sourcePage)]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, url, fileID = "file_id", alt, sourcePage = "source_page", items
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        url = Self.safeHTTPS(try c.decodeIfPresent(String.self, forKey: .url))
+        fileID = try c.decodeIfPresent(String.self, forKey: .fileID)
+        if let raw = try c.decodeIfPresent(String.self, forKey: .alt) {
+            alt = String(raw.prefix(MediaPolicy.maxAlt))
+        } else {
+            alt = nil
+        }
+        sourcePage = Self.safeHTTPS(try c.decodeIfPresent(String.self, forKey: .sourcePage))
+        let decoded = (try? c.decode([Lossy<ImageItem>].self, forKey: .items)) ?? []
+        let kept = decoded.compactMap(\.value).prefix(MediaPolicy.maxMediaItems)
+        items = kept.count >= 2 ? Array(kept) : nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(url, forKey: .url)
+        try c.encodeIfPresent(fileID, forKey: .fileID)
+        try c.encodeIfPresent(alt, forKey: .alt)
+        try c.encodeIfPresent(sourcePage, forKey: .sourcePage)
+        try c.encodeIfPresent(items, forKey: .items)
+    }
+
+    /// nil unless the string is a safe https URL.
+    private static func safeHTTPS(_ string: String?) -> String? {
+        string.flatMap { isSafeHTTPSURL($0) ? $0 : nil }
+    }
+}
+
+public struct VideoCard: Codable, Equatable {
+    public var id: String?
+    public var title: String
+    public var youtubeID: String?
+    public var url: String?
+    public var thumbnailURL: String?
+    public var sourcePage: String?
+
+    public init(id: String? = nil, title: String, youtubeID: String? = nil, url: String? = nil,
+                thumbnailURL: String? = nil, sourcePage: String? = nil) {
+        self.id = id; self.title = title; self.youtubeID = youtubeID; self.url = url
+        self.thumbnailURL = thumbnailURL; self.sourcePage = sourcePage
+    }
+
+    /// "Open in browser" target: MediaPolicy.watchURL(id:) for YouTube, else sourcePage, else url
+    /// (each only if isSafeHTTPSURL).
+    public var browserURL: URL? {
+        func safe(_ string: String?) -> URL? {
+            guard let string, isSafeHTTPSURL(string) else { return nil }
+            return URL(string: string)
+        }
+        if let youtubeID { return safe(MediaPolicy.watchURL(id: youtubeID).absoluteString) }
+        return safe(sourcePage) ?? safe(url)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, youtubeID = "youtube_id", url, thumbnailURL = "thumbnail_url", sourcePage = "source_page"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        if let raw = try c.decodeIfPresent(String.self, forKey: .youtubeID) {
+            guard MediaPolicy.isValidYouTubeID(raw) else {
+                throw DecodingError.dataCorruptedError(forKey: .youtubeID, in: c,
+                                                       debugDescription: "youtube_id must be an 11-character id")
+            }
+            youtubeID = raw
+            url = nil
+        } else if let raw = try c.decodeIfPresent(String.self, forKey: .url) {
+            guard isSafeHTTPSURL(raw) else {
+                throw DecodingError.dataCorruptedError(forKey: .url, in: c, debugDescription: "video url must be a safe https URL")
+            }
+            if let found = MediaPolicy.youtubeID(fromURL: raw) {
+                youtubeID = found
+                url = nil
+            } else {
+                youtubeID = nil
+                url = raw
+            }
+        } else {
+            throw DecodingError.dataCorruptedError(forKey: .youtubeID, in: c,
+                                                   debugDescription: "video card needs youtube_id or url")
+        }
+        // The thumbnail of a YouTube card is always derived from the id.
+        thumbnailURL = youtubeID == nil ? Self.safeHTTPS(try c.decodeIfPresent(String.self, forKey: .thumbnailURL)) : nil
+        sourcePage = Self.safeHTTPS(try c.decodeIfPresent(String.self, forKey: .sourcePage))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(youtubeID, forKey: .youtubeID)
+        try c.encodeIfPresent(url, forKey: .url)
+        try c.encodeIfPresent(thumbnailURL, forKey: .thumbnailURL)
+        try c.encodeIfPresent(sourcePage, forKey: .sourcePage)
+    }
+
+    /// nil unless the string is a safe https URL.
+    private static func safeHTTPS(_ string: String?) -> String? {
+        string.flatMap { isSafeHTTPSURL($0) ? $0 : nil }
     }
 }
 
@@ -160,6 +326,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
     case flow(FlowCard)
     case link(LinkCard)
     case image(ImageCard)
+    case video(VideoCard)
 
     /// Identifiable over the payload ids (nil when absent; ForEach by index instead).
     public var id: String? {
@@ -170,6 +337,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .flow(let p): return p.id
         case .link(let p): return p.id
         case .image(let p): return p.id
+        case .video(let p): return p.id
         }
     }
 
@@ -182,6 +350,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .flow: return "flow"
         case .link: return "link"
         case .image: return "image"
+        case .video: return "video"
         }
     }
 
@@ -194,6 +363,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .flow: return "FLOW"
         case .link: return "LINK"
         case .image: return "IMAGE"
+        case .video: return "VIDEO"
         }
     }
 
@@ -208,6 +378,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case "flow": self = .flow(try FlowCard(from: decoder))
         case "link": self = .link(try LinkCard(from: decoder))
         case "image": self = .image(try ImageCard(from: decoder))
+        case "video": self = .video(try VideoCard(from: decoder))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown card type \(other)")
         }
@@ -223,11 +394,20 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .flow(let p): try p.encode(to: encoder)
         case .link(let p): try p.encode(to: encoder)
         case .image(let p): try p.encode(to: encoder)
+        case .video(let p): try p.encode(to: encoder)
         }
     }
 }
 
 // MARK: - Message
+
+/// One element of a wire array: a bad element decodes as nil instead of failing
+/// the whole array (never throws for element problems; a non-array shapes/cards
+/// behaves like common/hud.py validate_hud: empty collection).
+private struct Lossy<Element: Decodable>: Decodable {
+    let value: Element?
+    init(from decoder: Decoder) throws { value = try? Element(from: decoder) }
+}
 
 /// A full HUD payload; arrays decode lossily (one bad element is skipped, like
 /// common/hud.py validate_hud) and never fail the whole message.
@@ -242,13 +422,6 @@ public struct HUDMessage: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey { case shapes, cards }
 
-    /// Never throws for element problems; a non-array shapes/cards behaves like
-    /// Python's validate_hud: empty collection.
-    private struct Lossy<Element: Decodable>: Decodable {
-        let value: Element?
-        init(from decoder: Decoder) throws { value = try? Element(from: decoder) }
-    }
-
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         shapes = ((try? c.decode([Lossy<HUDShape>].self, forKey: .shapes)) ?? []).compactMap(\.value)
@@ -259,7 +432,7 @@ public struct HUDMessage: Codable, Equatable {
 // MARK: - URL check (mirror of common/hud.py safe_https_url)
 
 /// https URLs with a host, no whitespace/control characters, reasonable length.
-func isSafeHTTPSURL(_ string: String) -> Bool {
+public func isSafeHTTPSURL(_ string: String) -> Bool {
     guard !string.isEmpty, string.count <= 2048,
           !string.contains(where: { $0.isWhitespace }),
           !string.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })

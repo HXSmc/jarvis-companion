@@ -187,3 +187,179 @@ final class SnapshotTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Media cards (image, gallery, video)
+
+/// Gradient bitmap with seed-varied colours and dark bands; generated in code only.
+private func makeMediaImage(width: Int, height: Int, seed: Int) -> CGImage {
+    let space = CGColorSpace(name: CGColorSpace.sRGB)!
+    let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                        bytesPerRow: 0, space: space,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let tint = CGFloat(seed % 5) / 4
+    let colors = [
+        CGColor(red: 0.10 + tint * 0.2, green: 0.12, blue: 0.18, alpha: 1),
+        CGColor(red: 0.55 + tint * 0.3, green: 0.20, blue: 0.16, alpha: 1),
+    ] as CFArray
+    if let gradient = CGGradient(colorsSpace: space, colors: colors, locations: [0, 1]) {
+        ctx.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: CGFloat(width), y: CGFloat(height)), options: [])
+    }
+    ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.28))
+    for band in 0..<3 {
+        ctx.fill(CGRect(x: 0, y: CGFloat(60 + band * 90), width: CGFloat(width), height: 34))
+    }
+    return ctx.makeImage()!
+}
+
+@MainActor
+extension SnapshotTests {
+    /// Scene size = card size + 40 (the padding) in both axes.
+    private func padded(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width + 40, height: size.height + 40)
+    }
+
+    /// One media card view over black and over the busy light backdrop.
+    private func renderMediaCard<V: View>(_ view: V, size: CGSize, name: String) throws {
+        try renderPNG(view.padding(20).background(Color.black), size: size, name: "\(name).png")
+        try renderPNG(view.padding(20).background(BusyLightBackdrop()), size: size, name: "\(name)-light.png")
+    }
+
+    func testRenderMediaImageCardStates() throws {
+        let cards = LayoutDebugCommand.demoMediaCards()
+        guard let photo = cards.first(where: { $0.id == "media-1" }), case .image(let card) = photo else {
+            XCTFail("demoMediaCards has no media-1 image card")
+            return
+        }
+        guard let item = card.images.first else {
+            XCTFail("media-1 has no image item")
+            return
+        }
+        let placeholder = padded(MediaPolicy.cardSize(for: photo)!)
+        try renderMediaCard(ImageCardView(card: card), size: placeholder, name: "media-image-loading")
+
+        let states = [item.url: MediaImageState.loaded(makeMediaImage(width: 1200, height: 800, seed: 1))]
+        let loaded = padded(MediaPolicy.cardSize(for: photo, imagePixels: CGSize(width: 1200, height: 800))!)
+        try renderMediaCard(ImageCardView(card: card, states: states), size: loaded, name: "media-image-loaded")
+
+        let fox = ImageCard(id: "fox", title: "Fox", url: "https://example.com/fox.jpg",
+                            alt: "Red fox in snow",
+                            sourcePage: "https://commons.wikimedia.org/wiki/File:Example.jpg")
+        try renderMediaCard(
+            ImageCardView(card: fox, states: [fox.url ?? "": .failed]),
+            size: padded(MediaPolicy.cardSize(for: .image(fox))!),
+            name: "media-image-failed"
+        )
+    }
+
+    func testRenderMediaGalleries() throws {
+        let cards = LayoutDebugCommand.demoMediaCards()
+        guard let gallery = cards.first(where: { $0.id == "media-2" }), case .image(let card) = gallery else {
+            XCTFail("demoMediaCards has no media-2 image card")
+            return
+        }
+        var states: [String: MediaImageState] = [:]
+        for (index, item) in card.images.enumerated() {
+            states[item.url] = index == 3
+                ? .failed
+                : .loaded(makeMediaImage(width: 900, height: 900, seed: index + 2))
+        }
+        try renderMediaCard(ImageCardView(card: card, states: states),
+                            size: padded(MediaPolicy.cardSize(for: gallery)!),
+                            name: "media-gallery-4")
+
+        let items = (1...6).map { ImageItem(url: "https://example.com/frame-\($0).jpg", alt: "Frame \($0)") }
+        var sixStates: [String: MediaImageState] = [:]
+        for (index, item) in items.enumerated() {
+            switch index {
+            case 4: break // left as .loading (missing key)
+            case 5: sixStates[item.url] = .failed
+            default: sixStates[item.url] = .loaded(makeMediaImage(width: 700, height: 500, seed: index + 10))
+            }
+        }
+        let six = ImageCard(id: "six", title: "Six frames", items: items)
+        try renderMediaCard(ImageCardView(card: six, states: sixStates),
+                            size: padded(MediaPolicy.cardSize(for: .image(six))!),
+                            name: "media-gallery-6")
+    }
+
+    func testRenderMediaVideoCards() throws {
+        let cards = LayoutDebugCommand.demoMediaCards()
+        guard let youTube = cards.first(where: { $0.id == "media-3" }),
+              let file = cards.first(where: { $0.id == "media-4" }),
+              case .video(let youTubeCard) = youTube,
+              case .video(let fileCard) = file else {
+            XCTFail("demoMediaCards has no media-3/media-4 video cards")
+            return
+        }
+        let thumb = MediaImageState.loaded(makeMediaImage(width: 1600, height: 900, seed: 7))
+        let size = padded(MediaPolicy.cardSize(for: youTube)!)
+        try renderMediaCard(VideoCardView(card: youTubeCard, thumbnail: thumb, phase: .idle, onPlay: {}),
+                            size: size, name: "media-video-thumb")
+        try renderMediaCard(VideoCardView(card: youTubeCard, thumbnail: thumb, phase: .failed, onPlay: {}),
+                            size: size, name: "media-video-fallback")
+        try renderMediaCard(VideoCardView(card: fileCard, thumbnail: nil, phase: .idle, onPlay: {}),
+                            size: padded(MediaPolicy.cardSize(for: file)!),
+                            name: "media-video-file-thumb")
+    }
+
+    func testRenderMediaScatter() throws {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 33, width: 1512, height: 949)
+        let cards = LayoutDebugCommand.demoMediaCards() + LayoutDebugCommand.demoCards(count: 4)
+        var states: [String: MediaImageState] = [:]
+        for card in cards {
+            guard case .image(let p) = card else { continue }
+            for item in p.images {
+                states[item.url] = .loaded(makeMediaImage(width: 1600, height: 900, seed: 9))
+            }
+        }
+        let keepOut = [ScatterLayout.orbKeepOut(screen: screen)]
+        var layout = ScatterLayout.LayoutState()
+        for card in cards {
+            let size = NSHostingView(rootView: CardView(card: card)).fittingSize
+            layout.cardAdded(card.listKey, size: size, visible: visible, keepOut: keepOut)
+        }
+        XCTAssertEqual(layout.order.count, cards.count)
+        let size = CGSize(width: 1512, height: 982)
+        try renderPNG(mediaScene(Color.black, cards: cards, frames: layout.frames, states: states),
+                      size: size, name: "media-scatter.png")
+        try renderPNG(mediaScene(BusyLightBackdrop(), cards: cards, frames: layout.frames, states: states),
+                      size: size, name: "media-scatter-light.png")
+    }
+
+    private func mediaScene<Backdrop: View>(_ backdrop: Backdrop, cards: [HUDCard],
+                                            frames: [String: CGRect], states: [String: MediaImageState]) -> some View {
+        ZStack(alignment: .topLeading) {
+            backdrop
+            ForEach(cards, id: \.listKey) { card in
+                if let frame = frames[card.listKey] {
+                    Group {
+                        switch card {
+                        case .image(let p):
+                            ImageCardView(card: p, states: states)
+                        case .video(let p):
+                            VideoCardView(card: p,
+                                          thumbnail: .loaded(makeMediaImage(width: 1600, height: 900, seed: 9)),
+                                          phase: .idle, onPlay: {})
+                        default:
+                            CardView(card: card)
+                        }
+                    }
+                    .fixedSize()
+                    .offset(x: frame.minX, y: frame.minY)
+                }
+            }
+            OrbView(state: .idle, level: 0)
+                .offset(x: 1512 - 68, y: 982 - 68)
+        }
+    }
+
+    func testMediaCardFittingSizesMatchPolicy() throws {
+        for card in LayoutDebugCommand.demoMediaCards() {
+            let expected = try XCTUnwrap(MediaPolicy.cardSize(for: card), "no cardSize for \(card.listKey)")
+            let size = NSHostingView(rootView: CardView(card: card)).fittingSize
+            XCTAssertEqual(size.width, MediaPolicy.cardWidth, accuracy: 1, card.listKey)
+            XCTAssertEqual(size.height, expected.height, accuracy: 1, card.listKey)
+        }
+    }
+}
