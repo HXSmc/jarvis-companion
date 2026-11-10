@@ -112,16 +112,17 @@ enum ScreenContext {
         return out
     }
 
-    /// Fresh AX frame of the same element, or nil when it vanished/moved >400 pt.
-    static func recheck(role: String, label: String, near box: CGRect) -> CGRect? {
+    /// Fresh AX frame and element of the same element, or nil when it vanished/moved >400 pt.
+    /// Call off the main actor (full AX walk).
+    static func recheck(role: String, label: String, near box: CGRect) -> (frame: CGRect, element: AXUIElement)? {
         guard let pid = frontmostPID() else { return nil }
         let centre = CGPoint(x: box.midX, y: box.midY)
-        var best: (frame: CGRect, dist: CGFloat)?
+        var best: (item: Candidate, dist: CGFloat)?
         for item in walkFrontApp(pid: pid).items where item.role == role && item.label == label {
             let d = hypot(item.frame.midX - centre.x, item.frame.midY - centre.y)
-            if d <= 400 && d < (best?.dist ?? .greatestFiniteMagnitude) { best = (item.frame, d) }
+            if d <= 400 && d < (best?.dist ?? .greatestFiniteMagnitude) { best = (item, d) }
         }
-        return best?.frame
+        return best.map { ($0.item.frame, $0.item.element) }
     }
 
     /// Gutter OCR -> LineBandMapper; [] when no gutter found.
@@ -134,31 +135,16 @@ enum ScreenContext {
         // 1-5 digit observations inside the frontmost window, converted to points.
         var digits: [(line: Int, centre: CGPoint, right: CGFloat)] = []
         for pair in ocrText(in: shot.image) {
-            guard (1...5).contains(pair.text.count), pair.text.allSatisfy(\.isNumber),
-                  let line = Int(pair.text) else { continue }
+            guard let line = ShapeTrack.lineNumber(pair.text) else { continue }
             let centre = CGPoint(x: (pair.box[0] + pair.box[2]) / 2 / shot.scale,
                                  y: (pair.box[1] + pair.box[3]) / 2 / shot.scale)
             guard window.contains(centre) else { continue }
             digits.append((line, centre, pair.box[2] / shot.scale))
         }
-        // Leftmost column of >=5 digit boxes with x-centres within 12 px.
-        let sorted = digits.sorted { $0.centre.x < $1.centre.x }
-        var gutter: [(line: Int, midY: CGFloat, right: CGFloat)] = []
-        var start = 0
-        while start < sorted.count {
-            var end = start
-            while end + 1 < sorted.count, sorted[end + 1].centre.x - sorted[start].centre.x <= 12 {
-                end += 1
-            }
-            if end - start + 1 >= 5 {
-                gutter = sorted[start...end].map { ($0.line, $0.centre.y, $0.right) }
-                break
-            }
-            start = end + 1
-        }
-        guard let mapper = LineBandMapper(marks: gutter.map { (line: $0.line, midY: $0.midY) })
+        guard let gutter = ShapeTrack.gutterMarks(digits: digits, window: window),
+              let mapper = LineBandMapper(marks: gutter.marks)
         else { return [] }
-        let x = (gutter.map(\.right).max() ?? 0) + 4
+        let x = gutter.right + 4
         let width = window.maxX - 8 - x
         guard width > 0 else { return [] }
         return ranges.map { mapper.band(for: $0, x: x, width: width) }
@@ -169,13 +155,15 @@ enum ScreenContext {
 
     private enum CaptureError: Error { case noDisplay }
 
-    private struct Shot {
+    struct Shot {
         let image: CGImage
         /// Image pixels per screen point.
         let scale: Double
     }
 
-    private static func captureMainDisplay() async throws -> Shot {
+    /// `region`: only that part of the main display (points from its top-left corner, e.g. the
+    /// boxes of a content check); nil = the whole display.
+    static func captureMainDisplay(region: CGRect? = nil) async throws -> Shot {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID }) ?? content.displays.first
@@ -195,11 +183,13 @@ enum ScreenContext {
         }
         let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
         let config = SCStreamConfiguration()
-        config.width = Int(Double(display.width) * backing)
-        config.height = Int(Double(display.height) * backing)
+        let frame = region ?? CGRect(x: 0, y: 0, width: CGFloat(display.width), height: CGFloat(display.height))
+        if let region { config.sourceRect = region }
+        config.width = Int(Double(frame.width) * backing)
+        config.height = Int(Double(frame.height) * backing)
         config.showsCursor = false
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-        return Shot(image: image, scale: Double(image.width) / Double(display.width))
+        return Shot(image: image, scale: Double(image.width) / Double(frame.width))
     }
 
     private static func jpegBase64(_ image: CGImage) -> String? {
@@ -228,7 +218,7 @@ enum ScreenContext {
     }
 
     /// Text observations as top-left pixel boxes [x0, y0, x1, y1].
-    private static func ocrText(in image: CGImage) -> [(text: String, box: [Double])] {
+    static func ocrText(in image: CGImage) -> [(text: String, box: [Double])] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
@@ -255,6 +245,7 @@ enum ScreenContext {
         let role: String
         let label: String
         let frame: CGRect
+        let element: AXUIElement
     }
 
     private struct WalkResult {
@@ -309,7 +300,7 @@ enum ScreenContext {
                 || (node.role == "AXCell" && !node.title.isEmpty)
                 || (node.role == "AXStaticText" && !node.title.isEmpty && entry.parentRole == "AXToolbar")
             if keep, !label.isEmpty, let frame = node.frame, frame.width > 0, frame.height > 0 {
-                items.append(Candidate(role: node.role, label: label, frame: frame))
+                items.append(Candidate(role: node.role, label: label, frame: frame, element: entry.element))
             }
             if entry.expand {
                 for child in node.children {

@@ -30,11 +30,12 @@ final class OverlayModel: ObservableObject {
     private struct ShapeEntry {
         let key: Int
         var shape: HUDShape
-        var anchor: ShapeAnchor?
+        var anchor: TrackAnchor?
         var hidden = false
     }
 
-    /// Any content event (shape/card/say) restarts the 60 s idle countdown.
+    /// Any content event (ShapeTrack.extendsIdle) restarts the 60 s idle countdown; follow
+    /// updates, late re-resolves and commits never do.
     func activity() { bumpIdle() }
 
     /// Returns the key that anchor(_:) takes once the shape's window is known.
@@ -46,16 +47,37 @@ final class OverlayModel: ObservableObject {
         entries.dropOldest(keeping: Self.maxShapes)
         publishShapes()
         if dropsAnchor { syncFollow() }
-        bumpIdle()
+        // No idle bump: the shape's event already restarted it on arrival (a commit may come later).
         return nextShapeKey
     }
 
-    /// Ties shapes to the windows they were drawn on; keys already gone are ignored.
-    func anchor(_ anchors: [Int: ShapeAnchor]) {
-        guard !anchors.isEmpty else { return }
+    /// Ties shapes to what they follow; returns the keys already gone (their anchors unused).
+    @discardableResult
+    func anchor(_ anchors: [Int: TrackAnchor]) -> [Int] {
+        guard !anchors.isEmpty else { return [] }
+        var unused = anchors
         for index in entries.indices {
-            if let anchor = anchors[entries[index].key] { entries[index].anchor = anchor }
+            if unused.removeValue(forKey: entries[index].key) != nil { entries[index].anchor = anchors[entries[index].key] }
         }
+        syncFollow()
+        return Array(unused.keys)
+    }
+
+    /// A late re-resolve moves a drawn shape and replaces its anchor; false when it is gone or
+    /// hidden (scrolled, covered: a result read before that must not show it again).
+    func replace(key: Int, rect: CGRect, anchor: TrackAnchor?) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.key == key }), !entries[index].hidden else { return false }
+        entries[index].shape.box = [Double(rect.minX), Double(rect.minY), Double(rect.maxX), Double(rect.maxY)]
+        entries[index].anchor = anchor
+        publishShapes()
+        syncFollow()
+        return true
+    }
+
+    /// A late re-resolve found the target positively gone.
+    func remove(keys: [Int]) {
+        entries.removeAll { keys.contains($0.key) }
+        publishShapes()
         syncFollow()
     }
 
@@ -132,7 +154,7 @@ final class OverlayModel: ObservableObject {
 
     /// Hands the current anchors to the follower; no anchors stops its timer.
     private func syncFollow() {
-        var anchors: [Int: ShapeAnchor] = [:]
+        var anchors: [Int: TrackAnchor] = [:]
         for entry in entries { if let anchor = entry.anchor { anchors[entry.key] = anchor } }
         if follower == nil {
             guard !anchors.isEmpty else { return }

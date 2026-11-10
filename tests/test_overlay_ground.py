@@ -1,10 +1,11 @@
 """Screen grounding: candidate merge, IoU dedupe, Retina scale, id parsing, prompt injection guard."""
 
 import json
+import re
 from pathlib import Path
 
 from common.hud import validate_shape
-from mac.voice.ground import build_candidates, grounding_prompt, pick, shape_for
+from mac.voice.ground import MAX_CANDIDATES, build_candidates, grounding_prompt, pick, shape_for
 
 SCREENS = Path(__file__).parent / "fixtures" / "overlay" / "screens"
 
@@ -100,3 +101,45 @@ def test_fixture_harness_stub():
         gt = matches[0]
         got = pick(scene["question"], cands, None, lambda p, j: json.dumps({"id": gt["id"]}))
         assert got is not None and got["box"] == gt["box"], f.name
+
+
+# Live replay: Wikipedia in Safari, "highlight the Saudi Arabia heading" came back as the
+# whole window ("Safari: Saudi Arabia - Wikipedia"), not the h1.
+WIKI_WINDOWS = [{"app": "Safari", "title": "Saudi Arabia - Wikipedia", "box": [855, 28, 1428, 824]}]
+
+
+def _window_picker(prompt, jpeg):
+    m = re.search(r'\[(\d+)\] window "Safari: Saudi Arabia - Wikipedia"', prompt)
+    return '{"id": %s}' % (m.group(1) if m else "null")
+
+
+def test_element_ask_never_gets_the_window_frame():
+    cands = build_candidates([], [{"text": "Saudi Arabia", "box": [1838, 372, 2164, 400]}],
+                             scale=2.0, windows=WIKI_WINDOWS)
+    assert cands[0]["source"] == "window"
+    for q in ("highlight the heading of this page", "highlight the Saudi Arabia heading",
+              "highlight the flag", "highlight the App Store link", "highlight the Windows 11 logo",
+              "highlight the text Microsoft Windows on this page", "highlight the app name in the title bar",
+              "highlight the word application in the paragraph",
+              "highlight the text that says window in the docs"):
+        assert pick(q, cands, None, _window_picker) is None, q  # nothing drawn, not the window
+
+
+def test_window_ask_still_gets_the_window():
+    cands = build_candidates([], [], windows=WIKI_WINDOWS)
+    for q in ("highlight the Safari window", "highlight the last debugging session", "point at the app",
+              "highlight this window", "which app is this", "show me the terminal session",
+              "highlight the window please"):
+        got = pick(q, cands, None, _window_picker)
+        assert got is not None and got["box"] == [855.0, 28.0, 1428.0, 824.0], q
+
+
+def test_link_heavy_page_leaves_room_for_ocr_lines():
+    ax = [{"role": "AXLink", "label": f"link {i}", "box": [0, 20 * i, 50, 20 * i + 15]} for i in range(300)]
+    ocr = [{"text": "Saudi Arabia", "box": [900, 180, 1080, 210]}]
+    cands = build_candidates(ax, ocr, windows=WIKI_WINDOWS)
+    assert len(cands) == MAX_CANDIDATES
+    assert cands[-1]["label"] == "Saudi Arabia" and cands[-1]["source"] == "ocr"
+    many = [{"text": f"line {i}", "box": [600, 20 * i, 700, 20 * i + 15]} for i in range(300)]
+    cands = build_candidates(ax, many, windows=WIKI_WINDOWS)
+    assert sum(c["source"] == "ocr" for c in cands) >= (MAX_CANDIDATES - 1) // 2

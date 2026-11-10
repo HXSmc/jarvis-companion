@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Outline-shape annotation at its box position (screen points, top-left origin)
 /// inside the surrounding canvas. Labels sit in a small dark capsule just above
-/// the box, kept inside the canvas.
+/// the box, kept inside the canvas and out of the menu bar.
 @MainActor
 public struct ShapeView: View {
     public let shape: HUDShape
@@ -40,7 +40,7 @@ public struct ShapeView: View {
                         .background(Color.black.opacity(0.75), in: Capsule())
                         .overlay(Capsule().strokeBorder(Theme.accent, lineWidth: 1))
                         .position(x: min(max(r.midX, 60), geo.size.width - 60),
-                                  y: max(14, r.minY - 14))
+                                  y: ShapeTrack.labelCentreY(for: r))
                 }
             }
         }

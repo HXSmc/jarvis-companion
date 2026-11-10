@@ -27,6 +27,11 @@ final class AppController {
     private var bannerTask: Task<Void, Never>?
     private var permissionTimer: Task<Void, Never>?
 
+    /// Commit order of async shape/band adds (re-resolve, gutter OCR); `.clear` beats older ones.
+    private var addOrder = ShapeTrack.AddOrder()
+    private var addChain: Task<Void, Never>?
+    private var lastRace: AddRace?
+
     func start() {
         let overlay = OverlayPanel()
         overlay.host(OverlayRootView(model: model))
@@ -213,7 +218,7 @@ final class AppController {
 
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized == "clear" || normalized == "clear the screen" {
-            model.clear()
+            clearAll()
         }
 
         let conv = conversationID()
@@ -223,6 +228,7 @@ final class AppController {
         turnFirstAudio = false
         turnDone = false
 
+        let captured = ElementTrack.captured(screen)
         var gotEvent = false
         var failure: Error?
         for attempt in 1...2 {
@@ -232,7 +238,7 @@ final class AppController {
                                                         stt: speech.lastDiagnosis, followUp: followUp,
                                                         screen: screen) {
                     gotEvent = true
-                    handle(event)
+                    handle(event, captured: captured)
                 }
                 return
             } catch {
@@ -252,31 +258,45 @@ final class AppController {
         }
     }
 
-    private func handle(_ event: OverlayEvent) {
+    /// `captured`: the turn's capture items in points (ElementTrack.captured), to tell a grounded
+    /// shape from coordinates the brain wrote itself.
+    private func handle(_ event: OverlayEvent, captured: [CGRect]) {
+        if ShapeTrack.extendsIdle(event) { model.activity() }
         switch event {
         case .say(let text):
-            model.activity()
             if serviceVoice == nil { audio.speakLocally(text) }
         case .audio(_, let rate, let pcm):
-            model.activity()
             model.orb = .speaking
             audio.enqueue(pcm: pcm, rate: rate)
         case .shape(let shape, let check):
-            model.activity()
-            var updated = shape
-            if let check,
-               let fresh = ScreenContext.recheck(role: check.role, label: check.label ?? "", near: shape.rect) {
-                updated.box = [Double(fresh.minX), Double(fresh.minY), Double(fresh.maxX), Double(fresh.maxY)]
+            // The capture is seconds old: re-resolve once, off the main actor, before drawing.
+            let stale = shape.rect, label = shape.label ?? ""
+            let role = check?.role, checkLabel = check?.label ?? ""
+            // An AX pick or a capture item is grounded; a rect the brain wrote is drawn only where
+            // its label is re-found.
+            let grounded = role != nil || ShapeTrack.grounded(stale, in: captured)
+            let work = Task.detached(priority: .userInitiated) { () -> [ElementTrack.Resolved] in
+                if role == nil, grounded, let window = ElementTrack.windowShape(stale: stale) { return window }
+                let found: ElementTrack.Found? = await ShapeTrack.reresolve(
+                    hasCheck: role != nil,
+                    recheck: {
+                        role.flatMap { ScreenContext.recheck(role: $0, label: checkLabel, near: stale) }
+                            .map { ElementTrack.Found(rect: $0.frame, element: $0.element) }
+                    },
+                    lookup: { ElementTrack.lookup(near: stale) },
+                    refind: { await ElementTrack.refind(label: label, stale: stale, grounded: grounded) })
+                return ElementTrack.anchor(stale: stale, label: label, found: found, grounded: grounded)
             }
-            anchorShapes([model.add(shape: updated): updated.rect])
+            enqueueAdd(work, budget: 1.5, fallback: { ElementTrack.fallback(stale: stale, grounded: grounded) },
+                       template: shape)
         case .card(let card):
-            model.activity()
             model.add(card: card)
         case .lines(_, let ranges):
-            model.activity()
-            highlightLines(ranges)
+            enqueueAdd(Task.detached(priority: .utility) { await ElementTrack.resolveBands(ranges) },
+                       budget: 5, fallback: { [] },
+                       template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: "changed"))
         case .clear:
-            model.clear()
+            clearAll()
         case .done:
             if audio.isBusy { turnDone = true } else { replyFinished() }
         case .unknown:
@@ -284,30 +304,94 @@ final class AppController {
         }
     }
 
-    private func highlightLines(_ ranges: [ClosedRange<Int>]) {
-        Task { [weak self] in
-            // 900 ms: let the editor settle before the gutter OCR pass.
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            guard !Task.isCancelled, let self else { return }
-            var batch: [Int: CGRect] = [:]
-            for band in await ScreenContext.lineBands(ranges: ranges) {
-                let key = self.model.add(shape: HUDShape(kind: .rect,
-                                                         box: [Double(band.minX), Double(band.minY),
-                                                               Double(band.maxX), Double(band.maxY)],
-                                                         label: "changed"))
-                batch[key] = band
+    /// Clears at once; adds still resolving lose and are never drawn (ShapeTrack.AddOrder).
+    private func clearAll() {
+        addOrder.clear()
+        model.clear()
+    }
+
+    /// Serial add path: items commit to the model strictly in arrival order (their re-resolve
+    /// already runs, in parallel). An item waits for its result at most its own budget, and at
+    /// most 1.5 s after a later item arrived; then its fallback commits and the real result,
+    /// when it comes, upgrades it (applyLate). An item that loses to a `.clear` is dropped with
+    /// its AX refs.
+    private func enqueueAdd(_ work: Task<[ElementTrack.Resolved], Never>, budget seconds: Double,
+                            fallback: @escaping @Sendable () -> [ElementTrack.Resolved], template: HUDShape) {
+        let ticket = addOrder.begin()
+        let race = AddRace(fallback: fallback)
+        Task.detached {
+            let items = await work.value
+            race.finish(.done(items))
+        }
+        race.timeout(after: seconds)
+        lastRace?.timeout(after: Self.maxWaitBehind)
+        lastRace = race
+        let previous = addChain
+        addChain = Task { [weak self] in
+            await previous?.value
+            let outcome = await race.wait()
+            guard let self else { return }
+            switch outcome {
+            case .done(let items):
+                _ = self.commit(items, ticket: ticket, template: template)
+            case .late(let items):
+                let keys = self.commit(items, ticket: ticket, template: template)
+                Task { [weak self] in
+                    let real = await work.value
+                    guard let self else { return }
+                    self.applyLate(real, replacing: keys, ticket: ticket, template: template)
+                }
             }
-            self.anchorShapes(batch)
         }
     }
 
-    /// Finds each new shape's window (one window-list call per batch, off the main actor) so
-    /// the box follows it. The shape is already on screen; it stays static if no window owns it.
-    private func anchorShapes(_ rects: [Int: CGRect]) {
-        guard !rects.isEmpty else { return }
-        Task { [weak self] in
-            let anchors = await Task.detached(priority: .utility) { WindowFollower.anchors(for: rects) }.value
-            self?.model.anchor(anchors)
+    /// A later add never waits longer than this behind an earlier one.
+    private static let maxWaitBehind: Double = 1.5
+
+    /// Commits one add in order; its model keys, or nil when a clear won.
+    private func commit(_ items: [ElementTrack.Resolved], ticket: ShapeTrack.AddOrder.Ticket,
+                        template: HUDShape) -> [Int]? {
+        guard addOrder.commit(ticket) else {
+            ElementTrack.release(items.compactMap(\.track))
+            return nil
+        }
+        return add(items, template: template)
+    }
+
+    private func add(_ items: [ElementTrack.Resolved], template: HUDShape) -> [Int] {
+        var keys: [Int] = []
+        var tracks: [Int: TrackAnchor] = [:]
+        for item in items {
+            var shape = template
+            shape.box = [Double(item.rect.minX), Double(item.rect.minY), Double(item.rect.maxX), Double(item.rect.maxY)]
+            let key = model.add(shape: shape)
+            keys.append(key)
+            if let track = item.track { tracks[key] = track }
+        }
+        let gone = Set(model.anchor(tracks))
+        ElementTrack.release(tracks.filter { gone.contains($0.key) }.map(\.value),
+                             keeping: tracks.filter { !gone.contains($0.key) }.map(\.value))
+        return keys
+    }
+
+    /// A re-resolve that finished after its fallback was committed: move/upgrade the drawn box,
+    /// draw what had no box, or remove a box whose target is positively gone. Nothing after a clear.
+    private func applyLate(_ real: [ElementTrack.Resolved], replacing keys: [Int]?,
+                           ticket: ShapeTrack.AddOrder.Ticket, template: HUDShape) {
+        guard let keys, addOrder.survives(ticket) else {
+            ElementTrack.release(real.compactMap(\.track))
+            return
+        }
+        if keys.isEmpty {
+            _ = add(real, template: template)
+        } else if real.isEmpty {
+            model.remove(keys: keys)
+        } else if real.count == keys.count {
+            for (key, item) in zip(keys, real) where !model.replace(key: key, rect: item.rect, anchor: item.track) {
+                ElementTrack.release(item.track.map { [$0] } ?? [])
+            }
+        } else {
+            ElementTrack.release(real.compactMap(\.track))
         }
     }
 
@@ -361,6 +445,64 @@ final class AppController {
             guard let self, self.listenSerial == serial, self.model.orb == .idle, !self.audio.isBusy
             else { return }
             await self.handleWake(followUp: true)
+        }
+    }
+}
+
+/// One add's outcome: its result, its own budget, or a cut by a later add, whichever is first.
+/// `.late` carries the fallback; the real result may still upgrade it.
+private final class AddRace: @unchecked Sendable {
+    enum Outcome {
+        case done([ElementTrack.Resolved])
+        case late([ElementTrack.Resolved])
+    }
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var waiter: CheckedContinuation<Outcome, Never>?
+    private let fallback: @Sendable () -> [ElementTrack.Resolved]
+
+    init(fallback: @escaping @Sendable () -> [ElementTrack.Resolved]) { self.fallback = fallback }
+
+    func finish(_ value: Outcome) {
+        lock.lock()
+        guard outcome == nil else {
+            lock.unlock()
+            return
+        }
+        outcome = value
+        let parked = waiter
+        waiter = nil
+        lock.unlock()
+        parked?.resume(returning: value)
+    }
+
+    /// Commits the fallback after `seconds` unless the result came first.
+    func timeout(after seconds: Double) {
+        Task.detached { [self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if !isFinished { finish(.late(fallback())) }
+        }
+    }
+
+    func wait() async -> Outcome {
+        await withCheckedContinuation { park($0) }
+    }
+
+    private var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcome != nil
+    }
+
+    private func park(_ continuation: CheckedContinuation<Outcome, Never>) {
+        lock.lock()
+        if let outcome {
+            lock.unlock()
+            continuation.resume(returning: outcome)
+        } else {
+            waiter = continuation
+            lock.unlock()
         }
     }
 }
