@@ -271,6 +271,9 @@ def _git(tokens: list[str], ctx: Ctx) -> tuple[str, list[str], str, bool] | Deny
         if problem:
             return Deny(problem)
     read_only = sub in _GIT_READ and (sub != "branch" or ("--list" in args and not _BRANCH_WRITE & set(args)))
+    # `git remote` reads only as a bare list or get-url (add/set-url/remove write; show/update hit the network)
+    read_only = read_only or (sub == "remote" and (args in ([], ["-v"], ["--verbose"])
+                                                   or (len(args) == 2 and args[0] == "get-url")))
     extra = []
     if read_only and sub in ("diff", "log", "show"):
         extra.append("--no-ext-diff")

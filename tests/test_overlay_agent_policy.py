@@ -364,3 +364,13 @@ def test_git_glob_pathspec_to_secret_denied(env):
         assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Deny), spec
     for spec in ("'*.py'", "'src/*.swift'", "a.txt"):
         assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Allow), spec
+
+
+def test_git_remote_list_is_read_only(env):
+    """Mac run: the agent asks `git remote -v` to find the GitHub repo; listing is a read, changing is not."""
+    ctx, _, _, r = env
+    for cmd in (f"git -C {r} remote -v", f"git -C {r} remote", f"git -C {r} remote get-url origin"):
+        assert isinstance(bash(ctx, cmd), ap.Allow), cmd
+    for cmd in (f"git -C {r} remote add x https://example.com/x", f"git -C {r} remote set-url origin y",
+                f"git -C {r} remote show origin", f"git -C {r} remote update"):
+        assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
