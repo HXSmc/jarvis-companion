@@ -20,6 +20,15 @@ from common.hud import MAX_LABEL, validate_shape
 MAX_CANDIDATES = 120
 MAX_PROMPT_LABEL = 80
 SHAPE_PAD = 4  # pt of breathing room around the chosen box when drawn
+# Whole-window candidates only when the ask is about a window: "highlight the heading" must
+# never come back as the frame of the window whose title holds "heading"'s words. The word must
+# END the noun phrase ("the Safari window", "which app is this"); "the App Store link" or
+# "Windows 11 logo" name a thing inside one. Singular only on purpose (plural/brand "Windows"
+# must not match). Unsure -> not a window ask: drawing nothing is the safe fallback. Known
+# accepted tail: "highlight the sentence the app is down" still counts (same words as "which app is this").
+_WINDOW_ASK_RE = re.compile(
+    r"\b(?:window|app|application|session)\b(?=\s*(?:$|[.,!?;:]"
+    r"|(?:is|are|please|now|here|that|which|where)\b))", re.I)
 
 
 def iou(a: list[float], b: list[float]) -> float:
@@ -53,7 +62,8 @@ def build_candidates(ax: list[dict], ocr: list[dict], scale: float = 1.0,
                      iou_threshold: float = 0.5, windows: list[dict] = ()) -> list[dict]:
     """Visible windows first ("App: title", frames in points), then AX elements (kept as
     is), then OCR boxes scaled to points and dropped when they overlap an already kept
-    non-window box (IoU > threshold)."""
+    non-window box (IoU > threshold). AX items leave at least half the remaining room to
+    OCR lines, so a link-heavy page cannot push its headings and text out of the list."""
     if not scale or scale <= 0:
         scale = 1.0
     out: list[dict] = []
@@ -64,13 +74,12 @@ def build_candidates(ax: list[dict], ocr: list[dict], scale: float = 1.0,
             c = _keep("window", "window", f"{app}: {title}" if title else app, w.get("box"))
             if c:
                 out.append(c)
-    for el in ax if isinstance(ax, list) else []:
-        if not isinstance(el, dict):
-            continue
-        c = _keep("ax", el.get("role"), el.get("label"), el.get("box"))
-        if c:
-            out.append(c)
-    for el in ocr if isinstance(ocr, list) else []:
+    ax_kept = [c for el in (ax if isinstance(ax, list) else []) if isinstance(el, dict)
+               and (c := _keep("ax", el.get("role"), el.get("label"), el.get("box")))]
+    ocr_list = ocr if isinstance(ocr, list) else []
+    room = max(0, MAX_CANDIDATES - len(out))
+    out += ax_kept[:room - min(len(ocr_list), room // 2)]
+    for el in ocr_list:
         if not isinstance(el, dict):
             continue
         box = el.get("box")
@@ -110,7 +119,10 @@ def grounding_prompt(question: str, candidates: list[dict]) -> str:
 
 def pick(question: str, candidates: list[dict], jpeg: bytes | None, ask) -> dict | None:
     """Ask the VLM (ask(prompt, jpeg) -> raw reply text) and return the chosen
-    candidate, or None (null id, unknown id, no parseable JSON)."""
+    candidate, or None (null id, unknown id, no parseable JSON). Whole-window candidates
+    are offered only when the question asks for a window, app or session."""
+    if not _WINDOW_ASK_RE.search(question):
+        candidates = [c for c in candidates if c["source"] != "window"]
     raw = ask(grounding_prompt(question, candidates), jpeg) or ""
     m = re.search(r"\{.*\}", raw, re.S)
     if not m:

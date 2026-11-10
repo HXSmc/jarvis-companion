@@ -1,8 +1,8 @@
 import AppKit
 import OverlayCore
 
-/// Moves anchored shapes with their windows. Polls the CG window list on a utility queue
-/// (no AX calls, window titles never read, nothing leaves the process) and hands each
+/// Moves anchored shapes with their windows and elements. Polls the CG window list on a utility
+/// queue (no AX calls on it, window titles never read, nothing leaves the process) and hands each
 /// change to the main actor. Exists only while the model holds an anchored shape.
 /// Sendable by confinement: `tracker` is touched only on `queue`.
 final class WindowFollower: @unchecked Sendable {
@@ -14,28 +14,26 @@ final class WindowFollower: @unchecked Sendable {
     init(apply: @escaping @MainActor (FollowUpdate) -> Void) {
         let queue = DispatchQueue(label: "jarvis.overlay.window-follow", qos: .utility)
         self.queue = queue
+        // AX reads run on ElementTrack's own queue, never on this one (a hung app stalls nothing here).
+        let elements = ElementTrack(trackerQueue: queue)
         tracker = ShapeFollowTracker(source: CGWindowSource(),
                                      scheduler: DispatchTickScheduler(queue: queue),
                                      screens: [],
+                                     elements: elements,
                                      onUpdate: { update in
             // FIFO hop: the last update of a drag must land last.
             DispatchQueue.main.async { MainActor.assumeIsolated { apply(update) } }
         })
+        elements.tracker = tracker
     }
 
-    /// Full anchored set (key = model shape key); empty stops the timer.
-    @MainActor func setAnchors(_ anchors: [Int: ShapeAnchor]) {
+    /// Full tracked set (key = model shape key); empty stops the timer and the scroll monitor.
+    @MainActor func setAnchors(_ anchors: [Int: TrackAnchor]) {
         let screens = [Self.panelScreen()]
         queue.async { [self] in
             tracker.screens = screens
-            tracker.setAnchors(anchors)
+            tracker.setTracks(anchors)
         }
-    }
-
-    /// Creation hit-test for one add-batch: one window-list call. Call off the main actor.
-    static func anchors(for rects: [Int: CGRect]) -> [Int: ShapeAnchor] {
-        let windows = normalWindows()
-        return rects.compactMapValues { ShapeFollow.anchor(rect: $0, windows: windows) }
     }
 
     /// On-screen normal windows (layer 0, visible) of other apps, front to back.
@@ -66,7 +64,7 @@ final class WindowFollower: @unchecked Sendable {
 
 /// One on-screen window list per tick; a per-id description only for anchored ids missing
 /// from it (minimized / hidden / other Space vs closed).
-private struct CGWindowSource: WindowSource {
+struct CGWindowSource: WindowSource {
     func sample(ids: [UInt32]) -> [UInt32: WindowSample] {
         let wanted = Set(ids)
         let windows = WindowFollower.normalWindows()
