@@ -2,7 +2,7 @@ name: mac-overlay
 
 on:
   push:
-    branches: [loop/jov, ci-ipa]
+    branches: [loop/jov, loop/jovicon, ci-ipa]
     paths:
       - 'mac/**'
       - 'gateway/overlay.py'
@@ -40,6 +40,9 @@ jobs:
 
       - name: Build OverlayCore + JarvisOverlay (release)
         run: swift build -c release --package-path mac/overlay
+
+      - name: App icon builds with iconutil
+        run: iconutil -c icns mac/overlay/Resources/AppIcon.iconset -o "$RUNNER_TEMP/AppIcon.icns"
 
       - name: OverlayCore tests (snapshots to $RUNNER_TEMP/snapshots)
         run: SNAPSHOT_DIR=$RUNNER_TEMP/snapshots swift test --package-path mac/overlay
