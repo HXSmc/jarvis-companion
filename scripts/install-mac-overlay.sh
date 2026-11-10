@@ -205,6 +205,14 @@ elif command -v lsof >/dev/null 2>&1; then
   done
 fi
 
+# (h2) agent MCP config: mail/calendar servers for the agent tier (local 0600 files, never committed)
+AGENT_SETUP=(python3 -m mac.voice.agent_setup)
+if [ -x "$PY" ]; then AGENT_SETUP[0]="$PY"; fi
+if (( DRY_RUN )); then AGENT_SETUP+=("--dry-run"); fi
+echo "agent MCP setup:"
+(cd "$REPO" && "${AGENT_SETUP[@]}") \
+  || echo "install-mac-overlay: agent MCP setup failed (the agent tier starts without mail/calendar MCP); rerun later"
+
 # (i) LaunchAgents: render the templates, then reload each agent
 run mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 for PLIST in com.jarvis.overlay.plist com.jarvis.overlay.service.plist; do

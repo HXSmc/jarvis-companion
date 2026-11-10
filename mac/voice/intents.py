@@ -1,10 +1,11 @@
-"""Deterministic overlay intents: transcript -> open an app/site, clear, ground, diff or answer.
+"""Deterministic overlay intents: transcript -> open an app/site, clear, ground, diff,
+owner-data agent work, or answer.
 
 First stop before any model call. "open X" either launches a real macOS app
 (the name must match an entry from the app dirs — it never reaches `open` as
 raw transcript text, and argv lists only, never a shell string) or a strictly
-validated https URL. Everything needing the model (grounding, git diff, plain
-questions) comes back as an Intent for the turn pipeline.
+validated https URL. Everything needing the model (grounding, git diff, agent
+work, plain questions) comes back as an Intent for the turn pipeline.
 """
 
 from __future__ import annotations
@@ -17,8 +18,9 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | answer
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | agent | answer
     arg: str = ""
+    sub: str = ""  # agent only: mail | calendar | notes | gh | git | code
 
 
 APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities", "~/Applications")
@@ -65,6 +67,30 @@ _INCOMPLETE_RE = re.compile(r"(?:,|\b(?:" + "|".join(_TRAILING) + r"))\W*$", re.
 _FILLER_TAIL_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(FILLERS) + r"))+[\s,.?!]*$", re.I)
 _DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|what day is (?:it|today)"
                       r"|what date is it|tell me the date)(?: today| now| please)?$")
+# Owner-data agent work, first match in priority order picks the sub.
+_AGENT_SUBS = (
+    ("mail", re.compile(r"\b(?:inbox|unread|e-?mails?|my mail|any mail|new mail)\b")),
+    ("calendar", re.compile(r"\b(?:calendar|my meetings?|next meeting|meetings? (?:today|tomorrow|this week)"
+                            r"|my schedule|agenda)\b")),
+    ("notes", re.compile(r"\b(?:obsidian|vault|my notes|in my notes|note about)\b")),
+    ("gh", re.compile(r"\b(?:prs?|pull requests?|github|ci|workflow runs?|actions runs?|open issues"
+                      r"|github issues|issues? (?:on|in|for)|issue #?\d+|my repos|repos? on github|releases?)\b")),
+    ("git", re.compile(r"\b(?:commits?|committed|git history|commit history|file history"
+                       r"|history of (?:this|the|that) (?:file|code|repo|function|project)|git log|commit log"
+                       r"|blame|who changed|who wrote|what changed in|when did .* change|push my changes"
+                       r"|my branch(?:es)?)\b")),
+    ("code", re.compile(r"\b(?:the|this|that) (?:code|file|function|class|method) on (?:my|the) screen\b"
+                        r"|\bthis (?:file|function|class|method)\b|\bcode (?:i have |i've got )?on (?:my|the) screen\b")),
+)
+# Generic questions ("what is a pull request") are for the brain even when they name
+# agent-owned words; a possessive or pointer ("my calendar") makes it owner data.
+_AGENT_LEADS = ("what is ", "what's ", "what are ", "explain ", "define ",
+                "how does ", "how do ", "tell me about ")
+_AGENT_GUARD_RE = re.compile(r"\b(?:my|our|this|these|that|open|last|latest|recent|on my screen|the repo)\b")
+# Whole-utterance replies to the agent's confirmation question (or a cancel).
+_CONFIRM_RE = re.compile(r"(?:yes(?: please| go ahead| do it)?|yeah|yep|do it|go ahead|confirm(?:ed)?)",
+                         re.I)
+_CANCEL_RE = re.compile(r"(?:stop(?: it)?|cancel|never ?mind|forget it|that's enough|abort)", re.I)
 
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
@@ -82,6 +108,12 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         return Intent("clock", "time")
     if _DATE_RE.match(low):
         return Intent("clock", "date")
+    # Owner-data work before git_diff so history words win over diff words;
+    # deterministic opens win over everything ("open github.com" is a site, not agent work).
+    if not low.startswith("open "):
+        sub = _agent_sub(low)
+        if sub:
+            return Intent("agent", t, sub)
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.
     if _DIFF_RE.search(low) or (_CHANGES_RE.search(low) and _MERGE_RE.search(low)):
@@ -105,6 +137,32 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         kind = "open_site" if _HOST_RE.match(host) else "open_app"
         return Intent(kind, arg)
     return Intent("answer", t)
+
+
+def _agent_sub(low: str) -> str:
+    """Owner-data sub for the transcript, "" when it is not agent work."""
+    if low.startswith(_AGENT_LEADS) and not _AGENT_GUARD_RE.search(low):
+        return ""
+    for sub, rx in _AGENT_SUBS:
+        if rx.search(low):
+            return sub
+    return ""
+
+
+def _clean(text: str) -> str:
+    """Same transcript cleanup as parse: wake words and trailing punctuation off."""
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    return _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
+
+
+def is_confirm(text: str) -> bool:
+    """Whole utterance is a yes to the agent's confirmation question."""
+    return bool(_CONFIRM_RE.fullmatch(_clean(text)))
+
+
+def is_cancel(text: str) -> bool:
+    """Whole utterance cancels the agent's work."""
+    return bool(_CANCEL_RE.fullmatch(_clean(text)))
 
 
 def looks_incomplete(text: str) -> bool:

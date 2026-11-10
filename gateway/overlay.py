@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import threading
@@ -38,7 +39,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import hud
-from mac.voice import acks, gitdiff, ground, intents, lean
+from mac.voice import acks, agent, agent_policy, gitdiff, ground, intents, lean
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,8 @@ Shape schema: {"kind": "rect"|"circle"|"triangle", "box": [x0, y0, x1, y1], "lab
 Explanations, charts, flowcharts and links go in cards, never in say lines. Never write step counters or plan text ("Step 1 of 3"). Use the WebSearch/WebFetch tools only when the question needs fresh facts.
 
 Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. To open an app, reply with ONLY {"open": "<app name as the owner said it>"} (one line, nothing else). Do this whenever the owner clearly asks to open, launch, pull up or bring up an app, in any wording, even if the name is rough ("a VS code"). Never ask the owner to rephrase or to say "open" plus a name. For a website, show a link card instead.
+
+If the request needs the owner's own files, the code on his screen, git history, GitHub, his notes, mail or calendar, reply with ONLY {"agent": true} and nothing else: a tool-using helper takes over. Never say you cannot reach them.
 
 If the request is clearly cut off mid-sentence (it trails off, for example "can you show me the last"), reply with ONLY {"incomplete": true} and nothing else: the mic stays open and the rest of the sentence comes in the next message. Never ask the user to repeat a cut-off request.
 
@@ -301,6 +304,7 @@ class OverlayDeps:
     clock: Callable[[], float] = time.monotonic
     now: Callable[[], datetime] = lambda: datetime.now().astimezone()
     system: Callable[[], str] = lambda: _system_state()
+    agent_conversations: object | None = None  # tool-using agent tier (agent.AgentSession per conv)
 
 
 _deps: OverlayDeps | None = None
@@ -332,6 +336,7 @@ def get_deps() -> OverlayDeps:
                 tools="",
             )),
             vlm_ask=_LazyVLM(),
+            agent_conversations=lean.Conversations(agent.AgentSession, max_sessions=4),
         )
     return _deps
 
@@ -381,6 +386,8 @@ def _owner_said_open_verb(text: str) -> bool:
 
 def _owner_asked_to_open(text: str, want: list[str], apps: dict) -> bool:
     """True when the owner's own words name exactly these app(s) (1-4 word window) right after an open verb."""
+    if not want:  # no candidate: nothing the owner could have named
+        return False
     words = [re.sub(r"[^a-z0-9]", "", w) for w in text.lower().split()]
     for i in range(len(words)):
         for n in range(1, 5):
@@ -475,12 +482,21 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                      "ttft_s": None, "first_answer_audio_s": None, "total_s": None}
     error: str | None = None
     said: list[str] = []
+    # A pending confirmation is settled first, on the raw transcript (before the continuation
+    # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
+    handled = False
+    async for ev in _agent_preflight(body, deps, metrics, said, start, on_step):
+        handled = True
+        yield ev
+    if handled:
+        return
     pending = _pending.pop(body.conv_id, None)
     if pending and body.followup and deps.clock() - pending[1] < PENDING_TTL_S:
         body = body.model_copy(update={"text": intents.join_continuation(pending[0], body.text)[:500]})
         if on_step:
             on_step("continued", text=body.text)
-    if intents.looks_incomplete(body.text):
+    # "who changed this file last" ends on a trailing word but is a complete agent request.
+    if intents.looks_incomplete(body.text) and intents.parse(body.text, apps={}).kind != "agent":
         # Trails off ("show me the last, uh"): say nothing, the app keeps the mic open.
         _pending[body.conv_id] = (body.text, deps.clock())
         if on_step:
@@ -493,7 +509,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         intent = intents.parse(body.text, apps=apps)
         if on_step:
             on_step("intent", kind=intent.kind, arg=intent.arg)
-        ack_text, ack_pcm, ack_rate = deps.acks.get(acks.pick_key(intent.kind))
+        ack_text, ack_pcm, ack_rate = deps.acks.get(acks.pick_key(intent.kind, intent.sub))
         if intent.kind == "clock":  # answered instantly, no ack needed
             pass
         elif ack_pcm:
@@ -623,9 +639,20 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                         _notes.setdefault(body.conv_id, deque(maxlen=3)).append(
                             f"git diff {base}:\n{diff_text}")
 
-        else:  # answer
-            async for event in _answer_turn(body, intent.arg, deps, metrics, said, start):
+        elif intent.kind == "agent":
+            async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step):
                 yield event
+
+        else:  # answer
+            escalate: list[bool] = []
+            async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
+                                            escalate=escalate):
+                yield event
+            if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
+                if on_step:
+                    on_step("intent", kind="agent", arg="handed over by the fast brain")
+                async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step):
+                    yield event
     except Exception as exc:  # never leak the prompt or token, only the class
         error = type(exc).__name__
         async for ev in _speak("Something went wrong on my side.", deps):
@@ -677,7 +704,7 @@ def _screen_text(screen: ScreenBody) -> str:
 
 async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        metrics: dict, said: list[str], start: float,
-                       screen_ref: bool = False) -> AsyncIterator[dict]:
+                       screen_ref: bool = False, escalate: list | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
     parts = [text]
@@ -732,13 +759,13 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             line = "I couldn't find that app."
         name = name.strip()
         if name and len(name) <= 60 and not _OPEN_BAD_CHARS & set(name):
-            found = intents.app_candidates(name, apps)
+            found = await asyncio.to_thread(intents.app_candidates, name, apps)
             if len(found) > 1:
-                if _owner_asked_to_open(text, found, apps):
+                if await asyncio.to_thread(_owner_asked_to_open, text, found, apps):
                     line = f"Did you mean {found[0]} or {found[1]}?"
                 else:
                     line = None
-            elif len(found) == 1 and _owner_asked_to_open(text, found, apps):
+            elif len(found) == 1 and await asyncio.to_thread(_owner_asked_to_open, text, found, apps):
                 real = await asyncio.to_thread(intents.open_app, found[0], run=deps.run, apps=apps)
                 if real:
                     line = f"Opening {real}."
@@ -758,6 +785,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             obj = {"say": line}
         if not isinstance(obj, dict):
             obj = {"say": line}
+        if escalate is not None and (escalate or obj.get("agent") is True):
+            escalate.append(True)  # hand over: nothing else from this reply is spoken or shown
+            return
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
             _pending[body.conv_id] = (body.text, deps.clock())
             return
@@ -819,6 +849,405 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 pass
 
 
+# --- Agent tier: tool-using claude, every tool call decided by agent_policy ---
+
+AGENT_WALL_S = 120  # hard limit per agent turn
+AGENT_TICK_S = 1.0  # how often the stream loop wakes up to check the clock
+KEEPALIVE_S = 15  # the app's URLSession idles out at 90 s; stay far below
+PROGRESS_GAP_S = 4  # at most one templated progress line per 4 s
+CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
+CONFIRM_POLL_S = 0.5
+_NO_RE = re.compile(r"(?:no|nope|no thanks|no thank you|don'?t|do not)", re.I)
+_WAKE_PREFIX_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
+
+
+@dataclass
+class AgentRun:
+    """One agent turn's state; it outlives the HTTP response while a confirmation is pending."""
+    conv_id: str
+    session: object
+    ctx: agent_policy.Ctx
+    repo: Path | None
+    started: float
+    last_progress: float | None = None
+    request_id: str | None = None
+    updated_input: dict | None = None
+    deadline: float = 0.0
+    tool: tuple[str, float] | None = None  # (log label, clock) of the tool now running
+    confirm_label: str = ""  # log label of the tool call waiting for a yes
+    cancelled: bool = False
+
+
+# conv_id -> run waiting for the owner's spoken yes (one per conv); conv_id -> run streaming now.
+_confirm: dict[str, AgentRun] = {}
+_agent_busy: dict[str, AgentRun] = {}
+_confirm_lock = threading.Lock()
+
+
+def _take_confirm(conv_id: str, run: AgentRun | None = None) -> AgentRun | None:
+    """Pop conv_id's pending confirmation (only if it is still `run`, when given). Thread-safe."""
+    with _confirm_lock:
+        current = _confirm.get(conv_id)
+        if current is None or (run is not None and current is not run):
+            return None
+        return _confirm.pop(conv_id)
+
+
+def _deny_and_drop(run: AgentRun, deps: OverlayDeps, reason: str = "owner did not confirm") -> None:
+    """Answer the waiting tool call with deny, then retire the session (its turn is abandoned)."""
+    run.cancelled = True
+    try:
+        if run.request_id is not None:
+            run.session.respond(run.request_id, False, message=reason)
+    except Exception:
+        pass
+    if deps.agent_conversations is not None:
+        deps.agent_conversations.drop(run.conv_id)
+
+
+def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
+    """Deny at the deadline even when no utterance ever comes (runs on its own thread)."""
+    while deps.clock() < run.deadline:
+        if _confirm.get(run.conv_id) is not run:
+            return
+        time.sleep(CONFIRM_POLL_S)
+    if _take_confirm(run.conv_id, run) is not None:
+        _deny_and_drop(run, deps)
+        debug_log.add(debug_log.for_utterance(), "agent_confirm", state="expired")
+
+
+async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
+    """A fixed, prerendered line (acks.PHRASES): audio when cached, else the say text."""
+    text, pcm, rate = deps.acks.get(key)
+    if pcm:
+        yield {"type": "audio", "text": text, "rate": rate, "pcm_b64": base64.b64encode(pcm).decode()}
+    else:
+        yield _say(text)
+
+
+def _stripped(text: str) -> str:
+    return _WAKE_PREFIX_RE.sub("", text.strip(), count=1).strip().rstrip(".!?").strip()
+
+
+async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, said: list[str],
+                           start: float, on_step) -> AsyncIterator[dict]:
+    """Settle a pending confirmation and refuse a second request while the agent works.
+
+    Yields nothing when the utterance should go through the normal pipeline.
+    """
+    for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
+        run = _take_confirm(other)
+        if run is not None:
+            await asyncio.to_thread(_deny_and_drop, run, deps)
+    run = _take_confirm(body.conv_id)
+    if run is not None:
+        if intents.is_confirm(body.text) and deps.clock() < run.deadline and not run.session.closed:
+            if on_step:
+                on_step("agent_confirm", state="allowed")
+            await asyncio.to_thread(run.session.respond, run.request_id, True, run.updated_input)
+            run.request_id = run.updated_input = None
+            run.started = deps.clock()
+            run.tool = (run.confirm_label, deps.clock())
+            async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
+                yield ev
+            yield _finish(body, deps, metrics, said, start)
+            return
+        if on_step:
+            on_step("agent_confirm", state="denied")
+        await asyncio.to_thread(_deny_and_drop, run, deps)
+        if intents.is_cancel(body.text) or _NO_RE.fullmatch(_stripped(body.text)):
+            async for ev in _line("not_confirmed", deps):
+                yield ev
+            said.append(acks.PHRASES.get("not_confirmed", ""))
+            yield _finish(body, deps, metrics, said, start)
+            return
+        return  # anything else: denied, then handled as a normal utterance
+    busy = _agent_busy.get(body.conv_id)
+    if busy is not None:
+        if intents.is_cancel(body.text):
+            busy.cancelled = True
+            if deps.agent_conversations is not None:
+                await asyncio.to_thread(deps.agent_conversations.drop, body.conv_id)
+            _agent_busy.pop(body.conv_id, None)
+            if on_step:
+                on_step("agent_confirm", state="stopped")
+            key = "stopped"
+        else:
+            key = "busy"
+        async for ev in _line(key, deps):
+            yield ev
+        said.append(acks.PHRASES.get(key, ""))
+        yield _finish(body, deps, metrics, said, start)
+
+
+def _finish(body: TurnBody, deps: OverlayDeps, metrics: dict, said: list[str], start: float) -> dict:
+    """The `done` event for a turn the preflight answered (kept in history like any turn)."""
+    metrics["total_s"] = round(deps.clock() - start, 3)
+    _history.setdefault(body.conv_id, deque(maxlen=6)).append((body.text, " ".join(said)))
+    return {"type": "done", "metrics": metrics, "error": None}
+
+
+def _toplevel(path: Path) -> Path | None:
+    out = gitdiff._git(path, "rev-parse", "--show-toplevel")
+    return Path(out.splitlines()[0].strip()) if out else None
+
+
+_TERMINALS = {"Terminal": "Terminal", "iTerm2": "iTerm2", "Ghostty": "ghostty"}
+
+
+def _terminal_cwd(app: str) -> Path | None:
+    """The front terminal's newest shell cwd via pgrep + lsof (no TCC grant); None elsewhere."""
+    proc = _TERMINALS.get(app)
+    if sys.platform != "darwin" or not proc:
+        return None
+    pids = _cmd(["pgrep", "-n", "-x", proc]).split()
+    for _ in range(3):  # app -> login -> shell
+        children = _cmd(["pgrep", "-P", ",".join(pids)]).split() if pids else []
+        if not children:
+            break
+        pids = children
+    if not pids:
+        return None
+    cwds = [ln[1:] for ln in _cmd(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(pids)]).splitlines()
+            if ln.startswith("n/")]
+    return Path(cwds[-1]) if cwds else None
+
+
+def _agent_repo(screen: ScreenBody | None) -> Path | None:
+    """Front document's repo, else the front terminal's cwd repo, else $OVERLAY_GIT_REPO, else None."""
+    doc = screen.document if screen is not None else None
+    if doc:
+        parent = Path(doc).expanduser().parent
+        if parent.is_dir() and (top := _toplevel(parent)):
+            return top
+    cwd = _terminal_cwd(screen.app) if screen is not None else None
+    if cwd is not None and cwd.is_dir() and (top := _toplevel(cwd)):
+        return top
+    env = os.environ.get("OVERLAY_GIT_REPO")
+    return Path(env).expanduser() if env else None
+
+
+def _gh_repo(tool_input: dict) -> str | None:
+    """The -R/--repo value of a gh Bash command (for the trusted-repos list), else None."""
+    try:
+        tokens = shlex.split(str(tool_input.get("command", "")))
+    except ValueError:
+        return None
+    for i, tok in enumerate(tokens):
+        if tok in ("-R", "--repo") and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith("--repo="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def _agent_lines(spec, run: AgentRun) -> dict | None:
+    """A model `lines` request -> a `lines` event, only for an existing readable file inside the repo."""
+    if not isinstance(spec, dict) or run.repo is None:
+        return None
+    file, ranges = spec.get("file"), spec.get("ranges")
+    if not isinstance(file, str) or not file or not isinstance(ranges, list) or not 0 < len(ranges) <= 20:
+        return None
+    root = Path(run.repo).resolve()
+    target = (root / file).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return None
+    if not isinstance(agent_policy.decide("Read", {"file_path": str(target)}, run.ctx), agent_policy.Allow):
+        return None
+    out = []
+    for r in ranges:
+        if (not isinstance(r, list) or len(r) != 2
+                or not all(isinstance(n, int) and not isinstance(n, bool) for n in r)
+                or not 1 <= r[0] <= r[1] <= 1_000_000):
+            return None
+        out.append([r[0], r[1]])
+    return {"type": "lines", "file": str(target), "ranges": out}
+
+
+async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dict, said: list[str],
+                      start: float, on_step) -> AsyncIterator[dict]:
+    pool = deps.agent_conversations
+    if pool is None:
+        async for ev in _speak("My tools aren't available right now.", deps):
+            yield ev
+        said.append("agent unavailable")
+        return
+    # The agent reads files, mail and PR text by design: this conversation stays off the web pool.
+    _tainted.add(body.conv_id)
+    repo = await asyncio.to_thread(_agent_repo, body.screen)
+    parts = [text]
+    history = _history.get(body.conv_id) or []
+    if history:
+        earlier = "\n".join(f"User: {u}\nJarvis: {s}" for u, s in list(history)[-3:])
+        parts.append(f"Earlier in this conversation:\n{earlier}")
+    where = [f"repository: {repo}" if repo else "no repository resolved; ask which one if the request needs one"]
+    if body.screen is not None and body.screen.document:
+        where.append(f"file on screen: {body.screen.document}")
+    parts.append(f'<context untrusted="true">\n{_scrub(chr(10).join(where))}\n</context>')
+    vault = os.environ.get("OVERLAY_VAULT")
+    if vault:
+        parts.append(f"The owner's Obsidian notes vault: {vault}")
+    parts.append(await asyncio.to_thread(_local_context, deps, body.screen))
+
+    session = await asyncio.to_thread(pool.get, body.conv_id)
+    cold = getattr(session, "turns", 0) == 0
+    metrics["agent_cold"] = cold
+    if on_step:
+        on_step("agent", cold=cold, repo=repo.name if repo else None)
+    run = AgentRun(
+        conv_id=body.conv_id, session=session, repo=repo, started=deps.clock(),
+        ctx=agent_policy.Ctx(home=str(Path.home()), vault=vault or None, cwd=getattr(session, "cwd", ""),
+                             read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools)),
+    )
+    await asyncio.to_thread(session.send_user, "\n\n".join(parts))
+    async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
+        yield ev
+
+
+async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: list[str],
+                        start: float, on_step) -> AsyncIterator[dict]:
+    """Drive one agent turn to its result, a confirmation question, a cancel or the time limit."""
+    _agent_busy[run.conv_id] = run
+    last_sent = deps.clock()
+    finished = False  # result spoken, or the turn now waits on a confirmation
+    try:
+        while True:
+            if deps.clock() - run.started >= AGENT_WALL_S:
+                run.cancelled = True
+                await asyncio.to_thread(deps.agent_conversations.drop, run.conv_id)
+                async for ev in _line("timeout", deps):
+                    yield ev
+                said.append(acks.PHRASES.get("timeout", "timeout"))
+                finished = True
+                return
+            ev = await asyncio.to_thread(run.session.next_event, AGENT_TICK_S)
+            if run.cancelled:  # "stop" from another request; it already spoke
+                finished = True
+                return
+            if ev is False:
+                if deps.clock() - last_sent >= KEEPALIVE_S:
+                    last_sent = deps.clock()
+                    yield {"type": "keepalive"}
+                continue
+            if ev is None:
+                raise RuntimeError("agent session ended")
+            kind = ev.get("type")
+            if kind == "user" and run.tool is not None:  # tool result arrived (content never logged)
+                label, began = run.tool
+                run.tool = None
+                if on_step:
+                    on_step("agent_tool", tool=label, decision="allow", ms=round((deps.clock() - began) * 1000))
+            elif kind == "control_request":
+                req = ev.get("request") if isinstance(ev.get("request"), dict) else {}
+                if req.get("subtype") != "can_use_tool":
+                    continue
+                rid = str(ev.get("request_id", ""))
+                name = str(req.get("tool_name") or "")
+                tool_input = req.get("input") if isinstance(req.get("input"), dict) else {}
+                decision = agent_policy.decide(name, tool_input, run.ctx)
+                label = agent_policy.log_label(name, tool_input)
+                if not isinstance(decision, agent_policy.Deny):
+                    now = deps.clock()
+                    if run.last_progress is None or now - run.last_progress >= PROGRESS_GAP_S:
+                        run.last_progress = now
+                        key = acks.progress_key(agent_policy.kind_of(name, tool_input, run.ctx))
+                        if metrics.get("agent_first_progress_s") is None:
+                            metrics["agent_first_progress_s"] = round(now - start, 3)
+                        if on_step:
+                            on_step("agent_progress", text=acks.PHRASES.get(key, ""))
+                        async for out in _line(key, deps):
+                            yield out
+                        last_sent = deps.clock()
+                if isinstance(decision, agent_policy.Allow):
+                    if not run.ctx.read_untrusted_remote and (repo := _gh_repo(tool_input)):
+                        run.ctx.trusted_repos = run.ctx.trusted_repos | {repo}
+                    if agent_policy.reads_remote_text(name, tool_input):
+                        run.ctx.read_untrusted_remote = True
+                    run.tool = (label, deps.clock())
+                    await asyncio.to_thread(run.session.respond, rid, True, decision.updated_input)
+                elif isinstance(decision, agent_policy.Deny):
+                    if on_step:
+                        on_step("agent_tool", tool=label, decision="deny", ms=None)
+                    await asyncio.to_thread(run.session.respond, rid, False, None, decision.reason)
+                else:  # Confirm: ask the owner, end this response, keep the CLI waiting
+                    if on_step:
+                        on_step("agent_tool", tool=label, decision="confirm", ms=None)
+                        on_step("agent_confirm", state="asked")
+                    run.request_id, run.updated_input = rid, decision.updated_input
+                    run.confirm_label = label
+                    run.session.pending = rid
+                    run.deadline = deps.clock() + CONFIRM_S
+                    with _confirm_lock:
+                        _confirm[run.conv_id] = run
+                    threading.Thread(target=_confirm_watchdog, args=(run, deps), daemon=True).start()
+                    question = f"Shall I {decision.summary}?"
+                    async for out in _speak(question, deps):
+                        yield out
+                    said.append(question)
+                    card = hud.validate_card({"type": "info", "title": "Confirm",
+                                              "body": [decision.summary, "Say yes to go ahead, or no."]})
+                    if card:
+                        yield {"type": "card", "card": card}
+                    finished = True
+                    return
+            elif kind == "result":
+                run.session.turns = getattr(run.session, "turns", 0) + 1
+                metrics["agent_total_s"] = round(deps.clock() - start, 3)
+                if metrics.get("agent_first_progress_s") is None:
+                    metrics["agent_first_progress_s"] = metrics["agent_total_s"]
+                spoke = len(said)
+                for line in str(ev.get("result") or "").splitlines():
+                    async for out in _agent_flush(line, run, deps, metrics, said, start):
+                        yield out
+                if len(said) == spoke:
+                    async for out in _speak("I couldn't get an answer for that.", deps):
+                        yield out
+                    said.append("no answer")
+                finished = True
+                return
+    finally:
+        if _agent_busy.get(run.conv_id) is run:
+            _agent_busy.pop(run.conv_id, None)
+        if not finished and not run.cancelled and _confirm.get(run.conv_id) is not run:
+            # Client gone or the process died mid-turn: retire the session so nothing stale is read later.
+            run.cancelled = True
+            deps.agent_conversations.drop(run.conv_id)
+
+
+async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dict, said: list[str],
+                       start: float) -> AsyncIterator[dict]:
+    """One line of the agent's final reply: say / card / shape / lines only (no open, no incomplete)."""
+    line = line.strip()
+    if not line:
+        return
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        obj = {"say": line}
+    if not isinstance(obj, dict):
+        obj = {"say": line}
+    if isinstance(obj.get("say"), str) and obj["say"].strip():
+        text = obj["say"].strip()
+        async for ev in _speak(text, deps):
+            yield ev
+        said.append(text)
+        if metrics.get("first_answer_audio_s") is None:
+            metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+    card = hud.validate_card(obj.get("card")) if "card" in obj else None
+    if card:
+        seen = _card_ids.setdefault(run.conv_id, set())
+        if card["id"] in seen:
+            card["id"] = uuid.uuid4().hex[:8]
+        seen.add(card["id"])
+        yield {"type": "card", "card": card}
+    shape = hud.validate_shape(obj.get("shape")) if "shape" in obj else None
+    if shape:
+        yield {"type": "shape", "shape": shape}
+    lines = _agent_lines(obj.get("lines"), run) if "lines" in obj else None
+    if lines:
+        yield lines
+
+
 # --- Routes ---
 
 @router.post("/utterance", dependencies=_LOOP_DEPS)
@@ -851,8 +1280,12 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
             elif kind == "shape":
                 shapes += 1
             elif kind == "done":
+                agent_metrics = {k: event["metrics"][k] for k in
+                                 ("agent_first_progress_s", "agent_total_s", "agent_cold")
+                                 if k in event["metrics"]}
                 debug_log.add(rec, "done", cards=cards, shapes=shapes, error=event["error"],
-                              first_audio_ms=first_audio_ms, total_s=event["metrics"]["total_s"])
+                              first_audio_ms=first_audio_ms, total_s=event["metrics"]["total_s"],
+                              **agent_metrics)
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")

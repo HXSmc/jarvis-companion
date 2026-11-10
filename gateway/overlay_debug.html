@@ -43,6 +43,8 @@ const token = sessionStorage.getItem("overlayToken");
 const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "transcribed",
                 intent: "intent", spoke: "Jarvis spoke", done: "response done",
                 no_speech: "no speech", app_error: "app error",
+                agent: "agent started", agent_tool: "agent tool", agent_confirm: "confirmation",
+                agent_progress: "progress line",
                 incomplete: "waiting for more", continued: "continued after a pause" };
 
 function el(tag, cls, text) {
@@ -62,10 +64,17 @@ function describe(s) {
     case "continued": return `as one request: "${s.text}"`;
     case "intent": return s.kind + (s.arg ? ` → ${s.arg}` : "");
     case "spoke": return null;
+    case "agent_progress": return null;  // rendered as a quote
+    case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
+    case "agent_tool": return `${s.tool} · ${s.decision}` + (s.ms != null ? ` · ${s.ms} ms` : "");
+    case "agent_confirm": return s.state;
     case "done": return `${s.cards} cards, ${s.shapes} shapes` +
                         (s.first_audio_ms != null ? `, first audio ${s.first_audio_ms} ms` : ", no audio") +
                         (s.total_s != null ? `, total ${s.total_s} s` : "") +
-                        (s.error ? `, ERROR: ${s.error}` : "");
+                        (s.error ? `, ERROR: ${s.error}` : "") +
+                        (s.agent_first_progress_s != null || s.agent_total_s != null
+                          ? `, first progress ${s.agent_first_progress_s ?? "?"} s, agent ${s.agent_total_s ?? "?"} s` : "") +
+                        (s.agent_cold ? ", cold" : "");
     default: return s.detail || "";
   }
 }
@@ -89,14 +98,15 @@ function render(data) {
     const ol = el("ol");
     for (const s of turn.steps) {
       const failed = (s.step === "done" && s.error) || s.step === "no_speech" || s.step === "app_error";
+      const denied = s.step === "agent_tool" && s.decision === "deny";  // red row, not a failed turn
       if (failed) box.classList.add("err");
-      const li = el("li", failed ? "fail" : "");
+      const li = el("li", failed || denied ? "fail" : "");
       li.append(el("span", "step", LABEL[s.step] || s.step));
       li.append(el("span", "t", `+${((s.at - t0)).toFixed(2)} s`));
       const v = el("span", "v");
       const d = describe(s);
       if (d !== null) v.textContent = d;
-      if (s.step === "transcribed") v.append(el("q", "", s.text));
+      if (s.step === "transcribed" || s.step === "agent_progress") v.append(el("q", "", s.text));
       if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : ` · text at ${s.ms} ms, no audio`); }
       li.append(v);
       ol.append(li);
