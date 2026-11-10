@@ -111,18 +111,14 @@ final class FixtureDecodeTests: XCTestCase {
     }
 
     func testGalleryDropsUnsafeItemsLossily() throws {
-        let json = #"{"shapes":[],"cards":[{"id":"g1","type":"image","title":"Mixed","items":[
-            {"url":"https://example.com/a.jpg"},{"url":"http://example.com/b.jpg"},
-            {"url":"https://example.com/c.jpg"}]}]}"#
+        let json = #"{"shapes":[],"cards":[{"id":"g1","type":"image","title":"Mixed","items":[{"url":"https://example.com/a.jpg"},{"url":"http://example.com/b.jpg"},{"url":"https://example.com/c.jpg"}]}]}"#
         let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(json.utf8))
         guard case .image(let card) = msg.cards[0] else { return XCTFail("expected an image card") }
         XCTAssertEqual(card.items?.map(\.url), ["https://example.com/a.jpg", "https://example.com/c.jpg"])
     }
 
     func testGalleryAllBadItemsFallsBackToTopLevelURL() throws {
-        let json = #"{"shapes":[],"cards":[{"id":"g2","type":"image","title":"All bad",
-            "url":"https://example.com/top.jpg","items":[
-            {"url":"http://example.com/b.jpg"},{"url":42}]}]}"#
+        let json = #"{"shapes":[],"cards":[{"id":"g2","type":"image","title":"All bad","url":"https://example.com/top.jpg","items":[{"url":"http://example.com/b.jpg"},{"url":42}]}]}"#
         let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(json.utf8))
         guard case .image(let card) = msg.cards[0] else { return XCTFail("expected an image card") }
         XCTAssertNil(card.items)
