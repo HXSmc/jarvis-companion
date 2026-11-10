@@ -222,6 +222,13 @@ class _Conn:
             self.session.close()
             self.session = None
 
+    async def _close_session_async(self) -> None:
+        # Detach on the loop, close the detached object in a thread: the worker never reads
+        # self.session, so a session a later _start assigns can't be closed by mistake.
+        old, self.session = self.session, None
+        if old:
+            await asyncio.to_thread(old.close)
+
     def _reset_research(self) -> None:
         if self.research is not None:
             try:
@@ -244,7 +251,7 @@ class _Conn:
         logger.info("start model=%s session=%s task=%r", self.model, session_id, task[:200])
 
     async def _start(self, task: str, model: str, session_id: str | None, announce: bool) -> None:
-        self._close_session()
+        await self._close_session_async()
         self.task, self.model, self.session_id = task, model if model in ("sonnet", "haiku") else "sonnet", session_id
         self.task_from_session = False
         if not self.task and session_id:  # the phone opened Hardware Mode from a session's card
@@ -669,7 +676,7 @@ class _Conn:
                 await self.ask(text, use_frame)
             except Exception as exc:  # brain crash must not kill the socket
                 logger.exception("hwmode: ask failed")
-                self._close_session()
+                await self._close_session_async()
                 try:
                     await self.send({"type": "error", "error": f"brain error: {type(exc).__name__}"})
                 except Exception:
