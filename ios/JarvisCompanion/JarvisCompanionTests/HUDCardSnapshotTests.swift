@@ -196,6 +196,52 @@ final class HUDCardSnapshotTests: XCTestCase {
         try draw("hud-07-layer", AnyView(view), size: CGSize(width: 390, height: 844))
     }
 
+    // MARK: row budget (whole rows only, never a mid-row cut)
+
+    func testFittingRowsKeepsWholeLeadingRows() {
+        XCTAssertEqual(HUDCardView.fittingRows(heights: [50, 50, 50], budget: 110, moreHeight: 17), 1)
+        XCTAssertEqual(HUDCardView.fittingRows(heights: [50, 50], budget: 110, moreHeight: 17), 2)  // all fit, no reserve
+        XCTAssertEqual(HUDCardView.fittingRows(heights: [50, 50, 50], budget: nil, moreHeight: 17), 3)  // no slot: all
+        XCTAssertEqual(HUDCardView.fittingRows(heights: [50], budget: 10, moreHeight: 17), 1)  // one row even in a tiny slot
+    }
+
+    func testFlowCardTwelveNodesInA200PointSlotShowsMoreLine() {
+        var card = HUDCard(id: "f", type: "flow", title: "Request path")
+        card.nodes = (0..<12).map { HUDCard.FlowNode(id: "n\($0)", text: "Node \($0)") }
+        let view = HUDCardView(card: card, maxHeight: 200)
+        let fit = view.flowFit
+        XCTAssertGreaterThanOrEqual(fit.nodes, 1)   // at least one whole node
+        XCTAssertLessThan(fit.nodes, 12)            // a 200 pt slot cannot hold 12
+        XCTAssertEqual(fit.dropped, 12 - fit.nodes) // no extra-edge lines here
+        XCTAssertEqual(view.moreLineText, "+\(fit.dropped) more")
+        XCTAssertNil(HUDCardView(card: card, maxHeight: 900).moreLineText)  // a tall slot shows all
+        XCTAssertNil(HUDCardView(card: card).moreLineText)                  // no slot: never drops
+    }
+
+    // MARK: bright / busy and Dynamic Type variants (round-1 review)
+
+    /// Every card type over a bright/busy camera frame stand-in: black 0.8 fill, white
+    /// 0.85 text must still read (contrast check, not pixel assert).
+    func testBrightBackdropCardShots() throws {
+        try shotVariant("hud-01b-info-bright", card: try XCTUnwrap(cards(Self.info).first), busy: true)
+        try shotVariant("hud-02b-stat-bright", card: try XCTUnwrap(cards(Self.stat).first), busy: true)
+        try shotVariant("hud-03b-bar-bright", card: try XCTUnwrap(cards(Self.bar).first), busy: true)
+        try shotVariant("hud-04b-flow-bright", card: try XCTUnwrap(cards(Self.flow).first), busy: true)
+        try shotVariant("hud-05b-link-bright", card: try XCTUnwrap(cards(Self.link).first), busy: true)
+        try shotVariant("hud-06c-image-bright", card: try XCTUnwrap(cards(Self.image).first), busy: true)
+    }
+
+    /// Every card type at accessibility3 (uncapped; the layer itself caps at
+    /// accessibility2): sizes scale, nothing falls below the 11 pt floor.
+    func testAccessibility3CardShots() throws {
+        try shotVariant("hud-01c-info-ax3", card: try XCTUnwrap(cards(Self.info).first), ax3: true)
+        try shotVariant("hud-02c-stat-ax3", card: try XCTUnwrap(cards(Self.stat).first), ax3: true)
+        try shotVariant("hud-03c-bar-ax3", card: try XCTUnwrap(cards(Self.bar).first), ax3: true)
+        try shotVariant("hud-04c-flow-ax3", card: try XCTUnwrap(cards(Self.flow).first), ax3: true)
+        try shotVariant("hud-05c-link-ax3", card: try XCTUnwrap(cards(Self.link).first), ax3: true)
+        try shotVariant("hud-06d-image-ax3", card: try XCTUnwrap(cards(Self.image).first), ax3: true)
+    }
+
     // MARK: drawing (same real-window approach as CardSnapshotTests)
 
     private func shot(_ name: String, card: HUDCard) throws {
@@ -204,6 +250,39 @@ final class HUDCardSnapshotTests: XCTestCase {
             .frame(width: 179, height: 200)
             .background(Color(white: 0.08))
         try draw(name, AnyView(view), size: CGSize(width: 390, height: 260))
+    }
+
+    /// Variant shot: over a bright/busy backdrop, or at accessibility3 type size with a
+    /// tall uncapped canvas (the layer caps at accessibility2, the card alone must not).
+    private func shotVariant(_ name: String, card: HUDCard, busy: Bool = false, ax3: Bool = false) throws {
+        let view = ZStack(alignment: .top) {
+            if busy { Self.busyBackdrop } else { Color(white: 0.08) }
+            Group {
+                if ax3 {
+                    HUDCardView(card: card).dynamicTypeSize(.accessibility3)
+                } else {
+                    HUDCardView(card: card)
+                }
+            }
+            .frame(width: 179, alignment: .top)
+            .padding(.top, 16)
+        }
+        try draw(name, AnyView(view), size: CGSize(width: 390, height: ax3 ? 820 : 320))
+    }
+
+    /// White with grey stripes: the bright/busy camera frame a card must stay legible over.
+    private static var busyBackdrop: some View {
+        GeometryReader { geo in
+            Path { p in
+                var y: CGFloat = 0
+                while y < geo.size.height {
+                    p.addRect(CGRect(x: 0, y: y, width: geo.size.width, height: 12))
+                    y += 24
+                }
+            }
+            .fill(Color(white: 0.72))
+        }
+        .background(Color.white)
     }
 
     /// $HUD_SHOTS_DIR when set; otherwise the shot still renders but nothing is written.

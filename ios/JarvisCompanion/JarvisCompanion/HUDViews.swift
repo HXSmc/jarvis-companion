@@ -1,44 +1,89 @@
 import SwiftUI
 
-/// Style tokens for the HUD layer: one cool cyan accent, the rest white on dark
-/// translucent panels with thin 1 pt borders and small corner ticks.
-private let hudLine = Color(red: 0.62, green: 0.93, blue: 1.0)    // border, ticks
-private let hudAccent = Color(red: 0.45, green: 0.88, blue: 1.0)  // the one accent
+/// Style tokens for the HUD layer: a neutral ice-white accent (yellow on the camera
+/// shapes stays the only highlight colour on screen), white text on black 0.8 panels
+/// with thin 1 pt borders and small corner ticks.
+private let hudIce = Color.white.opacity(0.92)  // border, ticks, bars, micro labels
 private let hudBody = Color.white.opacity(0.85)
 
-/// One rendered HUD card, as tall as its content (the layer caps it at its slot and clips).
+/// One rendered HUD card. `maxHeight` is its slot height: flow and bar cards drop whole
+/// rows that do not fit and end with a "+N more" line instead of clipping mid-row.
 struct HUDCardView: View {
     let card: HUDCard
+    var maxHeight: CGFloat? = nil
+
+    init(card: HUDCard, maxHeight: CGFloat? = nil) {
+        self.card = card
+        self.maxHeight = maxHeight
+    }
+
+    // Every size scales with Dynamic Type (the layer caps growth at accessibility2);
+    // nothing sits below the 11 pt readable floor.
+    @ScaledMetric(relativeTo: .caption2) private var microSize: CGFloat = 11  // micro label, edges
+    @ScaledMetric(relativeTo: .caption2) private var rowSize: CGFloat = 11    // bar rows, hosts, "+N more"
+    @ScaledMetric(relativeTo: .caption1) private var nodeSize: CGFloat = 12   // flow node text
+    @ScaledMetric(relativeTo: .footnote) private var bodySize: CGFloat = 13   // info lines, Open
+    @ScaledMetric(relativeTo: .body) private var titleSize: CGFloat = 16      // title, photo icons
+    @ScaledMetric(relativeTo: .largeTitle) private var statSize: CGFloat = 30 // stat value
+
+    @State private var imageLoaded = false  // image cards fetch only after a tap
 
     var body: some View {
-        Group {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(card.microLabel)
-                    .lineLimit(1)
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundColor(hudAccent)
-                    .kerning(1.2)
-                Text(card.title)
-                    .font(.system(size: 16, weight: .bold))
-                    .fontWidth(.condensed)
-                    .foregroundColor(.white)
-                    .lineLimit(2)
-                content
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        if card.type == "link" {
+            // VoiceOver must reach the Open link, so the card contains its children.
+            chrome.accessibilityElement(children: .contain)
+        } else if card.type == "image", card.url != nil, !imageLoaded {
+            chrome
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilityText + ", tap to load image")
+                .accessibilityAction { imageLoaded = true }
+        } else {
+            chrome
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilityText)
         }
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.ultraThinMaterial)
-                RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black.opacity(0.6))
-            }
-        )
-        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(hudLine.opacity(0.55), lineWidth: 1))
+    }
+
+    private var chrome: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            microLabelView
+            Text(card.title)
+                .font(.system(size: titleSize, weight: .bold))
+                .fontWidth(.condensed)
+                .foregroundColor(.white)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black.opacity(0.8)))
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(hudIce.opacity(0.55), lineWidth: 1))
         .overlay(HUDCornerTicks())
         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityText)
+    }
+
+    /// "TYPE // SOURCE": the type never truncates, the source loses its head when tight.
+    private var microLabelView: some View {
+        HStack(spacing: 0) {
+            Text(card.type.uppercased())
+                .kerning(0.6)
+                .fixedSize()
+            if let source = microSource {
+                Text(" // \(source)")
+                    .kerning(0.6)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+        }
+        .font(.system(size: microSize, weight: .semibold, design: .monospaced))
+        .foregroundColor(hudIce)
+        .accessibilityHidden(true)
+    }
+
+    private var microSource: String? {
+        let s = (card.source ?? card.url?.host ?? "").uppercased()
+        return s.isEmpty ? nil : s
     }
 
     @ViewBuilder private var content: some View {
@@ -57,7 +102,7 @@ struct HUDCardView: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array((card.body ?? []).enumerated()), id: \.offset) { _, line in
                 Text(line)
-                    .font(.system(size: 13))
+                    .font(.system(size: bodySize))
                     .foregroundColor(hudBody)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -67,14 +112,14 @@ struct HUDCardView: View {
     private var statBody: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(card.value ?? "")
-                .font(.system(size: 30, weight: .heavy))
+                .font(.system(size: statSize, weight: .heavy))
                 .fontWidth(.condensed)
                 .foregroundColor(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
             if let label = card.statLabel, !label.isEmpty {
                 Text(label)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: rowSize, design: .monospaced))
                     .foregroundColor(hudBody)
                     .lineLimit(2)
             }
@@ -82,7 +127,8 @@ struct HUDCardView: View {
     }
 
     private var barBody: some View {
-        let items = card.items ?? []
+        let fit = barFit
+        let items = Array((card.items ?? []).prefix(fit.rows))
         let peak = max(items.map(\.value).max() ?? 1, 0.001)
         return VStack(alignment: .leading, spacing: 5) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -95,53 +141,57 @@ struct HUDCardView: View {
                         Text(Self.shortNumber(item.value))
                             .fixedSize()
                     }
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: rowSize, design: .monospaced))
                     .foregroundColor(hudBody)
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.white.opacity(0.15))
-                            Capsule().fill(hudAccent)
+                            Capsule().fill(hudIce)
                                 .frame(width: geo.size.width * CGFloat(max(0, item.value) / peak))
                         }
                     }
                     .frame(height: 6)
                 }
             }
-            if let caption = card.caption, !caption.isEmpty {
+            if fit.dropped == 0, let caption = card.caption, !caption.isEmpty {
                 Text("sourced from \(caption)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(hudBody.opacity(0.7))
+                    .font(.system(size: rowSize, design: .monospaced))
+                    .foregroundColor(hudBody)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
             }
+            if fit.dropped > 0 { moreLineView(fit.dropped) }
         }
     }
 
     private var flowBody: some View {
-        let nodes = card.nodes ?? []
-        let extra = extraEdges()
+        let fit = flowFit
+        let nodes = Array((card.nodes ?? []).prefix(fit.nodes))
+        let extras = Array(extraEdges().prefix(fit.extras))
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(nodes.enumerated()), id: \.offset) { i, node in
                 if i > 0 { connector(from: nodes[i - 1], to: node) }
                 Text(node.text)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: nodeSize, weight: .medium))
                     .foregroundColor(.white)
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
             }
-            if !extra.isEmpty {
+            if !extras.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(extra.enumerated()), id: \.offset) { _, line in
+                    ForEach(Array(extras.enumerated()), id: \.offset) { _, line in
                         Text(line)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(hudBody.opacity(0.7))
+                            .font(.system(size: rowSize, design: .monospaced))
+                            .foregroundColor(hudBody)
                             .lineLimit(1)
                     }
                 }
                 .padding(.top, 8)
             }
+            if fit.dropped > 0 { moreLineView(fit.dropped) }
         }
     }
 
@@ -150,12 +200,12 @@ struct HUDCardView: View {
         let edge = card.edges?.first { $0.from == a.id && $0.to == b.id }
         return HStack(spacing: 4) {
             Image(systemName: "arrow.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(hudAccent)
+                .font(.system(size: microSize, weight: .semibold))
+                .foregroundColor(hudIce)
             if let label = edge?.label, !label.isEmpty {
                 Text(label)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(hudBody.opacity(0.7))
+                    .font(.system(size: microSize, design: .monospaced))
+                    .foregroundColor(hudBody)
                     .lineLimit(1)
             }
         }
@@ -180,19 +230,20 @@ struct HUDCardView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let host = card.url?.host {
                 Text(host)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: rowSize, design: .monospaced))
                     .foregroundColor(hudBody)
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
             if let url = card.url {
                 Link(destination: url) {
                     Text("Open")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(hudAccent)
+                        .font(.system(size: bodySize, weight: .bold))
+                        .foregroundColor(hudIce)
                         .padding(.horizontal, 16)
                         .frame(minHeight: 44)  // 44 pt hit area
                         .frame(maxWidth: .infinity)
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(hudAccent.opacity(0.8), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(hudIce.opacity(0.8), lineWidth: 1))
                 }
             }
         }
@@ -201,32 +252,116 @@ struct HUDCardView: View {
     private var imageBody: some View {
         Group {
             if let url = card.url {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        ZStack {
-                            Rectangle().fill(Color.white.opacity(0.08))  // quiet placeholder
-                            Image(systemName: "photo").font(.system(size: 16)).foregroundColor(hudBody.opacity(0.6))
+                if imageLoaded {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                        default:
+                            ZStack {
+                                Rectangle().fill(Color.white.opacity(0.08))  // quiet placeholder
+                                Image(systemName: "photo").font(.system(size: titleSize)).foregroundColor(hudBody)
+                            }
                         }
                     }
+                    .frame(height: 110)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.2), lineWidth: 1))
+                } else {
+                    // Tap to load: the phone never pings a model-chosen host on its own.
+                    Button {
+                        imageLoaded = true
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: "photo").font(.system(size: titleSize)).foregroundColor(hudBody)
+                            Text("Tap to load image")
+                                .font(.system(size: nodeSize, weight: .medium))
+                                .foregroundColor(hudBody)
+                            if let host = url.host {
+                                Text(host)
+                                    .font(.system(size: rowSize, design: .monospaced))
+                                    .foregroundColor(hudBody)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 110)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .frame(height: 110)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.2), lineWidth: 1))
             } else {
                 // file_id only: the picture is in the session files, nothing to fetch here.
                 HStack(spacing: 6) {
-                    Image(systemName: "photo").font(.system(size: 14))
-                    Text("Image in the session files").font(.system(size: 12))
+                    Image(systemName: "photo").font(.system(size: nodeSize))
+                    Text("Image in the session files").font(.system(size: nodeSize))
                 }
                 .foregroundColor(hudBody)
                 .padding(.horizontal, 10).padding(.vertical, 8)
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.25), lineWidth: 1))
             }
         }
+    }
+
+    // MARK: row budget (flow and bar cards never clip mid-row)
+
+    /// Leading rows of `heights` that fit `budget`, with room reserved for a "+N more"
+    /// line whenever anything is dropped. At least one row always shows.
+    static func fittingRows(heights: [CGFloat], budget: CGFloat?, moreHeight: CGFloat) -> Int {
+        guard let budget, !heights.isEmpty, heights.reduce(0, +) > budget else { return heights.count }
+        var used = moreHeight
+        var shown = 0
+        for h in heights {
+            if used + h > budget { break }
+            used += h
+            shown += 1
+        }
+        return max(shown, 1)
+    }
+
+    /// Micro label + a 2-line title + card padding, paid before any content row.
+    /// Estimates, deliberately generous so the border never gets cut.
+    private var headerHeight: CGFloat { microSize * 1.5 + 8 + titleSize * 2.6 + 24 }
+
+    /// Bar rows kept / dropped at the slot height (nil slot: everything).
+    var barFit: (rows: Int, dropped: Int) {
+        let items = card.items ?? []
+        guard let maxHeight else { return (items.count, 0) }
+        let rowH = rowSize * 1.5 + 14  // label line + gap + 6 pt bar + row spacing
+        let shown = Self.fittingRows(heights: Array(repeating: rowH, count: items.count),
+                                     budget: maxHeight - headerHeight, moreHeight: rowSize * 1.7)
+        return (shown, items.count - shown)
+    }
+
+    /// Flow rows kept / dropped at the slot height: nodes first, then the "A -> B" lines.
+    var flowFit: (nodes: Int, extras: Int, dropped: Int) {
+        let nodes = card.nodes ?? []
+        let extras = extraEdges()
+        guard let maxHeight else { return (nodes.count, extras.count, 0) }
+        let nodeH = nodeSize * 2.7 + 10              // a 2-line node box with its padding
+        let connectorH = microSize * 1.5 + 6
+        var heights = nodes.indices.map { $0 == 0 ? nodeH : nodeH + connectorH }
+        heights.append(contentsOf: extras.map { _ in rowSize * 1.7 })
+        let shown = Self.fittingRows(heights: heights, budget: maxHeight - headerHeight, moreHeight: rowSize * 1.7)
+        return (min(shown, nodes.count), max(0, shown - nodes.count), heights.count - shown)
+    }
+
+    /// "+N more" when the slot dropped rows, nil when everything fits (unit-tested).
+    var moreLineText: String? {
+        let dropped = card.type == "flow" ? flowFit.dropped : barFit.dropped
+        return dropped > 0 ? "+\(dropped) more" : nil
+    }
+
+    private func moreLineView(_ n: Int) -> some View {
+        Text("+\(n) more")
+            .font(.system(size: rowSize, design: .monospaced))
+            .foregroundColor(hudBody)
+            .lineLimit(1)
+            .padding(.top, 4)
     }
 
     // MARK: helpers
@@ -273,7 +408,7 @@ private struct HUDCornerTicks: View {
                 p.move(to: CGPoint(x: 0, y: h - len)); p.addLine(to: CGPoint(x: 0, y: h)); p.addLine(to: CGPoint(x: len, y: h))
                 p.move(to: CGPoint(x: w - len, y: h)); p.addLine(to: CGPoint(x: w, y: h)); p.addLine(to: CGPoint(x: w, y: h - len))
             }
-            .stroke(hudLine.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineCap: .square))
+            .stroke(hudIce.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineCap: .square))
         }
         .allowsHitTesting(false)
     }
@@ -292,7 +427,7 @@ struct HUDLayer: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var shown = false
+    @State private var shown = Set<Int>()
 
     static func slots(in size: CGSize, avoid: CGRect?) -> [CGRect] {
         let w = size.width, h = size.height
@@ -330,21 +465,25 @@ struct HUDLayer: View {
             let rects = Self.slots(in: geo.size, avoid: avoid)
             ZStack(alignment: .topLeading) {
                 ForEach(Array(cards.prefix(rects.count).enumerated()), id: \.offset) { i, card in
-                    // Content height, capped at the slot: the camera stays visible between cards.
-                    HUDCardView(card: card)
+                    // The card budgets its rows against the slot, so nothing is clipped
+                    // mid-row and the border stays whole.
+                    HUDCardView(card: card, maxHeight: rects[i].height)
                         .frame(width: rects[i].width)
-                        .frame(maxHeight: rects[i].height, alignment: .top)
-                        .clipped()
-                        .frame(width: rects[i].width, height: rects[i].height, alignment: .top)
+                        .frame(height: rects[i].height, alignment: .top)
                         .position(x: rects[i].midX, y: rects[i].midY)
-                        .opacity(shown || reduceMotion ? 1 : 0)
-                        .scaleEffect(shown || reduceMotion ? 1 : 0.92)
+                        .opacity(shown.contains(i) || reduceMotion ? 1 : 0)
+                        .scaleEffect(shown.contains(i) || reduceMotion ? 1 : 0.92)
                 }
             }
         }
+        // Cards stay usable at giant sizes: growth stops at accessibility2.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .onAppear {
-            guard !reduceMotion else { shown = true; return }
-            withAnimation(.easeOut(duration: 0.22)) { shown = true }  // short fade + scale
+            guard !reduceMotion else { shown = Set(cards.indices); return }
+            // Cards arrive 40 ms apart, like the reference; each fade is <= 250 ms.
+            for i in cards.indices {
+                withAnimation(.easeOut(duration: 0.22).delay(Double(i) * 0.04)) { shown.insert(i) }
+            }
         }
     }
 }
