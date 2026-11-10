@@ -2,33 +2,42 @@ import AppKit
 import SwiftUI
 import OverlayCore
 
-/// Card stack hosted in the CardPanel: permission card first, then HUD cards
-/// with the newest at the bottom. Hovering pauses the idle clear.
+/// One card in its own panel: scales in from 0.96 on arrival (none with Reduce Motion; the
+/// panel itself fades in).
 @MainActor
-struct CardColumnView: View {
-    @ObservedObject var model: OverlayModel
+struct CardTile: View {
+    let card: HUDCard
+    @State private var entered = false
 
     var body: some View {
-        VStack(spacing: 12) {
-            if !model.missingPermissions.isEmpty {
-                PermissionCard(missing: model.missingPermissions)
+        CardView(card: card)
+            .scaleEffect(entered ? 1 : 0.96)
+            .onAppear {
+                guard !Theme.reduceMotion else {
+                    entered = true
+                    return
+                }
+                withAnimation(.easeOut(duration: 0.2)) { entered = true }
             }
-            // Stable identity per card, so an insert or drop never re-binds a view to another card.
-            ForEach(model.cards, id: \.listKey) { card in
-                CardView(card: card)
-                    .transition(.opacity)
-            }
-        }
-        .onHover { model.setIdlePaused($0) }
-        // 200 ms ease-out on inserts; nothing when the user set Reduce Motion.
-        .animation(Theme.reduceMotion ? nil : .easeOut(duration: 0.2), value: model.cards)
+    }
+}
+
+/// One parked card as a chip in its own panel; a click on any chip restores every card.
+@MainActor
+struct CardChipButton: View {
+    let model: OverlayModel
+    let card: HUDCard
+
+    var body: some View {
+        Button { model.setLayout(.restore) } label: { CardChip(card: card) }
+            .buttonStyle(.plain)
     }
 }
 
 /// Native permission card (x-apple.systempreferences is not https, so this one
 /// is not a HUD card): one row per missing pane, each opening its settings pane.
 @MainActor
-private struct PermissionCard: View {
+struct PermissionCard: View {
     let missing: [Permission]
 
     var body: some View {
@@ -52,21 +61,5 @@ private struct PermissionCard: View {
         .background(Theme.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Theme.cardBorder, lineWidth: 1))
-    }
-}
-
-extension HUDCard {
-    /// The card's own id (the service always sets one); type + title when a card has none.
-    var listKey: String { id ?? "\(typeName):\(title)" }
-
-    var title: String {
-        switch self {
-        case .info(let p): return p.title
-        case .stat(let p): return p.title
-        case .bar(let p): return p.title
-        case .flow(let p): return p.title
-        case .link(let p): return p.title
-        case .image(let p): return p.title
-        }
     }
 }
