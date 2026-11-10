@@ -29,7 +29,7 @@ Server -> client:
 
 A new instruction may be spoken only when the user confirmed the current one done
 (or a [watch] check with a frame SEES it done). Every ask gets a cached instant
-ack after 0.45 s unless the answer's speech already went out.
+ack after 0.10 s unless the answer's speech already went out.
 
 A Claude session that needs a physical action posts `/hwmode/request`
 (shared token, from `jarvis-hw-request` on this box); the phone lists them
@@ -86,7 +86,7 @@ MAX_REQUESTS = 50
 # Each live connection is one `claude` process on this box.
 MAX_CONNECTIONS = 2
 # A cached instant ack goes out after this long without the answer's speech.
-ACK_AFTER_S = 0.45
+ACK_AFTER_S = 0.10
 _live_conns = 0
 # session_id -> {"task": str, "at": epoch seconds}; in memory: a gateway restart drops them.
 _requests: dict[str, dict] = {}
@@ -418,7 +418,7 @@ class _Conn:
                 ack_task.cancel()
 
     async def _instant_ack(self, acks, kind: str) -> None:
-        """The research/session turns take seconds: their ack clip goes out at once, no 0.45 s wait."""
+        """The research/session turns take seconds: their ack clip goes out at once, no wait."""
         clip = acks.clip(kind) if acks else None
         if clip is None:
             return
