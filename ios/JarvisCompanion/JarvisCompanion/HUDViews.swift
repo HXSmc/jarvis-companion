@@ -21,7 +21,7 @@ struct HUDCardView: View {
     // nothing sits below the 11 pt readable floor.
     @ScaledMetric(relativeTo: .caption2) private var microSize: CGFloat = 11  // micro label, edges
     @ScaledMetric(relativeTo: .caption2) private var rowSize: CGFloat = 11    // bar rows, hosts, "+N more"
-    @ScaledMetric(relativeTo: .caption1) private var nodeSize: CGFloat = 12   // flow node text
+    @ScaledMetric(relativeTo: .caption) private var nodeSize: CGFloat = 12   // flow node text
     @ScaledMetric(relativeTo: .footnote) private var bodySize: CGFloat = 13   // info lines, Open
     @ScaledMetric(relativeTo: .body) private var titleSize: CGFloat = 16      // title, photo icons
     @ScaledMetric(relativeTo: .largeTitle) private var statSize: CGFloat = 30 // stat value
