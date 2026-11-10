@@ -7,13 +7,17 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
 
     shape = {kind: "rect"|"circle"|"triangle", box: [x0, y0, x1, y1] (px of the frame/screen),
              label?: str<=40, id?: str}
-    card  = {id, type: "info"|"stat"|"bar"|"flow"|"link"|"image", title: str<=60, ...}
+    card  = {id, type: "info"|"stat"|"bar"|"flow"|"link"|"image"|"video", title: str<=60, ...}
       info:  body: [str] <= 6 lines
       stat:  value: str, label: str
       bar:   items: [{label, value: number}] <= 12, caption?: str
       flow:  nodes: [{id, text}] <= 12, edges: [[from, to, label?]]
       link:  url: https only, source?: str
-      image: url (https) or file_id
+      image: url (https) or file_id; alt?: str<=120, source_page?: https, gallery
+             items?: [{url, alt?, source_page?}] <= 6 (kept only with 2+; url = first item)
+      video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
+             .mp4/.mov/.m4v/.m3u8, thumbnail_url? (file urls only), source_page?;
+             no usable media -> link card on source_page/url, else dropped
     hud   = {shapes: [shape], cards: [card]}
 """
 
@@ -22,10 +26,10 @@ from __future__ import annotations
 import math
 import re
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 SHAPE_KINDS = ("rect", "circle", "triangle")
-CARD_TYPES = ("info", "stat", "bar", "flow", "link", "image")
+CARD_TYPES = ("info", "stat", "bar", "flow", "link", "image", "video")
 
 MAX_LABEL = 40
 MAX_TITLE = 60
@@ -33,6 +37,8 @@ MAX_LINE = 200
 MAX_BODY_LINES = 6
 MAX_VALUE = 24
 MAX_CAPTION = 120
+MAX_ALT = 120
+MAX_MEDIA_ITEMS = 6
 MAX_ITEMS = 12
 MAX_NODES = 12
 MAX_EDGES = 24
@@ -45,6 +51,7 @@ MAX_SHAPES = 12
 MAX_CARDS = 12
 
 _FILE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -82,6 +89,25 @@ def safe_https_url(value) -> str | None:
     if parts.scheme.lower() != "https" or not parts.hostname:
         return None
     return value
+
+
+def youtube_id_from_url(value) -> str | None:
+    """YouTube video id from an https watch/shorts/embed/youtu.be URL, else None."""
+    url = safe_https_url(value)
+    if not url:
+        return None
+    parts = urlsplit(url)
+    host, path = parts.hostname, parts.path  # hostname is already lowercase
+    vid = ""
+    if host in ("www.youtube.com", "youtube.com", "m.youtube.com") and path == "/watch":
+        vid = parse_qs(parts.query).get("v", [""])[0]
+    elif host in ("www.youtube.com", "www.youtube-nocookie.com"):
+        m = re.fullmatch(r"/(?:shorts|embed)/([^/]+)", path)
+        vid = m.group(1) if m else ""
+    elif host == "youtu.be":
+        m = re.fullmatch(r"/([^/]+)", path)
+        vid = m.group(1) if m else ""
+    return vid if _YOUTUBE_ID.fullmatch(vid) else None
 
 
 def validate_shape(raw) -> dict | None:
@@ -191,19 +217,85 @@ def _link(raw: dict, out: dict) -> dict | None:
     return out
 
 
+def _link_fallback(out: dict, url: str) -> dict:
+    """An image/video with no usable media degrades to a link card on `url`."""
+    return {"id": out["id"], "type": "link", "title": out["title"], "url": url,
+            "source": urlsplit(url).hostname[:MAX_SOURCE]}
+
+
 def _image(raw: dict, out: dict) -> dict | None:
+    alt, source_page = _text(raw.get("alt"), MAX_ALT), safe_https_url(raw.get("source_page"))
+    if alt:
+        out["alt"] = alt
+    if source_page:
+        out["source_page"] = source_page
+    items = raw.get("items")
+    if isinstance(items, list):
+        clean = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            iurl = safe_https_url(it.get("url"))
+            if not iurl:
+                continue
+            item = {"url": iurl}
+            ialt = _text(it.get("alt"), MAX_ALT)
+            if ialt:
+                item["alt"] = ialt
+            isp = safe_https_url(it.get("source_page"))
+            if isp:
+                item["source_page"] = isp
+            clean.append(item)
+            if len(clean) == MAX_MEDIA_ITEMS:
+                break
+        if len(clean) >= 2:
+            out["items"], out["url"] = clean, clean[0]["url"]
+            return out
+        if len(clean) == 1:
+            item = clean[0]
+            if not alt and item.get("alt"):
+                out["alt"] = item["alt"]
+            if not source_page and item.get("source_page"):
+                out["source_page"] = item["source_page"]
+            out["url"] = item["url"]
+            return out
     url = safe_https_url(raw.get("url"))
     file_id = raw.get("file_id")
     if url:
         out["url"] = url
     elif isinstance(file_id, str) and _FILE_ID.match(file_id):
         out["file_id"] = file_id
+    elif source_page:
+        return _link_fallback(out, source_page)
     else:
         return None
     return out
 
 
-_CARD_BODY = {"info": _info, "stat": _stat, "bar": _bar, "flow": _flow, "link": _link, "image": _image}
+def _video(raw: dict, out: dict) -> dict | None:
+    yid = raw.get("youtube_id")
+    if not (isinstance(yid, str) and _YOUTUBE_ID.fullmatch(yid)):
+        yid = youtube_id_from_url(raw.get("url"))
+    raw_url, source_page = safe_https_url(raw.get("url")), safe_https_url(raw.get("source_page"))
+    if isinstance(yid, str):  # YouTube cards never carry thumbnail_url
+        out["youtube_id"] = yid
+    elif raw_url and urlsplit(raw_url).path.lower().endswith((".mp4", ".mov", ".m4v", ".m3u8")):
+        out["url"] = raw_url
+        thumb = safe_https_url(raw.get("thumbnail_url"))
+        if thumb:
+            out["thumbnail_url"] = thumb
+    if "youtube_id" in out or "url" in out:
+        if source_page:
+            out["source_page"] = source_page
+        return out
+    link = source_page or raw_url
+    if not link:
+        return None
+    return _link_fallback(out, link)
+
+
+_CARD_BODY = {"info": _info, "stat": _stat, "bar": _bar, "flow": _flow, "link": _link,
+              "image": _image, "video": _video}
 
 
 def validate_card(raw) -> dict | None:
@@ -237,6 +329,12 @@ def schema_json() -> dict:
     """JSON Schema (draft 2020-12) of a validated HUD message; exported to tests/fixtures/hud/schema.json."""
     https = {"type": "string", "pattern": "^https://", "maxLength": MAX_URL}
     base = {"id": _str(MAX_ID), "title": {**_str(MAX_TITLE), "minLength": 1}}
+    image_item = {
+        "type": "object",
+        "properties": {"url": https, "alt": _str(MAX_ALT), "source_page": https},
+        "required": ["url"],
+        "additionalProperties": False,
+    }
 
     def card(kind: str, props: dict, required: list[str]) -> dict:
         return {
@@ -289,8 +387,18 @@ def schema_json() -> dict:
                             "type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 3}},
                     }, ["nodes", "edges"]),
                     card("link", {"url": https, "source": _str(MAX_SOURCE)}, ["url"]),
-                    {**card("image", {"url": https, "file_id": {"type": "string", "pattern": _FILE_ID.pattern}}, []),
+                    {**card("image", {
+                        "url": https, "alt": _str(MAX_ALT), "source_page": https,
+                        "items": {"type": "array", "minItems": 2, "maxItems": MAX_MEDIA_ITEMS,
+                                  "items": image_item},
+                        "file_id": {"type": "string", "pattern": _FILE_ID.pattern},
+                    }, []),
                      "anyOf": [{"required": ["url"]}, {"required": ["file_id"]}]},
+                    {**card("video", {
+                        "youtube_id": {"type": "string", "pattern": _YOUTUBE_ID.pattern},
+                        "url": https, "thumbnail_url": https, "source_page": https,
+                    }, []),
+                     "anyOf": [{"required": ["youtube_id"]}, {"required": ["url"]}]},
                 ]
             },
         },

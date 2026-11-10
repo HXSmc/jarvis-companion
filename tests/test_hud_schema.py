@@ -9,6 +9,7 @@ import pytest
 
 from common import hud
 
+YT_ID = "dQw4w9WgXcQ"
 FIXTURES = Path(__file__).parent / "fixtures" / "hud"
 FIXTURE_FILES = sorted(p for p in FIXTURES.glob("*.json") if p.name != "schema.json")
 
@@ -46,6 +47,7 @@ CARDS = {
     "flow": {"nodes": [{"id": "a", "text": "A"}, {"id": "b", "text": "B"}], "edges": [["a", "b", "go"]]},
     "link": {"url": "https://example.com/x?y=1", "source": "example.com"},
     "image": {"url": "https://example.com/p.jpg"},
+    "video": {"youtube_id": YT_ID},
 }
 
 
@@ -59,8 +61,9 @@ def test_every_card_type_accepted(ctype):
 
 
 def test_unknown_card_type_dropped():
-    assert hud.validate_card({"id": "c", "type": "video", "title": "T"}) is None
+    assert hud.validate_card({"id": "c", "type": "map", "title": "T"}) is None
     assert hud.validate_card({"id": "c", "type": "info", "title": "", "body": ["x"]}) is None
+    assert "video" in hud.CARD_TYPES
 
 
 @pytest.mark.parametrize("url", ["http://example.com", "javascript:alert(1)", "file:///etc/passwd",
@@ -74,6 +77,81 @@ def test_non_https_urls_rejected(url):
 def test_image_file_id_path_traversal_rejected():
     assert hud.validate_card({"id": "c", "type": "image", "title": "T", "file_id": "f_1.jpg"})["file_id"] == "f_1.jpg"
     assert hud.validate_card({"id": "c", "type": "image", "title": "T", "file_id": "../etc/passwd"}) is None
+
+
+def test_image_gallery_items():
+    seven = [{"url": f"https://example.com/{i}.jpg"} for i in range(5)] \
+        + [{"url": "http://example.com/x.jpg"}, "junk"]
+    out = hud.validate_card({"id": "g", "type": "image", "title": "T", "items": seven})
+    assert len(out["items"]) == 5 and out["url"] == out["items"][0]["url"]
+    one = hud.validate_card({"id": "g", "type": "image", "title": "T", "items": [
+        {"url": "https://example.com/one.jpg", "alt": "a", "source_page": "https://example.com/p"}]})
+    assert "items" not in one and one["url"] == "https://example.com/one.jpg"
+    assert one["alt"] == "a" and one["source_page"] == "https://example.com/p"
+    zero = hud.validate_card({"id": "g", "type": "image", "title": "T",
+                              "items": [{"url": "http://example.com/x.jpg"}],
+                              "source_page": "https://example.com/p"})
+    assert zero["type"] == "link" and zero["url"] == "https://example.com/p"
+    assert hud.validate_card({"id": "g", "type": "image", "title": "T",
+                              "items": [{"url": "http://example.com/x.jpg"}]}) is None
+    eight = hud.validate_card({"id": "g", "type": "image", "title": "T",
+                               "items": [{"url": f"https://example.com/{i}.jpg"} for i in range(8)]})
+    assert len(eight["items"]) == hud.MAX_MEDIA_ITEMS
+
+
+YT_URLS = [
+    f"https://www.youtube.com/watch?v={YT_ID}",
+    f"https://youtube.com/watch?v={YT_ID}&t=30",
+    f"https://m.youtube.com/watch?v={YT_ID}",
+    f"https://youtu.be/{YT_ID}",
+    f"https://www.youtube.com/shorts/{YT_ID}",
+    f"https://www.youtube.com/embed/{YT_ID}",
+    f"https://www.youtube-nocookie.com/embed/{YT_ID}",
+]
+
+
+@pytest.mark.parametrize("url", YT_URLS)
+def test_video_youtube_forms(url):
+    out = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": url})
+    assert out["youtube_id"] == YT_ID and "url" not in out
+    assert hud.youtube_id_from_url(url) == YT_ID
+
+
+@pytest.mark.parametrize("url", ["https://youtube.com.evil.example/watch?v=" + YT_ID,
+                                 "https://www.youtube.com/watch?v=short",
+                                 "http://youtu.be/" + YT_ID,
+                                 "https://youtu.be/" + YT_ID + "x",
+                                 "https://youtu.be/dQw4w9/gXcQ"])
+def test_youtube_lookalikes_refused(url):
+    out = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": url})
+    assert out is None or (out["type"] == "link" and "youtube_id" not in out)
+    assert hud.youtube_id_from_url(url) is None
+
+
+def test_youtube_form_edges():
+    assert hud.youtube_id_from_url(f"https://youtu.be/{YT_ID}/") is None  # trailing / not allowed
+    assert hud.youtube_id_from_url("https://www.youtube.com/watch") is None
+
+
+def test_video_media_urls():
+    out = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": "https://cdn.example.com/a.MP4?x=1"})
+    assert out["url"] == "https://cdn.example.com/a.MP4?x=1" and "youtube_id" not in out
+    html = hud.validate_card({"id": "v", "type": "video", "title": "T", "url": "https://example.com/a.html"})
+    assert html["type"] == "link" and html["url"] == "https://example.com/a.html"
+    for url in ("javascript:alert(1)", "file:///etc/passwd", "data:video/mp4,xx"):
+        assert hud.validate_card({"id": "v", "type": "video", "title": "T", "url": url}) is None
+
+
+def test_image_and_video_limits():
+    out = hud.validate_card({"id": "i", "type": "image", "title": "T", "url": "https://example.com/a.jpg",
+                             "alt": "x" * 200, "source_page": "https://example.com/p", "evil": 1})
+    assert len(out["alt"]) == hud.MAX_ALT and out["source_page"] == "https://example.com/p"
+    assert "evil" not in out
+    assert hud.validate_card({"id": "i", "type": "image", "title": "T",
+                              "url": "https://example.com/" + "a" * 2029}) is None  # 2049 chars
+    vid = hud.validate_card({"id": "v", "type": "video", "title": "T", "youtube_id": YT_ID,
+                             "thumbnail_url": "https://example.com/t.jpg"})
+    assert "thumbnail_url" not in vid
 
 
 def test_overlong_text_clamped():
