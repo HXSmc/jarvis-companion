@@ -210,3 +210,33 @@ def test_proxy_unlocked_batch_skips_status_check(gateway_server, mac_lock):
                 assert len(mac_lock["bodies"]) == 1, mac_lock["bodies"]
 
     asyncio.run(run())
+
+
+def test_proxy_non_json_mac_status_refuses_lock_as_offline(gateway_server, monkeypatch):
+    forwarded: list = []
+    mac = FastAPI()
+
+    @mac.get("/screen/mac/status")
+    async def status():
+        return Response(content=b"not json", media_type="text/plain")
+
+    @mac.post("/screen/mac/input")
+    async def input_(request: Request):
+        forwarded.append(await request.json())
+        return {"ok": True}
+
+    transport = httpx.ASGITransport(app=mac)
+    monkeypatch.setenv(screen.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(screen, "_mac_client", lambda: httpx.AsyncClient(transport=transport))
+    monkeypatch.setattr(screen, "_input_times", {})
+
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                resp = await c.post("/screen/mac/input", json={"events": [
+                    {"type": "tap", "x": 0.5, "y": 0.5, "require_app": "Safari"}]})
+                assert resp.status_code == 503, resp.text
+                assert resp.json()["detail"] == screen.MAC_OFFLINE_DETAIL, resp.text
+
+    asyncio.run(run())
+    assert forwarded == []

@@ -386,24 +386,41 @@ def test_halt_mid_drag_releases_the_button(load):
     mac.on_post = halt_on_third_held_move
     with pytest.raises(mod.InputHalted):
         mod.send_events([{"type": "drag", "x": 0.1, "y": 0.1, "dx": 0.2, "dy": 0.2}])
-    assert mac.posted[-1] == ("mouse", LUP) + moves[-1][2:]  # released where the pointer is
+    assert moves[-1][2:4] != (10.0, 10.0)  # the pointer had left the start point
+    assert mac.posted[-1] == ("mouse", LUP, 10.0, 10.0, 0)  # released at the checked start point
     assert sum(d[:2] == ("mouse", LUP) for d in mac.posted) == 1
     assert_pairs(mac.posted)
 
 
-# i
-def test_drag_refused_at_end_point_releases_at_last_move(load):
+# i (round 1 hub ruling: end point checked before the down; late refusal releases at p1)
+def test_drag_end_point_over_another_app_presses_nothing(load):
     mod, mac = load()
     mac.element_at = lambda x, y: (SAFARI[1] if x < 79 else TERMINAL[1], None)
     with pytest.raises(mod.FocusMismatch) as exc:
         mod.send_events([{"type": "drag", "x": 0.2, "y": 0.2, "dx": 0.6, "dy": 0.0, **LOCK}])
-    assert (exc.value.reason, exc.value.partial, exc.value.index) == ("point", True, 0)
-    last = 20.0 + (80.0 - 20.0) * (10 / 11)
-    assert mac.posted[0] == ("mouse", MOVED, 20.0, 20.0, 0)
+    assert (exc.value.reason, exc.value.index) == ("point", 0)
+    assert mac.posted == [("mouse", MOVED, 20.0, 20.0, 0)]  # pointer moved to the start, no down
+    assert mac.points[-1] == (80.0, 20.0)  # the end point was what got checked
+    assert_pairs(mac.posted)
+
+
+def test_drag_focus_change_mid_drag_releases_at_start_point(load):
+    mod, mac = load()
+    held = []
+
+    def flip_on_fifth_held_move(desc):
+        if desc[:2] == ("mouse", MOVED) and any(d[:2] == ("mouse", LDOWN) for d in mac.posted):
+            held.append(desc)
+            if len(held) == 5:
+                mac.front = TERMINAL
+    mac.on_post = flip_on_fifth_held_move
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([{"type": "drag", "x": 0.2, "y": 0.2, "dx": 0.6, "dy": 0.0, **LOCK}])
+    assert (exc.value.reason, exc.value.partial, exc.value.index) == ("app", True, 0)
     assert mac.posted[1] == ("mouse", LDOWN, 20.0, 20.0, 0)
     assert len(mac.posted) == 2 + 10 + 1
-    assert mac.posted[-1] == ("mouse", LUP, last, 20.0, 0)
-    assert mac.points[-1] == (80.0, 20.0)  # the end point was what got checked
+    assert mac.posted[-1] == ("mouse", LUP, 20.0, 20.0, 0)  # back at p1, never an unchecked point
+    assert sum(d[:2] == ("mouse", LUP) for d in mac.posted) == 1
     assert_pairs(mac.posted)
 
 
@@ -412,7 +429,8 @@ def test_locked_drag_match_releases_at_end_point(load):
     mod.send_events([{"type": "drag", "x": 0.2, "y": 0.2, "dx": 0.6, "dy": 0.0, **LOCK}])
     assert mac.posted[-1] == ("mouse", LUP, 80.0, 20.0, 0)
     assert len(mac.posted) == 13
-    assert mac.points == [(20.0, 20.0), (20.0, 20.0), (80.0, 20.0)]
+    # start (move), end (before the down), start (down), end (before the up)
+    assert mac.points == [(20.0, 20.0), (80.0, 20.0), (20.0, 20.0), (80.0, 20.0)]
 
 
 # j
@@ -508,9 +526,34 @@ def test_locked_scroll_over_another_app_refuses(load):
 
 def test_locked_scroll_without_point_posts_nothing(load):
     mod, mac = load()
-    with pytest.raises(ValueError):
+    with pytest.raises(mod.FocusMismatch) as exc:
         mod.send_events([{"type": "scroll", "dy": 0.5, "x": None, "y": None, **LOCK}])
+    assert exc.value.reason == "invalid"
     assert mac.posted == []
+
+
+def test_locked_mode_rejects_scroll_without_point_before_any_post(load):
+    mod, mac = load()
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([{"type": "key", "key": "return", "mods": [], **LOCK},
+                         {"type": "scroll", "dy": 0.5, "x": None, "y": None, **LOCK}], locked=True)
+    assert (exc.value.reason, exc.value.index) == ("invalid", 1)
+    assert mac.posted == [] and mac.system_created == 0
+
+
+@pytest.mark.parametrize("locked", [False, True])
+@pytest.mark.parametrize("fields", [
+    {"require_app": "Safari", "require_window": ""},
+    {"require_app": "", "require_window": "Inbox"},
+    {"require_window": "Inbox"},
+])
+def test_malformed_lock_fields_refuse_never_skip_the_check(load, fields, locked):
+    mod, mac = load()
+    mac.front_window = "Other"  # would fail a real window check
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([{"type": "key", "key": "return", "mods": [], **fields}], locked=locked)
+    assert exc.value.reason in ("invalid", "unlocked")
+    assert mac.posted == [] and mac.system_created == 0
 
 
 # m

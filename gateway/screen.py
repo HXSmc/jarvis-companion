@@ -444,8 +444,13 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
         # An older Mac gateway silently drops require_* (pydantic ignores
         # unknown fields) and would post unlocked: refuse unless it says it
         # enforces the lock.
-        if locked and (await _mac_forward("GET", "status")).json().get("focus_lock") is not True:
-            raise HTTPException(status_code=409, detail=FOCUS_LOCK_UNSUPPORTED)
+        if locked:
+            try:
+                supported = (await _mac_forward("GET", "status")).json().get("focus_lock") is True
+            except (ValueError, AttributeError):  # not a JSON object: fail closed
+                raise HTTPException(status_code=503, detail=MAC_OFFLINE_DETAIL) from None
+            if not supported:
+                raise HTTPException(status_code=409, detail=FOCUS_LOCK_UNSUPPORTED)
         await _mac_forward("POST", "input", json={"events": events})
     elif target == "mac":
         from mac.screen import driver

@@ -22,8 +22,8 @@ Halt: `halt()` makes every later post refuse (InputHalted) until `resume()`;
 it is a threading.Event, so it works while a batch holds `_LOCK`.
 
 Release rule: a posted mouse-down or key-down is always followed by its up,
-even when a halt or a refusal arrives in between (a drag refused at its end
-point releases at the last intermediate point). Those release posts are the
+even when a halt or a refusal arrives in between (a drag refused after its
+down releases at its checked start point). Those release posts are the
 only posts after a refusal; `_guarded_post` and `_post_release` are the only
 two places that call CGEventPost.
 
@@ -248,7 +248,8 @@ def capture_jpeg(w: int, q: int) -> tuple[bytes, int, int]:
 
 class FocusMismatch(Exception):
     """A focus-locked event was refused. `reason`: app | window | point |
-    probe_failed | unlocked. Holds app names and booleans only, never a
+    probe_failed | unlocked | invalid (empty require_app/require_window,
+    require_window without require_app, locked scroll without x/y). Holds app names and booleans only, never a
     window title. `index`/`partial` are set by send_events."""
 
     def __init__(self, reason: str, expected_app: str | None = None,
@@ -365,9 +366,11 @@ def _guard(ev: dict | None, point: CGPoint | None = None) -> None:
     if _HALT.is_set():
         raise InputHalted()
     app = ev.get("require_app") if ev else None
-    if not app:
+    want = ev.get("require_window") if ev else None
+    if app is None and want is None:
         return
-    want = ev.get("require_window")
+    if not app or want == "":  # a malformed lock never degrades to "no check"
+        raise FocusMismatch("invalid", app or None)
     system = AX.AXUIElementCreateSystemWide()
     if not system:
         raise FocusMismatch("probe_failed", app)
@@ -426,6 +429,9 @@ def send_events(events, *, locked: bool = False) -> None:
             for index, ev in enumerate(events):
                 if not ev.get("require_app"):
                     raise FocusMismatch("unlocked", index=index)
+                if ev.get("require_window") == "" or (
+                        ev["type"] == "scroll" and (ev.get("x") is None or ev.get("y") is None)):
+                    raise FocusMismatch("invalid", ev["require_app"], index=index)
         bounds = _main_bounds()
         for index, ev in enumerate(events):
             _event_posted = False
@@ -454,7 +460,7 @@ def _post(ev: dict, bounds: CGRect) -> None:
         p = None
         if ev.get("require_app"):
             if ev.get("x") is None or ev.get("y") is None:
-                raise ValueError("a locked scroll needs x and y")
+                raise FocusMismatch("invalid", ev["require_app"])
             p = to_points(ev["x"], ev["y"], bounds)
             _move(p, ev)
         _scroll(ev.get("dy") or 0.0, ev.get("dx") or 0.0, ev, p)
@@ -492,11 +498,14 @@ def _click(p: CGPoint, ev: dict | None = None, double: bool = False,
 
 
 def _drag(p1: CGPoint, p2: CGPoint, ev: dict | None = None) -> None:
-    """Guarded at the start point (move + down) and the end point (before the
-    up). The held-button moves only check halt. Any refusal after the down
-    releases the button where the pointer is."""
+    """Both the start and the end point are guarded before the mouse-down, so
+    a bad end point refuses with nothing pressed; the end point is checked
+    again before the up. The held-button moves only check halt. Any refusal
+    after the down releases at the START point p1 (a drop back on the
+    checked source = cancel), never at an unchecked point."""
     _move(p1, ev)
     time.sleep(0.1)
+    _guard(ev, p2)
     down = AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, p1, 0)
     _guarded_post(ev, down, p1)
     at = p1
@@ -505,7 +514,6 @@ def _drag(p1: CGPoint, p2: CGPoint, ev: dict | None = None) -> None:
             f = i / 11
             q = CGPoint(p1.x + (p2.x - p1.x) * f, p1.y + (p2.y - p1.y) * f)
             _guarded_post(None, AX.CGEventCreateMouseEvent(None, kCGEventMouseMoved, q, 0))
-            at = q
             time.sleep(0.03)
         _guard(ev, p2)
         at = p2
