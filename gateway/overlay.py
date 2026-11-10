@@ -664,7 +664,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     if untrusted:
         _tainted.add(body.conv_id)
     pool = deps.quiet_conversations if body.conv_id in _tainted else deps.conversations
-    session = pool.get(body.conv_id)
+    session = await asyncio.to_thread(pool.get, body.conv_id)
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
