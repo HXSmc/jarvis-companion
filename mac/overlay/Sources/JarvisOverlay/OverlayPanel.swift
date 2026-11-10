@@ -179,7 +179,12 @@ final class CardPanel: NSObject {
                 entry.host.rootView = CardTile(card: card)
                 entry.card = card
                 entries[key] = entry
-                model.resize(key: key, size: entry.host.fittingSize, visible: visible)
+                let before = model.layout.frames[key]
+                model.resize(key: key, size: entry.host.fittingSize, visible: visible, keepOut: keepOut)
+                // Placed again as the newest card, so it goes on top like one.
+                if entry.window.isVisible, let frame = model.layout.frames[key], frame.origin != before?.origin {
+                    entry.window.orderFrontRegardless()
+                }
             } else {
                 let host = NSHostingView(rootView: CardTile(card: card))
                 let window = HUDWindow()

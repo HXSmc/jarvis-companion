@@ -8,6 +8,14 @@ private let inset = ScatterLayout.insetArea(V)
 private let orb = ScatterLayout.orbKeepOut(screen: F)
 private let sizes = [CGSize(width: 300, height: 120), CGSize(width: 360, height: 200),
                      CGSize(width: 300, height: 90), CGSize(width: 360, height: 150)]
+/// Demo card sizes per kind (info, stat, bar, link, flow), as CardView measures them; the live
+/// frames of the Mac test show the same sizes to within 1 pt.
+private let kindSizes = [CGSize(width: 300, height: 93), CGSize(width: 300, height: 127), CGSize(width: 360, height: 136),
+                         CGSize(width: 300, height: 127), CGSize(width: 360, height: 204)]
+// The Mac of the live test: 1440x900 pt, menu bar 30 pt, Dock 74 pt. With these numbers the
+// engine gives the live demo:14 and demo:18 frames to within 1 pt.
+private let liveScreen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+private let liveVisible = CGRect(x: 0, y: 30, width: 1440, height: 796)
 
 final class ScatterLayoutTests: XCTestCase {
 
@@ -128,12 +136,17 @@ final class ScatterLayoutTests: XCTestCase {
             }
         }
         XCTAssertTrue(retired, "retire never happened within 20 placements")
-        existing.removeFirst()
-        let placement = ScatterLayout.place(size: size, key: retireKey, visible: small, existing: existing, keepOut: [])
-        guard case .at = placement else {
+        // Retiring oldest first always ends in a placement, at the latest on an empty screen.
+        var placement = ScatterLayout.Placement.retireOldest
+        while placement == .retireOldest, !existing.isEmpty {
+            existing.removeFirst()
+            placement = ScatterLayout.place(size: size, key: retireKey, visible: small, existing: existing, keepOut: [])
+        }
+        guard case .at(let frame) = placement else {
             XCTFail("expected a placement after retiring the oldest, got \(placement)")
             return
         }
+        assertOverlapBounds(existing + [frame])
     }
 
     // MARK: g
@@ -212,20 +225,27 @@ final class ScatterLayoutTests: XCTestCase {
         XCTAssertTrue(state.frames.isEmpty)
         XCTAssertTrue(state.order.isEmpty)
 
-        // While aside nothing is retired, even past the overlap caps on a small screen.
+        // While aside nothing is retired and the caps still hold: a card with no spot waits
+        // unplaced, and after restore it is placed by the normal rule (oldest retires).
         let small = CGRect(x: 0, y: 0, width: 800, height: 600)
         let size = CGSize(width: 360, height: 260)
         var parked = ScatterLayout.LayoutState()
         for i in 1...4 {
             parked.cardAdded("c\(i)", size: size, visible: small, keepOut: [])
         }
+        let placedBefore = parked.order
         parked.aside()
         var retired: [String] = []
         for i in 5...10 {
             retired += parked.cardAdded("c\(i)", size: size, visible: small, keepOut: [])
         }
         XCTAssertTrue(retired.isEmpty)
-        XCTAssertEqual(parked.order.count, 10)
+        XCTAssertEqual(Array(parked.order.prefix(placedBefore.count)), placedBefore)
+        XCTAssertNil(parked.frames["c10"])
+        assertOverlapBounds(parked.order.compactMap { parked.frames[$0] })
+        parked.restore()
+        XCTAssertFalse(parked.cardAdded("c10", size: size, visible: small, keepOut: []).isEmpty)
+        XCTAssertNotNil(parked.frames["c10"])
     }
 
     // MARK: k
@@ -265,12 +285,10 @@ final class ScatterLayoutTests: XCTestCase {
     // MARK: round 1 (hub amendment A2)
 
     /// Demo cards with fixed per-kind sizes (info, stat, bar, link, flow), as CardView measures them.
-    private func demoRun(_ count: Int, keepOut: [CGRect] = [orb]) -> ScatterLayout.LayoutState {
-        let kindSizes = [CGSize(width: 300, height: 93), CGSize(width: 300, height: 127), CGSize(width: 360, height: 136),
-                         CGSize(width: 300, height: 127), CGSize(width: 360, height: 204)]
+    private func demoRun(_ count: Int, visible: CGRect = V, keepOut: [CGRect] = [orb]) -> ScatterLayout.LayoutState {
         var state = ScatterLayout.LayoutState()
         for (index, card) in LayoutDebugCommand.demoCards(count: count).enumerated() {
-            state.cardAdded(card.listKey, size: kindSizes[index % 5], visible: V, keepOut: keepOut)
+            state.cardAdded(card.listKey, size: kindSizes[index % 5], visible: visible, keepOut: keepOut)
         }
         return state
     }
@@ -330,8 +348,6 @@ final class ScatterLayoutTests: XCTestCase {
             return row * 3 + col
         }
         var state = ScatterLayout.LayoutState()
-        let kindSizes = [CGSize(width: 300, height: 93), CGSize(width: 300, height: 127), CGSize(width: 360, height: 136),
-                         CGSize(width: 300, height: 127), CGSize(width: 360, height: 204)]
         for (index, card) in LayoutDebugCommand.demoCards(count: 9).enumerated() {
             var occupied = [Int](repeating: 0, count: 9)
             for frame in state.frames.values { occupied[zone(frame)] += 1 }
@@ -355,5 +371,102 @@ final class ScatterLayoutTests: XCTestCase {
         XCTAssertTrue(state.cardAdded("c3", size: size, visible: V, keepOut: [V]).isEmpty)
         XCTAssertNil(state.frames["c3"])
         XCTAssertTrue(state.order.isEmpty)
+    }
+
+    // MARK: round 2 (live test of 23b6b39)
+
+    /// Every pair keeps a 20 pt gap or overlaps 8-30 % of the smaller card on one corner (20 pt
+    /// to 75 % of the smaller card deep on each axis, the older card's top-left corner left
+    /// uncovered); no card touches a keep-out. Returns the overlapping pairs and the largest share.
+    @discardableResult
+    private func assertLayered(_ state: ScatterLayout.LayoutState, keepOut: [CGRect], _ label: String,
+                               line: UInt = #line) -> (pairs: Int, maxRatio: CGFloat) {
+        let frames = state.order.compactMap { state.frames[$0] }
+        XCTAssertEqual(frames.count, state.order.count, label, line: line)
+        var pairs = 0
+        var maxRatio: CGFloat = 0
+        for i in frames.indices {
+            for keep in keepOut {
+                XCTAssertFalse(frames[i].intersects(keep), "\(label): card \(i) on a keep-out", line: line)
+            }
+            for j in frames.indices where j > i {
+                let (below, top) = (frames[i], frames[j])
+                let overlap = ScatterLayout.overlapArea(below, top)
+                guard overlap > 0 else {
+                    XCTAssertFalse(below.intersects(top.insetBy(dx: -20, dy: -20)),
+                                   "\(label): pair \(i),\(j) closer than 20 pt", line: line)
+                    continue
+                }
+                let ratio = overlap / min(ScatterLayout.area(below), ScatterLayout.area(top))
+                let shared = below.intersection(top)
+                pairs += 1
+                maxRatio = max(maxRatio, ratio)
+                XCTAssertTrue(ratio >= 0.08 - 1e-9 && ratio <= 0.30 + 1e-9,
+                              "\(label): pair \(i),\(j) overlap \(ratio)", line: line)
+                XCTAssertTrue(shared.width >= 20 && shared.width <= 0.75 * min(below.width, top.width) + 1e-9
+                              && shared.height >= 20 && shared.height <= 0.75 * min(below.height, top.height) + 1e-9,
+                              "\(label): pair \(i),\(j) overlap \(shared.size) runs along a side", line: line)
+                XCTAssertTrue(shared.minX > below.minX || shared.minY > below.minY,
+                              "\(label): pair \(i),\(j) covers the title corner", line: line)
+            }
+        }
+        assertOverlapBounds(frames)
+        return (pairs, maxRatio)
+    }
+
+    /// The live test: demo:14 and demo:18 on the 1440x900 Mac with the measured card sizes.
+    /// Before this round the engine itself put full-side strips there (note 11 / link 14: a
+    /// 29x93 pt strip, about 10 %, read as two cards 1-2 px apart).
+    func testDemoCardsOnTheLiveScreen() {
+        let keepOut = [ScatterLayout.orbKeepOut(screen: liveScreen)]
+        for count in [14, 18] {
+            let state = demoRun(count, visible: liveVisible, keepOut: keepOut)
+            let (pairs, maxRatio) = assertLayered(state, keepOut: keepOut, "live demo:\(count)")
+            print(String(format: "live 1440x900 demo:%d: %d shown, %d overlapping pairs, max overlap %.3f",
+                         count, state.order.count, pairs, Double(maxRatio)))
+        }
+        XCTAssertEqual(demoRun(14, visible: liveVisible, keepOut: keepOut).order.count, 14)
+        for count in [14, 18] {
+            assertLayered(demoRun(count), keepOut: [orb], "1512 demo:\(count)")
+        }
+    }
+
+    /// A card that grows after placement (60 pt wider and taller, as when its content is
+    /// replaced) keeps its spot only while every rule still holds; otherwise it alone is
+    /// placed again (or the oldest retires). No other card ever moves.
+    func testCardGrowingAfterPlacementKeepsTheRules() {
+        for (screen, visible) in [(F, V), (liveScreen, liveVisible)] {
+            let keepOut = [ScatterLayout.orbKeepOut(screen: screen)]
+            for count in [14, 18] {
+                var state = demoRun(count, visible: visible, keepOut: keepOut)
+                var replaced = 0
+                for key in state.order {
+                    guard let old = state.frames[key] else { continue }
+                    let others = state.frames.filter { $0.key != key }
+                    let grown = CGSize(width: old.width + 60, height: old.height + 60)
+                    let retired = state.cardResized(key, size: grown, visible: visible, keepOut: keepOut)
+                    for (other, frame) in others where !retired.contains(other) {
+                        XCTAssertEqual(state.frames[other], frame, "\(other) moved when \(key) grew")
+                    }
+                    if state.frames[key] != ScatterLayout.clamp(CGRect(origin: old.origin, size: grown),
+                                                                into: ScatterLayout.insetArea(visible)) {
+                        replaced += 1
+                    }
+                    assertLayered(state, keepOut: keepOut, "\(Int(screen.width)) demo:\(count), \(key) grown")
+                }
+                XCTAssertGreaterThan(replaced, 0, "growth never broke a rule, so the test proves nothing")
+                let (pairs, maxRatio) = assertLayered(state, keepOut: keepOut, "grown")
+                print(String(format: "%.0f demo:%d grown by 60 pt: %d shown, %d re-placed, %d overlapping pairs, max overlap %.3f",
+                             Double(screen.width), count, state.order.count, replaced, pairs, Double(maxRatio)))
+            }
+        }
+
+        // Room to grow: the card keeps its spot (only clamped).
+        var state = ScatterLayout.LayoutState()
+        state.cardAdded("a", size: CGSize(width: 300, height: 120), visible: V, keepOut: [orb])
+        guard let old = state.frames["a"] else { return XCTFail("no frame for a") }
+        let grown = CGSize(width: 340, height: 160)
+        XCTAssertTrue(state.cardResized("a", size: grown, visible: V, keepOut: [orb]).isEmpty)
+        XCTAssertEqual(state.frames["a"], ScatterLayout.clamp(CGRect(origin: old.origin, size: grown), into: inset))
     }
 }

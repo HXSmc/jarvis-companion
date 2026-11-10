@@ -120,9 +120,11 @@ final class OverlayModel: ObservableObject {
         if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
     }
 
-    /// A card replaced in place keeps its origin; only its new size is clamped.
-    func resize(key: String, size: CGSize, visible: CGRect) {
-        layout.cardResized(key, size: size, visible: visible)
+    /// A card replaced in place keeps its spot while its new size keeps the caps; otherwise it
+    /// alone is placed again, and cards retired to make room leave `cards`.
+    func resize(key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) {
+        let retired = layout.cardResized(key, size: size, visible: visible, keepOut: keepOut)
+        if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
     }
 
     /// The screen changed: every stored frame moves the least distance back on screen.

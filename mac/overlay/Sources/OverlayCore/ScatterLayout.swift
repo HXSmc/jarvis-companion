@@ -3,7 +3,7 @@ import CoreGraphics
 
 /// Card placement over the whole visible screen: seeded, loose and layered (3x3 zones, least
 /// occupied first), never on a keep-out (orb, highlight boxes), pairwise overlap 8-30 % of the
-/// smaller card or a 20 pt gap. All rects are top-left global points, the space of `HUDShape.rect`.
+/// smaller card on one corner or a 20 pt gap. All rects are top-left global points, the space of `HUDShape.rect`.
 /// Pure: no AppKit, so every rule here is unit-tested.
 public enum ScatterLayout {
     /// Most cards on screen at once; the model drops the oldest beyond this.
@@ -18,8 +18,12 @@ public enum ScatterLayout {
     public static let minOverlap: CGFloat = 0.08
     /// Overlap a layered card looks for, as a share of the smaller card.
     public static let layerBand: ClosedRange<CGFloat> = 0.08...0.25
-    /// Cards that do not overlap keep at least this gap.
+    /// Cards that do not overlap keep at least this gap; an overlap is at least this deep on each axis.
     public static let minGap: CGFloat = 20
+    /// An overlap spans at most this share of the smaller card's width and of its height, so it
+    /// sits on a corner and never runs along a whole side (a full-side strip reads as two cards
+    /// butted together, or hides the card's title and value).
+    public static let maxCornerShare: CGFloat = 0.75
     static let candidatesPerZone = 24
 
     // Orb geometry, mirrors OverlayRootView.swift:26-30 (`.padding(24)`, bottom-right) and
@@ -38,15 +42,16 @@ public enum ScatterLayout {
         case at(CGRect)
         /// Only overlap is in the way: retire the oldest card and call again.
         case retireOldest
-        /// Every spot touches a keep-out: the card is not shown for now.
+        /// Every spot touches a keep-out, or (while aside, when nothing may retire) no spot keeps
+        /// the caps: the card is not shown for now.
         case noRoom
     }
 
     /// Places one card. `existing` is oldest first. Zones fill least occupied first; a card
     /// either overlaps another by 8-30 % of the smaller one or keeps a 20 pt gap to it. From the
     /// 7th card on, about one in three (`prefersLayer`) looks for a spot overlapping exactly one
-    /// older card by 8-25 % before anything else. With `allowRetire` false (parked cards are
-    /// never retired) the least-overlap spot wins, past the caps and the gap.
+    /// older card by 8-25 % before anything else. The caps and the gap always hold; with
+    /// `allowRetire` false (parked cards are never retired) a full screen gives `.noRoom`.
     public static func place(size: CGSize, key: String, visible: CGRect, existing: [CGRect],
                              keepOut: [CGRect], allowRetire: Bool = true) -> Placement {
         let area = insetArea(visible)
@@ -55,10 +60,7 @@ public enum ScatterLayout {
         var rng = SplitMix64(state: seed(key))
         var occupied = [Int](repeating: 0, count: 9)
         for frame in existing { occupied[zone(of: CGPoint(x: frame.midX, y: frame.midY), in: area)] += 1 }
-        // How much of each existing card the others already cover.
-        let covered = existing.indices.map { index in
-            existing.indices.reduce(CGFloat(0)) { $0 + ($1 == index ? 0 : overlapArea(existing[index], existing[$1])) }
-        }
+        let covered = coverage(existing)
         let tieBreak = (0..<9).map { _ in rng.next() }
         let zones = (0..<9).sorted { (occupied[$0], tieBreak[$0]) < (occupied[$1], tieBreak[$1]) }
         let zoneSize = CGSize(width: area.width / 3, height: area.height / 3)
@@ -86,8 +88,7 @@ public enum ScatterLayout {
                 let frame = clamp(CGRect(origin: origin, size: size), into: area)
                 if keepOut.contains(where: { $0.intersects(frame) }) { continue }
                 clearOfKeepOut = true
-                guard let fit = fitness(frame, existing: existing, covered: covered, capped: allowRetire)
-                else { continue }
+                guard let fit = fitness(frame, existing: existing, covered: covered) else { continue }
                 if layered, layer == nil, fit.layers { layer = frame }
                 if fit.overlap < (best?.score ?? .infinity) { best = (frame, fit.overlap) }
             }
@@ -95,7 +96,7 @@ public enum ScatterLayout {
             if !layered, let best, best.score == 0 { return .at(best.frame) }
         }
         if let best { return .at(best.frame) }
-        return clearOfKeepOut && !existing.isEmpty ? .retireOldest : .noRoom
+        return clearOfKeepOut && !existing.isEmpty && allowRetire ? .retireOldest : .noRoom
     }
 
     /// From the 7th card on, about one card in three, fixed by its key's seed.
@@ -119,29 +120,46 @@ public enum ScatterLayout {
     }
 
     /// Summed overlap with the existing cards, and whether it overlaps exactly one of them by
-    /// `layerBand`. Nil when `capped` and a pair is closer than `minGap` without overlapping,
-    /// overlaps outside 8-30 % of the smaller card, or any card would pass `maxCoverage`.
-    static func fitness(_ frame: CGRect, existing: [CGRect], covered: [CGFloat],
-                        capped: Bool) -> (overlap: CGFloat, layers: Bool)? {
+    /// `layerBand`. Nil when a pair is closer than `minGap` without overlapping, overlaps outside
+    /// 8-30 % of the smaller card or off a corner, or any card would pass `maxCoverage`.
+    static func fitness(_ frame: CGRect, existing: [CGRect], covered: [CGFloat]) -> (overlap: CGFloat, layers: Bool)? {
         var total: CGFloat = 0
         var overlapped = 0
         var inBand = true
         for (index, other) in existing.enumerated() {
             let overlap = overlapArea(frame, other)
             guard overlap > 0 else {
-                if capped, frame.intersects(other.insetBy(dx: -minGap, dy: -minGap)) { return nil }
+                if frame.intersects(other.insetBy(dx: -minGap, dy: -minGap)) { return nil }
                 continue
             }
             let ratio = overlap / min(area(frame), area(other))
-            overlapped += 1
-            if !layerBand.contains(ratio) { inBand = false }
-            if capped, ratio < minOverlap || ratio > maxOverlap || (covered[index] + overlap) / area(other) > maxCoverage {
+            if ratio < minOverlap || ratio > maxOverlap || (covered[index] + overlap) / area(other) > maxCoverage
+                || !isCornerOverlap(frame, over: other) {
                 return nil
             }
+            overlapped += 1
+            if !layerBand.contains(ratio) { inBand = false }
             total += overlap
         }
-        if capped, area(frame) > 0, total / area(frame) > maxCoverage { return nil }
+        if area(frame) > 0, total / area(frame) > maxCoverage { return nil }
         return (total, overlapped == 1 && inBand)
+    }
+
+    /// `top` lies over one corner of `below`: the shared part is `minGap` to `maxCornerShare` of
+    /// the smaller card deep on each axis, and `below`'s top-left corner (where its title
+    /// starts) stays uncovered.
+    static func isCornerOverlap(_ top: CGRect, over below: CGRect) -> Bool {
+        let shared = top.intersection(below)
+        return shared.width >= minGap && shared.width <= maxCornerShare * min(top.width, below.width)
+            && shared.height >= minGap && shared.height <= maxCornerShare * min(top.height, below.height)
+            && (shared.minX > below.minX || shared.minY > below.minY)
+    }
+
+    /// How much of each card the others cover.
+    static func coverage(_ frames: [CGRect]) -> [CGFloat] {
+        frames.indices.map { index in
+            frames.indices.reduce(CGFloat(0)) { $0 + ($1 == index ? 0 : overlapArea(frames[index], frames[$1])) }
+        }
     }
 
     /// The orb, its padding and the banner band, bottom-right of the screen.
@@ -269,8 +287,9 @@ public enum ScatterLayout {
         public mutating func clear() { self = LayoutState() }
 
         /// Places a measured card against the stored frames. Returns the keys retired to make
-        /// room, oldest first. The card stays unplaced when only a keep-out is in the way.
-        /// While aside nothing is retired: the card takes the least-overlap spot.
+        /// room, oldest first. The card stays unplaced when only a keep-out is in the way, or
+        /// while aside when no spot keeps the caps (nothing is retired then); a later sync after
+        /// restore places it.
         @discardableResult
         public mutating func cardAdded(_ key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) -> [String] {
             cardRemoved(key)
@@ -294,10 +313,24 @@ public enum ScatterLayout {
             }
         }
 
-        /// A card replaced in place keeps its origin; only its new size is clamped.
-        public mutating func cardResized(_ key: String, size: CGSize, visible: CGRect) {
-            guard let old = frames[key] else { return }
-            frames[key] = ScatterLayout.clamp(CGRect(origin: old.origin, size: size), into: ScatterLayout.insetArea(visible))
+        /// A card replaced in place keeps its origin while its new size still keeps the caps,
+        /// the gap and the keep-outs; otherwise that card alone is placed again (no other card
+        /// moves), retiring the oldest if needed. Returns the retired keys, oldest first.
+        /// A highlight already under the old frame does not move it (the card dims instead).
+        @discardableResult
+        public mutating func cardResized(_ key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) -> [String] {
+            guard let old = frames[key] else { return [] }
+            let frame = ScatterLayout.clamp(CGRect(origin: old.origin, size: size), into: ScatterLayout.insetArea(visible))
+            let others = order.filter { $0 != key }.compactMap { frames[$0] }
+            // Newer cards lie on top of this one, so their corner rule runs the other way.
+            let newer = order.drop(while: { $0 != key }).dropFirst().compactMap { frames[$0] }
+            if !keepOut.contains(where: { $0.intersects(frame) && !$0.intersects(old) }),
+               ScatterLayout.fitness(frame, existing: others, covered: ScatterLayout.coverage(others)) != nil,
+               newer.allSatisfy({ ScatterLayout.overlapArea($0, frame) == 0 || ScatterLayout.isCornerOverlap($0, over: frame) }) {
+                frames[key] = frame
+                return []
+            }
+            return cardAdded(key, size: size, visible: visible, keepOut: keepOut)
         }
 
         public mutating func cardRemoved(_ key: String) {
