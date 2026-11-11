@@ -177,7 +177,7 @@ def test_intent_turn_clear(text):
     assert deps.conversations.sessions == {}
 
 
-ODD = "make it all go away for a bit"
+ODD = "wipe it all away for a bit"  # opens every mode: "wipe" (clear), "away" (hide, park, the rest)
 
 
 @pytest.mark.parametrize("mode", ALL_MODES)
@@ -325,7 +325,7 @@ def test_directive_needs_an_overlay_verb_from_the_owner(text):
     events, steps = run_turn(deps, text)
     assert "c1" in quiet.sessions  # the model was asked and sent the directives
     assert directive_events(events) == []
-    assert not [s for s in steps if s[0] == "layout"]
+    assert [f.get("state") for s, f in steps if s == "layout"] == ["dropped"] * 3
     assert done(events)["error"] is None
 
 
@@ -333,7 +333,7 @@ def test_directive_with_an_overlay_verb_in_a_quiet_turn_is_emitted():
     quiet = FakeConversations(model_lines({"say": "Done."}, {"layout": "aside"}))
     deps = make_deps(quiet_conversations=quiet)
     overlay._tainted.add("c1")
-    events, _ = run_turn(deps, "tuck all of that out of sight and put it on the side")
+    events, _ = run_turn(deps, "tuck all of that out of the way")
     assert directive_events(events) == [{"type": "layout", "mode": "aside"}]
 
 
@@ -382,7 +382,7 @@ NEGATIVE_R1 = (
     "hide the screen", "move the screen left", "show me a picture of a cat", "show me the video",
     "come back to this later", "make it disappear from my desktop", "move to the left lane", "clear it up",
     "go away for the weekend", "dismiss the meeting", "show them how it works", "show it in finder",
-    "hide the window", "close it",
+    "hide the window",
 )
 
 
@@ -395,5 +395,117 @@ def test_routing_round1_positive(phrase, kind, arg):
 
 @pytest.mark.parametrize("phrase", NEGATIVE_R1)
 def test_routing_round1_negative(phrase):
+    for text in (phrase, f"Hey Jarvis, {phrase}", f"{phrase}.", f"{phrase}?"):
+        assert parse(text, apps={}).kind == "answer", text
+
+
+# --- round 2: per-mode verb gate, honest line, reserved Confirm id, more phrases (written by builder)
+
+LOOK = "show me the last error on this page"
+
+
+def test_look_turn_show_me_cannot_clear_hide_or_park():
+    assert overlay.intents.parse(LOOK, apps={}).kind == "look"
+    deps = make_deps(chunks=model_lines({"say": "Here it is."}, {"clear": True}, {"layout": "aside"},
+                                        {"layout": "hide"}))
+    events, _ = run_turn(deps, LOOK)  # the look branch passes no on_step (f52-seescreen code): no steps here
+    assert directive_events(events) == []
+    assert [e["text"] for e in events if e["type"] == "say"].count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+
+
+def test_look_turn_show_me_may_still_show_restore_or_move():
+    deps = make_deps(chunks=model_lines({"layout": "show"}, {"layout": "restore"}, {"layout": "left"}))
+    events, _ = run_turn(deps, LOOK)
+    assert [e["mode"] for e in directive_events(events)] == ["show", "restore", "left"]
+    assert overlay.OVERLAY_UNCHANGED_LINE not in [e.get("text") for e in events]
+
+
+@pytest.mark.parametrize("text,passes", [
+    ("what should I put in this field", set()),
+    ("is this clear", {"clear"}),
+    ("how far away is that", {"hide", "aside"}),
+    ("hide it for a bit", {"hide"}),
+    ("park the lot somewhere", {"aside"}),
+    ("dismiss all of those", {"clear"}),
+])
+def test_removal_modes_need_their_own_verb(text, passes):
+    for mode in ("clear", "hide", "aside"):
+        overlay._history.clear()
+        line = {"clear": True} if mode == "clear" else {"layout": mode}
+        deps = make_deps(chunks=model_lines({"say": "Right."}, line))
+        events, _ = run_turn(deps, text)
+        got = directive_events(events)
+        assert bool(got) == (mode in passes), (text, mode, got)
+
+
+def test_gate_drop_says_the_honest_line_once():
+    deps = make_deps(chunks=model_lines({"say": "Okay, moving them."}, {"layout": "left"}, {"layout": "up"}))
+    events, steps = run_turn(deps, "what is the weather like")
+    says_ = [e["text"] for e in events if e["type"] == "say"]
+    assert says_[-1] == overlay.OVERLAY_UNCHANGED_LINE and says_.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+    assert says_.index(overlay.OVERLAY_UNCHANGED_LINE) > says_.index("Okay, moving them.")
+    assert [f for s, f in steps if s == "layout"] == [{"mode": "left", "state": "dropped"},
+                                                       {"mode": "up", "state": "dropped"}]
+    assert done(events)["error"] is None
+
+
+def test_gate_drop_alone_is_not_an_empty_reply():
+    deps = make_deps(chunks=model_lines({"layout": "hide"}))
+    events, _ = run_turn(deps, "what is the weather like")
+    assert [e["text"] for e in events if e["type"] == "say"] == [acks.PHRASES["answer"], overlay.OVERLAY_UNCHANGED_LINE]
+    assert done(events)["error"] is None
+
+
+def test_no_honest_line_when_the_directive_passes():
+    deps = make_deps(chunks=model_lines({"say": "Hiding them."}, {"layout": "hide"}))
+    events, _ = run_turn(deps, "hide those things for a while")
+    assert directive_events(events) == [{"type": "layout", "mode": "hide"}]
+    assert overlay.OVERLAY_UNCHANGED_LINE not in [e.get("text") for e in events]
+
+
+def test_honest_line_is_short_and_plain():
+    line = overlay.OVERLAY_UNCHANGED_LINE
+    assert len(line.split()) <= 12 and "!" not in line and line.endswith(".")
+    assert overlay.intents.parse(line, apps={}).kind == "answer"  # never re-triggers itself
+
+
+def test_prompt_forbids_claiming_an_action_without_the_line():
+    for prompt in (overlay.ANSWER_PROMPT, overlay.QUIET_PROMPT):
+        line = next(x for x in prompt.splitlines() if x.startswith("When the owner asks to hide, show, move or clear"))
+        assert "never say you are hiding, moving or clearing anything without that line" in line
+
+
+def test_model_card_cannot_take_the_confirm_id():
+    card = {**INFO, "id": overlay._CONFIRM_CARD_ID}
+    deps = make_deps(chunks=model_lines({"card": card}))
+    events, _ = run_turn(deps, "what is the population of Japan")
+    shown = [e["card"] for e in events if e["type"] == "card"]
+    assert len(shown) == 1 and shown[0]["id"] != overlay._CONFIRM_CARD_ID
+
+
+POSITIVE_R2 = (
+    ("get this out of my face", "hide", ""), ("get it out of here", "hide", ""),
+    ("get it out of the way", "aside", ""), ("get them out of my way", "aside", ""),
+    ("get everything out of my way", "aside", ""),
+    ("close it", "clear", ""), ("close them", "clear", ""), ("close this", "clear", ""),
+    ("move it to the top right corner", "move", "top_right"), ("move it to the bottom left corner", "move", "bottom_left"),
+    ("move all the cards left", "move", "left"), ("move all of them to the right", "move", "right"),
+    ("hide all the cards", "hide", ""),
+)
+NEGATIVE_R2 = (  # all `answer` on 76968a6 and now
+    "close the door", "get it out of the car", "get out of my way", "move all the cards to the trash",
+    "close it down", "get this out of my head", "move it to the corner shop", "close safari",
+)
+
+
+@pytest.mark.parametrize("phrase,kind,arg", POSITIVE_R2)
+def test_routing_round2_positive(phrase, kind, arg):
+    for text in (phrase, f"Hey Jarvis, {phrase}", f"{phrase}.", f"{phrase}?"):
+        intent = parse(text, apps={})
+        assert (intent.kind, intent.arg) == (kind, arg), text
+
+
+@pytest.mark.parametrize("phrase", NEGATIVE_R2)
+def test_routing_round2_negative(phrase):
     for text in (phrase, f"Hey Jarvis, {phrase}", f"{phrase}.", f"{phrase}?"):
         assert parse(text, apps={}).kind == "answer", text

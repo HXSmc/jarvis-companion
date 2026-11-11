@@ -88,7 +88,7 @@ Pictures: when the owner asks to see a picture, photo or images of something, fi
 
 Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. To open an app, reply with ONLY {"open": "<app name as the owner said it>"} (one line, nothing else). Do this whenever the owner clearly asks to open, launch, pull up or bring up an app, in any wording, even if the name is rough ("a VS code"). Never ask the owner to rephrase or to say "open" plus a name. For a website, show a link card instead.
 
-When the owner asks to hide, show, move or clear the overlay in any wording, do it with one {"clear": true} or {"layout": ...} line after a short say line; never say you cannot, and never suggest keys, gestures or any other way to do it.
+When the owner asks to hide, show, move or clear the overlay in any wording, do it with one {"clear": true} or {"layout": ...} line after a short say line; never say you cannot, never say you are hiding, moving or clearing anything without that line, and never suggest keys, gestures or any other way to do it.
 
 If the request needs the owner's own files, the code on his screen, git history, GitHub, his notes, mail or calendar, reply with ONLY {"agent": true} and nothing else: a tool-using helper takes over. Never say you cannot reach them.
 
@@ -112,10 +112,19 @@ QUIET_PROMPT = re.sub(
 LAYOUT_MODES = frozenset({"hide", "show", "aside", "restore", "left", "right", "up", "down",
                           "top_left", "top_right", "bottom_left", "bottom_right", "other_side"})
 MAX_DIRECTIVES = 4  # clear/layout events per reply; an injected reply cannot flicker the overlay
-# A model clear/layout line counts only when the owner's own words ask for an overlay action
-# (same idea as the open-verb check): screen or web text alone can never park or wipe the cards.
+# A model clear/layout line counts only when the owner's own words (never screen, web or history
+# text) hold a verb for that kind of action, like the open-verb check. Clear, hide and park need a
+# removal word of their own kind, so "show me the error on this page" can at most let injected text
+# show, restore or move the cards. Residual: an owner question such as "is this clear" opens clear.
 _OVERLAY_VERB_RE = re.compile(r"\b(?:hide|unhide|show|move|shift|clear|close|dismiss|park|put|away|back|rid|bring"
                               r"|remove|minimi[sz]e|disappear|gone|off my screen)\b", re.IGNORECASE)
+_REMOVAL_VERB_RES = {
+    "clear": re.compile(r"\b(?:clear|dismiss|close|remove|wipe|rid)\b", re.IGNORECASE),
+    "hide": re.compile(r"\b(?:hide|away|disappear|gone|minimi[sz]e|rid|off my screen|out of my face"
+                       r"|out of my way|out of the way)\b", re.IGNORECASE),
+    "aside": re.compile(r"\b(?:park|aside|away|out of the way|out of my way)\b", re.IGNORECASE),
+}
+OVERLAY_UNCHANGED_LINE = "I haven't changed the overlay. Say hide, clear or move it."
 NO_PICTURE_LINE = "I couldn't find a picture of that."
 NO_VIDEO_LINES = {  # find_video reasons -> one plain line each; the card itself comes from the service
     "none": "I couldn't find a video of that.",
@@ -845,7 +854,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     lookup_alone_at: int | None = None  # len(said) when a lookup started as the turn's first output
     directives: list[str] = []  # clear/layout events sent this reply, capped at MAX_DIRECTIVES
     cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
-    owner_asked_layout = bool(_OVERLAY_VERB_RE.search(text))
+    gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
 
     async def media_refused() -> AsyncIterator[dict]:
         nonlocal media_seen
@@ -969,7 +978,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             card = hud.validate_card(raw_card) if quiet else media_lookup.fast_tier_card(raw_card)
         if card:
             seen = _card_ids.setdefault(body.conv_id, set())
-            if card["id"] in seen:
+            if card["id"] in seen or card["id"] == _CONFIRM_CARD_ID:  # Confirm id: agent only
                 card["id"] = uuid.uuid4().hex[:8]
             seen.add(card["id"])
             produced = True
@@ -984,7 +993,17 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 else layout if isinstance(layout, str) and layout in LAYOUT_MODES else None)
         if mode in ("hide", "aside", "clear") and len(_card_ids.get(body.conv_id, ())) > cards_before:
             mode = None  # a reply never hides, parks or wipes the card it just showed
-        if mode and owner_asked_layout and len(directives) < MAX_DIRECTIVES:
+        if mode and not _REMOVAL_VERB_RES.get(mode, _OVERLAY_VERB_RE).search(text):
+            if on_step:
+                on_step("layout", mode=mode, state="dropped")
+            if not gate_dropped:  # the model may have promised it: say plainly that nothing changed
+                async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
+                    yield ev
+                said.append(OVERLAY_UNCHANGED_LINE)
+            gate_dropped.append(mode)
+            produced = True  # the honest line is the answer: not an empty reply
+            mode = None
+        if mode and len(directives) < MAX_DIRECTIVES:
             directives.append(mode)
             produced = True
             if on_step:

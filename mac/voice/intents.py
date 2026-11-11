@@ -106,23 +106,25 @@ _NO_RE = re.compile(r"(?:(?:no|nope)(?: (?:don't|do not|thanks|thank you|stop|ca
 # Hide is checked before clear: "get rid of it" is temporary, "get rid of the cards" final.
 _WRAP_LEAD = r"(?:(?:can|could|would) you |please |jarvis )*"
 _WRAP_TRAIL = r"(?:,? (?:please|for me|for now|now|jarvis))*"
-_OBJECT = r"(?:it|them|that|this|everything|all of it|all|the overlay|the cards?)"
+_OBJECT = r"(?:it|them|that|this|everything|all the cards|all of them|all of it|all|the overlay|the cards?)"
 _HIDE_RE = re.compile(_WRAP_LEAD + r"(?:hide(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
                       r"|get (?:it|that|this|them) off my screen|go away"
+                      r"|get (?:it|this|that|them|everything) out of (?:my face|here)"
                       r"|make (?:it|that|them|everything) (?:disappear|go away))" + _WRAP_TRAIL)
 _SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show (?:it|them|everything|the overlay|the cards?)(?: again)?"
                       r"|bring (?:it|them|everything) back|unhide(?: " + _OBJECT + r")?|come back)" + _WRAP_TRAIL)
 _CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: it| them| all| everything| the (?:screen|overlay|cards?))?"
                        r"|dismiss(?: it| them| that| all| everything)?"
-                       r"|close (?:that|everything)|remove the cards|get rid of the cards)" + _WRAP_TRAIL)
+                       r"|close (?:it|this|that|them|everything)|remove the cards|get rid of the cards)" + _WRAP_TRAIL)
 _ASIDE_RE = re.compile(_WRAP_LEAD + r"(?:move (?:it|them) (?:out of the way|aside)"
+                       r"|get (?:it|this|that|them|everything) out of (?:the|my) way"
                        r"|park (?:it|the cards))" + _WRAP_TRAIL)
 _RESTORE_RE = re.compile(_WRAP_LEAD + r"put (?:it|them|the cards) back" + _WRAP_TRAIL)
 # Direction last ("move it to the top left", "move to the left side"); "top"->up, "bottom"->down
 # at the match site. No "the screen" object: "move the screen left" is not about the cards.
 _MOVE_RE = re.compile(_WRAP_LEAD + r"(?:move|shift)(?: " + _OBJECT + r")?"
                       + r"(?: to the)? (left|right|up|down|top left|top right|top"
-                      r"|bottom left|bottom right|bottom|other side)(?: side)?" + _WRAP_TRAIL)
+                      r"|bottom left|bottom right|bottom|other side)(?: side| corner)?" + _WRAP_TRAIL)
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.

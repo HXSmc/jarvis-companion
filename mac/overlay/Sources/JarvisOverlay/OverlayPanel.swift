@@ -158,13 +158,36 @@ final class HUDWindow: NSPanel {
         }
         moveTarget = frame
         let distance = hypot(frame.midX - self.frame.midX, frame.midY - self.frame.midY)
+        let width = (screen ?? NSScreen.main)?.visibleFrame.width ?? 0
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = ScatterLayout.moveDuration(distance: distance)
+            context.duration = ScatterLayout.moveDuration(distance: distance, across: width)
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             self.animator().setFrame(frame, display: false)
         }, completionHandler: { [self] in
             MainActor.assumeIsolated {
                 if moveTarget == frame { moveTarget = nil }
+            }
+        })
+    }
+
+    /// A refused move: lean `offset` (AppKit points) and back, `ScatterLayout.nudgeDuration` in
+    /// all; nothing under Reduce Motion, while hidden, dragged or sliding.
+    func nudge(by offset: CGVector) {
+        guard isVisible, !isDragging, moveTarget == nil, !Theme.reduceMotion else { return }
+        let home = frame
+        let half = ScatterLayout.nudgeDuration / 2
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = half
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(home.offsetBy(dx: offset.dx, dy: offset.dy), display: false)
+        }, completionHandler: { [self] in
+            MainActor.assumeIsolated {
+                guard moveTarget == nil, !isDragging else { return }
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = half
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    self.animator().setFrame(home, display: false)
+                }
             }
         })
     }
@@ -239,7 +262,15 @@ final class CardPanel: NSObject {
         model.moveBounds = { [weak self] in
             guard let self else { return (.zero, []) }
             let (screen, visible) = self.geometry
-            return (visible, [ScatterLayout.orbKeepOut(screen: screen)])
+            let permission = self.permissionWindow.isVisible ? [Self.flip(self.permissionWindow.frame)] : []
+            return (visible, [ScatterLayout.orbKeepOut(screen: screen)] + permission)
+        }
+        model.moveRefused = { [weak self] mode in
+            guard let self else { return }
+            let lean = ScatterLayout.nudgeOffset(mode)
+            for entry in self.entries.values {
+                entry.window.nudge(by: CGVector(dx: lean.dx, dy: -lean.dy))  // AppKit y points up
+            }
         }
         // @Published fires before the value lands: sync on the next main-loop turn.
         let refit = { [weak self] (_: Any) in DispatchQueue.main.async { self?.sync() } }

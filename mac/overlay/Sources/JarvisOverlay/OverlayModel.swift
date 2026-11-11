@@ -30,6 +30,8 @@ final class OverlayModel: ObservableObject {
     var pointerOnPanel: @MainActor () -> Bool = { false }
     /// Set by CardPanel: the visible frame (top-left points) and the orb keep-out a group move uses.
     var moveBounds: @MainActor () -> (visible: CGRect, keepOut: [CGRect]) = { (.zero, []) }
+    /// Set by CardPanel: a refused voice move leans the shown cards toward the asked side and back.
+    var moveRefused: @MainActor (LayoutMode) -> Void = { _ in }
     private static let maxShapes = 40
 
     /// Every shape held, oldest first; `shapes` is the visible part (hidden anchored shapes
@@ -161,10 +163,12 @@ final class OverlayModel: ObservableObject {
     /// Aside parks every card as a chip and drops the current highlight boxes; restore puts
     /// each card back at its stored frame and restarts the idle countdown. Hide fades every card
     /// and chip out (kept, idle countdown paused, highlights and media stopped); show and every
-    /// other mode make them visible again. A move restores parked cards, then moves the group.
+    /// other mode make them visible again. A move shows and restores the cards, then moves the
+    /// group; a refused move (no room clear of the orb) changes nothing and nudges the cards.
     /// Repeats are no-ops.
     func setLayout(_ mode: LayoutMode) {
-        if mode == .hide {
+        switch mode {
+        case .hide:
             guard !layout.hidden else { return }
             layout.hide()
             MediaPlaybackController.shared.stopAll()
@@ -172,10 +176,20 @@ final class OverlayModel: ObservableObject {
             idleTask?.cancel()
             idleTask = nil
             return
+        case .left, .right, .up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight, .otherSide:
+            let bounds = moveBounds()
+            if layout.moveAll(mode, visible: bounds.visible, keepOut: bounds.keepOut) {
+                bumpIdle()
+            } else {
+                moveRefused(mode)
+            }
+            return
+        case .show, .aside, .restore:
+            break
         }
         unhide()
         switch mode {
-        case .hide, .show:
+        case .hide, .show, .left, .right, .up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight, .otherSide:
             break
         case .aside:
             guard layout.mode == .normal else { return }
@@ -185,10 +199,6 @@ final class OverlayModel: ObservableObject {
         case .restore:
             guard layout.mode == .aside else { return }
             layout.restore()
-            bumpIdle()
-        case .left, .right, .up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight, .otherSide:
-            let bounds = moveBounds()
-            layout.moveAll(mode, visible: bounds.visible, keepOut: bounds.keepOut)
             bumpIdle()
         }
     }
