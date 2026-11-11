@@ -12,6 +12,7 @@ from common import hud
 from mac.voice import media_lookup
 
 FIXTURES = Path(__file__).parent / "fixtures" / "overlay"
+SUFFIX = " filetype:bitmap haswbstatement:P6216=Q19652|P275=Q6938433"
 
 
 def fixture(name: str) -> bytes:
@@ -43,13 +44,14 @@ def test_three_good_hits(commons):
         assert urlsplit(h["url"]).hostname in media_lookup.MEDIA_HOSTS
         assert urlsplit(h["source_page"]).hostname == "commons.wikimedia.org"
         assert h["licence"] and h["artist"]
-    assert hits[0]["title"] == "Alaska Red Fox (Vulpes vulpes)"  # File: prefix and extension gone
-    assert hits[0]["artist"] == 'Gregory "Slobirdr" Smith' and hits[0]["licence"] == "CC BY-SA 2.0"
+    assert hits[0]["title"] == "Common foxes in the snow"  # File: prefix and extension gone
+    assert hits[0]["artist"] == "Wilhelm Kuhnert" and hits[0]["licence"] == "Public domain"
+    assert [h["licence"] for h in hits] == ["Public domain", "CC0", "Public domain"]
     req = commons["requests"][0]
     assert req.url.host == "commons.wikimedia.org" and req.url.path == "/w/api.php"
     assert req.headers["user-agent"].startswith("jarvis-companion-overlay/1.0 (https://github.com/HXSmc/jarvis-companion)")
     assert "cookie" not in req.headers
-    assert req.url.params["gsrsearch"] == "red fox filetype:bitmap" and req.url.params["gsrnamespace"] == "6"
+    assert req.url.params["gsrsearch"] == "red fox" + SUFFIX and req.url.params["gsrnamespace"] == "6"
 
 
 def test_count_limits_hits(commons):
@@ -58,10 +60,44 @@ def test_count_limits_hits(commons):
 
 
 def test_bad_hits_are_dropped(commons):
-    """Other host, http, SVG, webm, suffix and userinfo tricks, bad page host, no licence, blocklist."""
+    """Other host, http, SVG, webm, suffix/userinfo/port tricks, bad page host, no licence, CC BY,
+    CC BY-SA, attribution required, blocklist."""
     commons["reply"] = lambda req: ok(fixture("bad"))
     hits = media_lookup.search("red fox", 6)
-    assert [h["title"] for h in hits] == ["Red Fox drinking from a lake in Gennevilliers, France"]
+    assert [h["title"] for h in hits] == ["Panorama fox", "Tall strip fox", "Vulpes vulpes ssp fulvus"]
+
+
+def _with_licence(code, short, attribution):
+    data = json.loads(fixture("fox"))
+    for page in data["query"]["pages"]:
+        ext = page["imageinfo"][0]["extmetadata"]
+        for key, value in (("License", code), ("LicenseShortName", short), ("AttributionRequired", attribution)):
+            if value is None:
+                ext.pop(key, None)
+            else:
+                ext[key] = {"value": value}
+    return json.dumps(data).encode()
+
+
+@pytest.mark.parametrize("code,short,attribution,kept", [
+    ("pd", "Public domain", "false", 3),
+    ("cc0", "CC0", "false", 3),
+    ("cc-by-4.0", "CC BY 4.0", "true", 0),
+    ("cc-by-sa-4.0", "CC BY-SA 4.0", "true", 0),
+    (None, None, None, 0),  # missing licence
+    ("pd", "Public domain", None, 0),  # unknown attribution flag
+    ("cc0", "CC0", "true", 0),  # contradictory: needs credit -> dropped
+])
+def test_only_public_domain_and_cc0(commons, code, short, attribution, kept):
+    commons["reply"] = lambda req: ok(_with_licence(code, short, attribution))
+    assert len(media_lookup.search("red fox", 6)) == kept
+
+
+def test_search_asks_commons_for_allowed_licences_only(commons):
+    media_lookup.search("red fox", 1)
+    sent = commons["requests"][0].url.params
+    assert sent["gsrsearch"].endswith(" haswbstatement:P6216=Q19652|P275=Q6938433")
+    assert sent["gsrlimit"] == "20" and "License" in sent["iiextmetadatafilter"]
 
 
 def test_lookalike_hosts_are_refused():
@@ -129,8 +165,8 @@ def test_query_is_cleaned_capped_and_sent_once(commons):
     media_lookup.search(nasty, 2)
     assert len(commons["requests"]) == 1
     sent = commons["requests"][0].url.params["gsrsearch"]
-    words = sent.removesuffix(" filetype:bitmap")
-    assert sent.endswith(" filetype:bitmap") and len(words) <= 80
+    words = sent.removesuffix(SUFFIX)
+    assert sent.endswith(SUFFIX) and len(words) <= 80
     assert not set(words) & set(':"/\n\x00\x1b')
     assert b"%0A" not in commons["requests"][0].url.raw_path  # no newline even encoded
 
@@ -144,8 +180,8 @@ def test_blocked_query_never_fetches(commons):
 def test_card_single_and_gallery(commons):
     one = hud.validate_card(media_lookup.find("red fox", 1))
     assert one["type"] == "image" and "items" not in one and one["title"] == "Red Fox"
-    assert one["alt"] == "Alaska Red Fox (Vulpes vulpes)"  # description, not attribution
-    assert one["caption"] == 'Gregory "Slobirdr" Smith, CC BY-SA 2.0, Wikimedia Commons'
+    assert one["alt"] == "Common foxes in the snow"  # description, not attribution
+    assert one["caption"] == "Wilhelm Kuhnert, Public domain, Wikimedia Commons"
     gal = hud.validate_card(media_lookup.find("red fox", 3))
     assert len(gal["items"]) == 3 and gal["url"] == gal["items"][0]["url"]
     assert all(it["caption"].endswith("Wikimedia Commons") for it in gal["items"])

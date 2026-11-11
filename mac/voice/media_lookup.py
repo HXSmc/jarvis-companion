@@ -5,6 +5,7 @@ the service asks Commons (fixed host, no key, no redirects, 4 s, 512 KB cap, no 
 builds the image card from the response. Everything Commons returns is untrusted text: it is
 stripped of markup and control characters, capped, shown on the card and never fed back to a model.
 
+Licences: public domain and CC0 only (ALLOWED_LICENCES), asked of the search and re-checked per hit.
 Content filter (no key, no dependency): bitmap files only, the ~800 px thumbnail never the
 original, and a word blocklist on the query, the file title, its object name and its categories.
 shortcut: Commons has no safe-search flag, so an explicit file with innocent words and no telling
@@ -41,10 +42,15 @@ MEDIA_TYPES = frozenset({"image", "video"})
 TIMEOUT_S = 4.0
 MAX_BYTES = 512 * 1024
 THROTTLE_S = 60  # after a 429 (Wikimedia API usage guidelines: back off)
-SEARCH_LIMIT = 10  # ask for a few more than needed: the filters drop some
+SEARCH_LIMIT = 20  # still one request (~50 KB); the filters drop some hits
 THUMB_WIDTH = 800
 MAX_QUERY, MAX_TITLE, MAX_ARTIST, MAX_LICENCE = 80, 60, 40, 30
 MAX_COUNT = hud.MAX_MEDIA_ITEMS
+# Only licences that need no visible credit while the Mac does not draw `caption` (task
+# f52-media-caption). Key = CommonsMetadata `License` code (extmetadata); value = the Commons
+# structured-data statement the search filters on. Widen both together, e.g.
+# "cc-by-4.0": "P275=Q20007257", once the caption is on screen.
+ALLOWED_LICENCES = {"pd": "P6216=Q19652", "cc0": "P275=Q6938433"}
 
 # Explicit and gore words; a match in the query skips the fetch, a match in a hit drops the hit.
 _BLOCK = re.compile(
@@ -128,6 +134,9 @@ def _hit(page) -> dict | None:
     raw_title = page.get("title") if isinstance(page.get("title"), str) else ""
     if not (url and source_page and licence):
         return None
+    if (_meta(ext, "License").strip().lower() not in ALLOWED_LICENCES
+            or _meta(ext, "AttributionRequired").strip().lower() != "false"):
+        return None
     if _BLOCK.search(" ".join((raw_title, _meta(ext, "ObjectName"), _meta(ext, "Categories")))):
         return None
     title = clean_text(_EXT.sub("", raw_title.removeprefix("File:")).replace("_", " "), MAX_TITLE)
@@ -192,10 +201,10 @@ def search(query, count=1) -> list[dict]:
                 return []
         data = _fetch({
             "action": "query", "format": "json", "formatversion": "2",
-            "generator": "search", "gsrsearch": f"{words} filetype:bitmap", "gsrnamespace": "6",
-            "gsrlimit": str(SEARCH_LIMIT), "prop": "imageinfo", "iiprop": "url|mime|extmetadata",
+            "generator": "search", "gsrsearch": f"{words} filetype:bitmap haswbstatement:{'|'.join(ALLOWED_LICENCES.values())}", "gsrnamespace": "6",
+            "gsrlimit": str(SEARCH_LIMIT), "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata",
             "iiurlwidth": str(THUMB_WIDTH), "iiextmetadatalanguage": "en",
-            "iiextmetadatafilter": "ObjectName|Artist|LicenseShortName|Categories",
+            "iiextmetadatafilter": "ObjectName|Artist|LicenseShortName|License|AttributionRequired|Categories",
         })
         result = data.get("query") if data else None
         pages = result.get("pages") if isinstance(result, dict) else None

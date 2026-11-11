@@ -10,21 +10,30 @@
      {
       "thumburl": "https://example.com/thumb/fox.jpg",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -36,23 +45,32 @@
     "index": 2,
     "imageinfo": [
      {
-      "thumburl": "http://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "http://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -60,27 +78,36 @@
    },
    {
     "ns": 6,
-    "title": "File:Australian Cattle Dog Origins Diagram.svg",
+    "title": "File:Fox diagram.svg",
     "index": 3,
     "imageinfo": [
      {
-      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f1/Australian_Cattle_Dog_Origins_Diagram.svg/960px-Australian_Cattle_Dog_Origins_Diagram.svg.png?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/f/f1/Australian_Cattle_Dog_Origins_Diagram.svg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Australian_Cattle_Dog_Origins_Diagram.svg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/svg+xml",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Australian Cattle Dog Origins Diagram"
+        "value": "Rotfuchs (Mai 2025) 2"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
        },
        "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/w/index.php?title=User:Nodoc%C3%A9phale&amp;action=edit&amp;redlink=1\" class=\"new\" title=\"User:Nodocéphale (page does not exist)\">Nodocéphale</a>"
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
        },
        "LicenseShortName": {
         "value": "CC0"
        },
-       "Categories": {
-        "value": "CC-Zero|Diagrams|Dog breeds|Origins|Australian Cattle Dog|Self-published work|Unidentified history"
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -92,23 +119,32 @@
     "index": 4,
     "imageinfo": [
      {
-      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "video/webm",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -122,21 +158,30 @@
      {
       "thumburl": "https://thumb.wikimedia.org.evil.com/x.jpg",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -150,21 +195,30 @@
      {
       "thumburl": "https://thumb.wikimedia.org@evil.com/x.jpg",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -178,21 +232,30 @@
      {
       "thumburl": "https://upload.wikimedia.org.evil.com/x.jpg",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -206,21 +269,67 @@
      {
       "thumburl": "https://upload.wikimedia.org@evil.com/x.jpg",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Bad port.jpg",
+    "index": 9,
+    "imageinfo": [
+     {
+      "thumburl": "https://upload.wikimedia.org:bad/x.jpg",
+      "thumbwidth": 800,
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
+      "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Rotfuchs (Mai 2025) 2"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -229,26 +338,35 @@
    {
     "ns": 6,
     "title": "File:Bad page host.jpg",
-    "index": 9,
+    "index": 10,
     "imageinfo": [
      {
-      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
       "descriptionurl": "https://evil.example/wiki/File:x.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -257,23 +375,137 @@
    {
     "ns": 6,
     "title": "File:No licence.jpg",
-    "index": 10,
+    "index": 11,
     "imageinfo": [
      {
-      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:CC BY fox.jpg",
+    "index": 12,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
+      "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Rotfuchs (Mai 2025) 2"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "AttributionRequired": {
+        "value": "true"
+       },
+       "License": {
+        "value": "cc-by-4.0"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:CC BY-SA fox.jpg",
+    "index": 13,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
+      "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Rotfuchs (Mai 2025) 2"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0"
+       },
+       "AttributionRequired": {
+        "value": "true"
+       },
+       "License": {
+        "value": "cc-by-sa-4.0"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Attribution required fox.jpg",
+    "index": 14,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
+      "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Rotfuchs (Mai 2025) 2"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "true"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -282,26 +514,35 @@
    {
     "ns": 6,
     "title": "File:Nude study fox.jpg",
-    "index": 11,
+    "index": 15,
     "imageinfo": [
      {
-      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 3681,
+      "height": 2454,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }
@@ -309,27 +550,110 @@
    },
    {
     "ns": 6,
-    "title": "File:Red Fox drinking from a lake in Gennevilliers, France.jpg",
-    "index": 12,
+    "title": "File:Panorama fox.jpg",
+    "index": 16,
     "imageinfo": [
      {
-      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
       "thumbwidth": 800,
-      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
-      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
       "mime": "image/jpeg",
+      "width": 6000,
+      "height": 1000,
       "extmetadata": {
        "ObjectName": {
-        "value": "Red Fox drinking from a lake in Gennevilliers, France"
-       },
-       "Artist": {
-        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
-       },
-       "LicenseShortName": {
-        "value": "CC BY 4.0"
+        "value": "Rotfuchs (Mai 2025) 2"
        },
        "Categories": {
-        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Tall strip fox.jpg",
+    "index": 17,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg/960px-Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Rotfuchs_%28Mai_2025%29_2.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rotfuchs_(Mai_2025)_2.jpg",
+      "mime": "image/jpeg",
+      "width": 400,
+      "height": 1200,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Rotfuchs (Mai 2025) 2"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Saxony-Anhalt|Files with coordinates missing SDC location of creation (51° N, 11° E)|Animals in Kröllwitz (Halle/Saale)|Front views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Romzig\" title=\"User:Romzig\">Romzig</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Vulpes vulpes ssp fulvus.jpg",
+    "index": 18,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/30/Vulpes_vulpes_ssp_fulvus.jpg/960px-Vulpes_vulpes_ssp_fulvus.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 600,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/30/Vulpes_vulpes_ssp_fulvus.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Vulpes_vulpes_ssp_fulvus.jpg",
+      "mime": "image/jpeg",
+      "width": 1285,
+      "height": 964,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Vulpes vulpes ssp fulvus"
+       },
+       "Categories": {
+        "value": "CC-Zero|Extracted images|Derivative versions|Files with coordinates missing SDC location of creation|INaturalist images reviewed by trusted reviewers|Vulpes vulpes in Ontario|Vulpes vulpes in snow|Vulpes vulpes looking at viewer|Vulpes vulpes fulva|Side views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "Joanne Redwood"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
        }
       }
      }

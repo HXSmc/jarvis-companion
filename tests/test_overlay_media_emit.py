@@ -32,7 +32,7 @@ YT = "dQw4w9WgXcQ"
 def hit(n: int, **over) -> dict:
     return {"url": f"https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a{n}/Dog{n}.jpg/960px-Dog{n}.jpg",
             "title": f"Dog {n}", "source_page": f"https://commons.wikimedia.org/wiki/File:Dog{n}.jpg",
-            "licence": "CC BY-SA 4.0", "artist": f"Author {n}", **over}
+            "licence": "CC0", "artist": f"Author {n}", **over}
 
 
 class FakeSearch:
@@ -90,7 +90,7 @@ def test_say_is_not_held_by_the_lookup_then_one_image_card(fake):
     assert kinds.index("say") < kinds.index("card")
     [card] = cards(events)
     assert card["type"] == "image" and card["url"].startswith("https://thumb.wikimedia.org/")
-    assert card["alt"] == "Dog 1" and card["caption"] == "Author 1, CC BY-SA 4.0, Wikimedia Commons"
+    assert card["alt"] == "Dog 1" and card["caption"] == "Author 1, CC0, Wikimedia Commons"
     assert "Here is a dog." in says(events) and overlay.NO_PICTURE_LINE not in says(events)
 
 
@@ -151,7 +151,8 @@ def test_injection_in_web_text_stays_inert(monkeypatch):
                            "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/x/xx/A.jpg/960px-A.jpg",
                            "descriptionurl": "https://commons.wikimedia.org/wiki/File:A.jpg",
                            "extmetadata": {"Artist": {"value": "<b>**x**</b>"},
-                                           "LicenseShortName": {"value": "CC0"}}}]}
+                                           "LicenseShortName": {"value": "CC0"}, "License": {"value": "cc0"},
+                                           "AttributionRequired": {"value": "false"}}}]}
     body = json.dumps({"query": {"pages": [page]}}).encode()
     sent = []
     monkeypatch.setattr(media_lookup, "_transport", httpx.MockTransport(
@@ -237,3 +238,19 @@ def test_debug_done_row_counts_media(fake, monkeypatch, tmp_path):
     turn(TestClient(make_app(), client=("127.0.0.1", 50000)), "show me a picture of a dog")
     done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"][-1]
     assert done["cards"] == 1 and done["media"] == 1
+
+
+def test_only_attribution_licences_found_says_no_result(monkeypatch):
+    """Item 3: nothing left after the licence filter -> the plain no-result line, no card."""
+    data = json.loads((ROOT / "tests/fixtures/overlay/commons_fox.json").read_text())
+    for page in data["query"]["pages"]:
+        page["imageinfo"][0]["extmetadata"].update(
+            {"License": {"value": "cc-by-sa-4.0"}, "LicenseShortName": {"value": "CC BY-SA 4.0"},
+             "AttributionRequired": {"value": "true"}})
+    body = json.dumps(data).encode()
+    monkeypatch.setattr(media_lookup, "_transport", httpx.MockTransport(
+        lambda req: httpx.Response(200, stream=httpx.ByteStream(body))))
+    monkeypatch.setattr(media_lookup, "_throttled_until", 0.0)
+    events = run(make_deps(chunks=lines({"say": "Looking for a picture of a fox."},
+                                        {"image_search": {"query": "fox", "count": 1}})))
+    assert cards(events) == [] and says(events)[-1] == overlay.NO_PICTURE_LINE
