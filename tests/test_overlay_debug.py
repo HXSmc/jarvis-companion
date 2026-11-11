@@ -129,4 +129,6 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"] == {"code_cli": True,
                                                                                         "vault": True}
     page = client.get("/overlay/debug").text
-    assert "VS Code `code` CLI missing: the editor will not scroll" in page and "code_cli === false" in page
+    assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
+    assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
+    assert "vault === false" in page and "Notes vault not set" in page

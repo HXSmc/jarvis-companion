@@ -28,7 +28,7 @@
   .v { word-break: break-word; }
   q { color: var(--quote); }
   .empty { color: var(--dim); padding: 32px 0; }
-  #setup { color: var(--bad); margin: 0 0 12px; }
+  #setup { color: var(--bad); margin: 0 0 12px; white-space: pre-line; }
 </style>
 </head>
 <body>
@@ -98,9 +98,12 @@ function render(data) {
   lis.textContent = lt;
   lis.style.color = l.state === "listening" ? "var(--ok)" : "var(--bad)";
   const setup = document.getElementById("setup");
-  const noCli = (data.setup || {}).code_cli === false;
-  setup.hidden = !noCli;
-  setup.textContent = noCli ? "VS Code `code` CLI missing: the editor will not scroll" : "";
+  const ok = data.setup || {};
+  const rows = [];
+  if (ok.code_cli === false) rows.push("VS Code command line tool (code) missing: the editor will not scroll");
+  if (ok.vault === false) rows.push("Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes");
+  setup.hidden = rows.length === 0;
+  setup.textContent = rows.join("\n");
 
   const root = document.getElementById("turns");
   root.replaceChildren();
