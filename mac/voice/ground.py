@@ -168,6 +168,24 @@ def for_question(question: str, candidates: list[dict]) -> list[dict]:
     return [c for c in candidates if c["source"] != "window"]
 
 
+MAX_ID_DIGITS = 6
+
+
+def parse_id(value) -> int | None:
+    """A candidate id from model JSON: an int, a whole float (2.0), or a string of 1-6 ASCII
+    digits; anything else (bool, 2.5, nan, "²", "٣", 20 digits) is None. Never raises."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        s = value.strip()
+        return int(s) if s.isascii() and s.isdigit() and len(s) <= MAX_ID_DIGITS else None
+    return None
+
+
 def choose(question: str, candidates: list[dict], jpeg: bytes | None, ask,
            context=None) -> tuple[dict | None, str]:
     """pick, plus why: picked | null | no_json | unknown_id."""
@@ -183,11 +201,8 @@ def choose(question: str, candidates: list[dict], jpeg: bytes | None, ask,
     cid = data.get("id") if isinstance(data, dict) else None
     if cid is None:
         return None, "null"
-    if isinstance(cid, bool):
-        return None, "unknown_id"
-    if isinstance(cid, str) and cid.strip().isdigit():
-        cid = int(cid)
-    if not isinstance(cid, int):
+    cid = parse_id(cid)
+    if cid is None:
         return None, "unknown_id"
     return next(((c, "picked") for c in candidates if c["id"] == cid), (None, "unknown_id"))
 
