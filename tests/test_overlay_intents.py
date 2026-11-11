@@ -129,7 +129,7 @@ def test_ack_cache_fallback():
     cache.prerender()  # no synth: quiet no-op
     assert cache.get("open") == ("Of course.", None, 0)
     # Unknown key falls back to the generic phrase.
-    assert cache.get("nope") == ("Certainly.", None, 0)
+    assert cache.get("nope") == ("On it.", None, 0)
 
     calls: list[str] = []
 

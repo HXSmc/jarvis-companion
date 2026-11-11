@@ -15,7 +15,7 @@ PHRASES = {
     "diff": "Pulling up the changes.",
     "answer": "Just a moment.",
     "clear": "All cleared.",
-    "generic": "Certainly.",
+    "generic": "On it.",
 }
 
 _ACK_KEYS = {
