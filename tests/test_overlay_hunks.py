@@ -91,7 +91,7 @@ def test_next_change_scrolls_and_highlights_one_hunk(client, repo):
     assert [e for e in events if e["type"] == "lines"] == [
         {"type": "lines", "file": str(root / "sample.py"), "ranges": [[149, 149]],
          "labels": ["2/3 changed"]}]
-    assert "Change 2 of 3, lines 149 to 149." in says(events)
+    assert "Change 2 of 3, line 149." in says(events)  # R1 ux 1 / design 2: one line is "line a"
     assert _wait(lambda: calls[-1] == ["code", "--goto", f"{sample.resolve()}:149"])
     steps = overlay.debug_log.snapshot()["turns"][0]["steps"]  # newest turn first
     assert any(s.get("step") == "hunk" and s.get("detail") == "next 2/3 lines=149-149"
@@ -107,6 +107,14 @@ def test_next_change_scrolls_and_highlights_one_hunk(client, repo):
 
     events = turn(client, "previous change", conv_id="h1")
     assert [e for e in events if e["type"] == "lines"][0]["ranges"] == [[149, 149]]
+    # R1 code 9: previous walks back to hunk 1, then stops with the first-change line.
+    events = turn(client, "previous change", conv_id="h1")
+    assert [e for e in events if e["type"] == "lines"][0]["labels"] == ["1/3 +3"]
+    assert "Change 1 of 3, lines 140 to 142." in says(events)
+    events = turn(client, "previous change", conv_id="h1")
+    assert acks.PHRASES["first_hunk"] in says(events)
+    assert not [e for e in events if e["type"] == "lines"]
+    assert overlay._hunks["h1"].index == 0
 
 
 def test_next_change_without_a_list(client):
@@ -134,7 +142,15 @@ def test_why_did_this_change_uses_blame_and_taints(client, repo):
     assert "Why did change 1 of 3 in sample.py, lines 140 to 142" in prompt
     assert "h1" in overlay._tainted
 
+    # R1 glm-cross note: on hunk 2 the prompt holds hunk 2's subject and diff, not hunk 1's or 3's.
     turn(client, "next change", conv_id="h1")
+    events = turn(client, "why did this change", conv_id="h1")
+    prompt = quiet.sessions["h1"].prompts[-1]
+    context = prompt.split('<context untrusted="true">', 1)[1]
+    assert "Rename the timeout flag" in context and "+L904 = 146" in context
+    assert "Drop the unused cache lines" not in prompt
+    assert "Add the retry counter" not in prompt.split("Change 2 of 3 in sample.py", 1)[1]
+    assert "Why did change 2 of 3 in sample.py, line 149" not in prompt  # question keeps "lines a to b"
     turn(client, "next change", conv_id="h1")  # hunk 3: removed lines, blame can't trace them
     prompts_before = len(quiet.sessions["h1"].prompts)
     events = turn(client, "why did this change", conv_id="h1")
@@ -169,3 +185,74 @@ def test_hunk_state_is_bounded_and_cleared(client, repo, monkeypatch):
         overlay._history[f"c{i}"] = deque([("q", "a")])
     turn(client, "next change", conv_id="fresh")
     assert "old1" not in overlay._hunks and "old1" not in overlay._history
+
+
+def test_why_refused_when_the_policy_says_no(client, repo, monkeypatch):
+    """R1 code 9: a "why" whose policy probe is not Allow speaks hunk_refused and asks no model; the probe
+    runs off the event loop (R1 code 5)."""
+    calls: list = []
+    _seed(client, repo, calls)
+    quiet = FakeConversations(['{"say": "x"}\n'])
+    overlay.set_deps(make_deps(conversations=FakeConversations(), quiet_conversations=quiet))
+    threads: list = []
+    real = overlay.agent_policy.decide
+
+    def deny(tool, inp, ctx):
+        import asyncio
+        try:  # a worker thread has no running loop; the event loop's thread does
+            asyncio.get_running_loop()
+            threads.append(True)
+        except RuntimeError:
+            threads.append(False)
+        return overlay.agent_policy.Deny("that repository defines its own git filters")
+
+    monkeypatch.setattr(overlay.agent_policy, "decide", deny)
+    blamed: list = []
+    monkeypatch.setattr(gitdiff, "blame_subjects", lambda *a: blamed.append(a) or ([], False))
+    events = turn(client, "why did this change", conv_id="h1")
+    assert acks.PHRASES["hunk_refused"] in says(events)
+    assert not quiet.sessions and not blamed
+    assert threads and not any(threads)  # never on the event loop
+    monkeypatch.setattr(overlay.agent_policy, "decide", real)
+
+
+def test_cursor_is_stored_before_the_boxes_and_a_new_highlight_replaces_it(client, repo, monkeypatch):
+    """R1 code 6: a barge-in right after the boxes still leaves the cursor. R1 code 7: a new highlight
+    that finds nothing drops the old cursor."""
+    import asyncio
+    root = Path(repo["repo"])
+    deps = make_deps(run=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=""))
+    body = overlay.TurnBody(text="show the diff", conv_id="b1",
+                            screen=overlay.ScreenBody(app="Code", document=str(root / "sample.py")))
+
+    async def until_lines():
+        gen = overlay.run_turn(body, deps)
+        async for ev in gen:
+            if ev["type"] == "lines":
+                stored = "b1" in overlay._hunks
+                await gen.aclose()  # the app barged in: the stream stops here
+                return stored
+        return None
+
+    assert asyncio.run(until_lines()) is True
+    calls: list = []
+    _seed(client, repo, calls)
+    assert "h1" in overlay._hunks
+    monkeypatch.setattr(gitdiff, "hunks", lambda r, b: [])
+    turn(client, "show the diff", conv_id="h1")
+    assert "h1" not in overlay._hunks
+    assert acks.PHRASES["no_hunks"] in says(turn(client, "next change", conv_id="h1"))
+
+
+def test_hunk_span_card_and_line_helpers():
+    """R1 code 11: a deletion at the top of a file (start 0) is line 1. R1 design 4: past five hunks the
+    card shows four and "+N more", and still the hint, within six lines."""
+    top = {"file": "a.py", "start": 0, "count": 0, "old": 2}
+    assert overlay._hunk_span(top) == (1, 1)
+    assert overlay._hunk_line(1, 2, top) == "Change 1 of 2, line 1."
+    assert overlay._hunk_line(2, 2, {"start": 5, "count": 3, "old": 1}) == "Change 2 of 2, lines 5 to 7."
+    many = [{"file": "a.py", "start": 10 * i, "count": 1, "old": 1} for i in range(1, 10)]
+    body = overlay._hunk_card("a.py", many)["body"]
+    assert body == ["1/9 line 10 changed", "2/9 line 20 changed", "3/9 line 30 changed",
+                    "4/9 line 40 changed", "+5 more", 'Say "next change" to jump.']
+    assert overlay._hunk_card("a.py", many[:1])["body"] == ["1/1 line 10 changed"]

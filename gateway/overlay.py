@@ -435,6 +435,33 @@ class HunkNav:
 _hunks: dict[str, HunkNav] = {}
 
 
+def _hunk_span(h: dict) -> tuple[int, int]:
+    """Editor lines a..b of a hunk (a deletion at the top of a file has new-side start 0: line 1)."""
+    a = max(1, h["start"])
+    return a, max(a, h["start"] + max(h["count"], 1) - 1)
+
+
+def _hunk_line(k: int, n: int, h: dict) -> str:
+    a, b = _hunk_span(h)
+    return f"Change {k} of {n}, line {a}." if a == b else f"Change {k} of {n}, lines {a} to {b}."
+
+
+def _hunk_card(rel: str, hunks: list[dict]) -> dict | None:
+    """The change-list card of both paths (since the merge, and "what changed in this file").
+    Six body lines at most (hud.MAX_BODY_LINES): past five hunks, four plus "+N more"."""
+    n = len(hunks)
+    rows = []
+    for i, h in enumerate(hunks):
+        a, b = _hunk_span(h)
+        word = "added" if h["old"] == 0 else "removed here" if h["count"] == 0 else "changed"
+        rows.append(f"{i + 1}/{n} line {a} {word}" if a == b else f"{i + 1}/{n} lines {a}-{b} {word}")
+    if n > 5:
+        rows = rows[:4] + [f"+{n - 4} more"]
+    if n > 1:
+        rows.append('Say "next change" to jump.')
+    return hud.validate_card({"type": "info", "title": f"Changes in {Path(rel).name}", "body": rows})
+
+
 def _installed_apps(clock=time.monotonic) -> dict:
     """intents.list_apps(), cached for 60 s (it walks the app folders; called off the event loop)."""
     global _apps_cache
@@ -662,6 +689,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                     said.append("Here.")
 
         elif intent.kind == "git_diff":
+            _hunks.pop(body.conv_id, None)  # a new highlight replaces the cursor, even when it finds nothing
             document = body.screen.document if body.screen else None
             repo = await asyncio.to_thread(gitdiff.repo_for, document)
             if repo is None:
@@ -706,26 +734,20 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                                     chosen = rel
                         of_file = [h for h in hunks if h["file"] == chosen][:20]
                         n = len(of_file)
+                        # The cursor first: a barge-in during the summary must not lose "next change".
+                        ctx = agent_policy.Ctx(home=str(Path.home()),
+                                               vault=os.environ.get("OVERLAY_VAULT") or None,
+                                               cwd=str(repo))
+                        _hunks[body.conv_id] = HunkNav(repo=repo, rel=chosen, base=base,
+                                                       hunks=of_file, index=0, editor=editor, ctx=ctx)
                         if editor:  # scroll off the turn's stream: a hung CLI never holds it
                             threading.Thread(target=_scroll_to, daemon=True,
-                                             args=(repo, chosen, of_file[0]["start"], editor,
+                                             args=(repo, chosen, _hunk_span(of_file[0])[0], editor,
                                                    deps, on_step)).start()
-                        ranges = [[h["start"], h["start"] + max(h["count"], 1) - 1] for h in of_file]
+                        ranges = [list(_hunk_span(h)) for h in of_file]
                         labels = [gitdiff.hunk_label(h, i + 1, n) for i, h in enumerate(of_file)]
                         yield _lines_event(str(Path(repo) / chosen), ranges, labels)
-                        body_lines = []
-                        for i, h in enumerate(of_file[:5]):
-                            a = h["start"]
-                            b = h["start"] + max(h["count"], 1) - 1
-                            word = ("added" if h["old"] == 0
-                                    else "removed here" if h["count"] == 0 else "changed")
-                            body_lines.append(f"{i + 1}/{n} line {a} {word}" if a == b
-                                              else f"{i + 1}/{n} lines {a}-{b} {word}")
-                        if n > 1:
-                            body_lines.append('Say "next change" to jump.')
-                        card = hud.validate_card({"type": "info",
-                                                  "title": f"Changes in {Path(chosen).name}",
-                                                  "body": body_lines})
+                        card = _hunk_card(chosen, of_file)
                         if card:
                             yield {"type": "card", "card": card}
                         tail = (f"I've opened {Path(chosen).name}." if editor
@@ -734,11 +756,6 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                         async for ev in _speak(summary, deps):
                             yield ev
                         said.append("opened the diff")
-                        ctx = agent_policy.Ctx(home=str(Path.home()),
-                                               vault=os.environ.get("OVERLAY_VAULT") or None,
-                                               cwd=str(repo))
-                        _hunks[body.conv_id] = HunkNav(repo=repo, rel=chosen, base=base,
-                                                       hunks=of_file, index=0, editor=editor, ctx=ctx)
                     else:
                         async for ev in _speak("No changes since the last merge.", deps):
                             yield ev
@@ -769,14 +786,13 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                     nav.index = index
                     h = nav.hunks[index]
                     k = index + 1
-                    a = h["start"]
-                    b = h["start"] + max(h["count"], 1) - 1
+                    a, b = _hunk_span(h)
                     if nav.editor:
                         threading.Thread(target=_scroll_to, daemon=True,
                                          args=(nav.repo, nav.rel, a, nav.editor, deps, on_step)).start()
                     yield _lines_event(str(nav.repo / nav.rel), [[a, b]],
                                        [gitdiff.hunk_label(h, k, n)])
-                    line = f"Change {k} of {n}, lines {a} to {b}."
+                    line = _hunk_line(k, n, h)
                     async for ev in _speak(line, deps):
                         yield ev
                     said.append(line)
@@ -786,14 +802,14 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                 h = nav.hunks[nav.index]
                 k = nav.index + 1
                 n = len(nav.hunks)
-                a, b = h["start"], h["start"] + max(h["count"], 1) - 1
+                a, b = _hunk_span(h)
                 if h["count"] == 0:
                     async for ev in _line("why_removed", deps):
                         yield ev
                 else:
                     probe = shlex.join(["git", "-C", str(nav.repo), "diff", nav.base, "--", nav.rel])
-                    if not isinstance(agent_policy.decide("Bash", {"command": probe}, nav.ctx),
-                                      agent_policy.Allow):
+                    verdict = await asyncio.to_thread(agent_policy.decide, "Bash", {"command": probe}, nav.ctx)
+                    if not isinstance(verdict, agent_policy.Allow):
                         async for ev in _line("hunk_refused", deps):
                             yield ev
                     else:
@@ -1421,9 +1437,13 @@ def _agent_repo(screen: ScreenBody | None, info: dict | None = None) -> Path | N
             info["how"] = "doc"
             return top
     front: dict = {}
-    if screen is not None:  # the app's own name first, else the first window of any known terminal
-        front = next((w for w in screen.windows if w.get("app") == screen.app), None) or next(
-            (w for w in screen.windows if w.get("app") in _TERMINALS), {})
+    if screen is not None:  # the app's own name first, else the front terminal window
+        front = next((w for w in screen.windows if w.get("app") == screen.app), None) or {}
+        terms = [w for w in screen.windows if w.get("app") in _TERMINALS]
+        # Only when a terminal IS in front (its window owner name may differ from screen.app): a
+        # background Terminal must never pick the repo while Slack or Safari is in front.
+        if not front and terms and (screen.app in _TERMINALS or screen.windows[0] is terms[0]):
+            front = terms[0]
     app = screen.app if screen is not None and screen.app in _TERMINALS else str(front.get("app") or "")
     cwd = _terminal_cwd(app, str(front.get("title") or ""), info) if screen is not None else None
     if cwd is not None and cwd.is_dir() and (top := _toplevel(cwd)):
@@ -1519,13 +1539,10 @@ def _last_change(run: AgentRun) -> tuple[dict | None, dict | None, HunkNav | Non
     hunks = [h for h in gitdiff.hunks(run.repo, f"{sha}^") if h["file"] == rel]
     if not hunks:
         return None, None, None
-    spans = [(h["start"], h["start"] + max(h["count"], 1) - 1) for h in hunks]
-    card = hud.validate_card({"type": "info", "title": f"Changed in {Path(rel).name}",
-                              "body": [f"Since {sha[:8]}^: {len(hunks)} changed part{'s' if len(hunks) > 1 else ''}",
-                                       *[f"Lines {a}-{b}" if b > a else f"Line {a}" for a, b in spans]]})
     shown = hunks[:20]
+    card = _hunk_card(rel, shown)  # the same card as "since the last merge"
     labels = [gitdiff.hunk_label(h, i + 1, len(shown)) for i, h in enumerate(shown)]
-    lines = _agent_lines({"file": rel, "ranges": [list(s) for s in spans[:20]]}, run)  # in-repo + Read policy
+    lines = _agent_lines({"file": rel, "ranges": [list(_hunk_span(h)) for h in shown]}, run)  # in-repo + Read
     if lines:
         lines = _lines_event(lines["file"], lines["ranges"], labels)
     nav = HunkNav(repo=run.repo, rel=rel, base=f"{sha}^", hunks=shown, index=0,
@@ -1719,12 +1736,12 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     if card:
                         yield {"type": "card", "card": card}
                     if lines:
+                        if nav:  # the cursor for a later "next change" / "why", stored before the yield
+                            _hunks[run.conv_id] = nav
                         if run.editor:  # the first change may be scrolled off: bring it into view
                             threading.Thread(target=_scroll_editor, daemon=True,
                                              args=(run, lines["ranges"][0][0], deps, on_step)).start()
                         yield lines
-                        if nav:  # the cursor for a later "next change" / "why did this change?"
-                            _hunks[run.conv_id] = nav
                     elif run.model_lines:  # no host diff (e.g. the file's first commit): the model's
                         yield run.model_lines
                 if len(said) == spoke:

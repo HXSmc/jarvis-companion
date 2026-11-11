@@ -739,8 +739,9 @@ def test_history_of_file_on_screen_gets_diff_card_and_lines(client):
     events = turn(client, "research the git history of the code on my screen and tell me what changed",
                   conv_id="hs1", screen={"app": "Code", "document": str(repo / "app.py")})
     cards = [e["card"] for e in events if e["type"] == "card"]
-    assert cards and cards[-1]["title"] == "Changed in app.py"
-    assert cards[-1]["body"][1:] == ["Line 2", "Line 4"]
+    # jtools2 R1 design 3: the same card as "since the last merge" (title, rows, the "next change" hint).
+    assert cards and cards[-1]["title"] == "Changes in app.py"
+    assert cards[-1]["body"] == ["1/2 line 2 changed", "2/2 line 4 added", 'Say "next change" to jump.']
     lines = [e for e in events if e["type"] == "lines"]
     assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[2, 2], [4, 4]],
                       "labels": ["1/2 changed", "2/2 +1"]}]
@@ -841,7 +842,7 @@ def test_model_lines_never_suppress_the_host_card_and_the_first_change_is_scroll
     events = turn(client, "research the git history of the code on my screen and tell me what changed",
                   conv_id="r4a", screen={"app": "Code", "document": str(REPO / "app.py")})
     cards = [e["card"] for e in events if e["type"] == "card"]
-    assert [c["title"] for c in cards] == ["Changed in app.py"]
+    assert [c["title"] for c in cards] == ["Changes in app.py"]
     assert [e for e in events if e["type"] == "lines"] == [
         {"type": "lines", "file": str(target), "ranges": [[2, 2], [4, 4]],
          "labels": ["1/2 changed", "2/2 +1"]}]
@@ -1094,6 +1095,10 @@ def test_terminal_repo_run6_shape(tmp_path, monkeypatch):
     # The app name the screen reports may differ from the window owner's: the first terminal window counts.
     found = overlay._agent_repo(overlay.ScreenBody(app="Terminal.app", windows=windows), {})
     assert found is not None and found.resolve() == scratch.resolve()
+    # R1 code 8: with another app in front (no window of it listed), a background Terminal never picks.
+    behind = [{"app": "Safari", "title": "News", "box": [0, 0, 900, 700]}] + windows
+    assert overlay._agent_repo(overlay.ScreenBody(app="Slack", windows=behind), {}) is None
+    assert overlay._agent_repo(overlay.ScreenBody(app="Slack", windows=windows), {}) is not None  # front = Terminal
     # A ~/path in the title beats a shorter folder name that is also in it.
     deep = git_repo(tmp_path / "home" / "jt-scratch6-x" / "jt-scratch6")
     assert overlay._title_hit(deep, "jt-scratch6 — ~/jt-scratch6 — -fish") < overlay._title_hit(
