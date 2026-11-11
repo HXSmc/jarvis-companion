@@ -72,12 +72,36 @@ final class LineBandMapperTests: XCTestCase {
     }
 
     func testEditorWindowIsTheFrontMostTitleThatNamesTheFile() {
-        let terminal = (title: "ali — -zsh — overlay.pyc", frame: CGRect(x: 0, y: 0, width: 10, height: 10))
-        let code = (title: "● overlay.py — jarvis-companion-overlay", frame: CGRect(x: 1, y: 1, width: 10, height: 10))
-        let other = (title: "overlay.py — elsewhere", frame: CGRect(x: 2, y: 2, width: 10, height: 10))
+        let terminal = (app: "Terminal", title: "ali — -zsh — overlay.pyc", frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        let code = (app: "Code", title: "● overlay.py — jarvis-companion-overlay", frame: CGRect(x: 1, y: 1, width: 10, height: 10))
+        let other = (app: "Code", title: "overlay.py — elsewhere", frame: CGRect(x: 2, y: 2, width: 10, height: 10))
         XCTAssertEqual(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [terminal, code, other]), code.frame)
         XCTAssertNil(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [terminal]))
         XCTAssertNil(LineBandFit.editorWindow(file: "", windows: [code]))
         XCTAssertNil(LineBandFit.editorWindow(file: "lay.py", windows: [code]))  // a part of a word is no match
+    }
+
+    func testEditorWindowNeedsAnEditorApp() {
+        // Security note 3e: a browser tab titled like the file must not pick the gutter pass.
+        let safari = (app: "Safari", title: "overlay.py", frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        let code = (app: "Code", title: "overlay.py — repo", frame: CGRect(x: 1, y: 1, width: 10, height: 10))
+        XCTAssertEqual(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [safari, code]), code.frame)
+        XCTAssertNil(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [safari]))
+    }
+
+    func testThreeHunksGiveThreeBandsInOrder() throws {
+        // Gutter for lines 120-170, 20 pt apart from y=100 (gutter(_:_:) above).
+        let pass = LineBandFit.fit(ranges: [140...142, 149...149, 156...156], digits: gutter(120, 170),
+                                   window: CGRect(x: 0, y: 80, width: 900, height: 1200), partial: false)
+        XCTAssertEqual(pass.reason, "ok")
+        XCTAssertEqual(pass.bands.map(\.lines), [140...142, 149...149, 156...156])
+        let rowTop: (Int) -> CGFloat = { 100 + CGFloat($0 - 120) * 20 - 10 }
+        for (band, (first, last)) in zip(pass.bands, [(140, 142), (149, 149), (156, 156)]) {
+            XCTAssertEqual(band.rect.minY, rowTop(first), accuracy: 1)
+            XCTAssertEqual(band.rect.maxY, rowTop(last) + 20, accuracy: 1)
+        }
+        XCTAssertEqual(BandRetry.rangeIndex(of: 149...149, in: [140...142, 149...149, 156...156]), 1)
+        XCTAssertEqual(BandRetry.rangeIndex(of: 150...151, in: [140...142, 149...160]), 1)  // clipped on the last try
+        XCTAssertNil(BandRetry.rangeIndex(of: 1...2, in: [140...142]))
     }
 }

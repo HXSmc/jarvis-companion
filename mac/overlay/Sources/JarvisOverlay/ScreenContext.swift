@@ -126,15 +126,15 @@ enum ScreenContext {
     }
 
     /// One gutter-OCR pass for a `lines` event in the editor window that shows `file` (the
-    /// front-most window whose title names it, so a card, Terminal or another app in front does
-    /// not steal the pass; else the frontmost app's window). No bands: `reason` says which guard.
+    /// front-most editor-app window whose title names it, so a card, Terminal or a browser tab with
+    /// the same title does not steal the pass; else the frontmost app's window). No bands: `reason` says which guard.
     /// `detail`: window pick and line numbers only.
     static func lineBands(ranges: [ClosedRange<Int>], file: String, partial: Bool) async
         -> (pass: LineBandFit.Pass, detail: String) {
         guard !ranges.isEmpty else { return (LineBandFit.Pass(reason: "no_ranges"), "") }
         guard CGPreflightScreenCaptureAccess() else { return (LineBandFit.Pass(reason: "no_permission"), "") }
         guard let shot = try? await captureMainDisplay() else { return (LineBandFit.Pass(reason: "capture_failed"), "") }
-        let titled = visibleWindows().map { (title: $0.title, frame: CGRect(x: $0.box[0], y: $0.box[1],
+        let titled = visibleWindows().map { (app: $0.app, title: $0.title, frame: CGRect(x: $0.box[0], y: $0.box[1],
                                                                           width: $0.box[2] - $0.box[0],
                                                                           height: $0.box[3] - $0.box[1])) }
         var pick = "title"

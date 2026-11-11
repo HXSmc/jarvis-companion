@@ -24,7 +24,8 @@ public enum OverlayEvent: Equatable {
     case audio(text: String, rate: Int, pcm: Data)
     case shape(HUDShape, check: AXCheck?)
     case card(HUDCard)
-    case lines(file: String, ranges: [ClosedRange<Int>])
+    /// `labels`: one short tag per range ("2/3 changed"), or empty: the app then uses "changed".
+    case lines(file: String, ranges: [ClosedRange<Int>], labels: [String] = [])
     case clear
     case layout(LayoutMode)
     case done(metrics: [String: Double], error: String?)
@@ -56,16 +57,21 @@ public enum OverlayEvent: Equatable {
             guard let file = obj["file"] as? String,
                   let rawRanges = obj["ranges"] as? [[Any]]
             else { return .unknown }
+            // Labels pair with the wire ranges by index; a list of another length is ignored.
+            let rawLabels = obj["labels"] as? [String] ?? []
+            let paired = rawLabels.count == rawRanges.count
             var ranges: [ClosedRange<Int>] = []
-            for pair in rawRanges {
+            var labels: [String] = []
+            for (index, pair) in rawRanges.enumerated() {
                 guard pair.count == 2,
                       let lo = (pair[0] as? NSNumber)?.intValue,
                       let hi = (pair[1] as? NSNumber)?.intValue,
                       lo <= hi
                 else { continue }
                 ranges.append(lo...hi)
+                if paired { labels.append(String(rawLabels[index].prefix(24))) }
             }
-            return .lines(file: file, ranges: ranges)
+            return .lines(file: file, ranges: ranges, labels: labels)
         case "clear":
             return .clear
         case "layout":

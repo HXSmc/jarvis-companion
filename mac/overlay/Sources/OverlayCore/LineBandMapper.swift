@@ -76,13 +76,17 @@ public enum LineBandFit {
         return Pass(bands: bands, reason: bands.isEmpty ? "off_clip" : "ok", seen: seen)
     }
 
-    /// Front-most window whose title names `file` (its last path part as a whole word, e.g.
-    /// "● overlay.py — repo"), or nil. `windows` front to back.
-    public static func editorWindow(file: String, windows: [(title: String, frame: CGRect)]) -> CGRect? {
+    /// Apps whose window title may pick the gutter pass (a browser tab titled "overlay.py" may not).
+    public static let editorApps: Set<String> = ["Code", "Visual Studio Code", "Cursor", "Xcode"]
+
+    /// Front-most editor window (`editorApps`) whose title names `file` (its last path part as a
+    /// whole word, e.g. "● overlay.py — repo"), or nil. `windows` front to back.
+    public static func editorWindow(file: String, windows: [(app: String, title: String, frame: CGRect)]) -> CGRect? {
         let name = file.split(separator: "/").last.map(String.init) ?? ""
         guard !name.isEmpty else { return nil }
         let wordChar: (Character) -> Bool = { $0.isLetter || $0.isNumber || "._-".contains($0) }
         return windows.first { window in
+            guard editorApps.contains(window.app) else { return false }
             var rest = window.title[...]
             while let hit = rest.range(of: name) {
                 let before = hit.lowerBound == window.title.startIndex ? nil : window.title[window.title.index(before: hit.lowerBound)]
@@ -92,5 +96,29 @@ public enum LineBandFit {
             }
             return false
         }?.frame
+    }
+}
+
+/// The `lines` retry loop without the screen: `pause(attempt)` then `pass(attempt)`, up to `tries`
+/// times, until `done` accepts a pass. A cancelled task (the owner cleared the screen) stops before
+/// the next pass and returns nil, so nothing is drawn or reported after the clear.
+public enum BandRetry {
+    public static func run<P>(tries: Int, pause: (Int) async -> Void, pass: (Int) async -> P,
+                              done: (P) -> Bool) async -> (pass: P, attempt: Int)? {
+        var last: (pass: P, attempt: Int)?
+        for attempt in 1...max(tries, 1) {
+            await pause(attempt)
+            if Task.isCancelled { return nil }
+            let result = await pass(attempt)
+            last = (result, attempt)
+            if done(result) { break }
+        }
+        return Task.isCancelled ? nil : last
+    }
+
+    /// Index of the wanted range a drawn band belongs to (a band on the last try may be the visible
+    /// part of its range), for its label; nil when none overlaps.
+    public static func rangeIndex(of band: ClosedRange<Int>, in ranges: [ClosedRange<Int>]) -> Int? {
+        ranges.firstIndex(of: band) ?? ranges.firstIndex { $0.overlaps(band) }
     }
 }
