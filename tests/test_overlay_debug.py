@@ -116,3 +116,19 @@ def test_wake_service_agent_is_not_throttled():
     """Without ProcessType launchd throttles the agent and the wake word stops hearing words."""
     plist = (Path(__file__).resolve().parent.parent / "launchd/com.jarvis.overlay.service.plist").read_text()
     assert "<key>ProcessType</key>\n\t<string>Interactive</string>" in plist
+
+
+def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
+    """jtools2 item 4: the page shows a red row when the `code` CLI is not on the service PATH."""
+    monkeypatch.setattr(overlay.shutil, "which", lambda name: None)
+    monkeypatch.delenv("OVERLAY_VAULT", raising=False)
+    data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
+    assert data["setup"] == {"code_cli": False, "vault": False}
+    monkeypatch.setattr(overlay.shutil, "which", lambda name: str(tmp_path / name))
+    monkeypatch.setenv("OVERLAY_VAULT", str(tmp_path))
+    assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"] == {"code_cli": True,
+                                                                                        "vault": True}
+    page = client.get("/overlay/debug").text
+    assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
+    assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
+    assert "vault === false" in page and "Notes vault not set" in page

@@ -10,25 +10,45 @@ skipped (+++ /dev/null).
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
+import sys
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pytest
+from fastapi.testclient import TestClient
 
 from common.hud import validate_card
+from conftest import TOKEN
+from gateway import overlay
 from mac.voice import gitdiff
+from test_overlay_service import make_app, make_deps, says, turn
 
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
 
 # Working tree after the fixture's post-merge edits (a.py line 1 deleted, original
 # lines 3-4 edited, b.py +2, c.py new with 5 lines, d.py deleted -> skipped).
+# old = old-side count of each unified=0 hunk header.
 EXPECTED_HUNKS = [
-    {"file": "a.py", "start": 0, "count": 0},
-    {"file": "a.py", "start": 2, "count": 2},
-    {"file": "b.py", "start": 4, "count": 2},
-    {"file": "c.py", "start": 1, "count": 5},
+    {"file": "a.py", "start": 0, "count": 0, "old": 1},
+    {"file": "a.py", "start": 2, "count": 2, "old": 2},
+    {"file": "b.py", "start": 4, "count": 2, "old": 0},
+    {"file": "c.py", "start": 1, "count": 5, "old": 0},
 ]
+
+
+def _fixture():
+    """Import tests/fixtures/overlay/hunk_fixture.py as a module."""
+    spec = importlib.util.spec_from_file_location(
+        "hunk_fixture", Path(__file__).parent / "fixtures/overlay/hunk_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _git(repo, *args: str) -> str:
@@ -137,9 +157,9 @@ def test_git_argv_defuses_repo_config(repo, monkeypatch):
     assert gitdiff.last_merge(r) == "abc123"
     gitdiff.hunks(r, merge)
     gitdiff.diff_text(r, merge)
-    prefix = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-              "-c", "diff.external=", "-c", "core.pager=cat"]
-    assert all(argv[:9] == prefix for argv in calls)
+    prefix = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=", "-c", "core.pager=cat", "-c", "log.showSignature=false"]
+    assert all(argv[:12] == prefix for argv in calls)
     # The diff calls also refuse external diff drivers and textconv filters.
     for argv in calls[1:]:
         assert "--no-ext-diff" in argv and "--no-textconv" in argv
@@ -251,3 +271,254 @@ def test_open_in_editor_times_out_and_skips_colon_names(repo):
 
     assert gitdiff.open_in_editor(r, "a:9", 3, run=ok, fallback=False) == "none"
     assert calls == []
+
+
+def test_hunks_carry_old_count_and_labels(tmp_path):
+    truth = _fixture().build(tmp_path / "r")
+    hs = [h for h in gitdiff.hunks(tmp_path / "r", truth["merge"]) if h["file"] == "sample.py"]
+    assert len(hs) == 3
+    assert all("old" in h for h in hs)
+    assert [(h["start"], h["start"] + max(h["count"], 1) - 1) for h in hs] == [
+        (t["start"], t["end"]) for t in truth["hunks"]]
+    labels = [gitdiff.hunk_label(h, i + 1, 3) for i, h in enumerate(hs)]
+    assert labels == ["1/3 +3", "2/3 changed", "3/3 removed here"]
+    assert all(gitdiff.LABEL_RE.match(l) for l in labels)
+
+
+def test_blame_subjects_and_hunk_diff(tmp_path):
+    repo = tmp_path / "r"
+    truth = _fixture().build(repo)
+    assert gitdiff.blame_subjects(repo, "sample.py", 149, 149) == (["Rename the timeout flag"], False)
+    assert gitdiff.blame_subjects(repo, "sample.py", 140, 142)[0] == ["Add the retry counter"]
+    lines = (repo / "sample.py").read_text().splitlines()
+    lines[9] = 'L010 = 10  # touched'  # uncommitted working-tree edit
+    (repo / "sample.py").write_text("\n".join(lines) + "\n")
+    assert gitdiff.blame_subjects(repo, "sample.py", 10, 10) == ([], True)
+    text = gitdiff.hunk_diff(repo, truth["merge"], "sample.py", 149)
+    assert text.startswith("@@") and "+L904 = 146" in text
+
+
+def test_blame_never_runs_a_repo_textconv(tmp_path):
+    """R1 security 1: a repo from an archive may set diff.<x>.textconv + .gitattributes; git blame
+    applies textconv by default, so "why did this change?" must not run that program."""
+    repo = tmp_path / "r"
+    _fixture().build(repo)
+    marker = tmp_path / "pwned"
+    script = tmp_path / "conv.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat \"$1\"\n")
+    script.chmod(0o755)
+    _git(repo, "config", "diff.evil.textconv", str(script))
+    (repo / ".gitattributes").write_text("*.py diff=evil\n")
+    subjects, _ = gitdiff.blame_subjects(repo, "sample.py", 149, 149)
+    assert not marker.exists()
+    assert subjects == ["Rename the timeout flag"]
+    assert gitdiff.has_filters(repo)  # the overlay refuses such a repo before any diff
+    _git(repo, "config", "--unset", "diff.evil.textconv")
+    _git(repo, "config", "diff.evil.command", str(script))
+    assert gitdiff.has_filters(repo)
+
+
+# --- since-the-merge turn (the service on top of the fixture repo) ---------------------------
+
+
+def _wait(cond, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _reset_overlay():
+    overlay._history.clear()
+    overlay._notes.clear()
+    overlay._tainted.clear()
+    overlay._card_ids.clear()
+    overlay._pending.clear()
+    overlay._hunks.clear()
+    overlay.set_deps(None)
+    yield
+    overlay.set_deps(None)
+    overlay._hunks.clear()
+
+
+@pytest.fixture
+def overlay_client(monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN)
+    monkeypatch.setattr(overlay, "TOKEN_FILE", token_file)
+    return TestClient(make_app(), client=("127.0.0.1", 50000))
+
+
+def test_since_merge_highlights_every_hunk_of_the_file_on_screen(overlay_client, tmp_path):
+    """A git_diff turn with sample.py on screen: labelled boxes for each hunk, a scroll to the
+    first one, an info card, and the hunk cursor stored; without an editor app nothing opens."""
+    truth = _fixture().build(tmp_path / "home" / "r", extra=True)
+    root = Path(truth["repo"])
+    sample = root / "sample.py"
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    overlay.set_deps(make_deps(run=fake_run))
+    events = turn(overlay_client, "show the diff", conv_id="s1",
+                  screen={"app": "Code", "document": str(sample)})
+    assert [e for e in events if e["type"] == "lines"] == [
+        {"type": "lines", "file": str(root / "sample.py"), "ranges": [[140, 142], [149, 149], [155, 155]],
+         "labels": ["1/3 +3", "2/3 changed", "3/3 removed here"]}]
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert cards[-1]["title"] == "Changes in sample.py"
+    assert cards[-1]["body"] == ["1/3 lines 140-142 added", "2/3 line 149 changed",
+                                 "3/3 line 155 removed here", 'Say "next change" to jump.']
+    assert _wait(lambda: calls == [["code", "--goto", f"{sample.resolve()}:140"]])  # hunk 1 only
+    assert "2 files changed since the last merge. I've opened sample.py." in says(events)
+    assert overlay._hunks["s1"].rel == "sample.py"  # sample.py on screen beat other.py's 12 lines
+
+    calls.clear()  # a browser is not an editor: highlight and tell, but nothing opens
+    overlay.set_deps(make_deps(run=fake_run))
+    events = turn(overlay_client, "show the diff", conv_id="s1",
+                  screen={"app": "Safari", "document": str(sample)})
+    assert [e for e in events if e["type"] == "lines"]
+    assert calls == []
+    assert "2 files changed since the last merge. Showing the changes in sample.py." in says(events)
+
+    def no_code(cmd, **kwargs):  # editor CLI missing: no fallback to `open`, ever
+        calls.append(list(cmd))
+        raise FileNotFoundError
+
+    overlay.set_deps(make_deps(run=no_code))
+    turn(overlay_client, "show the diff", conv_id="s1",
+         screen={"app": "Code", "document": str(sample)})
+    assert _wait(lambda: calls and calls[-1][0] == "code")
+    assert all(c[0] != "open" for c in calls)
+
+
+def _sign_head(repo: Path) -> None:
+    """Rewrite HEAD with a fake gpgsig header: any signature check on it runs gpg.program."""
+    body = _git(repo, "cat-file", "commit", "HEAD")
+    head, msg = body.split("\n\n", 1)
+    sig = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEz\n -----END PGP SIGNATURE-----"
+    proc = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=repo, env=GIT_ENV,
+                          input=f"{head}\n{sig}\n\n{msg}\n", capture_output=True, text=True, check=True)
+    _git(repo, "update-ref", "HEAD", proc.stdout.strip())
+
+
+def test_repo_gpg_program_never_runs(tmp_path, monkeypatch):
+    """R2 security 1: a repo's own gpg.program (+ log.showSignature) runs on any signature check:
+    the gate refuses the repo, the prefix turns showSignature off, and the agent's log/show are denied."""
+    from mac.voice import agent_policy as ap
+
+    home = tmp_path / "home"
+    repo = home / "r"
+    _fixture().build(repo)
+    _sign_head(repo)
+    marker = tmp_path / "pwned"
+    script = tmp_path / "gpg.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    script.chmod(0o755)
+    _git(repo, "config", "log.showSignature", "true")
+    for key in ("gpg.program", "gpg.ssh.program", "gpg.x509.program"):
+        _git(repo, "config", key, str(script))
+        assert gitdiff.has_filters(repo), key
+        _git(repo, "config", "--unset", key)
+    _git(repo, "config", "gpg.program", str(script))
+    ctx = ap.Ctx(home=str(home), vault=None, cwd=str(tmp_path))
+    for cmd in ("log -1 --show-signature", "log --show-sig", "log --format=%G?", "show -s"):
+        assert isinstance(ap.decide("Bash", {"command": f"git -C {repo} {cmd}"}, ctx), ap.Deny), cmd
+    assert gitdiff.last_merge(repo)
+    assert gitdiff._git(repo, "log", "-1", "--format=%H")
+    assert not marker.exists()
+    # The owner's own (global) gpg.program with a repo-local log.showSignature: the prefix keeps it off.
+    _git(repo, "config", "--unset", "gpg.program")
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text(f"[gpg]\n\tprogram = {script}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(glob))
+    assert not gitdiff.has_filters(repo)
+    assert gitdiff.last_merge(repo) and gitdiff._git(repo, "show", "-s", "HEAD")
+    assert not marker.exists()
+
+
+# Repo-local keys whose value is a program git (or git-lfs) runs; every one makes the repo refused.
+_PROGRAM_KEYS = ["gpg.program", "gpg.openpgp.program", "gpg.ssh.defaultKeyCommand", "core.sshCommand",
+                 "core.askPass", "core.editor", "sequence.editor", "core.gitProxy", "core.alternateRefsCommand",
+                 "credential.helper", "credential.https://x.example.helper", "remote.origin.uploadpack",
+                 "remote.origin.receivepack", "remote.origin.vcs", "alias.st", "submodule.m.update",
+                 "merge.evil.driver", "diff.evil.textconv", "diff.evil.command", "filter.evil.clean",
+                 "interactive.diffFilter", "pager.log", "core.pager", "difftool.x.cmd", "mergetool.x.path",
+                 "browser.x.cmd", "web.browser", "man.x.path", "man.viewer", "sendemail.smtpServer",
+                 "sendemail.toCmd", "imap.tunnel", "tar.tgz.command", "trailer.t.cmd", "trailer.t.command",
+                 "hook.pre.command", "gc.recentObjectsHook", "uploadpack.packObjectsHook", "http.proxy",
+                 "lfs.customtransfer.x.path", "lfs.extension.x.clean", "lfs.extension.x.smudge",
+                 # R3: programs git instaweb / git help -w / git cvsimport run (glm-cross R2)
+                 "instaweb.httpd", "instaweb.browser", "help.browser", "cvsimport.cvsps",
+                 # R3: a subsection name holding "=" must not cut the key short (security R2 LOW)
+                 "remote.a=b.uploadpack", "credential.https://h/a=b.helper", "merge.a=b.driver"]
+# Common repo-local keys that run nothing: they must not make a normal repo unusable.
+_SAFE_KEYS = {"remote.origin.url": "https://example.invalid/a.git", "remote.origin.partialclonefilter": "blob:none",
+              "branch.main.vscode-merge-base": "origin/main", "branch.main.remote": "origin",
+              "core.hooksPath": ".husky", "pull.rebase": "true", "user.name": "x", "core.autocrlf": "input"}
+
+
+@pytest.mark.parametrize("key", _PROGRAM_KEYS)
+def test_has_filters_refuses_every_repo_program_key(repo, key):
+    r, _ = repo
+    _git(r, "config", key, "/tmp/never-run")
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_ignores_unknown_scope(repo, monkeypatch):
+    """R3 Mac blocker: Apple git lists Xcode's built-in gitconfig (credential.helper) with scope
+    "unknown"; it is not the repo's, so it must not refuse every repo. Local/worktree still refuse."""
+    r, _ = repo
+    real = gitdiff._git
+    seen = []
+
+    def fake(repo_, *args):
+        seen.append(args)
+        out = real(repo_, *args)
+        return "unknown\tcredential.helper\n" + out + "unknown\tcore.pager\n"
+
+    monkeypatch.setattr(gitdiff, "_git", fake)
+    assert gitdiff.has_filters(r) is False
+    assert "--name-only" in seen[0]
+    _git(r, "config", "credential.helper", "/tmp/never-run")
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_fails_closed(repo, monkeypatch):
+    """No listing (git failed or timed out) refuses the repo (security R2 INFO)."""
+    r, _ = repo
+    monkeypatch.setattr(gitdiff, "_git", lambda *a: None)
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_includes_keep_the_includer_scope(repo, tmp_path):
+    """Real git: a file pulled in by the repo's own include.path / includeIf is listed with the
+    includer's scope (local / worktree), never as global/system/unknown, so the gate still refuses it."""
+    r, _ = repo
+    inc = tmp_path / "inc.gitconfig"
+    inc.write_text("[core]\n\tsshCommand = /tmp/never-run\n")
+    _git(r, "config", "include.path", str(inc))
+    assert gitdiff.has_filters(r) is True
+    _git(r, "config", "--unset", "include.path")
+    assert gitdiff.has_filters(r) is False
+    _git(r, "config", f"includeIf.gitdir:{r}/.path", str(inc))
+    assert gitdiff.has_filters(r) is True
+    _git(r, "config", "--unset", f"includeIf.gitdir:{r}/.path")
+    _git(r, "config", "extensions.worktreeConfig", "true")
+    _git(r, "config", "--worktree", "include.path", str(inc))
+    listing = subprocess.run(["git", "config", "--includes", "--show-scope", "--name-only", "--list"],
+                             cwd=r, capture_output=True, text=True, check=True).stdout
+    assert "worktree\tcore.sshcommand" in listing.splitlines()
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_keeps_plain_repo_keys(repo):
+    r, _ = repo
+    for key, value in _SAFE_KEYS.items():
+        _git(r, "config", key, value)
+    assert gitdiff.has_filters(r) is False

@@ -45,6 +45,28 @@ final class EventDecodeTests: XCTestCase {
         XCTAssertEqual(event, .lines(file: "/abs/path.py", ranges: [12...18, 40...41]))
     }
 
+    func testLinesWithLabels() {
+        let event = decode(#"{"type":"lines","file":"/a.py","ranges":[[140,142],[149,149],[155,155]],"labels":["1/3 +3","2/3 changed","3/3 removed here"]}"#)
+        XCTAssertEqual(event, .lines(file: "/a.py", ranges: [140...142, 149...149, 155...155],
+                                     labels: ["1/3 +3", "2/3 changed", "3/3 removed here"]))
+        // A dropped (inverted) pair drops its own label, the others stay paired.
+        let dropped = decode(#"{"type":"lines","file":"/a.py","ranges":[[9,3],[149,149]],"labels":["1/2 changed","2/2 changed"]}"#)
+        XCTAssertEqual(dropped, .lines(file: "/a.py", ranges: [149...149], labels: ["2/2 changed"]))
+        // Long labels are clipped to 24 characters.
+        let long = decode(#"{"type":"lines","file":"/a.py","ranges":[[1,1]],"labels":["\#(String(repeating: "x", count: 40))"]}"#)
+        XCTAssertEqual(long, .lines(file: "/a.py", ranges: [1...1], labels: [String(repeating: "x", count: 24)]))
+    }
+
+    func testLinesWithoutLabelsKeepsChangedLabel() {
+        // No labels (an older service) or a list of the wrong length: no labels, the app draws "changed".
+        XCTAssertEqual(decode(#"{"type":"lines","file":"/a.py","ranges":[[1,2]]}"#),
+                       .lines(file: "/a.py", ranges: [1...2], labels: []))
+        XCTAssertEqual(decode(#"{"type":"lines","file":"/a.py","ranges":[[1,2],[5,5]],"labels":["1/2 changed"]}"#),
+                       .lines(file: "/a.py", ranges: [1...2, 5...5], labels: []))
+        XCTAssertEqual(decode(#"{"type":"lines","file":"/a.py","ranges":[[1,2]],"labels":[7]}"#),
+                       .lines(file: "/a.py", ranges: [1...2], labels: []))
+    }
+
     func testClear() {
         XCTAssertEqual(decode(#"{"type":"clear"}"#), .clear)
     }

@@ -24,6 +24,35 @@ public struct LineBandMapper: Equatable {
         b = (sy - a * sx) / n
     }
 
+    /// The longest chain of marks on one evenly spaced line grid, OCR outliers skipped. VS Code's
+    /// sticky-scroll headers show ancestor line numbers (587, 618, 678, 687, 689) on the gutter rows
+    /// above the scrolling lines (692...732): a fit through them drew line 710's band two rows low
+    /// (Mac run, 33a). Pitch = median step between consecutive line numbers. A chain of fewer than
+    /// 2 marks returns `marks` unchanged.
+    public static func evenRun(_ marks: [(line: Int, midY: CGFloat)]) -> [(line: Int, midY: CGFloat)] {
+        let sorted = marks.sorted { $0.line < $1.line }
+        let pairs = zip(sorted, sorted.dropFirst()).filter { $0.1.line > $0.0.line }
+        let unit = pairs.filter { $0.1.line - $0.0.line == 1 }.map { $0.1.midY - $0.0.midY }
+        let steps = (unit.isEmpty ? pairs.map { ($0.1.midY - $0.0.midY) / CGFloat($0.1.line - $0.0.line) } : unit).sorted()
+        guard !steps.isEmpty else { return marks }
+        let pitch = steps[steps.count / 2]
+        guard pitch != 0 else { return marks }
+        let tolerance = max(2, abs(pitch) * 0.25)
+        var best: [(line: Int, midY: CGFloat)] = []
+        for start in sorted.indices {
+            var chain = [sorted[start]]
+            for mark in sorted[(start + 1)...] {
+                let last = chain[chain.count - 1]
+                if mark.line > last.line,
+                   abs(mark.midY - last.midY - pitch * CGFloat(mark.line - last.line)) <= tolerance {
+                    chain.append(mark)
+                }
+            }
+            if chain.count > best.count { best = chain }
+        }
+        return best.count >= 2 ? best : marks
+    }
+
     /// Highlight band for `lines` spanning the text area from x to x+width:
     /// y from y(start) - h/2 to y(end) + h/2, h = |a| (one line height).
     public func band(for lines: ClosedRange<Int>, x: CGFloat, width: CGFloat) -> CGRect {
@@ -76,13 +105,17 @@ public enum LineBandFit {
         return Pass(bands: bands, reason: bands.isEmpty ? "off_clip" : "ok", seen: seen)
     }
 
-    /// Front-most window whose title names `file` (its last path part as a whole word, e.g.
-    /// "● overlay.py — repo"), or nil. `windows` front to back.
-    public static func editorWindow(file: String, windows: [(title: String, frame: CGRect)]) -> CGRect? {
+    /// Apps whose window title may pick the gutter pass (a browser tab titled "overlay.py" may not).
+    public static let editorApps: Set<String> = ["Code", "Visual Studio Code", "Cursor", "Xcode"]
+
+    /// Front-most editor window (`editorApps`) whose title names `file` (its last path part as a
+    /// whole word, e.g. "● overlay.py — repo"), or nil. `windows` front to back.
+    public static func editorWindow(file: String, windows: [(app: String, title: String, frame: CGRect)]) -> CGRect? {
         let name = file.split(separator: "/").last.map(String.init) ?? ""
         guard !name.isEmpty else { return nil }
         let wordChar: (Character) -> Bool = { $0.isLetter || $0.isNumber || "._-".contains($0) }
         return windows.first { window in
+            guard editorApps.contains(window.app) else { return false }
             var rest = window.title[...]
             while let hit = rest.range(of: name) {
                 let before = hit.lowerBound == window.title.startIndex ? nil : window.title[window.title.index(before: hit.lowerBound)]
@@ -92,5 +125,36 @@ public enum LineBandFit {
             }
             return false
         }?.frame
+    }
+}
+
+/// The `lines` retry loop without the screen: `pause(attempt)` then `pass(attempt)`, up to `tries`
+/// times, until `done` accepts a pass. A cancelled task (the owner cleared the screen) stops before
+/// the next pass and returns nil, so nothing is drawn or reported after the clear.
+public enum BandRetry {
+    public static func run<P>(tries: Int, pause: (Int) async -> Void, pass: (Int) async -> P,
+                              done: (P) -> Bool) async -> (pass: P, attempt: Int)? {
+        var last: (pass: P, attempt: Int)?
+        for attempt in 1...max(tries, 1) {
+            await pause(attempt)
+            if Task.isCancelled { return nil }
+            let result = await pass(attempt)
+            last = (result, attempt)
+            if done(result) { break }
+        }
+        return Task.isCancelled ? nil : last
+    }
+
+    /// Index of the wanted range a drawn band belongs to (a band on the last try may be the visible
+    /// part of its range), for its label: an exact match, else the range it overlaps most (the first on
+    /// a tie); nil when none overlaps.
+    public static func rangeIndex(of band: ClosedRange<Int>, in ranges: [ClosedRange<Int>]) -> Int? {
+        if let exact = ranges.firstIndex(of: band) { return exact }
+        var best: (index: Int, rows: Int)?
+        for (index, range) in ranges.enumerated() where range.overlaps(band) {
+            let rows = min(range.upperBound, band.upperBound) - max(range.lowerBound, band.lowerBound) + 1
+            if rows > (best?.rows ?? 0) { best = (index, rows) }
+        }
+        return best?.index
     }
 }
