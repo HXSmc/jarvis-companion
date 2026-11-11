@@ -102,27 +102,27 @@ _NO_RE = re.compile(r"(?:(?:no|nope)(?: (?:don't|do not|thanks|thank you|stop|ca
                     r"|don't(?: do it)?|do not(?: do it)?)" + _POLITE)
 
 # Overlay hide/show/aside/restore/move and the widened clear: whole-utterance
-# phrases with an optional politeness wrapper ("can you hide it, please").
-# "get rid of it for now" is explicit hide and checked before clear ("for now"
-# makes it temporary; the wrapper alone must not eat the trailing "now").
+# phrases with an optional politeness wrapper ("can you hide it for now, please").
+# Hide is checked before clear: "get rid of it" is temporary, "get rid of the cards" final.
 _WRAP_LEAD = r"(?:(?:can|could|would) you |please |jarvis )*"
-_WRAP_TRAIL = r"(?:,? (?:please|for me|now|jarvis))*"
-_OBJECT = r"(?:it|them|that|this|everything|all of it|all|the overlay|the cards?|the screen)"
-_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:hide " + _OBJECT + r"|get rid of it for now|put it away)"
-                      + _WRAP_TRAIL)
-_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show (?:it|everything) again|show the overlay"
-                      r"|bring (?:it|them) back|unhide(?: everything)?)" + _WRAP_TRAIL)
-_CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: everything| the screen)?|dismiss(?: it)?"
-                       r"|close (?:that|everything)|remove the cards|get rid of the cards)"
-                       + _WRAP_TRAIL)
+_WRAP_TRAIL = r"(?:,? (?:please|for me|for now|now|jarvis))*"
+_OBJECT = r"(?:it|them|that|this|everything|all of it|all|the overlay|the cards?)"
+_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:hide(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
+                      r"|get (?:it|that|this|them) off my screen|go away"
+                      r"|make (?:it|that|them|everything) (?:disappear|go away))" + _WRAP_TRAIL)
+_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show (?:it|them|everything|the overlay|the cards?)(?: again)?"
+                      r"|bring (?:it|them|everything) back|unhide(?: " + _OBJECT + r")?|come back)" + _WRAP_TRAIL)
+_CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: it| them| all| everything| the (?:screen|overlay|cards?))?"
+                       r"|dismiss(?: it| them| that| all| everything)?"
+                       r"|close (?:that|everything)|remove the cards|get rid of the cards)" + _WRAP_TRAIL)
 _ASIDE_RE = re.compile(_WRAP_LEAD + r"(?:move (?:it|them) (?:out of the way|aside)"
                        r"|park (?:it|the cards))" + _WRAP_TRAIL)
 _RESTORE_RE = re.compile(_WRAP_LEAD + r"put (?:it|them|the cards) back" + _WRAP_TRAIL)
-# Direction last ("move it to the top left"); "top"->up, "bottom"->down at the match site.
-_MOVE_RE = re.compile(_WRAP_LEAD + r"(?:move|shift) " + _OBJECT
+# Direction last ("move it to the top left", "move to the left side"); "top"->up, "bottom"->down
+# at the match site. No "the screen" object: "move the screen left" is not about the cards.
+_MOVE_RE = re.compile(_WRAP_LEAD + r"(?:move|shift)(?: " + _OBJECT + r")?"
                       + r"(?: to the)? (left|right|up|down|top left|top right|top"
-                      r"|bottom left|bottom right|bottom|other side)" + _WRAP_TRAIL)
-
+                      r"|bottom left|bottom right|bottom|other side)(?: side)?" + _WRAP_TRAIL)
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.

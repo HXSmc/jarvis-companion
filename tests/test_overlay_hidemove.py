@@ -308,3 +308,92 @@ def test_prompt_layout_modes_match_the_allow_list():
     assert overlay.LAYOUT_MODES == frozenset(ALL_MODES)
     schema = next(x for x in overlay.ANSWER_PROMPT.splitlines() if x.strip().startswith('{"clear": true} or'))
     assert set(re.findall(r'"([a-z_]+)"', schema.split("{\"layout\":", 1)[1])) == overlay.LAYOUT_MODES
+
+
+# --- round 1: owner verb gate, own-card guard, wider phrases (written by builder) ----------
+
+INFO = {"type": "info", "title": "Population of Japan", "body": ["About 124 million people."]}
+
+
+@pytest.mark.parametrize("text", ["what does this page say", "summarise the email on my screen",
+                                  "what does the headline mean"])
+def test_directive_needs_an_overlay_verb_from_the_owner(text):
+    quiet = FakeConversations(model_lines({"say": "Done."}, {"layout": "aside"}, {"clear": True},
+                                          {"layout": "hide"}))
+    deps = make_deps(quiet_conversations=quiet)
+    overlay._tainted.add("c1")
+    events, steps = run_turn(deps, text)
+    assert "c1" in quiet.sessions  # the model was asked and sent the directives
+    assert directive_events(events) == []
+    assert not [s for s in steps if s[0] == "layout"]
+    assert done(events)["error"] is None
+
+
+def test_directive_with_an_overlay_verb_in_a_quiet_turn_is_emitted():
+    quiet = FakeConversations(model_lines({"say": "Done."}, {"layout": "aside"}))
+    deps = make_deps(quiet_conversations=quiet)
+    overlay._tainted.add("c1")
+    events, _ = run_turn(deps, "tuck all of that out of sight and put it on the side")
+    assert directive_events(events) == [{"type": "layout", "mode": "aside"}]
+
+
+def test_directive_without_verb_in_a_normal_turn_is_dropped():
+    deps = make_deps(chunks=model_lines({"say": "Paris."}, {"clear": True}, {"layout": "left"}))
+    events, _ = run_turn(deps, "what is the capital of France")
+    assert directive_events(events) == []
+
+
+@pytest.mark.parametrize("mode", ["hide", "aside"])
+def test_directive_never_hides_its_own_card(mode):
+    deps = make_deps(chunks=model_lines({"card": INFO}, {"layout": mode}, {"clear": True}))
+    events, _ = run_turn(deps, ODD)
+    assert [e["card"]["title"] for e in events if e["type"] == "card"] == [INFO["title"]]
+    assert directive_events(events) == []
+
+
+def test_directive_move_after_own_card_still_allowed():
+    deps = make_deps(chunks=model_lines({"card": INFO}, {"layout": "left"}))
+    events, _ = run_turn(deps, ODD)
+    assert directive_events(events) == [{"type": "layout", "mode": "left"}]
+
+
+def test_directive_hide_before_a_card_is_kept():
+    deps = make_deps(chunks=model_lines({"layout": "hide"}, {"card": INFO}))
+    events, _ = run_turn(deps, ODD)
+    kinds = [e["type"] for e in events if e["type"] in ("layout", "card")]
+    assert kinds == ["layout", "card"]  # the app un-hides on the card, so it is seen
+
+
+POSITIVE_R1 = (
+    ("hide", "hide", ""), ("hide everything for now", "hide", ""), ("hide it for now", "hide", ""),
+    ("put it away for now", "hide", ""), ("put everything away", "hide", ""), ("put them away", "hide", ""),
+    ("get that off my screen", "hide", ""), ("go away", "hide", ""), ("make it disappear", "hide", ""),
+    ("show it", "show", ""), ("show them", "show", ""), ("show the cards", "show", ""),
+    ("show everything", "show", ""), ("come back", "show", ""), ("unhide it", "show", ""),
+    ("clear it", "clear", ""), ("clear them", "clear", ""), ("clear the overlay", "clear", ""),
+    ("clear the cards", "clear", ""), ("dismiss everything", "clear", ""), ("dismiss them", "clear", ""),
+    ("move to the left", "move", "left"), ("move to the right", "move", "right"),
+    ("move it to the left side", "move", "left"), ("move them to the right side", "move", "right"),
+    ("could you hide everything for now please", "hide", ""),
+)
+
+# Base kinds recorded on 76968a6 (all four forms): every row was `answer` there and stays so.
+NEGATIVE_R1 = (
+    "hide the screen", "move the screen left", "show me a picture of a cat", "show me the video",
+    "come back to this later", "make it disappear from my desktop", "move to the left lane", "clear it up",
+    "go away for the weekend", "dismiss the meeting", "show them how it works", "show it in finder",
+    "hide the window", "close it",
+)
+
+
+@pytest.mark.parametrize("phrase,kind,arg", POSITIVE_R1)
+def test_routing_round1_positive(phrase, kind, arg):
+    for text in (phrase, f"Hey Jarvis, {phrase}", f"{phrase}.", f"{phrase}?"):
+        intent = parse(text, apps={})
+        assert (intent.kind, intent.arg) == (kind, arg), text
+
+
+@pytest.mark.parametrize("phrase", NEGATIVE_R1)
+def test_routing_round1_negative(phrase):
+    for text in (phrase, f"Hey Jarvis, {phrase}", f"{phrase}.", f"{phrase}?"):
+        assert parse(text, apps={}).kind == "answer", text

@@ -13,10 +13,10 @@ final class HideMoveTests: XCTestCase {
         OverlayEvent.decode(line: Data(line.utf8))
     }
 
-    /// Three cards placed in a small region in the middle of the screen, the second one pinned.
+    /// Three cards placed in a small region left of the centre line, the second one pinned.
     private func compactState() -> ScatterLayout.LayoutState {
         var state = ScatterLayout.LayoutState()
-        let region = CGRect(x: 400, y: 250, width: 760, height: 460)
+        let region = CGRect(x: 100, y: 250, width: 600, height: 400)
         for i in 1...3 {
             state.cardAdded("c\(i)", size: CGSize(width: 220, height: 90), visible: region, keepOut: [])
         }
@@ -131,7 +131,90 @@ final class HideMoveTests: XCTestCase {
             default: XCTFail("not a move: \(direction)")
             }
             XCTAssertEqual(state.moveCount, before.moveCount + 1)
+            assertInNamedPart(newGroup, direction)
         }
+    }
+
+    /// The group ends inside the named half (edges) or quarter (corners).
+    private func assertInNamedPart(_ box: CGRect, _ direction: LayoutMode, line: UInt = #line) {
+        let eps: CGFloat = 0.001
+        switch direction {
+        case .left, .topLeft, .bottomLeft: XCTAssertLessThanOrEqual(box.maxX, area.midX + eps, line: line)
+        case .right, .topRight, .bottomRight: XCTAssertGreaterThanOrEqual(box.minX, area.midX - eps, line: line)
+        default: break
+        }
+        switch direction {
+        case .up, .topLeft, .topRight: XCTAssertLessThanOrEqual(box.maxY, area.midY + eps, line: line)
+        case .down, .bottomLeft, .bottomRight: XCTAssertGreaterThanOrEqual(box.minY, area.midY - eps, line: line)
+        default: break
+        }
+    }
+
+    /// Twelve cards scattered over the whole screen: the group box is about the screen, so a
+    /// plain shift would not show. Every move still lands in the named part, order kept.
+    func testScatteredGroupStillMovesVisibly() {
+        var scattered = ScatterLayout.LayoutState()
+        for i in 1...12 {
+            scattered.cardAdded("s\(i)", size: CGSize(width: 300, height: 110), visible: visible, keepOut: [])
+        }
+        XCTAssertGreaterThan(group(scattered).width, area.width * 0.7)
+        for direction in moves where direction != .otherSide {
+            var state = scattered
+            state.moveAll(direction, visible: visible)
+            let box = group(state)
+            assertInNamedPart(box, direction)
+            let horizontal: Set<LayoutMode> = [.left, .right, .topLeft, .topRight, .bottomLeft, .bottomRight]
+            let vertical: Set<LayoutMode> = [.up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight]
+            let byX = scattered.order.sorted { scattered.frames[$0]!.minX < scattered.frames[$1]!.minX }
+            let byY = scattered.order.sorted { scattered.frames[$0]!.minY < scattered.frames[$1]!.minY }
+            for (a, b) in zip(byX, byX.dropFirst()) {
+                XCTAssertLessThanOrEqual(state.frames[a]!.minX, state.frames[b]!.minX + 0.001, "\(direction)")
+            }
+            for (a, b) in zip(byY, byY.dropFirst()) {
+                XCTAssertLessThanOrEqual(state.frames[a]!.minY, state.frames[b]!.minY + 0.001, "\(direction)")
+            }
+            for key in scattered.order {
+                let old = scattered.frames[key]!, new = state.frames[key]!
+                XCTAssertEqual(new.size, old.size)
+                XCTAssertTrue(visible.contains(new), "\(direction) \(key)")
+                if !horizontal.contains(direction) { XCTAssertEqual(new.minX, old.minX, accuracy: 0.001) }
+                if !vertical.contains(direction) { XCTAssertEqual(new.minY, old.minY, accuracy: 0.001) }
+            }
+            if horizontal.contains(direction) {
+                let edge = [.left, .topLeft, .bottomLeft].contains(direction) ? box.minX - area.minX : area.maxX - box.maxX
+                XCTAssertEqual(edge, 0, accuracy: 0.001, "\(direction)")
+            }
+        }
+    }
+
+    func testOtherSideOfAStraddlingGroupGoesToTheFarHalf() {
+        var state = ScatterLayout.LayoutState()
+        // Group 600...1070 straddles the midline (720); its centre (835) is right of it.
+        let spots = [CGRect(x: 600, y: 300, width: 220, height: 90), CGRect(x: 850, y: 300, width: 220, height: 90),
+                     CGRect(x: 700, y: 450, width: 220, height: 90)]
+        for (i, spot) in spots.enumerated() {
+            state.cardAdded("c\(i)", size: spot.size, visible: visible, keepOut: [])
+            state.cardDragged("c\(i)", to: spot, visible: visible)
+        }
+        XCTAssertLessThan(group(state).minX, visible.midX)
+        XCTAssertGreaterThan(group(state).maxX, visible.midX)
+        state.moveAll(.otherSide, visible: visible)
+        XCTAssertLessThanOrEqual(group(state).maxX, area.midX + 0.001)
+        XCTAssertEqual(group(state).minX, area.minX, accuracy: 0.001)
+    }
+
+    func testPackedSqueezesInOrderAndTouchesTheEdge() {
+        let starts: [CGFloat] = [0, 300, 900], lengths: [CGFloat] = [200, 200, 300]
+        let left = ScatterLayout.packed(starts, lengths: lengths, from: 10, to: 610, atEnd: false)
+        XCTAssertEqual(left[0], 10, accuracy: 0.001)
+        XCTAssertEqual(left[2] + 300, 610, accuracy: 0.001)
+        XCTAssertLessThan(left[0], left[1]); XCTAssertLessThan(left[1], left[2])
+        let right = ScatterLayout.packed(starts, lengths: lengths, from: 10, to: 610, atEnd: true)
+        XCTAssertEqual(right[2] + 300, 610, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(right[0], 10 - 0.001)
+        // A group that fits keeps its spacing: one shared offset.
+        let fits = ScatterLayout.packed([100, 250], lengths: [100, 100], from: 0, to: 600, atEnd: true)
+        XCTAssertEqual(fits, [350, 500])
     }
 
     func testMoveToTheOtherSideMirrorsAGroupOnTheLeft() {
@@ -141,6 +224,60 @@ final class HideMoveTests: XCTestCase {
         state.moveAll(.otherSide, visible: visible)
         XCTAssertEqual(group(state).maxX, area.maxX, accuracy: 0.001)
         XCTAssertEqual(group(state).minY, leftGroup.minY, accuracy: 0.001)
+    }
+
+    /// A tall pinned column moved right would land on the orb: the whole column shifts (one
+    /// shared offset, layout kept) so the orb stays clear, and nothing leaves the screen.
+    func testTallColumnNeverCoversTheOrb() {
+        let orb = ScatterLayout.orbKeepOut(screen: screen)
+        var state = ScatterLayout.LayoutState()
+        for i in 0..<5 {
+            state.cardAdded("t\(i)", size: CGSize(width: 220, height: 150), visible: visible, keepOut: [])
+        }
+        for i in 0..<5 {
+            state.cardDragged("t\(i)", to: CGRect(x: 100, y: 41 + CGFloat(i) * 160, width: 220, height: 150), visible: visible)
+        }
+        let before = state
+        for direction in [LayoutMode.right, .bottomRight, .down] {
+            var moved = before
+            moved.moveAll(direction, visible: visible, keepOut: [orb])
+            let dx = moved.frames["t0"]!.minX - before.frames["t0"]!.minX
+            let dy = moved.frames["t0"]!.minY - before.frames["t0"]!.minY
+            for i in 0..<5 {
+                let new = moved.frames["t\(i)"]!, old = before.frames["t\(i)"]!
+                XCTAssertEqual(ScatterLayout.overlapArea(new, orb), 0, "\(direction) t\(i)")
+                XCTAssertTrue(visible.contains(new), "\(direction) t\(i)")
+                if direction == .right {
+                    XCTAssertEqual(new.minX - old.minX, dx, accuracy: 0.001)
+                    XCTAssertEqual(new.minY - old.minY, dy, accuracy: 0.001)
+                }
+            }
+        }
+    }
+
+    /// No shift clears the orb: the cards stay where they were (the move is refused).
+    func testMoveThatCannotClearTheOrbLeavesTheCards() {
+        let orb = ScatterLayout.orbKeepOut(screen: screen)
+        XCTAssertNil(ScatterLayout.clearOf([orb], [area], area: area))
+        var state = ScatterLayout.LayoutState()
+        state.cardAdded("big", size: area.size, visible: visible, keepOut: [])
+        state.cardDragged("big", to: area, visible: visible)
+        let before = state
+        state.moveAll(.right, visible: visible, keepOut: [orb])
+        XCTAssertEqual(state.frames, before.frames)
+        XCTAssertEqual(state.moveCount, before.moveCount)
+    }
+
+    func testMoveDurationScalesWithDistance() {
+        XCTAssertEqual(ScatterLayout.moveDuration(distance: 0), ScatterLayout.motionShort)
+        XCTAssertEqual(ScatterLayout.moveDuration(distance: 840), 0.35, accuracy: 0.0001)
+        XCTAssertEqual(ScatterLayout.moveDuration(distance: 5000), 0.45)
+    }
+
+    func testConfirmCardRestoresParkedCards() {
+        XCTAssertTrue(ScatterLayout.restoresParked(.info(InfoCard(id: "agentconfirm", title: "Confirm", body: ["Send mail"]))))
+        XCTAssertFalse(ScatterLayout.restoresParked(.info(InfoCard(id: "c1", title: "Note", body: []))))
+        XCTAssertFalse(ScatterLayout.restoresParked(.info(InfoCard(title: "No id", body: []))))
     }
 
     func testMoveClearsTheOrb() {

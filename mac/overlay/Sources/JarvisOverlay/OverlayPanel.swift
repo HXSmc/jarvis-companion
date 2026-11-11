@@ -88,7 +88,7 @@ final class HUDWindow: NSPanel {
         ignoresMouseEvents = true
         if alpha > 0, !isVisible { orderFrontRegardless() }
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Theme.reduceMotion ? 0 : 0.2
+            context.duration = Theme.reduceMotion ? 0 : ScatterLayout.motionShort
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = alpha
         }, completionHandler: { [self] in
@@ -123,6 +123,7 @@ final class HUDWindow: NSPanel {
             if !isDragging {
                 guard ScatterLayout.isDrag(from: press.pointer, to: pointer) else { return }
                 isDragging = true
+                stopMove()  // a card grabbed mid-slide follows the pointer, not the slide
                 orderFrontRegardless()
                 dragged(frame, false)
             }
@@ -146,25 +147,38 @@ final class HUDWindow: NSPanel {
     }
 
     /// Top-left global rect (HUD space) to this panel's AppKit frame; no-op when unchanged.
-    /// `animated` (a voice move of a shown panel) slides there in 0.2 s ease-out, instant with Reduce Motion.
+    /// `animated` (a voice move of a shown panel) slides there, longer for a longer way
+    /// (ScatterLayout.moveDuration), ease in-out; instant with Reduce Motion.
     func place(_ rect: CGRect, animated: Bool = false) {
         guard !isDragging else { return }
         let frame = CardPanel.flip(rect)
         guard frame != self.frame, frame != moveTarget else { return }
         guard animated, isVisible, !Theme.reduceMotion else {
-            moveTarget = nil
-            return setFrame(frame, display: false)
+            return moveTarget == nil ? setFrame(frame, display: false) : stopMove(at: frame)
         }
         moveTarget = frame
+        let distance = hypot(frame.midX - self.frame.midX, frame.midY - self.frame.midY)
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.2
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.duration = ScatterLayout.moveDuration(distance: distance)
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             self.animator().setFrame(frame, display: false)
         }, completionHandler: { [self] in
             MainActor.assumeIsolated {
                 if moveTarget == frame { moveTarget = nil }
             }
         })
+    }
+
+    /// Ends an in-flight slide at `target` (default: where the panel is now). A zero-length
+    /// animation replaces the running one; a plain setFrame could be overwritten by it.
+    private func stopMove(at target: CGRect? = nil) {
+        guard moveTarget != nil else { return }
+        moveTarget = nil
+        let end = target ?? frame
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            self.animator().setFrame(end, display: false)
+        }
     }
 
     /// True when the press lands inside a live player host, so its events go untouched.

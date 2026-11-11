@@ -112,6 +112,10 @@ QUIET_PROMPT = re.sub(
 LAYOUT_MODES = frozenset({"hide", "show", "aside", "restore", "left", "right", "up", "down",
                           "top_left", "top_right", "bottom_left", "bottom_right", "other_side"})
 MAX_DIRECTIVES = 4  # clear/layout events per reply; an injected reply cannot flicker the overlay
+# A model clear/layout line counts only when the owner's own words ask for an overlay action
+# (same idea as the open-verb check): screen or web text alone can never park or wipe the cards.
+_OVERLAY_VERB_RE = re.compile(r"\b(?:hide|unhide|show|move|shift|clear|close|dismiss|park|put|away|back|rid|bring"
+                              r"|remove|minimi[sz]e|disappear|gone|off my screen)\b", re.IGNORECASE)
 NO_PICTURE_LINE = "I couldn't find a picture of that."
 NO_VIDEO_LINES = {  # find_video reasons -> one plain line each; the card itself comes from the service
     "none": "I couldn't find a video of that.",
@@ -596,11 +600,10 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
             yield {"type": "clear"}
 
         elif intent.kind in ("hide", "show", "aside", "restore", "move"):
-            mode = intent.arg if intent.kind == "move" else intent.kind
-            if mode in LAYOUT_MODES:
-                if on_step:
-                    on_step("layout", mode=mode)
-                yield {"type": "layout", "mode": mode}
+            mode = intent.arg if intent.kind == "move" else intent.kind  # parse yields allow-listed modes only
+            if on_step:
+                on_step("layout", mode=mode)
+            yield {"type": "layout", "mode": mode}
 
         elif intent.kind == "clock":
             line = _clock_line(intent.arg, deps.now())
@@ -841,6 +844,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     media_seen = False  # one media lookup (or quiet media line) per turn; the first directive wins
     lookup_alone_at: int | None = None  # len(said) when a lookup started as the turn's first output
     directives: list[str] = []  # clear/layout events sent this reply, capped at MAX_DIRECTIVES
+    cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
+    owner_asked_layout = bool(_OVERLAY_VERB_RE.search(text))
 
     async def media_refused() -> AsyncIterator[dict]:
         nonlocal media_seen
@@ -977,7 +982,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         layout = obj.get("layout")
         mode = ("clear" if obj.get("clear") is True
                 else layout if isinstance(layout, str) and layout in LAYOUT_MODES else None)
-        if mode and len(directives) < MAX_DIRECTIVES:
+        if mode in ("hide", "aside", "clear") and len(_card_ids.get(body.conv_id, ())) > cards_before:
+            mode = None  # a reply never hides, parks or wipes the card it just showed
+        if mode and owner_asked_layout and len(directives) < MAX_DIRECTIVES:
             directives.append(mode)
             produced = True
             if on_step:

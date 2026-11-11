@@ -208,6 +208,57 @@ public enum ScatterLayout {
         return frames
     }
 
+    /// Smallest rect holding every frame; nil for none.
+    static func bounds(_ frames: [CGRect]) -> CGRect? {
+        frames.reduce(nil as CGRect?) { $0?.union($1) ?? $1 }
+    }
+
+    /// New starts along one axis: the group touches `to` (atEnd) or `from`, and a group longer
+    /// than `from...to` is squeezed in, order kept, so every span ends inside.
+    static func packed(_ starts: [CGFloat], lengths: [CGFloat], from: CGFloat, to: CGFloat,
+                       atEnd: Bool) -> [CGFloat] {
+        let ends = zip(starts, lengths).map { $0 + $1 }
+        guard let low = starts.min(), let high = ends.max(), let longest = lengths.max() else { return starts }
+        let span = high - low, room = to - from
+        let scale = span <= room || span <= longest ? 1 : max(0, room - longest) / (span - longest)
+        return zip(starts, ends).map { start, end in
+            atEnd ? to - (high - end) * scale - (end - start) : from + (start - low) * scale
+        }
+    }
+
+    /// `frames` moved off every keep-out by one shared shift up or left (the shorter one that
+    /// keeps the group inside `area`); `frames` itself when nothing is covered; nil when no
+    /// shift clears every keep-out.
+    static func clearOf(_ keepOut: [CGRect], _ frames: [CGRect], area: CGRect) -> [CGRect]? {
+        func covers(_ set: [CGRect]) -> Bool {
+            set.contains { frame in keepOut.contains { overlapArea(frame, $0) > 0 } }
+        }
+        guard covers(frames) else { return frames }
+        let hits = frames.flatMap { frame in keepOut.filter { overlapArea(frame, $0) > 0 }.map { (frame, $0) } }
+        let up = hits.map { $0.0.maxY - $0.1.minY }.max() ?? 0
+        let left = hits.map { $0.0.maxX - $0.1.minX }.max() ?? 0
+        let tries = [(up, frames.map { $0.offsetBy(dx: 0, dy: -up) }),
+                     (left, frames.map { $0.offsetBy(dx: -left, dy: 0) })].sorted { $0.0 < $1.0 }
+        let room = area.insetBy(dx: -0.5, dy: -0.5)
+        return tries.first { !covers($0.1) && (bounds($0.1).map { room.contains($0) } ?? false) }?.1
+    }
+
+    /// Duration of a fade or a short overlay transition.
+    public static let motionShort: TimeInterval = 0.2
+
+    /// A voice move slides longer the farther it goes, so a screen-wide move reads as a slide.
+    public static func moveDuration(distance: CGFloat) -> TimeInterval {
+        min(0.45, max(motionShort, TimeInterval(distance) / 2400))
+    }
+
+    /// The agent's Confirm card (and its settled / expired replacement): shown in full on arrival,
+    /// never as a parked chip. Same id as `_CONFIRM_CARD_ID` in gateway/overlay.py.
+    public static let confirmCardID = "agentconfirm"
+
+    public static func restoresParked(_ card: HUDCard) -> Bool {
+        card.id == confirmCardID
+    }
+
     /// FNV-1a 64 over the UTF-8 bytes; `hashValue` is randomised per process.
     public static func seed(_ key: String) -> UInt64 {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
@@ -322,41 +373,61 @@ public enum ScatterLayout {
         public mutating func hide() { hidden = true }
         public mutating func show() { hidden = false }
 
-        /// Moves every placed card as one group (relative layout kept) to an edge or corner of the
-        /// inset area: left/right change only x, up/down only y, otherSide translates the group to
-        /// its mirror image across the visible frame's centre line. A group that would cover a
-        /// keep-out (the orb) is lifted clear of it; each card is then clamped inside the inset
-        /// area and pinned, so later placements keep it. Shows and restores first. Other modes: no-op.
+        /// Moves every placed card as one group to the named side of the inset area, so the move
+        /// always shows: the group ends inside the named half (left, right, up, down), quarter
+        /// (corners) or the other half (otherSide), touching the named edge. Only the named axes
+        /// change. A group that already fits there keeps its exact layout (one shared offset); a
+        /// longer one is squeezed into it along that axis, card order kept. otherSide mirrors a group
+        /// that lies on one side of the centre line and moves a straddling one to the half away
+        /// from its centre. A group that would cover a keep-out (the orb) is shifted up or left,
+        /// whichever is shorter and stays inside; if neither does, the cards stay put. Moved cards
+        /// are pinned. Shows and restores first. Other modes: no-op.
         public mutating func moveAll(_ direction: LayoutMode, visible: CGRect, keepOut: [CGRect] = []) {
             let area = ScatterLayout.insetArea(visible)
             let keys = order.filter { frames[$0] != nil }
-            guard let group = keys.compactMap({ frames[$0] }).reduce(nil as CGRect?, { $0?.union($1) ?? $1 }),
-                  area.width > 0, area.height > 0 else { return }
-            let toLeft = area.minX - group.minX, toRight = area.maxX - group.maxX
-            let toTop = area.minY - group.minY, toBottom = area.maxY - group.maxY
-            let delta: CGPoint
+            let old = keys.compactMap { frames[$0] }
+            guard let group = ScatterLayout.bounds(old), area.width > 0, area.height > 0 else { return }
+            let halfX = area.width / 2, halfY = area.height / 2
+            var xs = old.map(\.minX), ys = old.map(\.minY)
+            let widths = old.map(\.width), heights = old.map(\.height)
+            let toLeft = { xs = ScatterLayout.packed(xs, lengths: widths, from: area.minX, to: area.minX + halfX, atEnd: false) }
+            let toRight = { xs = ScatterLayout.packed(xs, lengths: widths, from: area.maxX - halfX, to: area.maxX, atEnd: true) }
+            let toTop = { ys = ScatterLayout.packed(ys, lengths: heights, from: area.minY, to: area.minY + halfY, atEnd: false) }
+            let toBottom = { ys = ScatterLayout.packed(ys, lengths: heights, from: area.maxY - halfY, to: area.maxY, atEnd: true) }
             switch direction {
-            case .left: delta = CGPoint(x: toLeft, y: 0)
-            case .right: delta = CGPoint(x: toRight, y: 0)
-            case .up: delta = CGPoint(x: 0, y: toTop)
-            case .down: delta = CGPoint(x: 0, y: toBottom)
-            case .topLeft: delta = CGPoint(x: toLeft, y: toTop)
-            case .topRight: delta = CGPoint(x: toRight, y: toTop)
-            case .bottomLeft: delta = CGPoint(x: toLeft, y: toBottom)
-            case .bottomRight: delta = CGPoint(x: toRight, y: toBottom)
-            case .otherSide: delta = CGPoint(x: 2 * visible.midX - group.maxX - group.minX, y: 0)
+            case .left: toLeft()
+            case .right: toRight()
+            case .up: toTop()
+            case .down: toBottom()
+            case .topLeft: toLeft(); toTop()
+            case .topRight: toRight(); toTop()
+            case .bottomLeft: toLeft(); toBottom()
+            case .bottomRight: toRight(); toBottom()
+            case .otherSide:
+                if group.maxX <= visible.midX || group.minX >= visible.midX {
+                    let mirroredMin = 2 * visible.midX - group.maxX
+                    xs = xs.map { mirroredMin + $0 - group.minX }
+                } else if group.midX <= visible.midX {
+                    toRight()
+                } else {
+                    toLeft()
+                }
             case .aside, .restore, .hide, .show: return
             }
-            // shortcut: one lift up off the keep-outs, a group taller than the space above the orb still covers it.
-            let moved = keys.compactMap { frames[$0]?.offsetBy(dx: delta.x, dy: delta.y) }
-            let lift = moved.flatMap { frame in
-                keepOut.filter { $0.intersects(frame) }.map { frame.maxY - $0.minY }
-            }.max() ?? 0
+            var moved = old.indices.map { CGRect(x: xs[$0], y: ys[$0], width: widths[$0], height: heights[$0]) }
+            // One shared offset keeps the group inside the inset area on the axis it did not move.
+            if let box = ScatterLayout.bounds(moved) {
+                let inside = ScatterLayout.clamp(box, into: area)
+                if inside.size == box.size {
+                    moved = moved.map { $0.offsetBy(dx: inside.minX - box.minX, dy: inside.minY - box.minY) }
+                }
+            }
+            moved = moved.map { ScatterLayout.clamp($0, into: area) }  // no-op unless a card is larger than the area
             hidden = false
             mode = .normal
-            for key in keys {
-                guard let frame = frames[key] else { continue }
-                frames[key] = ScatterLayout.clamp(frame.offsetBy(dx: delta.x, dy: delta.y - lift), into: area)
+            guard let placed = ScatterLayout.clearOf(keepOut, moved, area: area) else { return }
+            for (index, key) in keys.enumerated() {
+                frames[key] = placed[index]
                 pinned.insert(key)
             }
             moveCount &+= 1

@@ -112,6 +112,8 @@ final class OverlayModel: ObservableObject {
 
     func add(card: HUDCard) {
         unhide()  // a new answer is never invisible
+        // A Confirm question (or its settled line) is never left as a parked chip.
+        if ScatterLayout.restoresParked(card) { setLayout(.restore) }
         if let id = card.id, let index = cards.firstIndex(where: { $0.id == id }) {
             cards[index] = card
         } else {
