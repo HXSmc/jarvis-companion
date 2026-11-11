@@ -195,8 +195,9 @@ final class AppController {
         return sound
     }()
 
-    /// followUp: the open-mic window after a reply (no wake word, same conversation).
-    private func handleWake(followUp: Bool = false) async {
+    /// followUp: the open-mic window after a reply (no wake word, same conversation);
+    /// replayFrom: the reply's drain time, so only post-reply ring audio is replayed.
+    private func handleWake(followUp: Bool = false, replayFrom: Date? = nil) async {
         listenSerial += 1
         turnDone = false  // a barge-in's stale drain must not start a follow-up
         if followUp {
@@ -216,6 +217,7 @@ final class AppController {
         let listenStart = Date()
         speech.listenAfterWake(
             followUp: followUp,
+            replayFrom: replayFrom,
             onPartial: { [weak self] _ in
                 // Speech in the follow-up window: show the normal listening orb.
                 if followUp, self?.model.orb == .followUp { self?.model.orb = .listening }
@@ -543,7 +545,7 @@ final class AppController {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard let self, self.listenSerial == serial, self.model.orb == .idle, !self.audio.isBusy
             else { return }
-            await self.handleWake(followUp: true)
+            await self.handleWake(followUp: true, replayFrom: self.audio.lastDrainAt)
         }
     }
 }

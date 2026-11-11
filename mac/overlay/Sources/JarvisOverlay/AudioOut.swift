@@ -19,6 +19,8 @@ final class AudioOut {
     var onFirstAudio: (() -> Void)?
     /// All scheduled audio finished playing.
     var onDrain: (() -> Void)?
+    /// When the last drain fired; the follow-up replay window starts here (plus echo tail).
+    private(set) var lastDrainAt: Date?
 
     /// Not player.isPlaying: that stays true after the last buffer played, until stop().
     var isBusy: Bool { pendingBuffers > 0 || synthSpeaking }
@@ -66,7 +68,7 @@ final class AudioOut {
             Task { @MainActor in
                 guard let self else { return }
                 self.pendingBuffers = max(self.pendingBuffers - 1, 0)
-                if self.pendingBuffers == 0 { self.onDrain?() }
+                if self.pendingBuffers == 0 { self.lastDrainAt = Date(); self.onDrain?() }
             }
         }
         if !player.isPlaying { player.play() }
@@ -110,7 +112,7 @@ final class AudioOut {
 
     private func synthFinished() {
         synthSpeaking = false
-        if pendingBuffers == 0 { onDrain?() }
+        if pendingBuffers == 0 { lastDrainAt = Date(); onDrain?() }
     }
 
     private func installTapOnce() {

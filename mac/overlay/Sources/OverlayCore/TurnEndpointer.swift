@@ -3,7 +3,8 @@ import Foundation
 /// Decides when a spoken turn is over. SpeechAnalyzer partials lag the audio, and people pause
 /// mid-sentence ("show me the last, uh ... debugging session"), so a turn ends only after a
 /// silence with neither new text nor voiced audio, and that silence is longer when the words
-/// so far trail off.
+/// so far trail off; a complete-looking sentence ends on text silence alone, room "voice"
+/// (fan, TV) cannot hold it open.
 public enum TurnEndpointer {
     /// Complete-looking sentence: end fast.
     public static let fast: TimeInterval = 0.7
@@ -11,6 +12,10 @@ public enum TurnEndpointer {
     public static let extended: TimeInterval = 2.7
     /// No new text for this long ends the turn even if the mic still "hears voice" (fan, TV).
     public static let stuckText: TimeInterval = 4
+    /// Text silence this long ends a complete-looking sentence even while the mic hears voice.
+    public static let completeHold: TimeInterval = 1.5
+    /// A follow-up replay starts this long after the reply drained: the reply's room echo dies.
+    public static let echoTail: TimeInterval = 0.15
 
     /// A filler ends a turn as incomplete even when STT punctuates it ("the last, huh?").
     static let fillers: Set<String> = ["uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah"]  // Mac STT: "uh" -> "huh"
@@ -39,8 +44,24 @@ public enum TurnEndpointer {
     public static func shouldEnd(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> Bool {
         let needed = silence(after: text)
         if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return true }
+        // A complete-looking sentence ends on text silence alone; empty text never does.
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !looksIncomplete(text),
+           now.timeIntervalSince(lastTextAt) >= completeHold { return true }
         let quietSince = max(lastTextAt, lastVoiceAt ?? .distantPast)
         return now.timeIntervalSince(quietSince) >= needed
+    }
+
+    /// Where follow-up replay begins: anything stamped earlier is the reply's own echo.
+    public static func replayStart(drainedAt: Date) -> Date {
+        drainedAt.addingTimeInterval(echoTail)
+    }
+
+    /// Which ring chunks a follow-up may replay; all false when the drain time is unknown.
+    public static func replayable(stamps: [Date], drainedAt: Date?) -> [Bool] {
+        guard let drainedAt else { return stamps.map { _ in false } }
+        let start = replayStart(drainedAt: drainedAt)
+        return stamps.map { $0 >= start }
     }
 }
 

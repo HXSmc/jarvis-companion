@@ -334,13 +334,19 @@ def files_phrase(n: int) -> str:
 
 
 def diff_cards(hunks: list[dict], base: str, title: str = "Changed since last merge",
-               empty: str = "No changes since the last merge") -> list[dict]:
+               empty: str = "No changes since the last merge",
+               head: str | None = None) -> list[dict]:
     """Stat + bar + "where it changed" info cards summarizing `hunks()` output, validated by common.hud.
 
     The stat (and the empty-case info card) carry `title`, the empty card says `empty`.
-    Empty hunks (or a failed git call upstream) yield one info card instead.
+    Empty hunks (or a failed git call upstream) yield one info card instead. With `head`
+    (merge fallback) the stat label and bar caption name the base..head range instead of
+    the base alone, keeping a trailing ^ on the base (`9ca3ed4a^..9ca3ed4a`).
     """
     short = base[:8]
+    if head:
+        b = base[:-1][:8] + "^" if base.endswith("^") else base[:8]
+        short = f"{b}..{head[:8]}"
     if not hunks:
         card = validate_card(
             {"type": "info", "id": "gd-stat", "title": title, "body": [empty]}

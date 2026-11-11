@@ -51,7 +51,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 no_speech: "no speech", app_error: "app error",
                 agent: "agent started", agent_tool: "agent tool", agent_confirm: "confirmation",
                 agent_progress: "progress line", lines: "line highlight", editor_scroll: "editor scroll",
-                repo_pick: "repo picked", hunk: "change list",
+                repo_pick: "repo picked", hunk: "change list", media: "media",
                 incomplete: "waiting for more", continued: "continued after a pause" };
 
 function el(tag, cls, text) {
@@ -128,7 +128,7 @@ function render(data) {
       const d = describe(s);
       if (d !== null) v.textContent = d;
       if (s.step === "transcribed" || s.step === "agent_progress") v.append(el("q", "", s.text));
-      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : ` · text at ${s.ms} ms, no audio`); }
+      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : s.ms == null ? ` · ${s.note || "not spoken in a turn"}` : ` · text at ${s.ms} ms, no audio`); }
       li.append(v);
       ol.append(li);
     }

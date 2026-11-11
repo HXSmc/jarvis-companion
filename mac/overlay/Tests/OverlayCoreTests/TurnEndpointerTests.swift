@@ -39,6 +39,33 @@ final class TurnEndpointerTests: XCTestCase {
                                                now: t0.addingTimeInterval(4)))
     }
 
+    func testCompleteTextEndsDespiteRoomVoice() {
+        let t0 = Date()
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
+                                                 lastVoiceAt: t0.addingTimeInterval(1.4),
+                                                 now: t0.addingTimeInterval(1.4)))
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.6),
+                                                now: t0.addingTimeInterval(1.55)))
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: "show me the last", lastTextAt: t0,
+                                                 lastVoiceAt: t0.addingTimeInterval(1.6),
+                                                 now: t0.addingTimeInterval(2.0)))
+        // Empty text never ends via the complete-hold rule.
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: "", lastTextAt: t0,
+                                                 lastVoiceAt: t0.addingTimeInterval(1.9),
+                                                 now: t0.addingTimeInterval(1.9)))
+    }
+
+    func testReplayStartsAfterTheReplyAndEcho() {
+        let d = Date()
+        XCTAssertEqual(TurnEndpointer.replayStart(drainedAt: d), d.addingTimeInterval(0.15))
+        let stamps = [d.addingTimeInterval(-0.5), d, d.addingTimeInterval(0.1),
+                      d.addingTimeInterval(0.15), d.addingTimeInterval(0.4)]
+        XCTAssertEqual(TurnEndpointer.replayable(stamps: stamps, drainedAt: d),
+                       [false, false, false, true, true])
+        XCTAssertEqual(TurnEndpointer.replayable(stamps: [d], drainedAt: nil), [false])
+    }
+
     func testVoiceActivityTracksTheNoiseFloor() {
         var vad = VoiceActivity()
         for _ in 0..<100 { XCTAssertFalse(vad.isVoiced(rms: 0.002)) }  // quiet room

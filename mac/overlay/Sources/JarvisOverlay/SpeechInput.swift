@@ -44,10 +44,11 @@ final class SpeechInput {
     /// audio. Ends per TurnEndpointer (0.7 s quiet, 2.7 s when the words trail off);
     /// 5 s with no speech, an empty final, or 30 s hard cap -> onNothing(why), why = a short
     /// diagnosis for the debug page (STT path, buffers fed, results, errors).
-    /// followUp: the open-mic window after a reply. No ring replay (it holds Jarvis's own
-    /// voice) and 8 s to start speaking.
+    /// followUp: the open-mic window after a reply. Replays only ring audio stamped after
+    /// replayFrom (the reply's drain + echo tail); nil replays nothing. 8 s to start speaking.
     func listenAfterWake(
         followUp: Bool = false,
+        replayFrom: Date? = nil,
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void,
         onNothing: @escaping (_ why: String) -> Void
@@ -56,6 +57,7 @@ final class SpeechInput {
         cancel()
         let turn = Turn()
         turn.followUp = followUp
+        turn.replayFrom = replayFrom
         turn.onPartial = onPartial
         turn.onFinal = onFinal
         turn.onNothing = onNothing
@@ -111,6 +113,7 @@ final class SpeechInput {
         var onFinal: ((_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void)?
         var onNothing: ((String) -> Void)?
         var followUp = false
+        var replayFrom: Date?  // follow-up turns replay only ring chunks at/after the reply drain + echo tail
         var path = ""  // STT path + why it was taken, for the debug page
         var endNote = ""  // how long the end-of-turn silence was, for the debug page
         let stats = FeedStats()
@@ -259,6 +262,13 @@ final class SpeechInput {
         }
         if !turn.followUp {
             for chunk in tap.ringSnapshot() { feed(chunk.buffer, chunk.at) }
+        } else {
+            // Follow-up: replay only chunks stamped at/after replayStart; replayStart >= the
+            // drain time already guarantees no chunk recorded while audio was busy is replayed.
+            let snapshot = tap.ringSnapshot()
+            let playable = TurnEndpointer.replayable(stamps: snapshot.map { $0.at },
+                                                     drainedAt: turn.replayFrom)
+            for (chunk, ok) in zip(snapshot, playable) where ok { feed(chunk.buffer, chunk.at) }
         }
         tap.setSink(feed)
         let verdict = await watch(turn: turn)
@@ -316,6 +326,14 @@ final class SpeechInput {
         turn.cancelHandler = { task.cancel() }
         for chunk in tap.ringSnapshot() where !turn.followUp {
             request.append(chunk.buffer)
+        }
+        if turn.followUp {
+            // Follow-up: replay only chunks stamped at/after replayStart; replayStart >= the
+            // drain time already guarantees no chunk recorded while audio was busy is replayed.
+            let snapshot = tap.ringSnapshot()
+            let playable = TurnEndpointer.replayable(stamps: snapshot.map { $0.at },
+                                                     drainedAt: turn.replayFrom)
+            for (chunk, ok) in zip(snapshot, playable) where ok { request.append(chunk.buffer) }
         }
         tap.setSink { [weak request] buffer, _ in
             stats.fed(converted: Int(buffer.frameLength))

@@ -1,9 +1,11 @@
 """Builds a temp git repo whose diff against the last merge has one added, one changed
 and one removed hunk in sample.py, each from its own named commit.
 
-Modes: default (clean tree), "dirty" (line 20 of sample.py edited but uncommitted) and
+Modes: default (clean tree), "dirty" (line 20 of sample.py edited but uncommitted),
 "merged-clean" (a fresh two-parent merge whose only new-side change is line 30 of
-sample.py, from one feature commit).
+sample.py, from one feature commit), "wrap" (a >300-char line 149 committed on top,
+.vscode wordWrap setting on disk) and "fold" (imports.ts with one import line changed,
+.vscode folding setting on disk).
 
 Used by tests/test_overlay_git.py (hunk counts, labels, blame, hunk_diff) and by the
 live Mac check: open sample.py in VS Code and ask to highlight the changes since the
@@ -35,7 +37,10 @@ def build(root: Path, extra: bool = False, mode: str = "") -> dict:
     mode "dirty": after the normal build, line 20 of sample.py is edited in the working
     tree only (truth["dirty"]). mode "merged-clean": a second feature branch tunes line 30,
     main gains notes.txt, and a --no-ff merge lands it on a clean tree (truth["last_merge"],
-    truth["merge_hunk"]).
+    truth["merge_hunk"]). mode "wrap": one more commit makes line 149 a single >300-char
+    line, with .vscode/settings.json turning on wordWrap (truth["wrap"]). mode "fold":
+    imports.ts (12 imports, 30 exports) is committed, then its line 6 import gains a second
+    name, with .vscode/settings.json enabling foldingImportsByDefault (truth["fold"]).
     """
     root = Path(root)
     if root.exists() and any(root.iterdir()):
@@ -84,6 +89,24 @@ def build(root: Path, extra: bool = False, mode: str = "") -> dict:
         truth["last_merge"] = _git(root, "rev-parse", "HEAD")
         truth["merge_hunk"] = {"start": 30, "end": 30, "kind": "changed",
                                "subject": "Tune the retry delay"}
+    elif mode == "wrap":
+        (root / ".vscode").mkdir()
+        (root / ".vscode/settings.json").write_text('{"editor.wordWrap": "on"}')
+        long_line = "L904 = 146  # "
+        while len(long_line) <= 300:
+            long_line += "timeout renamed for the retry path "
+        sample[148] = long_line  # line 149 was "L904 = 146  # timeout renamed"
+        _commit(root, "sample.py", sample, "Long wrapped line")
+        truth["wrap"] = {"start": 149, "end": 149, "kind": "changed"}
+    elif mode == "fold":
+        (root / ".vscode").mkdir()
+        (root / ".vscode/settings.json").write_text('{"editor.foldingImportsByDefault": true}')
+        imports = [f'import {{ a{k:02d} }} from "./a{k:02d}";' for k in range(1, 13)]
+        imports += [""] + [f"export const v{k:02d} = {k};" for k in range(1, 31)]
+        _commit(root, "imports.ts", imports, "Add imports")
+        imports[5] = 'import { a06, b06 } from "./a06";'  # line 6 gains a second name
+        _commit(root, "imports.ts", imports, "Change an import")
+        truth["fold"] = {"file": "imports.ts", "start": 6, "end": 6, "kind": "changed"}
     return truth
 
 
@@ -95,10 +118,11 @@ def _commit(root: Path, name: str, lines: list[str], subject: str) -> None:
 
 def main(argv: list[str]) -> None:
     rest = argv[1:]
-    modes = [f for f in ("--dirty", "--merged-clean") if f in rest]
-    dirs = [a for a in rest if a not in ("--extra", "--dirty", "--merged-clean")]
+    modes = [f for f in ("--dirty", "--merged-clean", "--wrap", "--fold") if f in rest]
+    dirs = [a for a in rest if a not in ("--extra", "--dirty", "--merged-clean", "--wrap", "--fold")]
     if len(modes) > 1 or len(dirs) != 1:
-        raise SystemExit("usage: hunk_fixture.py <dir> [--extra] [--dirty|--merged-clean]")
+        raise SystemExit("usage: hunk_fixture.py <dir> [--extra] "
+                         "[--dirty|--merged-clean|--wrap|--fold]")
     print(json.dumps(build(Path(dirs[0]), "--extra" in rest,
                            mode=modes[0][2:] if modes else ""), indent=2))
 
