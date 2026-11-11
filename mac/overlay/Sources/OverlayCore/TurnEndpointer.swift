@@ -49,6 +49,10 @@ public enum TurnEndpointer {
            text.distance(from: text.startIndex, to: range.lowerBound) < 40 {
             text = String(text[range.upperBound...])
         }
+        return text
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?;:-"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     public static func shouldEnd(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> Bool {
         let needed = silence(after: text)

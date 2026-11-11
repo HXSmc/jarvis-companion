@@ -154,10 +154,6 @@ final class SpeechInput {
 
     /// Drops everything up to a "jarvis" near the start, and stray punctuation.
     static func stripWake(_ raw: String) -> String { TurnEndpointer.stripWake(raw) }
-        return text
-            .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?;:-"))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     // MARK: watchdog
 
