@@ -25,7 +25,8 @@ from test_overlay_seescreen import (  # noqa: E402,F401  (shared stubs + fixture
 @pytest.fixture(autouse=True)
 def reset_lookfix_state():
     stores = (overlay._card_text, overlay._last_reply, overlay._resets, overlay._pending, overlay._confirm,
-              overlay._expired, overlay._agent_busy, overlay._notes, overlay._card_ids, overlay._inflight)
+              overlay._expired, overlay._agent_busy, overlay._notes, overlay._card_ids, overlay._inflight,
+              overlay._hunks)
     for store in stores:
         store.clear()
     overlay.debug_log.clear()
@@ -545,3 +546,17 @@ def test_reference_after_card_about_the_screen_is_not_own_card(client):
     nothing is drawn, but Jarvis does not claim it is only on his card."""
     events, _vlm, _calls = look(client, ASK_MOTTO, MOTTO, "highlight it", fallback=lambda p: ['{"point": null}'])
     assert says(events)[-1] == "I can't see it on screen." and overlay.OWN_CARD_LINE not in says(events)
+
+
+def test_change_cursor_blocks_wake_reset_but_clear_drops_it(client, monkeypatch):
+    """jtools2's _hunks (merged from ci-ipa) is agent-tier state: a wake word keeps the conversation;
+    "clear" drops the cursor itself and then starts afresh."""
+    deps, _web, _quiet, log = life(monkeypatch)
+    screen_question(client, "h1", **SPOKEN)
+    log.clear()
+    overlay._hunks["h1"] = object()
+    deps.clock.t += 91
+    turn(client, "what is the capital of France", conv_id="h1", **SPOKEN)
+    assert ("quiet", "drop", "h1") not in log and "h1" in overlay._tainted
+    turn(client, "clear", conv_id="h1", followup=True)
+    assert "h1" not in overlay._hunks and "h1" not in overlay._tainted and ("quiet", "drop", "h1") in log

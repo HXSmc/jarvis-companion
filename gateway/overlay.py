@@ -503,10 +503,11 @@ def _may_start_fresh(conv_id: str, deps: OverlayDeps, agent_state_at_start: bool
             and _inflight.get(conv_id, 0) <= 1)
 
 
-def _holds_agent_state(conv_id: str, deps: OverlayDeps) -> bool:
+def _holds_agent_state(conv_id: str, deps: OverlayDeps, cursor: bool = True) -> bool:
     """True while the agent tier holds anything for conv_id (a session, a pending or expired yes, a
-    running turn): its read text and pending questions are not ours to drop, so no fresh start."""
-    if conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy:
+    running turn, with `cursor` a change-list cursor): its read text and pending questions are not
+    ours to drop, so no fresh start."""
+    if conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy or (cursor and conv_id in _hunks):
         return True
     pool = deps.agent_conversations
     if pool is None:
@@ -701,7 +702,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     resets = _resets.get(body.conv_id, 0)
     # Read before the preflight settles a pending yes: a turn that began with agent state never
     # starts the conversation afresh, even once the preflight has answered that state.
-    agent_state = _holds_agent_state(body.conv_id, deps)
+    # The change-list cursor is left to the check at the reset itself: "clear" drops it first.
+    agent_state = _holds_agent_state(body.conv_id, deps, cursor=False)
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
