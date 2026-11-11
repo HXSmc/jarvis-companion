@@ -16,7 +16,7 @@ PHRASES = {
     "answer": "Just a moment.",
     "clear": "All cleared.",
     "hide": "Hidden.",
-    "show": "Back on screen.",
+    "show": "Showing them.",
     "aside": "Out of the way.",
     "restore": "Putting them back.",
     "move": "Moving them.",

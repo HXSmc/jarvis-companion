@@ -21,7 +21,7 @@ struct CardTile: View {
                     entered = true
                     return
                 }
-                withAnimation(.easeOut(duration: 0.2)) { entered = true }
+                withAnimation(.easeOut(duration: Theme.motionShort)) { entered = true }
             }
     }
 

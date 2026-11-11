@@ -133,7 +133,7 @@ _REMOVAL_VERB_RES = {
                        r"|out of my way|out of the way)\b", re.IGNORECASE),
     "aside": re.compile(r"\b(?:park|aside|away|out of the way|out of my way)\b", re.IGNORECASE),
 }
-OVERLAY_UNCHANGED_LINE = "I haven't changed the overlay. Say hide, clear or move it."
+OVERLAY_UNCHANGED_LINE = "The overlay is unchanged."
 NO_PICTURE_LINE = "I couldn't find a picture of that."
 NO_VIDEO_LINES = {  # find_video reasons -> one plain line each; the card itself comes from the service
     "none": "I couldn't find a video of that.",
