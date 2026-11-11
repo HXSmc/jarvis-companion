@@ -146,6 +146,7 @@ def reset(monkeypatch, tmp_path):
     monkeypatch.delenv("OVERLAY_GIT_REPO", raising=False)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))  # policy home = a fake folder
+    monkeypatch.setattr(overlay.gitdiff, "editor_path", lambda editor: editor)  # the fake `run` records "code"
     global REPO
     REPO = git_repo(tmp_path / "home" / "repo")
     yield
@@ -742,7 +743,7 @@ def test_history_of_file_on_screen_gets_diff_card_and_lines(client):
     cards = [e["card"] for e in events if e["type"] == "card"]
     # jtools2 R1 design 3: the same card as "since the last merge" (title, rows, the "next change" hint).
     assert cards and cards[-1]["title"] == "Changes in app.py"
-    assert cards[-1]["body"] == ["1/2 line 2 changed", "2/2 line 4 added", 'Say "next change" to jump.']
+    assert cards[-1]["body"] == ["Now: 1/2 line 2 changed", "2/2 line 4 added", 'Say "next change" to jump.']
     lines = [e for e in events if e["type"] == "lines"]
     assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[2, 2], [4, 4]],
                       "labels": ["1/2 changed", "2/2 +1"]}]

@@ -107,6 +107,16 @@ final class OverlayModel: ObservableObject {
     }
 
     /// A late re-resolve found the target positively gone.
+    /// A newer turn replaces these cards (drop_cards): they leave the screen, and an idle-cleared set
+    /// holding one of them can no longer come back with "show them".
+    func remove(cardIDs: [String]) {
+        let ids = Set(cardIDs)
+        if let stash = idleStash, stash.cards.contains(where: { $0.id.map(ids.contains) ?? false }) {
+            idleStash = nil
+        }
+        cards.removeAll { $0.id.map(ids.contains) ?? false }
+    }
+
     func remove(keys: [Int]) {
         entries.removeAll { keys.contains($0.key) }
         publishShapes()

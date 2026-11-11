@@ -44,6 +44,7 @@ def reset(monkeypatch, tmp_path):
     monkeypatch.delenv("OVERLAY_GIT_REPO", raising=False)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))  # policy home: the fixture repo's git is Allow
+    monkeypatch.setattr(gitdiff, "editor_path", lambda editor: editor)  # the fake `run` records "code"
     yield
     overlay.set_deps(None)
 
@@ -128,34 +129,32 @@ def test_next_change_without_a_list(client):
 
 
 def test_why_did_this_change_uses_blame_and_taints(client, repo):
+    """jfollow item 3: the answer is a fixed template from the blamed commit (no model call); the
+    commit text still rides as an untrusted note for a later free question, and the conv is tainted."""
     calls: list = []
     _seed(client, repo, calls)
     quiet = FakeConversations(['{"say": "It added a retry counter."}\n'])
+    loud = FakeConversations(['{"say": "It added a retry counter."}\n'])
     overlay.set_deps(make_deps(run=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=""),
-                               conversations=FakeConversations(),
-                               quiet_conversations=quiet))
+                               conversations=loud, quiet_conversations=quiet))
     events = turn(client, "why did this change", conv_id="h1")
-    assert "It added a retry counter." in says(events)
-    prompt = quiet.sessions["h1"].prompts[-1]  # the tool-less pool, not the web one
-    assert "Add the retry counter" in prompt  # the blame subject rides as untrusted context
-    assert '<context untrusted="true">' in prompt
-    assert "Why did change 1 of 3 in sample.py, lines 140 to 142" in prompt
+    assert any(s.startswith('Change 1 of 3 came from "Add the retry counter", committed ') for s in says(events))
+    assert quiet.sessions == {} and loud.sessions == {}  # no model call
+    assert "Add the retry counter" in overlay._notes["h1"][-1]
     assert "h1" in overlay._tainted
 
-    # R1 glm-cross note: on hunk 2 the prompt holds hunk 2's subject and diff, not hunk 1's or 3's.
+    # On hunk 2 the answer and the note hold hunk 2's subject and diff, not hunk 1's or 3's.
     turn(client, "next change", conv_id="h1")
     events = turn(client, "why did this change", conv_id="h1")
-    prompt = quiet.sessions["h1"].prompts[-1]
-    context = prompt.split('<context untrusted="true">', 1)[1]
-    assert "Rename the timeout flag" in context and "+L904 = 146" in context
-    assert "Drop the unused cache lines" not in prompt
-    assert "Add the retry counter" not in prompt.split("Change 2 of 3 in sample.py", 1)[1]
-    assert "Why did change 2 of 3 in sample.py, line 149" not in prompt  # question keeps "lines a to b"
+    (line,) = [s for s in says(events) if s.startswith("Change 2 of 3")]
+    assert '"Rename the timeout flag"' in line and "retry" not in line and "cache" not in line
+    note = overlay._notes["h1"][-1]
+    assert "Rename the timeout flag" in note and "+L904 = 146" in note
+    assert "Drop the unused cache lines" not in note and "Add the retry counter" not in note
     turn(client, "next change", conv_id="h1")  # hunk 3: removed lines, blame can't trace them
-    prompts_before = len(quiet.sessions["h1"].prompts)
     events = turn(client, "why did this change", conv_id="h1")
     assert acks.PHRASES["why_removed"] in says(events)
-    assert len(quiet.sessions["h1"].prompts) == prompts_before  # fixed line, no model call
+    assert quiet.sessions == {} and loud.sessions == {}
 
 
 def test_hunk_state_is_bounded_and_cleared(client, repo, monkeypatch):

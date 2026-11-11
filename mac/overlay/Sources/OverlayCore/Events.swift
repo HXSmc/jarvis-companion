@@ -31,6 +31,8 @@ public enum OverlayEvent: Equatable {
     case lines(file: String, ranges: [ClosedRange<Int>], labels: [String] = [])
     case clear
     case layout(LayoutMode)
+    /// Ids of cards the service sent earlier that a newer turn replaces (string ids only, <= 64 chars, max 24).
+    case dropCards(ids: [String])
     case done(metrics: [String: Double], error: String?)
     case unknown
 
@@ -80,6 +82,10 @@ public enum OverlayEvent: Equatable {
         case "layout":
             guard let raw = obj["mode"] as? String, let mode = LayoutMode(rawValue: raw) else { return .unknown }
             return .layout(mode)
+        case "drop_cards":
+            guard let raw = obj["ids"] as? [Any] else { return .unknown }
+            let ids = raw.compactMap { $0 as? String }.filter { $0.count <= 64 }
+            return .dropCards(ids: Array(ids.prefix(24)))
         case "done":
             var metrics: [String: Double] = [:]
             if let raw = obj["metrics"] as? [String: Any] {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import sys
 import types
 from pathlib import Path
@@ -132,3 +133,26 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
     assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
     assert "vault === false" in page and "Notes vault not set" in page
+
+
+def test_setup_rows_have_page_padding(client):
+    """jfollow item 8: the red setup rows line up with the turn cards (not flush at x=0)."""
+    page = client.get("/overlay/debug").text
+    rule = re.search(r"#setup\s*\{([^}]*)\}", page)
+    inside_main = re.search(r"<main[^>]*>.*id=\"setup\"", page, re.S)
+    assert inside_main or (rule and re.search(r"padding:\s*0\s+[1-9]\d*px", rule.group(1)))
+
+
+def test_code_cli_setup_finds_the_bundled_cli(client, monkeypatch, tmp_path):
+    """jfollow item 6: the bundled VS Code CLI counts; the JSON holds a boolean, never a path."""
+    from mac.voice import gitdiff
+    exe = tmp_path / "bundle" / "code"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(gitdiff.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gitdiff, "EDITOR_CANDIDATES", {"code": (str(exe),), "cursor": ()})
+    resp = client.get("/overlay/debug/turns", headers=AUTH_HEADER)
+    assert resp.json()["setup"]["code_cli"] is True and str(tmp_path) not in resp.text
+    monkeypatch.setattr(gitdiff, "EDITOR_CANDIDATES", {"code": (str(tmp_path / "none"),), "cursor": ()})
+    assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["code_cli"] is False
