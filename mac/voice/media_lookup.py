@@ -46,6 +46,7 @@ SEARCH_LIMIT = 20  # still one request (~50 KB); the filters drop some hits
 THUMB_WIDTH = 800
 MAX_QUERY, MAX_TITLE, MAX_ARTIST, MAX_LICENCE = 80, 60, 40, 30
 MAX_COUNT = hud.MAX_MEDIA_ITEMS
+MIN_ASPECT, MAX_ASPECT = 0.5, 2.5  # width/height; strips and panoramas look broken on a card
 # Only licences that need no visible credit while the Mac does not draw `caption` (task
 # f52-media-caption). Key = CommonsMetadata `License` code (extmetadata); value = the Commons
 # structured-data statement the search filters on. Widen both together, e.g.
@@ -133,6 +134,10 @@ def _hit(page) -> dict | None:
     licence = clean_text(_meta(ext, "LicenseShortName"), MAX_LICENCE)
     raw_title = page.get("title") if isinstance(page.get("title"), str) else ""
     if not (url and source_page and licence):
+        return None
+    width, height = info.get("width"), info.get("height")
+    if (isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0
+            and not MIN_ASPECT <= width / height <= MAX_ASPECT):  # unknown size = kept
         return None
     if (_meta(ext, "License").strip().lower() not in ALLOWED_LICENCES
             or _meta(ext, "AttributionRequired").strip().lower() != "false"):

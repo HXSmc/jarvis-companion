@@ -61,10 +61,24 @@ def test_count_limits_hits(commons):
 
 def test_bad_hits_are_dropped(commons):
     """Other host, http, SVG, webm, suffix/userinfo/port tricks, bad page host, no licence, CC BY,
-    CC BY-SA, attribution required, blocklist."""
+    CC BY-SA, attribution required, blocklist, panorama 6:1, tall strip 1:3."""
     commons["reply"] = lambda req: ok(fixture("bad"))
     hits = media_lookup.search("red fox", 6)
-    assert [h["title"] for h in hits] == ["Panorama fox", "Tall strip fox", "Vulpes vulpes ssp fulvus"]
+    assert [h["title"] for h in hits] == ["Vulpes vulpes ssp fulvus"]
+
+
+@pytest.mark.parametrize("width,height,kept", [
+    (1000, 2000, True), (2500, 1000, True), (999, 2000, False), (2501, 1000, False),
+    (None, None, True), (0, 0, True), ("800", "600", True),  # unknown size = kept
+])
+def test_aspect_ratio_limits(commons, width, height, kept):
+    data = json.loads(fixture("fox"))
+    data["query"]["pages"] = data["query"]["pages"][:1]
+    info = data["query"]["pages"][0]["imageinfo"][0]
+    info.pop("width"), info.pop("height")
+    info.update({k: v for k, v in (("width", width), ("height", height)) if v is not None})
+    commons["reply"] = lambda req: ok(json.dumps(data).encode())
+    assert len(media_lookup.search("red fox", 1)) == int(kept)
 
 
 def _with_licence(code, short, attribution):
