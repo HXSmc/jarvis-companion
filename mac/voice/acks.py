@@ -34,6 +34,12 @@ PHRASES = {
     "busy": "Still on the last one, I'm afraid.",
     "not_confirmed": "Very well, I won't.",
     "expired": "That request expired, so I haven't done it.",
+    "hunk": "Right.",
+    "no_hunks": "There's no list of changes yet. Ask me to highlight them first.",
+    "last_hunk": "That was the last change.",
+    "first_hunk": "That's the first change.",
+    "why_removed": "Git blame can't trace removed lines, I'm afraid.",
+    "hunk_refused": "I won't run git in that repository, I'm afraid.",
 }
 
 _ACK_KEYS = {
@@ -42,6 +48,7 @@ _ACK_KEYS = {
     "ground": "look",
     "look": "look",
     "git_diff": "diff",
+    "hunk": "hunk",
     "clear": "clear",
     "answer": "answer",
 }

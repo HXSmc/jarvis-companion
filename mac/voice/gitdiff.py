@@ -24,8 +24,10 @@ _EDITOR_TIMEOUT = 2  # the editor CLI returns at once when healthy
 _GIT_PREFIX = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                "-c", "diff.external=", "-c", "core.pager=cat",
                "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"]
-# New side of a unified=0 hunk header: +<start>[,<count>]; a missing ,count means 1.
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+# Hunk header: -<start>[,<count>] +<start>[,<count>]; a missing ,count means 1 on either side.
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+# Overlay labels: only integers and fixed words ever reach the app from diff data.
+LABEL_RE = re.compile(r"^[0-9]{1,2}/[0-9]{1,2} (\+[0-9]{1,6}|changed|removed here)$")
 
 
 def _git(repo: Path, *args: str) -> str | None:
@@ -78,8 +80,9 @@ def last_merge(repo: Path) -> str | None:
 def hunks(repo: Path, base: str) -> list[dict]:
     """New-side line ranges of the working-tree diff against `base`.
 
-    [{file, start, count}] in diff order. Deleted files (+++ /dev/null) are skipped;
-    pure deletions are kept with count 0 so the app can still highlight the old line.
+    [{file, start, count, old}] in diff order (count = new-side lines, old = old-side
+    lines). Deleted files (+++ /dev/null) are skipped; pure deletions are kept with
+    count 0 so the app can still highlight the old line.
     """
     out = _git(Path(repo), "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
     if not out:
@@ -93,8 +96,71 @@ def hunks(repo: Path, base: str) -> list[dict]:
             continue
         m = _HUNK_RE.match(line)
         if m and file:
-            result.append({"file": file, "start": int(m[1]), "count": int(m[2] or 1)})
+            result.append({"file": file, "start": int(m[2]), "count": int(m[3] or 1),
+                           "old": int(m[1] or 1)})
     return result
+
+
+def hunk_label(h: dict, i: int, n: int) -> str:
+    """Short overlay label for hunk `i` of `n`: "+k" added, "changed", or "removed here"."""
+    if h["old"] == 0:
+        return f"{i}/{n} +{h['count']}"
+    if h["count"] == 0:
+        return f"{i}/{n} removed here"
+    return f"{i}/{n} changed"
+
+
+def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000) -> str:
+    """Unified=3 hunk (header + body) covering new-side line `start` of `rel`; "" when nothing matches.
+
+    Exact hunk first; else the last hunk starting at or before `start` (the user's line
+    sits in its context or the removal just after it).
+    """
+    out = _git(Path(repo), "diff", "--unified=3", "--no-color", "--no-ext-diff", "--no-textconv",
+               base, "--", rel)
+    if not out:
+        return ""
+    parsed: list[tuple[int, int, str]] = []  # (new start, new count, hunk text)
+    cur: list[str] = []
+    head: tuple[int, int] | None = None
+    for line in out.splitlines():
+        m = _HUNK_RE.match(line)
+        if m:
+            if head:
+                parsed.append((*head, "\n".join(cur)))
+            head = (int(m[2]), int(m[3] or 1))
+            cur = [line]
+        elif head:
+            cur.append(line)
+    if head:
+        parsed.append((*head, "\n".join(cur)))
+    for s, c, text in parsed:
+        if s <= start <= s + max(c, 1) - 1:
+            return text[:limit]
+    before = [(s, text) for s, _, text in parsed if s <= start]
+    return max(before, key=lambda st: st[0])[1][:limit] if before else ""
+
+
+def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tuple[list[str], bool]:
+    """Subjects of the commits behind lines a..b of `rel`; second item True when a line is uncommitted."""
+    out = _git(Path(repo), "blame", "-L", f"{a},{b}", "--porcelain", "--", rel)
+    if not out:
+        return [], False
+    shas: list[str] = []
+    uncommitted = False
+    for line in out.splitlines():
+        m = re.match(r"^([0-9a-f]{40}) \d+ \d+", line)
+        if not m:
+            continue
+        if m[1] == "0" * 40:  # the all-zero sha marks not-committed-yet lines
+            uncommitted = True
+        elif m[1] not in shas:
+            shas.append(m[1])
+    subjects = []
+    for sha in shas[:max_n]:
+        log = _git(Path(repo), "log", "-1", "--format=%s", sha)
+        subjects.append(log.splitlines()[0].strip()[:120] if log else "")
+    return subjects, uncommitted
 
 
 def diff_text(repo: Path, base: str, limit: int = 12000) -> str:

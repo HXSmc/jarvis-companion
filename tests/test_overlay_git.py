@@ -10,8 +10,10 @@ skipped (+++ /dev/null).
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,12 +25,22 @@ GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
 
 # Working tree after the fixture's post-merge edits (a.py line 1 deleted, original
 # lines 3-4 edited, b.py +2, c.py new with 5 lines, d.py deleted -> skipped).
+# old = old-side count of each unified=0 hunk header.
 EXPECTED_HUNKS = [
-    {"file": "a.py", "start": 0, "count": 0},
-    {"file": "a.py", "start": 2, "count": 2},
-    {"file": "b.py", "start": 4, "count": 2},
-    {"file": "c.py", "start": 1, "count": 5},
+    {"file": "a.py", "start": 0, "count": 0, "old": 1},
+    {"file": "a.py", "start": 2, "count": 2, "old": 2},
+    {"file": "b.py", "start": 4, "count": 2, "old": 0},
+    {"file": "c.py", "start": 1, "count": 5, "old": 0},
 ]
+
+
+def _fixture():
+    """Import tests/fixtures/overlay/hunk_fixture.py as a module."""
+    spec = importlib.util.spec_from_file_location(
+        "hunk_fixture", Path(__file__).parent / "fixtures/overlay/hunk_fixture.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _git(repo, *args: str) -> str:
@@ -251,3 +263,28 @@ def test_open_in_editor_times_out_and_skips_colon_names(repo):
 
     assert gitdiff.open_in_editor(r, "a:9", 3, run=ok, fallback=False) == "none"
     assert calls == []
+
+
+def test_hunks_carry_old_count_and_labels(tmp_path):
+    truth = _fixture().build(tmp_path / "r")
+    hs = [h for h in gitdiff.hunks(tmp_path / "r", truth["merge"]) if h["file"] == "sample.py"]
+    assert len(hs) == 3
+    assert all("old" in h for h in hs)
+    assert [(h["start"], h["start"] + max(h["count"], 1) - 1) for h in hs] == [
+        (t["start"], t["end"]) for t in truth["hunks"]]
+    labels = [gitdiff.hunk_label(h, i + 1, 3) for i, h in enumerate(hs)]
+    assert labels == ["1/3 +3", "2/3 changed", "3/3 removed here"]
+    assert all(gitdiff.LABEL_RE.match(l) for l in labels)
+
+
+def test_blame_subjects_and_hunk_diff(tmp_path):
+    repo = tmp_path / "r"
+    truth = _fixture().build(repo)
+    assert gitdiff.blame_subjects(repo, "sample.py", 149, 149) == (["Rename the timeout flag"], False)
+    assert gitdiff.blame_subjects(repo, "sample.py", 140, 142)[0] == ["Add the retry counter"]
+    lines = (repo / "sample.py").read_text().splitlines()
+    lines[9] = 'L010 = 10  # touched'  # uncommitted working-tree edit
+    (repo / "sample.py").write_text("\n".join(lines) + "\n")
+    assert gitdiff.blame_subjects(repo, "sample.py", 10, 10) == ([], True)
+    text = gitdiff.hunk_diff(repo, truth["merge"], "sample.py", 149)
+    assert text.startswith("@@") and "+L904 = 146" in text

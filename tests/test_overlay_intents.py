@@ -312,6 +312,20 @@ def test_confirm_phrases_survive_real_speech_to_text():
         assert not is_no(text), text
 
 
+def test_hunk_routing():
+    for text, arg in (("next change", "next"), ("Jarvis, next change.", "next"),
+                      ("go to the next change", "next"), ("next", "next"),
+                      ("previous change", "prev"), ("why did this change?", "why"),
+                      ("explain this change", "why")):
+        intent = parse(text, apps={})
+        assert (intent.kind, intent.arg, intent.sub) == ("hunk", arg, arg), text
+    # The deterministic paths these could be confused with stay as they were.
+    assert parse("what changed in the last commit") == Intent(
+        "agent", "what changed in the last commit", "git")
+    assert parse("highlight the changes since the last merge").kind == "git_diff"
+    assert parse("what's next on my calendar").sub == "calendar"
+
+
 def test_agent_routing_ignores_ordinary_talk():
     """R1 code #7: everyday words do not send a request to the 120 s agent tier."""
     for text in ("I'm committed to this plan", "tell me about the new iPhone release",
