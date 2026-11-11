@@ -13,8 +13,9 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
       bar:   items: [{label, value: number}] <= 12, caption?: str
       flow:  nodes: [{id, text}] <= 12, edges: [[from, to, label?]]
       link:  url: https only, source?: str
-      image: url (https) or file_id; alt?: str<=120, source_page?: https, gallery
-             items?: [{url, alt?, source_page?}] <= 6 (kept only with 2+; url = first item)
+      image: url (https) or file_id; alt?: str<=120, caption?: str<=120 (attribution),
+             source_page?: https, gallery items?: [{url, alt?, caption?, source_page?}] <= 6
+             (kept only with 2+; url = first item)
       video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
              .mp4/.mov/.m4v (no HLS), thumbnail_url? (file urls only), source_page?;
              no usable media -> link card on source_page/url, else dropped
@@ -228,8 +229,11 @@ def _link_fallback(out: dict, url: str) -> dict:
 
 def _image(raw: dict, out: dict) -> dict | None:
     alt, source_page = _text(raw.get("alt"), MAX_ALT), safe_https_url(raw.get("source_page"))
+    caption = _text(raw.get("caption"), MAX_CAPTION)
     if alt:
         out["alt"] = alt
+    if caption:
+        out["caption"] = caption
     if source_page:
         out["source_page"] = source_page
     items = raw.get("items")
@@ -245,6 +249,9 @@ def _image(raw: dict, out: dict) -> dict | None:
             ialt = _text(it.get("alt"), MAX_ALT)
             if ialt:
                 item["alt"] = ialt
+            icap = _text(it.get("caption"), MAX_CAPTION)
+            if icap:
+                item["caption"] = icap
             isp = safe_https_url(it.get("source_page"))
             if isp:
                 item["source_page"] = isp
@@ -258,6 +265,8 @@ def _image(raw: dict, out: dict) -> dict | None:
             item = clean[0]
             if not alt and item.get("alt"):
                 out["alt"] = item["alt"]
+            if not caption and item.get("caption"):
+                out["caption"] = item["caption"]
             if not source_page and item.get("source_page"):
                 out["source_page"] = item["source_page"]
             out["url"] = item["url"]
@@ -334,7 +343,7 @@ def schema_json() -> dict:
     base = {"id": _str(MAX_ID), "title": {**_str(MAX_TITLE), "minLength": 1}}
     image_item = {
         "type": "object",
-        "properties": {"url": https, "alt": _str(MAX_ALT), "source_page": https},
+        "properties": {"url": https, "alt": _str(MAX_ALT), "caption": _str(MAX_CAPTION), "source_page": https},
         "required": ["url"],
         "additionalProperties": False,
     }
@@ -391,7 +400,7 @@ def schema_json() -> dict:
                     }, ["nodes", "edges"]),
                     card("link", {"url": https, "source": _str(MAX_SOURCE)}, ["url"]),
                     {**card("image", {
-                        "url": https, "alt": _str(MAX_ALT), "source_page": https,
+                        "url": https, "alt": _str(MAX_ALT), "caption": _str(MAX_CAPTION), "source_page": https,
                         "items": {"type": "array", "minItems": 2, "maxItems": MAX_MEDIA_ITEMS,
                                   "items": image_item},
                         "file_id": {"type": "string", "pattern": _FILE_ID.pattern},

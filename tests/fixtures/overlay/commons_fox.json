@@ -1,0 +1,91 @@
+{
+ "batchcomplete": true,
+ "query": {
+  "pages": [
+   {
+    "ns": 6,
+    "title": "File:Alaska Red Fox (Vulpes vulpes).jpg",
+    "index": 1,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/8/8e/Alaska_Red_Fox_%28Vulpes_vulpes%29.jpg/960px-Alaska_Red_Fox_%28Vulpes_vulpes%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/8/8e/Alaska_Red_Fox_%28Vulpes_vulpes%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Alaska_Red_Fox_(Vulpes_vulpes).jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Alaska Red Fox (Vulpes vulpes)"
+       },
+       "Artist": {
+        "value": "<a rel=\"nofollow\" class=\"external text\" href=\"https://www.flickr.com/people/22170893@N06\">Gregory \"Slobirdr\" Smith</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY-SA 2.0"
+       },
+       "Categories": {
+        "value": "Featured pictures of Alaska|Seward Peninsula|Vulpes vulpes (juvenile)|Vulpes vulpes alascensis|Flickr images reviewed by FlickreviewR|June 2014 in Alaska|Files uploaded by The Photographer from Flickr|Featured pictures of Vulpes vulpes|Featured pictures from Flickr|Featured pictures uploaded by User:Wilfredor|Photographs by Gregory Smith|Vulpes vulpes in Alaska|Portraits of Vulpes vulpes|Front views of Vulpes vulpes"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Vulpes vulpes laying in snow.jpg",
+    "index": 2,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/03/Vulpes_vulpes_laying_in_snow.jpg/960px-Vulpes_vulpes_laying_in_snow.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/03/Vulpes_vulpes_laying_in_snow.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Vulpes_vulpes_laying_in_snow.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Vulpes vulpes laying in snow"
+       },
+       "Artist": {
+        "value": "Shiretoko-Shari Tourist Association"
+       },
+       "LicenseShortName": {
+        "value": "Attribution"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes schrencki|Attribution only license|Items with VRTS permission confirmed|Formerly featured pictures on Wikimedia Commons|Images with extracted images|Files with derivative versions|Orange mammals|Vulpes vulpes in snow|Vulpes vulpes sleeping|Front views of Vulpes vulpes"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Vulpes vulpes Mallnitz 01.jpg",
+    "index": 3,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/6e/Vulpes_vulpes_Mallnitz_01.jpg/960px-Vulpes_vulpes_Mallnitz_01.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/6/6e/Vulpes_vulpes_Mallnitz_01.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Vulpes_vulpes_Mallnitz_01.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Vulpes vulpes Mallnitz 01"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Uoaei1\" title=\"User:Uoaei1\">Uoaei1</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0"
+       },
+       "Categories": {
+        "value": "Taken with Nikon D7100|Taken with AF-S VR Micro-Nikkor 105mm f/2.8G IF-ED|Self-published work|Animals of Carinthia|Featured pictures of Carinthia|Featured pictures by Uoaei1|National parks of Austria with known ID|Featured pictures on Wikipedia, Bengali|Vulpes vulpes in Austria|Uploaded via Campaign:wle-at-nap|Austria photographs taken on 2019-07-30|Featured pictures of Vulpes vulpes|Mammals facing left|All images by Uoaei1|Animals of Nationalpark Hohe Tauern|National parks of Austria needing check|Featured pictures from WikiDaheim|Media from WikiDaheim 2019 in Austria/all|Media from WikiDaheim 2019 in Austria/Natural heritage|Side views of Vulpes vulpes|Vulpes vulpes on rocks|Vulpes vulpes and mountains"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,340 @@
+{
+ "batchcomplete": true,
+ "query": {
+  "pages": [
+   {
+    "ns": 6,
+    "title": "File:Other host.jpg",
+    "index": 1,
+    "imageinfo": [
+     {
+      "thumburl": "https://example.com/thumb/fox.jpg",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Plain http.jpg",
+    "index": 2,
+    "imageinfo": [
+     {
+      "thumburl": "http://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Australian Cattle Dog Origins Diagram.svg",
+    "index": 3,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f1/Australian_Cattle_Dog_Origins_Diagram.svg/960px-Australian_Cattle_Dog_Origins_Diagram.svg.png?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/f/f1/Australian_Cattle_Dog_Origins_Diagram.svg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Australian_Cattle_Dog_Origins_Diagram.svg",
+      "mime": "image/svg+xml",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Australian Cattle Dog Origins Diagram"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/w/index.php?title=User:Nodoc%C3%A9phale&amp;action=edit&amp;redlink=1\" class=\"new\" title=\"User:Nodocéphale (page does not exist)\">Nodocéphale</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "Categories": {
+        "value": "CC-Zero|Diagrams|Dog breeds|Origins|Australian Cattle Dog|Self-published work|Unidentified history"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Fox clip.webm",
+    "index": 4,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "video/webm",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Suffix trick.jpg",
+    "index": 5,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org.evil.com/x.jpg",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Userinfo trick.jpg",
+    "index": 6,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org@evil.com/x.jpg",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Upload suffix.jpg",
+    "index": 7,
+    "imageinfo": [
+     {
+      "thumburl": "https://upload.wikimedia.org.evil.com/x.jpg",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Upload userinfo.jpg",
+    "index": 8,
+    "imageinfo": [
+     {
+      "thumburl": "https://upload.wikimedia.org@evil.com/x.jpg",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Bad page host.jpg",
+    "index": 9,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://evil.example/wiki/File:x.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:No licence.jpg",
+    "index": 10,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Nude study fox.jpg",
+    "index": 11,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Red Fox drinking from a lake in Gennevilliers, France.jpg",
+    "index": 12,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg/960px-Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Red_Fox_drinking_from_a_lake_in_Gennevilliers%2C_France.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_drinking_from_a_lake_in_Gennevilliers,_France.jpg",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox drinking from a lake in Gennevilliers, France"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:Alexis_Lours\" title=\"User:Alexis Lours\">Alexis Lours</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 4.0"
+       },
+       "Categories": {
+        "value": "Vulpes vulpes crucigera|Images with extracted images|Featured pictures of Hauts-de-Seine|Vulpes vulpes in France|Flickr images reviewed by FlickreviewR 2|Flickr files uploaded by Red panda bot|Photos in Flickr Explore|Featured pictures of Vulpes vulpes|Photos by Alexis Lours|Featured photos by Alexis Lours|Vulpes vulpes (female)|Taken with Canon EOS R7|Animals of Parc des Chanteraines|Taken with Canon RF 200–800mm f/6.3–9 IS USM|Photographs taken on 2025-09-28|Vulpes vulpes drinking|Side views of Vulpes vulpes|Vulpes vulpes and water|Vulpes vulpes and rocks"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}
