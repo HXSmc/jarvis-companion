@@ -83,28 +83,28 @@ def fake(monkeypatch):
 def test_say_is_not_held_by_the_lookup_then_one_image_card(fake):
     gate = threading.Event()
     search = fake(hits=[hit(1)], gate=gate)
-    deps = make_deps(chunks=lines({"say": "Here is a dog."}, {"image_search": {"query": "dog", "count": 1}}))
-    events = run(deps, on_event=lambda ev: gate.set() if ev["type"] == "say" and ev["text"] == "Here is a dog." else None)
+    deps = make_deps(chunks=lines({"say": "Looking for a picture of a dog."}, {"image_search": {"query": "dog", "count": 1}}))
+    events = run(deps, on_event=lambda ev: gate.set() if ev["type"] == "say" and ev["text"] == "Looking for a picture of a dog." else None)
     assert search.released is True  # the say event went out while the lookup was still held
     kinds = [e["type"] for e in events]
     assert kinds.index("say") < kinds.index("card")
     [card] = cards(events)
     assert card["type"] == "image" and card["url"].startswith("https://thumb.wikimedia.org/")
     assert card["alt"] == "Dog 1" and card["caption"] == "Author 1, CC0, Wikimedia Commons"
-    assert "Here is a dog." in says(events) and overlay.NO_PICTURE_LINE not in says(events)
+    assert "Looking for a picture of a dog." in says(events) and overlay.NO_PICTURE_LINE not in says(events)
 
 
 def test_image_search_before_say_does_not_delay_the_say(fake):
     gate = threading.Event()
     search = fake(hits=[hit(1)], gate=gate)
-    deps = make_deps(chunks=lines({"image_search": {"query": "dog", "count": 1}}, {"say": "One moment."}))
-    run(deps, on_event=lambda ev: gate.set() if ev["type"] == "say" and ev["text"] == "One moment." else None)
+    deps = make_deps(chunks=lines({"image_search": {"query": "dog", "count": 1}}, {"say": "Looking for a picture of a dog, one moment."}))
+    run(deps, on_event=lambda ev: gate.set() if ev["type"] == "say" and ev["text"] == "Looking for a picture of a dog, one moment." else None)
     assert search.released is True
 
 
 def test_gallery_of_three(fake):
     fake(hits=[hit(1), hit(2), hit(3)])
-    deps = make_deps(chunks=lines({"say": "Here are three."}, {"image_search": {"query": "red foxes", "count": 3}}))
+    deps = make_deps(chunks=lines({"say": "Looking for pictures of red foxes."}, {"image_search": {"query": "red foxes", "count": 3}}))
     [card] = cards(run(deps, text="show me three pictures of red foxes"))
     assert len(card["items"]) == 3 and card["url"] == card["items"][0]["url"]
     assert card["title"] == "Red Foxes"
@@ -112,11 +112,11 @@ def test_gallery_of_three(fake):
 
 def test_model_written_image_url_is_refused(fake, caplog):
     search = fake(hits=[hit(1)])
-    deps = make_deps(chunks=lines({"say": "Here."}, {"card": {"type": "image", "title": "Dog",
+    deps = make_deps(chunks=lines({"say": "Looking for a picture."}, {"card": {"type": "image", "title": "Dog",
                                                              "url": "https://evil.example/x.jpg"}}))
     with caplog.at_level(logging.INFO, logger="mac.voice.media_lookup"):
         events = run(deps)
-    assert cards(events) == [] and says(events)[-1] == "Here." and search.calls == []
+    assert cards(events) == [] and says(events)[-1] == "Looking for a picture." and search.calls == []
     assert any("model-written image" in r.getMessage() for r in caplog.records)
     assert not any("evil" in r.getMessage() for r in caplog.records)
 
@@ -159,7 +159,7 @@ def test_injection_in_web_text_stays_inert(monkeypatch):
         lambda req: sent.append(req) or httpx.Response(200, stream=httpx.ByteStream(body))))
     monkeypatch.setattr(media_lookup, "_throttled_until", 0.0)
     launched = []
-    convs = FakeConversations(lines({"say": "Here."}, {"image_search": {"query": "dog", "count": 1}}))
+    convs = FakeConversations(lines({"say": "Looking for a picture of a dog."}, {"image_search": {"query": "dog", "count": 1}}))
     deps = make_deps(conversations=convs, run=lambda *a, **k: launched.append(a))
     events = run(deps)
     [card] = cards(events)
@@ -182,6 +182,12 @@ def test_quiet_pool_never_fetches(fake):
     assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1
 
 
+def test_picture_line_rule_is_neutral_and_english():
+    rule = next(line for line in overlay.ANSWER_PROMPT.splitlines() if line.startswith("Pictures:"))
+    assert "promises no result and names no number" in rule and 'never "here is" or "here are"' in rule
+    assert "Write the query in English" in rule
+
+
 def test_quiet_prompt_has_no_picture_rule():
     assert "image_search" in overlay.ANSWER_PROMPT and "image_search" not in overlay.QUIET_PROMPT
     assert "Pictures and videos cannot be fetched in this conversation" in overlay.QUIET_PROMPT
@@ -190,7 +196,7 @@ def test_quiet_prompt_has_no_picture_rule():
 
 def test_no_result_says_so(fake):
     fake(hits=[])
-    deps = make_deps(chunks=lines({"say": "Let me look."}, {"image_search": {"query": "xqzvbnm", "count": 1}}))
+    deps = make_deps(chunks=lines({"say": "Looking for a picture of that."}, {"image_search": {"query": "xqzvbnm", "count": 1}}))
     events = run(deps)
     assert cards(events) == [] and says(events)[-1] == overlay.NO_PICTURE_LINE
 
@@ -221,7 +227,7 @@ def test_agent_tier_drops_media_cards():
 
 def test_one_lookup_per_turn(fake):
     search = fake(hits=[hit(1)])
-    deps = make_deps(chunks=lines({"say": "Here."}, {"image_search": {"query": "dog", "count": 1}},
+    deps = make_deps(chunks=lines({"say": "Looking for a picture of a dog."}, {"image_search": {"query": "dog", "count": 1}},
                                   {"image_search": {"query": "cat", "count": 1}}))
     assert len(cards(run(deps))) == 1 and search.calls == [("dog", 1)]
 
@@ -234,7 +240,7 @@ def test_debug_done_row_counts_media(fake, monkeypatch, tmp_path):
     token_file.write_text(TOKEN)
     monkeypatch.setattr(overlay, "TOKEN_FILE", token_file)
     fake(hits=[hit(1)])
-    overlay.set_deps(make_deps(chunks=lines({"say": "Here."}, {"image_search": {"query": "dog", "count": 1}})))
+    overlay.set_deps(make_deps(chunks=lines({"say": "Looking for a picture of a dog."}, {"image_search": {"query": "dog", "count": 1}})))
     turn(TestClient(make_app(), client=("127.0.0.1", 50000)), "show me a picture of a dog")
     done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"][-1]
     assert done["cards"] == 1 and done["media"] == 1
