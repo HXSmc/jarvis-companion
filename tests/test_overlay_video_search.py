@@ -232,7 +232,7 @@ def test_only_a_video_lookup_is_a_full_answer(monkeypatch):
 
 def test_agent_handover_shows_no_video_card_or_miss_line(monkeypatch):
     gate = threading.Event()  # the lookup is still in flight when the reply hands over
-    fake = install_video(monkeypatch, gate=gate)
+    install_video(monkeypatch, gate=gate)
     deps = make_deps(chunks=lines({"say": "Looking for a video of that."},
                                   {"video_search": {"query": "rocket launch"}},
                                   {"agent": True}))
@@ -240,7 +240,7 @@ def test_agent_handover_shows_no_video_card_or_miss_line(monkeypatch):
         events = run(deps)
     finally:
         gate.set()
-    assert fake.calls in ([], ["rocket launch"])  # the handover cancels the lookup, started or not
+    assert "My tools aren't available right now." in says(events)  # the agent tier took over (no agent pool here)
     assert not [c for c in cards(events) if c["type"] == "video"]
     assert not [s for s in says(events) if s in overlay.NO_VIDEO_LINES.values()]
 
