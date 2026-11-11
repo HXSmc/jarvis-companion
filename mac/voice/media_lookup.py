@@ -219,7 +219,7 @@ def card(query, hits: list[dict]) -> dict | None:
     """Raw image card (one picture, or a gallery for 2-6) built only from lookup hits."""
     if not hits:
         return None
-    title = clean_query(query).title()[:MAX_TITLE] or "Pictures"
+    title = " ".join(w[:1].upper() + w[1:] for w in clean_query(query).split())[:MAX_TITLE] or "Pictures"
     items = [{"url": h["url"], "alt": h["title"] or title, "caption": caption(h),
               "source_page": h["source_page"]} for h in hits[:MAX_COUNT]]
     if len(items) == 1:

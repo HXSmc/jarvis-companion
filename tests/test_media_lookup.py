@@ -190,3 +190,10 @@ def test_malformed_port_drops_only_that_hit(commons):
     commons["reply"] = lambda req: ok(json.dumps(data).encode())
     hits = media_lookup.search("red fox", 6)
     assert len(hits) == len(data["query"]["pages"]) - 1 and all(":bad" not in h["url"] for h in hits)
+
+
+def test_card_title_capitalises_words_not_after_apostrophes():
+    hit = {"url": "https://thumb.wikimedia.org/a.jpg", "title": "t", "licence": "CC0", "artist": "",
+           "source_page": "https://commons.wikimedia.org/wiki/File:a.jpg"}
+    assert media_lookup.card("red fox's den", [hit])["title"] == "Red Fox's Den"
+    assert media_lookup.card("eiffel tower in USA", [hit])["title"] == "Eiffel Tower In USA"
