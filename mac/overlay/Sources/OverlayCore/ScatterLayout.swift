@@ -219,10 +219,13 @@ public enum ScatterLayout {
     /// (where the title starts) uncovered on both axes: its title start, one touch target.
     public static let minStrip: CGFloat = 44
 
+    /// Size of the area kept free for a macOS notification banner (the banner is 344 pt wide; the
+    /// rest is its margin and shadow), top right of the visible frame.
+    public static let notificationZoneSize = CGSize(width: 380, height: 130)
     /// Kept free for a macOS notification banner (344 pt wide plus margins), top right of the
-    /// visible frame. Reserved for voice moves only (the caller passes it as a keep-out).
+    /// visible frame. Every card placement and voice move keeps it free (callers pass it as a keep-out).
     public static func notificationZone(visible: CGRect) -> CGRect {
-        CGRect(x: visible.maxX - 380, y: visible.minY, width: 380, height: 130)
+        CGRect(x: visible.maxX - notificationZoneSize.width, y: visible.minY, width: notificationZoneSize.width, height: notificationZoneSize.height)
     }
 
     /// A voice move of the group `old` toward `direction`, inside the inset area and off every
@@ -439,6 +442,13 @@ public enum ScatterLayout {
     public static func moveDuration(distance: CGFloat, across width: CGFloat) -> TimeInterval {
         guard width > 0 else { return moveMaxDuration }
         return min(moveMaxDuration, max(motionShort, moveMaxDuration * TimeInterval(distance / width)))
+    }
+
+    /// One duration for a whole group move, so every card lands at the same moment: the
+    /// `moveDuration` of the card that travels farthest (centre to centre). `old` and `new` pair up by index.
+    public static func groupMoveDuration(old: [CGRect], new: [CGRect], across width: CGFloat) -> TimeInterval {
+        let farthest = zip(old, new).map { hypot($1.midX - $0.midX, $1.midY - $0.midY) }.max() ?? 0
+        return moveDuration(distance: farthest, across: width)
     }
 
     /// Top-left-space lean of the refused-move nudge toward the asked side.
