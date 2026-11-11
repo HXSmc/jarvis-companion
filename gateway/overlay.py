@@ -720,16 +720,18 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append(NO_SCREEN_LINE)
             elif body.screen is None:
                 async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                                screen_ref=True, failed=failed):
+                                                screen_ref=True, failed=failed, on_step=on_step):
                     yield event
             else:
                 g = await _ground(body, deps)
                 if g["pick"] is None:
                     before = len(said)
                     async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                                    screen_ref=True, failed=failed, look=g):
+                                                    screen_ref=True, failed=failed, look=g, on_step=on_step):
                         yield event
-                    line = _look_miss_line(g, body.conv_id, spoke=len(said) > before, text=body.text)
+                    # The dropped-directive line says nothing about the target: the miss line still follows it.
+                    spoke = any(s != OVERLAY_UNCHANGED_LINE for s in said[before:])
+                    line = _look_miss_line(g, body.conv_id, spoke=spoke, text=body.text)
                     if line and not failed:  # a failed answer already spoke its one line
                         async for ev in _speak(line, deps):
                             yield ev

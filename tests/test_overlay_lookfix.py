@@ -426,3 +426,25 @@ def test_quiet_prompt():
     assert not any(w in overlay.QUIET_PROMPT for w in ("WebSearch", "WebFetch"))
     line = overlay.QUIET_MEDIA_LINE
     assert len(line) <= 80 and "clear" in line.lower() and line.count(".") == 2
+
+
+# --- D6: the dropped-directive line and the look-miss line are both spoken ---------------------
+
+def test_miss_and_drop_look_on_step(client):
+    events, _vlm, _calls = look(client, ASK_MOTTO, MOTTO, "highlight the weather forecast",
+                                fallback=lambda p: ['{"layout": "hide"}', '{"point": null}'])
+    spoken = says(events)
+    assert shapes(events) == [] and spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+    assert spoken.count("I can't see it on screen.") == 1
+    assert spoken.index(overlay.OVERLAY_UNCHANGED_LINE) < spoken.index("I can't see it on screen.")
+    assert events[-1]["type"] == "done" and [e["type"] for e in events if e["type"] in ("layout", "clear")] == []
+    dropped = [s for s in steps_named(client, "layout") if s.get("state") == "dropped"]
+    assert [(s["mode"], s["state"]) for s in dropped] == [("hide", "dropped")]  # recorded through on_step
+
+
+def test_miss_line_never_repeats_after_a_spoken_answer(client):
+    events, _vlm, _calls = look(client, ASK_MOTTO, MOTTO, "highlight the weather forecast",
+                                fallback=lambda p: ['{"say": "I don\'t see a forecast."}', '{"layout": "hide"}',
+                                                    '{"point": null}'])
+    spoken = says(events)
+    assert "I can't see it on screen." not in spoken and spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
