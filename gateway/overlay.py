@@ -869,16 +869,15 @@ def _screen_text(screen: ScreenBody, targets: list[dict] | None = None) -> str:
 
 
 def _point_at(point, targets: list[dict]) -> tuple[dict, str] | None:
-    """The model's {"point": ...}: a listed id (int or digit string, as ground.choose takes), or
-    text (3+ chars) inside a candidate label."""
-    if isinstance(point, str) and point.strip().isdigit():
-        point = int(point.strip())
-    if isinstance(point, int) and not isinstance(point, bool):
-        hit = next((c for c in targets if c["id"] == point), None)
+    """The model's {"point": ...}: a listed id (parsed as ground.choose parses one), or text
+    (3+ chars) inside a candidate label as the model saw it (ground._safe_label)."""
+    pid = ground.parse_id(point)
+    if pid is not None:
+        hit = next((c for c in targets if c["id"] == pid), None)
         return (hit, "point_id") if hit else None
     if isinstance(point, str) and len(point.strip()) >= 3:
-        want = point.strip().lower()
-        hit = next((c for c in targets if want in c["label"].lower()), None)
+        want = " ".join(point.lower().split())
+        hit = next((c for c in targets if want in ground._safe_label(c["label"]).lower()), None)
         return (hit, "point_text") if hit else None
     return None
 
