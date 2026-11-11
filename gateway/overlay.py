@@ -933,14 +933,11 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             lookup_alone_at = None if produced else len(said)
             produced = True  # a lookup is an answer: the turn is not an empty reply
             video_lookup = "image_search" not in obj  # one slot: image_search wins if a line holds both
-            key = "image_search" if not video_lookup else "video_search"
-            req = obj[key] if isinstance(obj[key], dict) else {}
-            if video_lookup:
-                pictures = loop.create_task(asyncio.wait_for(
-                    asyncio.to_thread(media_lookup.find_video, req.get("query")), LOOKUP_WAIT_S))
-            else:
-                pictures = loop.create_task(asyncio.wait_for(
-                    asyncio.to_thread(media_lookup.find, req.get("query"), req.get("count")), LOOKUP_WAIT_S))
+            req = obj["video_search" if video_lookup else "image_search"]
+            req = req if isinstance(req, dict) else {}
+            lookup = (asyncio.to_thread(media_lookup.find_video, req.get("query")) if video_lookup
+                      else asyncio.to_thread(media_lookup.find, req.get("query"), req.get("count")))
+            pictures = loop.create_task(asyncio.wait_for(lookup, LOOKUP_WAIT_S))
         raw_card = obj.get("card")
         if quiet and isinstance(raw_card, dict) and raw_card.get("type") in media_lookup.MEDIA_TYPES:
             async for ev in media_refused():

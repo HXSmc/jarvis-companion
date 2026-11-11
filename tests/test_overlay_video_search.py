@@ -1,7 +1,7 @@
 """Fast-tier video_search -> one service-found video card, or one plain miss line. No network.
 
-media_lookup.find_video does not exist in this worktree yet (a parallel helper adds it), so it is
-monkeypatched with raising=False; the model is a FakeConversations replaying canned JSON lines.
+media_lookup.find_video (and media_lookup.find for the image path) are replaced by fakes; the model
+is a FakeConversations replaying canned JSON lines.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def install_video(monkeypatch, **kw):
                 self.released = self.gate.wait(timeout=3)
             return (self.card, self.reason)
     f = FakeVideo(**kw)
-    monkeypatch.setattr(media_lookup, "find_video", f, raising=False)
+    monkeypatch.setattr(media_lookup, "find_video", f)
     return f
 
 
@@ -231,11 +231,16 @@ def test_only_a_video_lookup_is_a_full_answer(monkeypatch):
 
 
 def test_agent_handover_shows_no_video_card_or_miss_line(monkeypatch):
-    install_video(monkeypatch)
+    gate = threading.Event()  # the lookup is still in flight when the reply hands over
+    fake = install_video(monkeypatch, gate=gate)
     deps = make_deps(chunks=lines({"say": "Looking for a video of that."},
-                                  {"video_search": {"query": "debugging session"}},
+                                  {"video_search": {"query": "rocket launch"}},
                                   {"agent": True}))
-    events = run(deps, text="what changed in this file")
+    try:
+        events = run(deps)
+    finally:
+        gate.set()
+    assert fake.calls in ([], ["rocket launch"])  # the handover cancels the lookup, started or not
     assert not [c for c in cards(events) if c["type"] == "video"]
     assert not [s for s in says(events) if s in overlay.NO_VIDEO_LINES.values()]
 

@@ -375,7 +375,7 @@ def find_video(query) -> tuple[dict | None, str]:
         if not words:
             return None, "none"
         if _BLOCK.search(words):
-            logger.info("video lookup: query refused by the content filter")
+            logger.info("video lookup: refused by the content filter")
             return None, "none"
         lowered = words.lower()
         with _lock:
@@ -383,14 +383,14 @@ def find_video(query) -> tuple[dict | None, str]:
             if hit is not None and _now() - hit[0] < VIDEO_CACHE_TTL:
                 return hit[1], "ok" if hit[1] else "none"
             if _quota_until is not None and _now() < _quota_until:
-                logger.info("video lookup: quota")
+                logger.info("video lookup: daily quota used up")
                 return None, "quota"
             if _key_retry_until is not None and _now() < _key_retry_until:
-                logger.info("video lookup: key_rejected")
+                logger.info("video lookup: waiting after a rejected credential")
                 return None, "key_rejected"
         apikey = _key()
         if not apikey:
-            logger.info("video lookup: key_missing")
+            logger.info("video lookup: no credential configured")
             return None, "key_missing"
         status, payload = _video_get(words, apikey)
         if status is None:
