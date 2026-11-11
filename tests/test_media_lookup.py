@@ -68,7 +68,8 @@ def test_lookalike_hosts_are_refused():
     for url in ("https://upload.wikimedia.org.evil.com/x.jpg", "https://upload.wikimedia.org@evil.com/x.jpg",
                 "https://thumb.wikimedia.org.evil.com/x.jpg", "https://thumb.wikimedia.org@evil.com/x.jpg",
                 "https://user@upload.wikimedia.org/x.jpg", "https://upload.wikimedia.org:8443/x.jpg",
-                "http://upload.wikimedia.org/x.jpg", "https://evilupload.wikimedia.org/x.jpg"):
+                "http://upload.wikimedia.org/x.jpg", "https://evilupload.wikimedia.org/x.jpg",
+                "https://upload.wikimedia.org:bad/x.jpg", "https://upload.wikimedia.org:99999/x.jpg"):
         assert media_lookup._media_url(url) is None, url
     assert media_lookup._media_url("https://upload.wikimedia.org/a/b.jpg")
 
@@ -181,3 +182,11 @@ def test_search_words_never_reach_any_log(commons, caplog):
         media_lookup.search("zebracornmarker fox", 3)
     assert commons["requests"] and not any("zebracornmarker" in r.getMessage() for r in caplog.records)
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+def test_malformed_port_drops_only_that_hit(commons):
+    data = json.loads(fixture("fox"))
+    data["query"]["pages"][0]["imageinfo"][0]["thumburl"] = "https://upload.wikimedia.org:bad/x.jpg"
+    commons["reply"] = lambda req: ok(json.dumps(data).encode())
+    hits = media_lookup.search("red fox", 6)
+    assert len(hits) == len(data["query"]["pages"]) - 1 and all(":bad" not in h["url"] for h in hits)

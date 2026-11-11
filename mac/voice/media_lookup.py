@@ -86,24 +86,27 @@ def _count(value) -> int:
     return max(1, min(MAX_COUNT, int(value)))
 
 
-def _media_url(value) -> str | None:
+def _exact_host(value, hosts) -> str | None:
+    """https URL whose hostname is exactly one of `hosts`, with no userinfo or port; malformed -> None."""
     url = hud.safe_https_url(value)
     if not url:
         return None
     parts = urlsplit(url)
-    if parts.hostname not in MEDIA_HOSTS or parts.username is not None or parts.port is not None:
+    try:
+        port = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return None
+    if parts.hostname not in hosts or parts.username is not None or port is not None:
         return None
     return url
+
+
+def _media_url(value) -> str | None:
+    return _exact_host(value, MEDIA_HOSTS)
 
 
 def _page_url(value) -> str | None:
-    url = hud.safe_https_url(value)
-    if not url:
-        return None
-    parts = urlsplit(url)
-    if parts.hostname != PAGE_HOST or parts.username is not None or parts.port is not None:
-        return None
-    return url
+    return _exact_host(value, (PAGE_HOST,))
 
 
 def _meta(ext: dict, key: str) -> str:
