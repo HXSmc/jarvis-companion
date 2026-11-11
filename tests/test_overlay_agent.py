@@ -133,7 +133,7 @@ class FakeAgentPool:
 
 @pytest.fixture(autouse=True)
 def reset(monkeypatch, tmp_path):
-    for name in ("_history", "_notes", "_card_ids", "_pending", "_confirm", "_agent_busy"):
+    for name in ("_history", "_notes", "_card_ids", "_pending", "_confirm", "_agent_busy", "_hunks"):
         getattr(overlay, name).clear()
     overlay._tainted.clear()
     overlay.debug_log.clear()
@@ -333,6 +333,16 @@ def test_lines_event_validated(client, tmp_path, monkeypatch):
                   screen={"app": "Code", "document": str(repo / "app.py")})
     lines = [e for e in events if e["type"] == "lines"]
     assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[1, 2], [3, 3]]}]
+
+
+def test_lines_labels_validated():
+    """Labels ride the lines event only as one valid label per range (gitdiff.LABEL_RE, <= 24 chars);
+    anything else still ships the event, just without labels — never dropped."""
+    base = {"type": "lines", "file": "a.py", "ranges": [[1, 2]]}
+    assert overlay._lines_event("a.py", [[1, 2]], ["1/2 changed"]) == {**base, "labels": ["1/2 changed"]}
+    for bad in ([], ["1/2 changed", "2/2 changed"], ["1/2 <changed>"],  # wrong length / '<'
+                ["1/2 " + "a" * 21], [123], "1/2 changed"):  # too long / not str / not a list
+        assert overlay._lines_event("a.py", [[1, 2]], bad) == base
 
 
 def test_cancel_and_timeout(client):
@@ -732,7 +742,9 @@ def test_history_of_file_on_screen_gets_diff_card_and_lines(client):
     assert cards and cards[-1]["title"] == "Changed in app.py"
     assert cards[-1]["body"][1:] == ["Line 2", "Line 4"]
     lines = [e for e in events if e["type"] == "lines"]
-    assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[2, 2], [4, 4]]}]
+    assert lines == [{"type": "lines", "file": str((repo / "app.py").resolve()), "ranges": [[2, 2], [4, 4]],
+                      "labels": ["1/2 changed", "2/2 +1"]}]
+    assert overlay._hunks["hs1"].rel == "app.py" and overlay._hunks["hs1"].index == 0
     done = [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "done"]
     assert done[0]["lines"] == 1
     # Not about the screen: no host diff.
@@ -831,7 +843,8 @@ def test_model_lines_never_suppress_the_host_card_and_the_first_change_is_scroll
     cards = [e["card"] for e in events if e["type"] == "card"]
     assert [c["title"] for c in cards] == ["Changed in app.py"]
     assert [e for e in events if e["type"] == "lines"] == [
-        {"type": "lines", "file": str(target), "ranges": [[2, 2], [4, 4]]}]
+        {"type": "lines", "file": str(target), "ranges": [[2, 2], [4, 4]],
+         "labels": ["1/2 changed", "2/2 +1"]}]
     assert _wait(lambda: calls == [["code", "--goto", f"{target}:2"]])
     kinds = [e["type"] for e in events]
     assert kinds.index("card") < kinds.index("lines") < kinds.index("done")

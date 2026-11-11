@@ -418,6 +418,23 @@ _pending: dict[str, tuple[str, float]] = {}
 PENDING_TTL_S = 30
 
 
+@dataclass
+class HunkNav:
+    """The highlighted change list of one file: the cursor for "next change" / "why did this change?"."""
+
+    repo: Path
+    rel: str
+    base: str
+    hunks: list[dict]
+    index: int
+    editor: str | None
+    ctx: agent_policy.Ctx
+
+
+# conv_id -> HunkNav: a new highlight for a conversation replaces its cursor.
+_hunks: dict[str, HunkNav] = {}
+
+
 def _installed_apps(clock=time.monotonic) -> dict:
     """intents.list_apps(), cached for 60 s (it walks the app folders; called off the event loop)."""
     global _apps_cache
@@ -551,8 +568,9 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         body = body.model_copy(update={"text": intents.join_continuation(pending[0], body.text)[:500]})
         if on_step:
             on_step("continued", text=body.text)
-    # "who changed this file last" ends on a trailing word but is a complete agent request.
-    if intents.looks_incomplete(body.text) and intents.parse(body.text, apps={}).kind != "agent":
+    # "who changed this file last" ends on a trailing word but is a complete agent request;
+    # so does a bare "next" (the hunk walk).
+    if intents.looks_incomplete(body.text) and intents.parse(body.text, apps={}).kind not in ("agent", "hunk"):
         # Trails off ("show me the last, uh"): say nothing, the app keeps the mic open.
         _pending[body.conv_id] = (body.text, deps.clock())
         if on_step:
@@ -564,6 +582,8 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         intent = intents.parse(body.text, apps=apps)
+        if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
+            intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
         if on_step:
             on_step("intent", kind=intent.kind, arg=intent.arg)
         ack_text, ack_pcm, ack_rate = deps.acks.get(acks.pick_key(intent.kind, intent.sub))
@@ -577,6 +597,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         metrics["ack_ms"] = round((deps.clock() - start) * 1000, 1)
 
         if intent.kind == "clear":
+            _hunks.pop(body.conv_id, None)
             yield {"type": "clear"}
 
         elif intent.kind == "clock":
@@ -672,18 +693,52 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                     for h in hunks:
                         per_file[h["file"]] = per_file.get(h["file"], 0) + h["count"]
                     if hunks:
-                        top = max(per_file, key=lambda f: per_file[f])
-                        first_line = next(h["start"] for h in hunks if h["file"] == top)
-                        await asyncio.to_thread(gitdiff.open_in_editor, repo, top, first_line,
-                                                run=deps.run)
-                        ranges = [[h["start"], h["start"] + max(h["count"], 1) - 1]
-                                  for h in hunks if h["file"] == top]
-                        yield {"type": "lines", "file": str(Path(repo) / top), "ranges": ranges}
-                        summary = (f"{len(per_file)} files changed since the last merge. "
-                                   f"I've opened {Path(top).name}.")
+                        # The file on screen wins when it has changes; else the most-changed file.
+                        chosen = max(per_file, key=lambda f: per_file[f])
+                        editor = _EDITOR_CLI.get(body.screen.app if body.screen else "")
+                        root = Path(repo).resolve()
+                        document = body.screen.document if body.screen else None
+                        if document:
+                            target = Path(document).expanduser().resolve()
+                            if target.is_relative_to(root) and target.is_file():
+                                rel = str(target.relative_to(root))
+                                if per_file.get(rel):
+                                    chosen = rel
+                        of_file = [h for h in hunks if h["file"] == chosen][:20]
+                        n = len(of_file)
+                        if editor:  # scroll off the turn's stream: a hung CLI never holds it
+                            threading.Thread(target=_scroll_to, daemon=True,
+                                             args=(repo, chosen, of_file[0]["start"], editor,
+                                                   deps, on_step)).start()
+                        ranges = [[h["start"], h["start"] + max(h["count"], 1) - 1] for h in of_file]
+                        labels = [gitdiff.hunk_label(h, i + 1, n) for i, h in enumerate(of_file)]
+                        yield _lines_event(str(Path(repo) / chosen), ranges, labels)
+                        body_lines = []
+                        for i, h in enumerate(of_file[:5]):
+                            a = h["start"]
+                            b = h["start"] + max(h["count"], 1) - 1
+                            word = ("added" if h["old"] == 0
+                                    else "removed here" if h["count"] == 0 else "changed")
+                            body_lines.append(f"{i + 1}/{n} line {a} {word}" if a == b
+                                              else f"{i + 1}/{n} lines {a}-{b} {word}")
+                        if n > 1:
+                            body_lines.append('Say "next change" to jump.')
+                        card = hud.validate_card({"type": "info",
+                                                  "title": f"Changes in {Path(chosen).name}",
+                                                  "body": body_lines})
+                        if card:
+                            yield {"type": "card", "card": card}
+                        tail = (f"I've opened {Path(chosen).name}." if editor
+                                else f"Showing the changes in {Path(chosen).name}.")
+                        summary = f"{len(per_file)} files changed since the last merge. {tail}"
                         async for ev in _speak(summary, deps):
                             yield ev
                         said.append("opened the diff")
+                        ctx = agent_policy.Ctx(home=str(Path.home()),
+                                               vault=os.environ.get("OVERLAY_VAULT") or None,
+                                               cwd=str(repo))
+                        _hunks[body.conv_id] = HunkNav(repo=repo, rel=chosen, base=base,
+                                                       hunks=of_file, index=0, editor=editor, ctx=ctx)
                     else:
                         async for ev in _speak("No changes since the last merge.", deps):
                             yield ev
@@ -695,6 +750,70 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                     if diff_text:
                         _notes.setdefault(body.conv_id, deque(maxlen=3)).append(
                             f"git diff {base}:\n{diff_text}")
+
+        elif intent.kind == "hunk":
+            nav = _hunks.get(body.conv_id)
+            if nav is None:
+                async for ev in _line("no_hunks", deps):
+                    yield ev
+            elif intent.arg in ("next", "prev"):
+                index = nav.index + (1 if intent.arg == "next" else -1)
+                n = len(nav.hunks)
+                if index >= n:
+                    async for ev in _line("last_hunk", deps):
+                        yield ev
+                elif index < 0:
+                    async for ev in _line("first_hunk", deps):
+                        yield ev
+                else:
+                    nav.index = index
+                    h = nav.hunks[index]
+                    k = index + 1
+                    a = h["start"]
+                    b = h["start"] + max(h["count"], 1) - 1
+                    if nav.editor:
+                        threading.Thread(target=_scroll_to, daemon=True,
+                                         args=(nav.repo, nav.rel, a, nav.editor, deps, on_step)).start()
+                    yield _lines_event(str(nav.repo / nav.rel), [[a, b]],
+                                       [gitdiff.hunk_label(h, k, n)])
+                    line = f"Change {k} of {n}, lines {a} to {b}."
+                    async for ev in _speak(line, deps):
+                        yield ev
+                    said.append(line)
+                    if on_step:
+                        on_step("hunk", detail=f"{intent.arg} {k}/{n} lines={a}-{b}")
+            else:  # why: blame behind the current hunk, answered on the tool-less pool
+                h = nav.hunks[nav.index]
+                k = nav.index + 1
+                n = len(nav.hunks)
+                a, b = h["start"], h["start"] + max(h["count"], 1) - 1
+                if h["count"] == 0:
+                    async for ev in _line("why_removed", deps):
+                        yield ev
+                else:
+                    probe = shlex.join(["git", "-C", str(nav.repo), "diff", nav.base, "--", nav.rel])
+                    if not isinstance(agent_policy.decide("Bash", {"command": probe}, nav.ctx),
+                                      agent_policy.Allow):
+                        async for ev in _line("hunk_refused", deps):
+                            yield ev
+                    else:
+                        subjects, uncommitted = await asyncio.to_thread(
+                            gitdiff.blame_subjects, nav.repo, nav.rel, a, b)
+                        text = await asyncio.to_thread(gitdiff.hunk_diff, nav.repo, nav.base,
+                                                       nav.rel, a)
+                        _notes.setdefault(body.conv_id, deque(maxlen=3)).append(
+                            f"Change {k} of {n} in {nav.rel}, lines {a} to {b}.\n"
+                            f"Commit subjects: {'; '.join(subjects) or 'none'}"
+                            + ("\nPart of it is not committed yet." if uncommitted else "")
+                            + f"\n{text}")
+                        question = (f"Why did change {k} of {n} in {Path(nav.rel).name}, "
+                                    f"lines {a} to {b}, change? Two short sentences; "
+                                    f"name the commit subject.")
+                        async for event in _answer_turn(body, question, deps, metrics, said, start,
+                                                        failed=failed):
+                            yield event
+                        if on_step:
+                            on_step("hunk", detail=f"why {k}/{n} lines={a}-{b}")
 
         elif intent.kind == "agent":
             async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step,
@@ -728,6 +847,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         _tainted.discard(oldest)
         _card_ids.pop(oldest, None)
         _pending.pop(oldest, None)
+        _hunks.pop(oldest, None)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}
@@ -1103,18 +1223,32 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
                 bus.publish("hud", ev)
 
 
-def _scroll_editor(run: AgentRun, line: int, deps: OverlayDeps, on_step=None) -> None:
-    """Scroll the editor on its own thread: a hung or missing CLI never holds the turn's stream.
-    The debug page gets `editor_scroll` with the result ("code" = scrolled, "none" = CLI missing,
-    failed or timed out, "error") and how long it took, to line up with the app's `lines` row."""
+def _scroll_to(repo: Path, rel: str, line: int, editor: str, deps: OverlayDeps, on_step=None) -> None:
+    """Scroll `repo/rel` to `line`; the debug page gets the `editor_scroll` row
+    ("code" = scrolled, "none" = CLI missing, failed or timed out, "error") and how long it took,
+    to line up with the app's `lines` row. Runs on the caller's thread (a daemon one)."""
     started = time.monotonic()
     try:
-        result = gitdiff.open_in_editor(run.repo, run.screen_file, line, run=deps.run, editor=run.editor,
-                                        fallback=False)
+        result = gitdiff.open_in_editor(repo, rel, line, run=deps.run, editor=editor, fallback=False)
     except Exception:
         result = "error"
     if on_step:
         on_step("editor_scroll", detail=f"{result} in {round((time.monotonic() - started) * 1000)} ms")
+
+
+def _scroll_editor(run: AgentRun, line: int, deps: OverlayDeps, on_step=None) -> None:
+    """Scroll the file on screen in the editor: a hung or missing CLI never holds the turn's stream."""
+    _scroll_to(run.repo, run.screen_file, line, run.editor, deps, on_step)
+
+
+def _lines_event(file: str, ranges: list, labels: list | None = None) -> dict:
+    """A `lines` event; `labels` only with one valid label per range (gitdiff.LABEL_RE, <= 24 chars)."""
+    event = {"type": "lines", "file": file, "ranges": ranges}
+    if (isinstance(labels, list) and len(labels) == len(ranges)
+            and all(isinstance(x, str) and len(x) <= 24 and "<" not in x
+                    and gitdiff.LABEL_RE.fullmatch(x) for x in labels)):
+        event["labels"] = labels
+    return event
 
 
 def _line_events(key: str, deps: OverlayDeps) -> list[dict]:
@@ -1365,31 +1499,38 @@ def _screen_file(body: TurnBody, repo: Path | None, sub: str) -> str | None:
     return str(target.relative_to(root)) if target.is_relative_to(root) and target.is_file() else None
 
 
-def _last_change(run: AgentRun) -> tuple[dict | None, dict | None]:
-    """(diff card, lines event) for the newest commit touching the file on screen, up to the working tree.
+def _last_change(run: AgentRun) -> tuple[dict | None, dict | None, HunkNav | None]:
+    """(diff card, lines event, hunk cursor) for the newest commit touching the file on screen,
+    up to the working tree.
 
     Line numbers are the working tree's, so they match the editor. Runs git with the defused prefix.
     """
     rel = run.screen_file
     if not rel or run.repo is None:
-        return None, None
+        return None, None, None
     # Same gate as the agent's own git calls: no filters, no vault or secret-holding repo, no secret file.
     probe = shlex.join(["git", "-C", str(run.repo), "diff", "HEAD", "--", rel])
     if not isinstance(agent_policy.decide("Bash", {"command": probe}, run.ctx), agent_policy.Allow):
-        return None, None
+        return None, None, None
     out = gitdiff._git(run.repo, "log", "-1", "--format=%H", "--", rel)
     sha = out.split()[0] if out else None
     if not sha or not gitdiff._git(run.repo, "rev-parse", "--verify", "--quiet", f"{sha}^"):
-        return None, None  # never committed, or its first commit: nothing to compare against
+        return None, None, None  # never committed, or its first commit: nothing to compare against
     hunks = [h for h in gitdiff.hunks(run.repo, f"{sha}^") if h["file"] == rel]
     if not hunks:
-        return None, None
+        return None, None, None
     spans = [(h["start"], h["start"] + max(h["count"], 1) - 1) for h in hunks]
     card = hud.validate_card({"type": "info", "title": f"Changed in {Path(rel).name}",
                               "body": [f"Since {sha[:8]}^: {len(hunks)} changed part{'s' if len(hunks) > 1 else ''}",
                                        *[f"Lines {a}-{b}" if b > a else f"Line {a}" for a, b in spans]]})
-    lines = _agent_lines({"file": rel, "ranges": [list(s) for s in spans[:20]]}, run)
-    return card, lines
+    shown = hunks[:20]
+    labels = [gitdiff.hunk_label(h, i + 1, len(shown)) for i, h in enumerate(shown)]
+    lines = _agent_lines({"file": rel, "ranges": [list(s) for s in spans[:20]]}, run)  # in-repo + Read policy
+    if lines:
+        lines = _lines_event(lines["file"], lines["ranges"], labels)
+    nav = HunkNav(repo=run.repo, rel=rel, base=f"{sha}^", hunks=shown, index=0,
+                  editor=run.editor, ctx=run.ctx)
+    return card, lines, nav
 
 
 async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dict, said: list[str],
@@ -1574,7 +1715,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     async for out in _agent_flush(line, run, deps, metrics, said, start):
                         yield out
                 if run.screen_file:  # "what changed" in the file on screen: the host's card and lines
-                    card, lines = await asyncio.to_thread(_last_change, run)
+                    card, lines, nav = await asyncio.to_thread(_last_change, run)
                     if card:
                         yield {"type": "card", "card": card}
                     if lines:
@@ -1582,6 +1723,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                             threading.Thread(target=_scroll_editor, daemon=True,
                                              args=(run, lines["ranges"][0][0], deps, on_step)).start()
                         yield lines
+                        if nav:  # the cursor for a later "next change" / "why did this change?"
+                            _hunks[run.conv_id] = nav
                     elif run.model_lines:  # no host diff (e.g. the file's first commit): the model's
                         yield run.model_lines
                 if len(said) == spoke:

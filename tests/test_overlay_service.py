@@ -107,12 +107,14 @@ def reset_overlay_state():
     overlay._tainted.clear()
     overlay._card_ids.clear()
     overlay._pending.clear()
+    overlay._hunks.clear()
     yield
     overlay.set_deps(None)
     overlay._history.clear()
     overlay._notes.clear()
     overlay._tainted.clear()
     overlay._card_ids.clear()
+    overlay._hunks.clear()
 
 
 @pytest.fixture
@@ -240,24 +242,30 @@ def test_git_diff_turn(client, monkeypatch, tmp_path):
     monkeypatch.setattr(gitdiff, "repo_for", lambda document: repo)
     monkeypatch.setattr(gitdiff, "last_merge", lambda r: "abc1234")
     monkeypatch.setattr(gitdiff, "hunks", lambda r, b: [
-        {"file": "a.py", "start": 10, "count": 12},
-        {"file": "a.py", "start": 40, "count": 0},
-        {"file": "b.py", "start": 1, "count": 5},
+        {"file": "a.py", "start": 10, "count": 12, "old": 12},
+        {"file": "a.py", "start": 40, "count": 0, "old": 2},
+        {"file": "b.py", "start": 1, "count": 5, "old": 5},
     ])
     opened: list[tuple] = []
     monkeypatch.setattr(gitdiff, "open_in_editor",
-                        lambda r, file, line, run=None: opened.append((str(r), file, line)) or "code")
+                        lambda r, file, line, run=None, editor="code", fallback=True:
+                        opened.append((str(r), file, line)) or "code")
     # diff_text lands with a parallel task; stub it (raising=False: not in this tree yet).
     monkeypatch.setattr(gitdiff, "diff_text", lambda repo, base: "diff --git MARKER", raising=False)
 
     events = turn(client, "show the diff", conv_id="d1")
     cards = [e["card"] for e in events if e["type"] == "card"]
-    assert len(cards) == 3  # stat + bar + where, via the real gitdiff.diff_cards
+    assert len(cards) == 4  # stat + bar + where, then the file's own hunk list
+    assert cards[3]["title"] == "Changes in a.py"
+    assert cards[3]["body"] == ["1/2 lines 10-21 changed", "2/2 line 40 removed here",
+                                'Say "next change" to jump.']
     lines = next(e for e in events if e["type"] == "lines")
     assert lines["file"] == str(repo / "a.py")
     assert lines["ranges"] == [[10, 21], [40, 40]]
-    assert opened == [(str(repo), "a.py", 10)]
-    assert "2 files changed since the last merge. I've opened a.py." in says(events)
+    assert lines["labels"] == ["1/2 changed", "2/2 removed here"]
+    assert opened == []  # no editor app on screen: nothing to scroll to
+    assert "2 files changed since the last merge. Showing the changes in a.py." in says(events)
+    assert overlay._hunks["d1"].rel == "a.py"
 
 
 ANSWER_CHUNKS = [
@@ -313,7 +321,7 @@ def test_followup_same_context(client, monkeypatch, tmp_path):
     repo.mkdir()
     monkeypatch.setattr(gitdiff, "repo_for", lambda document: repo)
     monkeypatch.setattr(gitdiff, "last_merge", lambda r: "abc1234")
-    monkeypatch.setattr(gitdiff, "hunks", lambda r, b: [{"file": "a.py", "start": 3, "count": 4}])
+    monkeypatch.setattr(gitdiff, "hunks", lambda r, b: [{"file": "a.py", "start": 3, "count": 4, "old": 4}])
     monkeypatch.setattr(gitdiff, "open_in_editor", lambda *a, **k: "code")
     monkeypatch.setattr(gitdiff, "diff_text", lambda repo, base: "MARKER-DIFF-TEXT", raising=False)
     conv = FakeConversations()

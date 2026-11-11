@@ -13,13 +13,21 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pytest
+from fastapi.testclient import TestClient
 
 from common.hud import validate_card
+from conftest import TOKEN
+from gateway import overlay
 from mac.voice import gitdiff
+from test_overlay_service import make_app, make_deps, says, turn
 
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
 
@@ -288,3 +296,82 @@ def test_blame_subjects_and_hunk_diff(tmp_path):
     assert gitdiff.blame_subjects(repo, "sample.py", 10, 10) == ([], True)
     text = gitdiff.hunk_diff(repo, truth["merge"], "sample.py", 149)
     assert text.startswith("@@") and "+L904 = 146" in text
+
+
+# --- since-the-merge turn (the service on top of the fixture repo) ---------------------------
+
+
+def _wait(cond, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _reset_overlay():
+    overlay._history.clear()
+    overlay._notes.clear()
+    overlay._tainted.clear()
+    overlay._card_ids.clear()
+    overlay._pending.clear()
+    overlay._hunks.clear()
+    overlay.set_deps(None)
+    yield
+    overlay.set_deps(None)
+    overlay._hunks.clear()
+
+
+@pytest.fixture
+def overlay_client(monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN)
+    monkeypatch.setattr(overlay, "TOKEN_FILE", token_file)
+    return TestClient(make_app(), client=("127.0.0.1", 50000))
+
+
+def test_since_merge_highlights_every_hunk_of_the_file_on_screen(overlay_client, tmp_path):
+    """A git_diff turn with sample.py on screen: labelled boxes for each hunk, a scroll to the
+    first one, an info card, and the hunk cursor stored; without an editor app nothing opens."""
+    truth = _fixture().build(tmp_path / "home" / "r", extra=True)
+    root = Path(truth["repo"])
+    sample = root / "sample.py"
+    calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    overlay.set_deps(make_deps(run=fake_run))
+    events = turn(overlay_client, "show the diff", conv_id="s1",
+                  screen={"app": "Code", "document": str(sample)})
+    assert [e for e in events if e["type"] == "lines"] == [
+        {"type": "lines", "file": str(root / "sample.py"), "ranges": [[140, 142], [149, 149], [155, 155]],
+         "labels": ["1/3 +3", "2/3 changed", "3/3 removed here"]}]
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert cards[-1]["title"] == "Changes in sample.py"
+    assert cards[-1]["body"] == ["1/3 lines 140-142 added", "2/3 line 149 changed",
+                                 "3/3 line 155 removed here", 'Say "next change" to jump.']
+    assert _wait(lambda: calls == [["code", "--goto", f"{sample.resolve()}:140"]])  # hunk 1 only
+    assert "2 files changed since the last merge. I've opened sample.py." in says(events)
+    assert overlay._hunks["s1"].rel == "sample.py"  # sample.py on screen beat other.py's 12 lines
+
+    calls.clear()  # a browser is not an editor: highlight and tell, but nothing opens
+    overlay.set_deps(make_deps(run=fake_run))
+    events = turn(overlay_client, "show the diff", conv_id="s1",
+                  screen={"app": "Safari", "document": str(sample)})
+    assert [e for e in events if e["type"] == "lines"]
+    assert calls == []
+    assert "2 files changed since the last merge. Showing the changes in sample.py." in says(events)
+
+    def no_code(cmd, **kwargs):  # editor CLI missing: no fallback to `open`, ever
+        calls.append(list(cmd))
+        raise FileNotFoundError
+
+    overlay.set_deps(make_deps(run=no_code))
+    turn(overlay_client, "show the diff", conv_id="s1",
+         screen={"app": "Code", "document": str(sample)})
+    assert _wait(lambda: calls and calls[-1][0] == "code")
+    assert all(c[0] != "open" for c in calls)
