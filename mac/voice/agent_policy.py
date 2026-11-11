@@ -47,6 +47,9 @@ class Ctx:
     vault: str | None = field(default_factory=lambda: os.environ.get("OVERLAY_VAULT") or None)
     cwd: str = ""
     read_only_mcp: frozenset = frozenset()
+    # MCP tools that may run after a spoken yes; anything in neither list is denied. None = an old
+    # agent-tools.json without a "confirm" list: every non-read-only tool asks (the old behaviour).
+    confirm_mcp: frozenset | None = None
     # The session already read text it did not write (files, commits, PRs, mail). Set by the gateway
     # after any allowed call, kept for the session's life: from then on a new repo name could carry data out.
     read_untrusted_remote: bool = False
@@ -93,10 +96,32 @@ _GIT_BAD_LONG = ("--output", "--ext-diff", "--textconv", "--exec-path", "--git-d
 _GIT_NET = {"push", "fetch", "pull", "clone", "ls-remote", "archive", "submodule"}
 _REMOTE_HELPER_RE = re.compile(r"^(ext|fd)::", re.IGNORECASE)  # ext::<cmd> runs <cmd> as the transport
 _GIT_BAD_SHORT = set("ocOX")  # -o/-c as the first letter; -O<file>/-X<file> anywhere in a cluster
+# git config keys whose value is a program git runs (or a remote/URL rewrite that picks one).
+_GIT_PROGRAM_KEYS = ("core.sshcommand", "core.editor", "core.pager", "core.fsmonitor", "core.hookspath",
+                     "core.gitproxy", "core.askpass", "sequence.editor", "gpg.program", "gpg.*.program",
+                     "credential.helper", "credential.*.helper", "diff.*.command", "diff.*.textconv",
+                     "diff.external", "merge.*.driver", "filter.*", "remote.*.receivepack",
+                     "remote.*.uploadpack", "alias.*", "url.*.insteadof", "url.*.pushinsteadof", "pager.*",
+                     "interactive.difffilter")
+# git config forms that read values (a remote URL may hold a token) or reach another config file.
+_GIT_CONFIG_READ = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--show-origin",
+                    "--show-scope", "--blob", "--file", "-f", "--global", "--system", "--includes"}
+_GIT_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_GIT_ENV_BAD = ("GIT_SSH=", "GIT_SSH_COMMAND=", "GIT_EXTERNAL_DIFF=", "GIT_PAGER=", "GIT_EDITOR=", "GIT_ASKPASS=",
+                "GIT_EXEC_PATH=", "GIT_CONFIG")
+# Extra names a glob pathspec is tested against: env variants and other secret names _SECRET_SAMPLES lacks.
+_SECRET_PROBES = _SECRET_SAMPLES + (".env.production", ".env.development", ".env.test", ".env.staging",
+                                    "secrets.yaml", "secrets.json", "secret.yaml", "x.token", "x_token.json",
+                                    "credential", ".pgpass", ".htpasswd", "x.kdbx", "x.keystore", "x.jks",
+                                    "x.tfstate.backup", "id_dsa", ".bash_history")
+_CODE_EXTS = {"py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "swift", "m", "mm", "h", "c", "cc", "cpp", "go", "rs",
+              "java", "kt", "rb", "php", "cs", "sh", "md", "txt", "rst", "html", "css", "scss", "svg", "xml"}
 _BRANCH_WRITE = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy", "--force",
                  "--set-upstream-to", "-u", "--unset-upstream", "--edit-description"}
 _GH_READ = {"pr": {"list", "view", "diff", "checks", "status"}, "issue": {"list", "view", "status"},
             "repo": {"view", "list"}, "run": {"list", "view"}, "release": {"list", "view"}}
+_GH_LIST_VALUE_OPTS = {"-L", "--limit", "-l", "--language", "--topic", "--visibility", "--json", "-q", "--jq",
+                       "-t", "--template"}
 _GH_DENY = {"--web", "-w", "--hostname", "--watch"}
 _REPO_RE = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$")  # GitHub owners have no dots: no HOST/ form
 _API_PATH_RE = re.compile(r"^/?(repos|users|orgs|search|notifications|user)(/|$|\?)")
@@ -198,6 +223,9 @@ def _path_problem(raw, resolved: str, ctx: Ctx, search: bool) -> str | None:
     names = [os.path.basename(resolved)] + ([os.path.basename(raw)] if isinstance(raw, str) else [])
     if any(_secret_name(n) for n in names if n):
         return "that file holds secrets and is off limits"
+    parts = _fold(resolved).split("/")
+    if len(parts) >= 2 and parts[-1] in ("config", "config.worktree") and ".git" in parts[:-1]:
+        return "that file holds secrets and is off limits"  # git config may hold tokens in remote URLs
     roots = _deny_roots(ctx)
     if _closed_dir(resolved, home) or any(_under(resolved, r) for r in roots):
         return "that folder holds secrets and is off limits"
@@ -277,10 +305,16 @@ def _git(tokens: list[str], ctx: Ctx) -> tuple[str, list[str], str, bool] | Deny
         problem = _git_arg_problem(a, sub, d, top, ctx)
         if problem:
             return Deny(problem)
+    problem = _git_runs_program(sub, args)
+    if problem:
+        return Deny(problem)
+    if sub == "remote" and args[:1] in (["-v"], ["--verbose"], ["get-url"]):
+        return Deny("remote URLs are hidden; the GitHub origin is in your context")  # a URL may hold a token
+    if sub == "config" and any(a in _GIT_CONFIG_READ or a.startswith("--get") for a in args):
+        return Deny("git config reads are not allowed; the GitHub origin is in your context")
     read_only = sub in _GIT_READ and (sub != "branch" or ("--list" in args and not _BRANCH_WRITE & set(args)))
-    # `git remote` reads only as a bare list or get-url (add/set-url/remove write; show/update hit the network)
-    read_only = read_only or (sub == "remote" and (args in ([], ["-v"], ["--verbose"])
-                                                   or (len(args) == 2 and args[0] == "get-url")))
+    # `git remote` reads only as a bare list of names (add/set-url/remove write; show/update hit the network)
+    read_only = read_only or (sub == "remote" and args == [])
     extra = []
     if read_only and sub in ("diff", "log", "show"):
         extra.append("--no-ext-diff")
@@ -288,6 +322,34 @@ def _git(tokens: list[str], ctx: Ctx) -> tuple[str, list[str], str, bool] | Deny
         extra.append("--no-textconv")
     argv = gitdiff._GIT_PREFIX + ["-C", d, sub, *extra, *args]
     return d, argv, os.path.basename(top), read_only
+
+
+def _git_runs_program(sub: str, args: list[str]) -> str | None:
+    """Why a git form is refused even with a spoken yes: it would run a program the owner never hears."""
+    bad = "that git form can run a program, so it is not allowed"
+    if sub in ("mergetool", "filter-branch") or (sub == "submodule" and "foreach" in args) or (
+            sub == "bisect" and "run" in args):
+        return bad
+    if sub == "config" and any(fnmatch.fnmatch(a.split("=", 1)[0].casefold(), k)
+                               for a in args if not a.startswith("-") for k in _GIT_PROGRAM_KEYS):
+        return bad
+    long_opt = {"rebase": "--exec", "difftool": "--extcmd"}.get(sub)
+    if long_opt:
+        for a in args:
+            name = a.split("=", 1)[0]
+            if (len(name) > 2 and long_opt.startswith(name)) or (a.startswith("-") and not a.startswith("--")
+                                                                 and "x" in a[1:]):
+                return bad
+    return None
+
+
+def _glob_hits_secret(pat: str) -> bool:
+    """A glob pathspec (`*.production`, `[.]env.x`, `secret?.yaml`) that could match a secret file name."""
+    probes = list(_SECRET_PROBES)
+    m = re.fullmatch(r"\*\.([a-z0-9_-]+)", pat)
+    if m and m.group(1) not in _CODE_EXTS:  # *.prod could reach .env.prod; *.py is source code
+        probes.append(f".env.{m.group(1)}")
+    return any(fnmatch.fnmatch(n, pat) and (n in _SECRET_SAMPLES or _secret_name(n)) for n in probes)
 
 
 def _git_arg_problem(a: str, sub: str, d: str, top: str, ctx: Ctx) -> str | None:
@@ -310,7 +372,7 @@ def _git_arg_problem(a: str, sub: str, d: str, top: str, ctx: Ctx) -> str | None
     parts = [c.casefold() for c in re.split(r"[:/]", a)]
     if _secret_name(parts[-1]) or _SECRET_DIR in parts:
         return "that file holds secrets and is off limits"
-    if set("*?[") & set(a) and any(fnmatch.fnmatch(s, parts[-1]) for s in _SECRET_SAMPLES):
+    if set("*?[") & set(a) and _glob_hits_secret(parts[-1]):
         return "that pathspec would match secret files"  # git log -p -- '*.env'
 
     for v in values:
@@ -351,6 +413,9 @@ def _bash(inp: dict, ctx: Ctx) -> Allow | Deny | Confirm:
             return Deny("a chain must stay in one repository")
         summary = (f"run git {', '.join(shlex.join(t[3:]) for t in token_lists)} in {built[0][2]}")
         return _confirm_bash(summary, inp, " && ".join(shlex.join(b[1]) for b in built))
+    for t in token_lists:  # VAR=x git ..., env ... git ...: the environment can name a program git runs
+        if "git" in t and (t[0] == "env" or _GIT_ENV_RE.match(t[0]) or any(a.startswith(_GIT_ENV_BAD) for a in t)):
+            return Deny("git with changed environment variables is not allowed: they can run a program")
     tokens = token_lists[0]
     if tokens[0] == "git":
         b = _git(tokens, ctx)
@@ -459,6 +524,16 @@ def _gh(tokens: list[str], inp: dict, ctx: Ctx) -> Allow | Deny | Confirm:
     if verb not in _GH_READ.get(group, ()):
         return side
     own = (repo or "").split("/")[0].casefold() in ctx.own_owners
+    if group == "repo" and verb == "list":  # no owner = the logged-in owner's own account
+        rest, owners, i = args[2:], [], 0
+        while i < len(rest):
+            if rest[i] in _GH_LIST_VALUE_OPTS:
+                i += 2
+                continue
+            if not rest[i].startswith("-"):
+                owners.append(rest[i])
+            i += 1
+        own = own or not owners or (len(owners) == 1 and owners[0].casefold() in ctx.own_owners)
     if ctx.read_untrusted_remote and (repo or "").casefold() not in ctx.trusted_repos and not own:
         return side  # after reading untrusted text, a new repo name could carry data out
     return Allow({**inp, "command": command})
@@ -469,6 +544,8 @@ def _mcp(tool: str, inp: dict, ctx: Ctx) -> Allow | Confirm | Deny:
     short field; a field the owner could not hear (nested, long, too much) means Deny."""
     if tool in ctx.read_only_mcp:
         return Allow(inp)
+    if ctx.confirm_mcp is not None and tool not in ctx.confirm_mcp:
+        return Deny("that mail or calendar tool is not available to me")
     _, server, name = (tool.split("__", 2) + ["", ""])[:3]
     addrs, fields = [], []
     for k, v in inp.items():

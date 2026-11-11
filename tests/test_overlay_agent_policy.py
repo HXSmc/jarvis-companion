@@ -367,10 +367,12 @@ def test_git_glob_pathspec_to_secret_denied(env):
 
 
 def test_git_remote_list_is_read_only(env):
-    """Mac run: the agent asks `git remote -v` to find the GitHub repo; listing is a read, changing is not."""
+    """Mac run: the agent asks `git remote -v` to find the GitHub repo; listing is a read, changing is not.
+    jtools2 3b: -v/get-url print URLs that may hold tokens: Deny (the host puts the origin in the prompt)."""
     ctx, _, _, r = env
-    for cmd in (f"git -C {r} remote -v", f"git -C {r} remote", f"git -C {r} remote get-url origin"):
-        assert isinstance(bash(ctx, cmd), ap.Allow), cmd
+    assert isinstance(bash(ctx, f"git -C {r} remote"), ap.Allow)
+    for cmd in (f"git -C {r} remote -v", f"git -C {r} remote get-url origin"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
     for cmd in (f"git -C {r} remote add x https://example.com/x", f"git -C {r} remote set-url origin y",
                 f"git -C {r} remote show origin", f"git -C {r} remote update"):
         assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
@@ -422,3 +424,71 @@ def test_read_only_gh_on_the_owners_own_repos_stays_allowed_after_a_read(env):
     assert isinstance(bash(ctx, "gh api repos/HXSmc/jarvis-companion/pulls"), ap.Confirm)  # 30b unchanged
     ctx.own_owners = frozenset()
     assert isinstance(bash(ctx, "gh pr list -R HXSmc/jarvis-companion"), ap.Confirm)
+
+
+# --- jtools2: gh repo list, MCP third bucket, git forms that run a program, remote URLs, glob variants ---
+
+
+def test_gh_repo_list_is_own_after_a_read(env):
+    """Run 6 step 4: `gh repo list --limit 100` (the owner's own account) Confirmed after the taint."""
+    ctx = env[0]
+    ctx.read_untrusted_remote = True
+    ctx.own_owners = frozenset({"hxsmc"})
+    assert isinstance(bash(ctx, "gh repo list --limit 100"), ap.Allow)
+    assert isinstance(bash(ctx, "gh repo list HXSmc"), ap.Allow)
+    assert isinstance(bash(ctx, "gh repo list evil"), ap.Confirm)
+    assert isinstance(bash(ctx, "gh repo list evil --limit 5"), ap.Confirm)
+    assert isinstance(bash(ctx, "gh api repos/evil/x"), ap.Confirm)  # 30b unchanged
+    assert isinstance(bash(ctx, "gh repo create x"), ap.Confirm)
+
+
+def test_mcp_tool_not_listed_is_denied(env):
+    ctx = env[0]
+    ctx.read_only_mcp = frozenset({"mcp__mail__search_emails"})
+    ctx.confirm_mcp = frozenset({"mcp__mail__send_email"})
+    assert isinstance(decide(ctx, "mcp__mail__delete_email", id="1"), ap.Deny)
+    sent = decide(ctx, "mcp__mail__send_email", to=["a@example.com"], subject="hi", body="x")
+    assert isinstance(sent, ap.Confirm) and "a@example.com" in sent.summary
+    assert isinstance(decide(ctx, "mcp__mail__search_emails", query="x"), ap.Allow)
+    ctx.confirm_mcp = None  # an old agent-tools.json without a confirm list: unchanged
+    assert isinstance(decide(ctx, "mcp__mail__delete_email", id="1"), ap.Confirm)
+
+
+def test_git_forms_that_run_a_program_denied(env):
+    """Security note 3a: one spoken yes must never run a program set through git config, an option or the env."""
+    ctx, _, _, r = env
+    for cmd in (f"git -C {r} config core.sshCommand x", f"git -C {r} config --add core.sshcommand x",
+                f"git -C {r} config alias.x '!sh'", f"git -C {r} config remote.origin.uploadpack x",
+                f"git -C {r} config remote.origin.receivepack x", f"git -C {r} config core.editor x",
+                f"git -C {r} config sequence.editor x", f"git -C {r} config gpg.program x",
+                f"git -C {r} config diff.x.command y", f"git -C {r} config merge.x.driver y",
+                f"git -C {r} config url.ext::sh.insteadOf https://", f"git -C {r} rebase -x 'make'",
+                f"git -C {r} rebase --exec=make", f"git -C {r} submodule foreach ls", f"git -C {r} difftool -x vim",
+                f"git -C {r} difftool --extcmd=vim", f"git -C {r} bisect run make",
+                f"git -C {r} filter-branch --tree-filter x", f"git -C {r} mergetool",
+                f"GIT_SSH_COMMAND=x git -C {r} push", f"env GIT_SSH=x git -C {r} fetch", f"GIT_PAGER=x git -C {r} log"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
+    for cmd in (f"git -C {r} commit -m x", f"git -C {r} push -u origin main", f"git -C {r} config user.name x"):
+        assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
+    assert isinstance(bash(ctx, f"git -C {r} log -5"), ap.Allow)
+
+
+def test_remote_urls_hidden(env):
+    """Security note 3b: remote URLs and config values may hold tokens; the origin comes from the host."""
+    ctx, _, _, r = env
+    for cmd in (f"git -C {r} remote -v", f"git -C {r} remote --verbose", f"git -C {r} remote get-url origin",
+                f"git -C {r} config --get remote.origin.url", f"git -C {r} config -l"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
+    assert "origin is in your context" in bash(ctx, f"git -C {r} remote -v").reason
+    assert isinstance(decide(ctx, "Read", file_path=str(r / ".git/config")), ap.Deny)
+    assert isinstance(decide(ctx, "Read", file_path=str(r / ".git/config.worktree")), ap.Deny)
+    assert isinstance(bash(ctx, f"git -C {r} remote"), ap.Allow)
+
+
+def test_git_glob_pathspec_env_variants_denied(env):
+    """Security note 3c: a glob that can reach .env.production and friends is denied, plain ones still work."""
+    ctx, _, _, r = env
+    for spec in ("'*.production'", "'[.]env.production'", "'secret?.yaml'", "'.env*'", "'*.prod'"):
+        assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Deny), spec
+    for spec in ("'*.py'", "'src/*.ts'"):
+        assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Allow), spec
