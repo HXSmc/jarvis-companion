@@ -556,7 +556,8 @@ def test_change_cursor_blocks_wake_reset_but_clear_drops_it(client, monkeypatch)
     log.clear()
     overlay._hunks["h1"] = object()
     deps.clock.t += 91
-    turn(client, "what is the capital of France", conv_id="h1", **SPOKEN)
+    events = turn(client, DOG, conv_id="h1", **SPOKEN)
     assert ("quiet", "drop", "h1") not in log and "h1" in overlay._tainted
+    assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1  # "clear" does work here, so it says so
     turn(client, "clear", conv_id="h1", followup=True)
     assert "h1" not in overlay._hunks and "h1" not in overlay._tainted and ("quiet", "drop", "h1") in log

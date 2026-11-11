@@ -1248,7 +1248,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if media_seen:
             return
         media_seen = True
-        line = AGENT_MEDIA_LINE if _holds_agent_state(body.conv_id, deps) else QUIET_MEDIA_LINE
+        # A change-list cursor alone does not block "clear" (clear drops it), so it keeps the clear line.
+        line = AGENT_MEDIA_LINE if _holds_agent_state(body.conv_id, deps, cursor=False) else QUIET_MEDIA_LINE
         async for ev in _speak(line, deps):
             yield ev
         said.append(line)
