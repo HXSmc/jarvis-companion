@@ -224,6 +224,11 @@ def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run,
     return "text-editor"
 
 
+def files_phrase(n: int) -> str:
+    """Count of files for the stat card and the spoken summary: 1 file, 3 files."""
+    return f"{n} file" if n == 1 else f"{n} files"
+
+
 def diff_cards(hunks: list[dict], base: str) -> list[dict]:
     """Stat + bar + "where it changed" info cards summarizing `hunks()` output, validated by common.hud.
 
@@ -242,7 +247,7 @@ def diff_cards(hunks: list[dict], base: str) -> list[dict]:
     cards = [
         validate_card(
             {"type": "stat", "title": "Changed since last merge",
-             "value": f"{len(per_file)} files", "label": short}
+             "value": files_phrase(len(per_file)), "label": short}
         ),
         validate_card(
             {"type": "bar", "title": "Changed lines by file",

@@ -607,7 +607,8 @@ async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     if deps.synth is None:
         return None
     try:
-        pcm, rate = await asyncio.to_thread(deps.synth, text)
+        # Answers quote code in backticks (the "why" line): the caption keeps them, the voice doesn't.
+        pcm, rate = await asyncio.to_thread(deps.synth, text.replace("`", ""))
     except Exception:
         return None
     return {"type": "audio", "text": text, "rate": rate,
@@ -818,7 +819,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                             yield {"type": "card", "card": card}
                         tail = (f"I've opened {Path(chosen).name}." if editor
                                 else f"Showing the changes in {Path(chosen).name}.")
-                        summary = f"{len(per_file)} files changed since the last merge. {tail}"
+                        summary = f"{gitdiff.files_phrase(len(per_file))} changed since the last merge. {tail}"
                         async for ev in _speak(summary, deps):
                             yield ev
                         said.append("opened the diff")

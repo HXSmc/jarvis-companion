@@ -256,3 +256,22 @@ def test_hunk_span_card_and_line_helpers():
     assert body == ["1/9 line 10 changed", "2/9 line 20 changed", "3/9 line 30 changed",
                     "4/9 line 40 changed", "+5 more", 'Say "next change" to jump.']
     assert overlay._hunk_card("a.py", many[:1])["body"] == ["1/1 line 10 changed"]
+
+
+def test_one_file_is_singular_and_backticks_are_not_spoken():
+    """R3 Mac UX: "1 file" (not "1 files") on the card and in the spoken summary; the "why" answer
+    quotes code in backticks, which the voice must not read out (the caption keeps the text)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from mac.voice import gitdiff
+
+    assert gitdiff.files_phrase(1) == "1 file" and gitdiff.files_phrase(2) == "2 files"
+    stat = gitdiff.diff_cards([{"file": "a.py", "start": 3, "count": 1, "old": 1}], "abc1234")[0]
+    assert stat["value"] == "1 file"
+    heard = []
+    deps = SimpleNamespace(synth=lambda text: (heard.append(text), (b"\0\0", 16000))[1])
+    line = "Line 149 changed because the old `L146 = 146` became ``L904 = 146``."
+    audio = asyncio.run(overlay._audio(line, deps))
+    assert heard == ["Line 149 changed because the old L146 = 146 became L904 = 146."]
+    assert audio["text"] == line
