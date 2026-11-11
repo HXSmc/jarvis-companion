@@ -240,3 +240,10 @@ def test_the_key_never_reaches_any_log_or_returned_value(key, video, caplog):
         assert FAKE not in record.getMessage()
         if record.exc_info:
             assert FAKE not in (record.exc_text or "")
+
+
+def test_empty_200_body_is_an_error_and_not_cached(key, video):
+    video["reply"] = lambda req: ok(b"")
+    assert media_lookup.find_video("Rocket launch") == (None, "error")
+    video["reply"] = lambda req: ok(fixture("rocket"))
+    assert media_lookup.find_video("Rocket launch")[1] == "ok" and len(video["requests"]) == 2

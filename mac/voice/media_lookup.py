@@ -223,9 +223,8 @@ def search(query, count=1) -> list[dict]:
         pages = result.get("pages") if isinstance(result, dict) else None
         if not isinstance(pages, list):
             return []
-        pages = [p for _, _, p in sorted(  # by index, stable via the sequence tiebreak
-            (p.get("index") if isinstance(p.get("index"), int) else 1 << 30, i, p)
-            for i, p in enumerate(pages) if isinstance(p, dict))]
+        pages = sorted((p for p in pages if isinstance(p, dict)),
+                       key=lambda p: p.get("index") if isinstance(p.get("index"), int) else 1 << 30)
         hits = [h for h in map(_hit, pages) if h]
         return hits[:_count(count)]
     except Exception as e:  # a lookup bug must never break the spoken answer
@@ -412,7 +411,10 @@ def find_video(query) -> tuple[dict | None, str]:
                     _key_retry_until = _now() + KEY_RETRY
                 return None, "key_rejected"
             return None, "error"
-        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):  # an empty or odd 200 body is a fault, not "nothing found"
+            logger.info("video lookup: bad response body")
+            return None, "error"
+        items = payload.get("items")
         card = next((c for c in map(_video_hit, items) if c), None) if isinstance(items, list) else None
         now = _now()
         with _lock:
