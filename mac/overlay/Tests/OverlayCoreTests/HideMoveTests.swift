@@ -207,7 +207,8 @@ final class HideMoveTests: XCTestCase {
         let size = CGSize(width: 320, height: 160)
         let slots = ScatterLayout.rows(Array(repeating: size, count: 3), in: area, right: true, bottom: false, keepOut: [zone])
         // x 1104 would sit under the banner zone (x from 1060): the row jumps to end 20 pt left of it.
-        XCTAssertEqual(slots?.map(\.origin), [CGPoint(x: 720, y: 41), CGPoint(x: 380, y: 41), CGPoint(x: 40, y: 41)])
+        // f52-cardfix: slots come back in reading order, the last card in the rightmost slot.
+        XCTAssertEqual(slots?.map(\.origin), [CGPoint(x: 40, y: 41), CGPoint(x: 380, y: 41), CGPoint(x: 720, y: 41)])
         let left = ScatterLayout.rows(Array(repeating: size, count: 3), in: area, right: false, bottom: true, keepOut: [])
         XCTAssertEqual(left?.map(\.origin), [CGPoint(x: 16, y: 724), CGPoint(x: 356, y: 724), CGPoint(x: 696, y: 724)])
         // Too many for a small region: nil, never an overlap.

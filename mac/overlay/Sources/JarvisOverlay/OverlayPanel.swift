@@ -55,7 +55,7 @@ final class HUDWindow: NSPanel {
     /// A press that landed on a live player: its whole stream goes to the player untouched.
     private var pressOnPlayer = false
     private(set) var isDragging = false
-    /// AppKit frame an animated move is heading to; a sync during the animation must not cut it short.
+    /// AppKit frame a sliding move is heading to; a sync during the animation must not cut it short.
     private var moveTarget: CGRect?
 
     init() {
@@ -147,20 +147,18 @@ final class HUDWindow: NSPanel {
     }
 
     /// Top-left global rect (HUD space) to this panel's AppKit frame; no-op when unchanged.
-    /// `animated` (a voice move of a shown panel) slides there, longer for a longer way
-    /// (ScatterLayout.moveDuration), ease in-out; instant with Reduce Motion.
-    func place(_ rect: CGRect, animated: Bool = false) {
+    /// `slide` (a voice move of a shown panel, one duration for the whole group:
+    /// ScatterLayout.groupMoveDuration) slides there, ease in-out; nil or Reduce Motion: instant.
+    func place(_ rect: CGRect, slide: TimeInterval? = nil) {
         guard !isDragging else { return }
         let frame = CardPanel.flip(rect)
         guard frame != self.frame, frame != moveTarget else { return }
-        guard animated, isVisible, !Theme.reduceMotion else {
+        guard let slide, isVisible, !Theme.reduceMotion else {
             return moveTarget == nil ? setFrame(frame, display: false) : stopMove(at: frame)
         }
         moveTarget = frame
-        let distance = hypot(frame.midX - self.frame.midX, frame.midY - self.frame.midY)
-        let width = (screen ?? NSScreen.main)?.visibleFrame.width ?? 0
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = ScatterLayout.moveDuration(distance: distance, across: width)
+            context.duration = slide
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             self.animator().setFrame(frame, display: false)
         }, completionHandler: { [self] in
@@ -328,7 +326,7 @@ final class CardPanel: NSObject {
         guard let model else { return }
         let (screen, visible) = geometry
         let highlights = model.shapes.map { ScatterLayout.shapeKeepOut($0.rect, screenWidth: screen.width) }
-        var keepOut = [ScatterLayout.orbKeepOut(screen: screen)] + highlights
+        var keepOut = [ScatterLayout.orbKeepOut(screen: screen), ScatterLayout.notificationZone(visible: visible)] + highlights
         if let permission = syncPermission(model, visible: visible) { keepOut.append(permission) }
         self.keepOut = keepOut
 
@@ -363,7 +361,16 @@ final class CardPanel: NSObject {
 
         let aside = model.layout.mode == .aside
         let hidden = model.layout.hidden
-        let animateMove = model.layout.moveCount != movesSeen
+        // A voice move: every shown card slides for the same time (the farthest one's), so they land together.
+        var slide: TimeInterval?
+        if model.layout.moveCount != movesSeen {
+            let moving = model.cards.compactMap { card -> (CGRect, CGRect)? in
+                guard let window = entries[card.listKey]?.window, window.isVisible,
+                      let frame = model.layout.frames[card.listKey] else { return nil }
+                return (Self.flip(window.frame), frame)
+            }
+            slide = ScatterLayout.groupMoveDuration(old: moving.map(\.0), new: moving.map(\.1), across: visible.width)
+        }
         movesSeen = model.layout.moveCount
         let dragBounds = Self.flip(visible)
         for card in model.cards {
@@ -381,7 +388,7 @@ final class CardPanel: NSObject {
                 entry.window.fade(to: 0)
                 continue
             }
-            entry.window.place(frame, animated: animateMove)
+            entry.window.place(frame, slide: slide)
             // A highlight under a card dims it. Only a new line band moves cards off it, once (moveCards).
             entry.window.fade(to: highlights.contains { $0.intersects(frame) } ? 0.25 : 1)
         }

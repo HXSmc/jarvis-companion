@@ -25,6 +25,22 @@ final class OverlayModel: ObservableObject {
     @Published var banner: String?
 
     private var idleTask: Task<Void, Never>?
+    /// The cards the last idle clear took off screen, for one "show them" (ScatterLayout.IdleStash).
+    /// Memory only; released on clear, a new card or shape, a mode change with cards shown, or at
+    /// its retention deadline (the task below), whichever comes first.
+    private var idleStash: ScatterLayout.IdleStash? {
+        didSet {
+            stashExpiry?.cancel()
+            stashExpiry = nil
+            guard let deadline = idleStash?.clearedAt.addingTimeInterval(ScatterLayout.IdleStash.retention) else { return }
+            stashExpiry = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, deadline.timeIntervalSinceNow) * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.idleStash = nil
+            }
+        }
+    }
+    private var stashExpiry: Task<Void, Never>?
     /// Set by CardPanel: whether the pointer rests on a shown card, chip or the permission card
     /// right now. Read at the idle deadline only, so no remembered hover state can stick.
     var pointerOnPanel: @MainActor () -> Bool = { false }
@@ -55,6 +71,7 @@ final class OverlayModel: ObservableObject {
     /// Returns the key that anchor(_:) takes once the shape's window is known.
     @discardableResult
     func add(shape: HUDShape) -> Int {
+        dropStash(on: .newShape)
         unhide()
         nextShapeKey += 1
         entries.append(ShapeEntry(key: nextShapeKey, shape: shape))
@@ -113,6 +130,7 @@ final class OverlayModel: ObservableObject {
     }
 
     func add(card: HUDCard) {
+        dropStash(on: .newCard)  // a new answer after an idle clear starts from an empty screen
         unhide()  // a new answer is never invisible
         // A Confirm question (or its settled line) is never left as a parked chip.
         if ScatterLayout.restoresParked(card) { setLayout(.restore) }
@@ -158,15 +176,17 @@ final class OverlayModel: ObservableObject {
     /// The screen changed: every stored frame moves the least distance back on screen.
     func reclamp(visible: CGRect) {
         layout.reclamp(visible: visible)
+        idleStash?.layout.reclamp(visible: visible)
     }
 
     /// Aside parks every card as a chip and drops the current highlight boxes; restore puts
     /// each card back at its stored frame and restarts the idle countdown. Hide fades every card
     /// and chip out (kept, idle countdown paused, highlights and media stopped); show and every
-    /// other mode make them visible again. A move shows and restores the cards, then moves the
-    /// group; a refused move (no room clear of the orb) changes nothing and nudges the cards.
-    /// Repeats are no-ops.
+    /// other mode make them visible again; after an idle clear, show brings that set back at the
+    /// same places. A move shows and restores the cards, then moves the group; a refused move (no
+    /// room clear of the orb) changes nothing and nudges the cards. Repeats are no-ops.
     func setLayout(_ mode: LayoutMode) {
+        dropStash(on: .layout(mode))
         switch mode {
         case .hide:
             guard !layout.hidden else { return }
@@ -189,8 +209,14 @@ final class OverlayModel: ObservableObject {
         }
         unhide()
         switch mode {
-        case .hide, .show, .left, .right, .up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight, .otherSide:
+        case .hide, .left, .right, .up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight, .otherSide:
             break
+        case .show:
+            guard cards.isEmpty, let stash = idleStash, stash.restorable(now: Date()) else { return }
+            idleStash = nil
+            layout = stash.layout
+            cards = stash.cards
+            bumpIdle()
         case .aside:
             guard layout.mode == .normal else { return }
             layout.aside()
@@ -211,6 +237,7 @@ final class OverlayModel: ObservableObject {
     }
 
     func clear() {
+        idleStash = nil  // clear wipes everything, the idle-cleared set too (IdleStash.survives(.clear) is false)
         clearShapes()
         cards = []
         layout.clear()
@@ -230,6 +257,7 @@ final class OverlayModel: ObservableObject {
     /// At the deadline: the pointer resting on a panel (read now), or a video plays — held at
     /// most 10 min from its start — waits another round; otherwise clears the highlight boxes,
     /// and the cards unless they are parked aside (chips wait for restore or clear, no timer).
+    /// Cleared cards stay restorable by "show them" (idleStash).
     private func idleExpired() {
         if ScatterLayout.idleWaits(pointerOnPanel: pointerOnPanel(),
                                    playingSince: MediaPlaybackController.shared.playingSince,
@@ -238,7 +266,14 @@ final class OverlayModel: ObservableObject {
             return
         }
         clearShapes()
-        if layout.mode == .normal && !layout.hidden { cards = [] }
+        guard layout.mode == .normal && !layout.hidden else { return }
+        // A restorable hide: "show them" brings these back (one set, IdleStash.retention at most).
+        if !cards.isEmpty { idleStash = ScatterLayout.IdleStash(cards: cards, layout: layout, clearedAt: Date()) }
+        cards = []
+    }
+
+    private func dropStash(on event: ScatterLayout.IdleStash.Event) {
+        if !ScatterLayout.IdleStash.survives(event, cardsOnScreen: !cards.isEmpty) { idleStash = nil }
     }
 
     private func clearShapes() {
