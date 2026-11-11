@@ -182,9 +182,9 @@ def test_agent_ack_keys():
 def test_ack_cache_fallback():
     cache = acks.AckCache()
     cache.prerender()  # no synth: quiet no-op
-    assert cache.get("open") == ("On it.", None, 0)
+    assert cache.get("open") == ("Of course.", None, 0)
     # Unknown key falls back to the generic phrase.
-    assert cache.get("nope") == ("Right away.", None, 0)
+    assert cache.get("nope") == ("On it.", None, 0)
 
     calls: list[str] = []
 
@@ -194,7 +194,7 @@ def test_ack_cache_fallback():
 
     cache = acks.AckCache(synth)
     cache.prerender()
-    assert cache.get("open") == ("On it.", b"pcm:On it.", 24000)
+    assert cache.get("open") == ("Of course.", b"pcm:Of course.", 24000)
     assert sorted(calls) == sorted(acks.PHRASES.values())
 
     def broken(text):
@@ -202,7 +202,7 @@ def test_ack_cache_fallback():
 
     cache = acks.AckCache(broken)
     cache.prerender()  # must not raise
-    assert cache.get("look") == ("Let me look.", None, 0)
+    assert cache.get("look") == ("Having a look.", None, 0)
 
 
 def test_lean_tools_allowlist():

@@ -367,7 +367,7 @@ def test_second_request_while_busy_gets_still_working(client):
             break
         time.sleep(0.01)
     events = turn(client, "and my calendar", conv_id="b1")
-    assert "Still working on the last one." in says(events)
+    assert "Still on the last one, I'm afraid." in says(events)
     turn(client, "stop", conv_id="b1")
     t.join(5)
 
@@ -565,14 +565,14 @@ def test_confirm_expiry_and_other_utterance_are_told(client):
     clock.now += 31
     assert _wait(lambda: pool.made[0].responses)
     events = turn(client, "yes", conv_id="x1")
-    assert "That request expired, so I didn't do it." in " ".join(says(events) + [
+    assert "That request expired, so I haven't done it." in " ".join(says(events) + [
         e.get("text", "") for e in events if e["type"] == "audio"])
     assert any(e["type"] == "card" and e["card"]["id"] == card_id for e in events)
     # A different request while one waits: say it was dropped, then answer.
     turn(client, "commit and push my changes", conv_id="x2")
     events = turn(client, "what is the capital of France", conv_id="x2")
     spoken = [e.get("text") for e in events if e["type"] in ("say", "audio")]
-    assert spoken[0] == "Alright, I won't." and "Noon." in spoken
+    assert spoken[0] == "Very well, I won't." and "Noon." in spoken
 
 
 def test_no_replaces_confirm_card(client):
@@ -618,7 +618,7 @@ def test_late_yes_before_watchdog_hears_expired(client, monkeypatch):
     clock.now += 31
     events = turn(client, "yes", conv_id="ly1")
     spoken = " ".join(says(events) + [e.get("text", "") for e in events if e["type"] == "audio"])
-    assert "That request expired, so I didn't do it." in spoken and "Alright, I won't." not in spoken
+    assert "That request expired, so I haven't done it." in spoken and "Very well, I won't." not in spoken
     assert [r["behavior"] for r in pool.made[0].responses] == ["deny"]
     assert any(e["type"] == "card" and e["card"]["title"] == "Not done: it timed out" for e in events)
 
@@ -892,7 +892,7 @@ def test_expired_confirm_is_pushed_to_the_app(client, monkeypatch):
     assert k1 == k2 == "hud"
     assert card == {"type": "card", "card": {**confirm, "title": "Not done: it timed out",
                                              "body": [confirm["body"][0]]}}
-    assert line["type"] in ("say", "audio") and line["text"] == "That request expired, so I didn't do it."
+    assert line["type"] in ("say", "audio") and line["text"] == "That request expired, so I haven't done it."
     assert len(line["text"].split()) <= 12
 
 
