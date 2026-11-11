@@ -28,18 +28,17 @@ final class ServiceClient {
         return try JSONDecoder().decode(Health.self, from: data)
     }
 
-    /// SSE event stream; yields each `event:` name (hello, wake, ...).
-    func events() -> AsyncThrowingStream<String, Error> {
+    /// SSE event stream; yields each event's name (hello, wake, hud, ...) with its data line.
+    func events() -> AsyncThrowingStream<(name: String, data: String), Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let request = try authorizedRequest(path: "/overlay/events", method: "GET")
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response)
+                    var sse = SSELines()  // ": ping" etc. ignored
                     for try await line in bytes.lines {
-                        guard line.hasPrefix("event:") else { continue }  // ": ping" etc. ignored
-                        let name = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
-                        if !name.isEmpty { continuation.yield(name) }
+                        if let event = sse.feed(line) { continuation.yield(event) }
                     }
                     continuation.finish()
                 } catch {

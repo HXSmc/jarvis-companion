@@ -134,6 +134,12 @@ final class OverlayModel: ObservableObject {
         if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
     }
 
+    /// New line bands: cards over them move off once (ScatterLayout.LayoutState.moveOff).
+    func moveCards(off highlights: [CGRect], visible: CGRect, keepOut: [CGRect]) {
+        let retired = layout.moveOff(highlights, visible: visible, keepOut: keepOut)
+        if !retired.isEmpty { cards.removeAll { retired.contains($0.listKey) } }
+    }
+
     /// The user drags a card: it comes to the front and stays where it is dropped. The idle
     /// countdown restarts when the drag ends (during it the pointer rests on the card).
     func drag(key: String, to frame: CGRect, visible: CGRect, ended: Bool) {

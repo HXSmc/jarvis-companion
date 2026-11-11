@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from mac.voice import acks
-from mac.voice.intents import Intent, list_apps, open_app, open_site, parse
+from mac.voice.intents import Intent, is_cancel, is_confirm, is_no, list_apps, open_app, open_site, parse
 from mac.voice.lean import Conversations, lean_argv
 
 
@@ -122,6 +122,61 @@ def test_pick_key():
     assert acks.pick_key("clear") == "clear"
     assert acks.pick_key("answer") == "answer"
     assert acks.pick_key("zzz") == "generic"
+
+
+def test_agent_routing():
+    for text, sub in (
+        ("research the git history of the code on my screen and tell me what changed", "git"),
+        ("any open PRs on jarvis-companion", "gh"),
+        ("what does my Obsidian say about pricing", "notes"),
+        ("who changed this file last", "git"),
+        ("check my inbox", "mail"),
+        ("Hey Jarvis, what changed in the last commit?", "git"),
+        ("commit and push my changes", "git"),
+        ("what's on my calendar today", "calendar"),
+        ("what does this function do", "code"),
+    ):
+        intent = parse(text)
+        assert (intent.kind, intent.sub) == ("agent", sub), text
+    # Generic questions and the deterministic paths stay where they were.
+    assert parse("what is a pull request").kind == "answer"
+    assert parse("explain git rebase").kind == "answer"
+    assert parse("show the diff since the last merge").kind == "git_diff"
+    assert parse("what changed since the last merge").kind == "git_diff"
+    assert parse("what time is it") == Intent("clock", "time")
+    assert parse("highlight the last debugging session").kind == "look"
+    assert parse("what is the capital of France").kind == "answer"
+    assert parse("show me the logs").kind != "agent"
+    assert parse("tell me about the history of Rome").kind == "answer"
+    assert parse("I have an issue with my wifi").kind == "answer"
+    assert parse("open safari", apps={"safari": "Safari"}) == Intent("open_app", "safari")
+
+
+def test_confirm_and_cancel_phrases():
+    for text in ("yes", "Yes.", "YES", "Jarvis, yes please", "go ahead!", "Hey Jarvis do it"):
+        assert is_confirm(text), text
+    for text in ("no", "yes but first tell me the time", "what's on my screen", "yesterday"):
+        assert not is_confirm(text), text
+    for text in ("stop", "Cancel.", "never mind", "Jarvis, stop"):
+        assert is_cancel(text), text
+    for text in ("stop the music in five minutes", "no"):
+        assert not is_cancel(text), text
+
+
+def test_agent_ack_keys():
+    for sub, text in (("git", "Checking the git history."), ("gh", "Looking at GitHub."),
+                      ("notes", "Searching your notes."), ("mail", "Checking your mail."),
+                      ("calendar", "Checking your calendar."), ("code", "Looking at that file.")):
+        key = acks.pick_key("agent", sub)
+        assert (key, acks.PHRASES[key]) == (f"agent_{sub}", text)
+    assert acks.pick_key("agent", "zzz") == "agent_code"
+    assert acks.progress_key("git") == "progress_git"
+    assert acks.progress_key("file") == "progress_file"
+    assert acks.progress_key("zzz") == "progress_other"
+    assert acks.PHRASES["progress_notes"] != acks.PHRASES["agent_notes"]  # no stutter (R1 ux #4)
+    for text in acks.PHRASES.values():
+        assert len(text.split()) <= 12, text
+        assert not any(w in text.lower() for w in ("certainly", "absolutely", "happy to", "great")), text
 
 
 def test_ack_cache_fallback():
@@ -240,3 +295,29 @@ def test_conversations_prewarm_hands_the_spare_to_the_next_new_conversation():
     spare = made[0]
     assert convs.get("a") is spare  # the warm one, no cold start
     assert len(made) == 2  # a new spare is already starting for the next conversation
+
+
+def test_confirm_phrases_survive_real_speech_to_text():
+    """R1 ux #1: STT commas, "sir" and politeness still count; extra requests still do not."""
+    for text in ("Yes, please.", "Yes, go ahead.", "Yeah, do it", "yes sir", "go ahead Jarvis", "Yep.",
+                 "Yes, do it, please."):
+        assert is_confirm(text), text
+    for text in ("yes, but first check the tests", "yes and also delete the branch", "no"):
+        assert not is_confirm(text), text
+    for text in ("Stop, please", "Cancel it.", "Never mind, Jarvis"):
+        assert is_cancel(text), text
+    for text in ("no", "No, don't.", "Nope.", "no thanks", "Don't do it", "no, cancel it"):
+        assert is_no(text), text
+    for text in ("no idea what time it is", "yes"):
+        assert not is_no(text), text
+
+
+def test_agent_routing_ignores_ordinary_talk():
+    """R1 code #7: everyday words do not send a request to the 120 s agent tier."""
+    for text in ("I'm committed to this plan", "tell me about the new iPhone release",
+                 "write an email to John about lunch", "what does CI stand for in schools",
+                 "how do I write a polite email"):
+        assert parse(text).kind != "agent", text
+    for text in ("is the CI green on jarvis-companion", "read my latest emails", "any new email from Sara",
+                 "list the releases of jarvis-companion"):
+        assert parse(text).kind == "agent", text

@@ -55,7 +55,7 @@ async def _lifespan(app: FastAPI):
         await asyncio.to_thread(get_deps().acks.prerender)
     except Exception as exc:  # prewarm must never keep the overlay from serving
         logger.warning("ack prerender failed (%s), continuing", type(exc).__name__)
-    for pool_name in ("conversations", "quiet_conversations"):
+    for pool_name in ("conversations", "quiet_conversations", "agent_conversations"):
         try:
             getattr(get_deps(), pool_name).prewarm()  # first answer skips the CLI cold start
         except Exception as exc:

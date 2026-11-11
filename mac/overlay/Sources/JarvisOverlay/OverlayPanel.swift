@@ -240,6 +240,15 @@ final class CardPanel: NSObject {
         return ScatterLayout.pointerRests(NSEvent.mouseLocation, onAnyOf: frames)
     }
 
+    /// New line bands (top-left points): cards over them move off once, then the panels follow.
+    func moveCards(off bands: [CGRect]) {
+        guard let model else { return }
+        let (screen, visible) = geometry
+        let added = bands.map { ScatterLayout.shapeKeepOut($0, screenWidth: screen.width) }
+        model.moveCards(off: added, visible: visible, keepOut: keepOut + added)
+        sync()
+    }
+
     @objc private func screensChanged() {
         model?.reclamp(visible: geometry.visible)
         sync()
@@ -300,7 +309,7 @@ final class CardPanel: NSObject {
                 continue
             }
             entry.window.place(frame)
-            // A highlight that appears under a card dims it; the card never moves.
+            // A highlight under a card dims it. Only a new line band moves cards off it, once (moveCards).
             entry.window.fade(to: highlights.contains { $0.intersects(frame) } ? 0.25 : 1)
         }
         restack(aside ? [] : model.layout.order.filter { entries[$0] != nil })
