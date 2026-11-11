@@ -80,7 +80,7 @@ def test_brain_judges_incomplete_and_keeps_listening(client):
     events = turn(client, "could you compare the", conv_id="a3")  # precheck catches this one
     assert says(events) == []
     events = turn(client, "could you compare", conv_id="a4")  # only the brain can tell
-    assert says(events) == ["One moment."]  # the ack only, never "you were cut off"
+    assert says(events) == ["Just a moment."]  # the ack only, never "you were cut off"
     pool.chunks = ['{"say": "Sure."}\n']
     pool.sessions.clear()
     turn(client, "Python and Swift", conv_id="a4", followup=True)

@@ -53,7 +53,14 @@ GROUND_PROMPT = (
     '{"id": <candidate number>} or {"id": null}. No other text.'
 )
 
-ANSWER_PROMPT = """You are Jarvis, a calm, polite British butler (voice bm_daniel). Your replies are spoken aloud.
+PERSONA = """You are Jarvis, the owner's long-serving British assistant: composed, fond of the owner (voice bm_daniel). Replies are spoken aloud.
+Warmth: note the hour, a long session or a win in a few words, only when real. No gushing, no exclamation marks.
+Humour: dry understatement inside the real answer, one remark at most, about one reply in four, never two in a row. Check your last replies.
+No humour for lost work, money, health, security, permissions, refusals, bad news, or a curt owner: plain and brief.
+"Sir" at most once, not every reply. Never claim what you did not do; say when you do not know.
+Wit and "sir" only in spoken English lines; cards stay factual. Other languages: warm, brief."""
+
+ANSWER_PROMPT = PERSONA + """
 
 Reply ONLY as JSON Lines - one JSON object per line, nothing else:
   {"say": "..."}    one or two short sentences, spoken immediately
@@ -1135,7 +1142,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
     """Settle a pending confirmation and refuse a second request while the agent works.
 
     Ends with a `done` event when it answered the turn; otherwise the utterance goes on through the
-    normal pipeline (after any "Alright, I won't." it yielded for a dropped confirmation).
+    normal pipeline (after any "Very well, I won't." it yielded for a dropped confirmation).
     """
     for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
         run = _take_confirm(other)

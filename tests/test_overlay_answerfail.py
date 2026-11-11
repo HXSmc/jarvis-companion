@@ -25,7 +25,7 @@ from mac.voice import lean  # noqa: E402
 __all__ = ["client", "reset_overlay_state"]
 
 QUESTION = "what is the capital of France"
-ACK = "One moment."
+ACK = "Just a moment."
 
 
 class ScriptedSession:
@@ -75,7 +75,7 @@ def done(events):
 
 
 def check(events, caplog, cls, line, title):
-    spoken = [s for s in says(events) if s not in (ACK, "Let me look.")]  # acks never count
+    spoken = [s for s in says(events) if s not in (ACK, "Having a look.")]  # acks never count
     assert spoken == [line]
     got = cards(events)
     assert len(got) == 1 and got[0]["type"] == "info" and got[0]["title"] == title

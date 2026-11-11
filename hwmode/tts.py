@@ -19,7 +19,7 @@ _ARABIC = re.compile(r"[؀-ۿ]")
 class Voice:
     def __init__(self) -> None:
         self.name = os.environ.get("HWMODE_TTS_VOICE", "bm_daniel")
-        self.speed = float(os.environ.get("HWMODE_TTS_SPEED", "1.0"))
+        self.speed = float(os.environ.get("HWMODE_TTS_SPEED", "1.08"))
         self.dir = Path(os.environ.get("HWMODE_TTS_DIR", str(Path.home() / ".local/share/kokoro")))
         self._kokoro = None
         self._lock = threading.Lock()  # one synthesis at a time: onnxruntime already uses every core

@@ -10,12 +10,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 PHRASES = {
-    "open": "On it.",
-    "look": "Let me look.",
-    "diff": "Pulling up the changes now.",
-    "answer": "One moment.",
-    "clear": "Cleared.",
-    "generic": "Right away.",
+    "open": "Of course.",
+    "look": "Having a look.",
+    "diff": "Pulling up the changes.",
+    "answer": "Just a moment.",
+    "clear": "All cleared.",
+    "generic": "On it.",
     "agent_git": "Checking the git history.",
     "agent_gh": "Looking at GitHub.",
     "agent_notes": "Searching your notes.",
@@ -31,9 +31,9 @@ PHRASES = {
     "progress_other": "Still working on it.",
     "stopped": "Stopped.",
     "timeout": "That took too long, so I stopped.",
-    "busy": "Still working on the last one.",
-    "not_confirmed": "Alright, I won't.",
-    "expired": "That request expired, so I didn't do it.",
+    "busy": "Still on the last one, I'm afraid.",
+    "not_confirmed": "Very well, I won't.",
+    "expired": "That request expired, so I haven't done it.",
 }
 
 _ACK_KEYS = {
