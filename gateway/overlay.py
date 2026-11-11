@@ -1571,6 +1571,9 @@ def _toplevel(path: Path) -> Path | None:
 
 
 _TERMINALS = {"Terminal": "Terminal", "iTerm2": "iTerm2", "Ghostty": "ghostty"}
+# Absolute paths: the service's launchd PATH has no /usr/sbin (macOS lsof), so a bare "lsof"
+# never ran there and every live turn found 0 shells (Mac run, criterion 30).
+_PGREP, _LSOF = "/usr/bin/pgrep", "/usr/sbin/lsof"
 
 
 def _terminal_cwd(app: str, title: str = "", info: dict | None = None) -> Path | None:
@@ -1580,17 +1583,21 @@ def _terminal_cwd(app: str, title: str = "", info: dict | None = None) -> Path |
     window's title names (`title`, e.g. "jt-scratch6 — ~/jt-scratch6 — -fish — 80×24") wins; no
     single match -> None, and the agent asks which repo instead of guessing. `info` gets counts only."""
     proc = _TERMINALS.get(app)
+    if info is not None:
+        info["app"] = "terminal" if proc else "other"
     if sys.platform != "darwin" or not proc:
         return None
     # Every process of that name (not just the newest), and lsof gets longer than the 1 s default:
     # with several windows and shells it can be slower, and a timeout reads as "no shells".
-    pids, every = _cmd(["pgrep", "-x", proc]).split(), []
+    pids, every = _cmd([_PGREP, "-x", proc]).split(), []
     for _ in range(3):  # app -> login -> shell; every level, so a shell running a program still counts
-        pids = _cmd(["pgrep", "-P", ",".join(pids)]).split() if pids else []
+        pids = _cmd([_PGREP, "-P", ",".join(pids)]).split() if pids else []
         every += pids
+    if info is not None:
+        info["procs"] = len(every)
     if not every:
         return None
-    cwds = [Path(ln[1:]) for ln in _cmd(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(every)],
+    cwds = [Path(ln[1:]) for ln in _cmd([_LSOF, "-a", "-d", "cwd", "-Fn", "-p", ",".join(every)],
                                         timeout=3).splitlines()
             if ln.startswith("n/")]
     return _pick_terminal_cwd(cwds, title, info)
@@ -1662,7 +1669,8 @@ def _repo_pick_detail(info: dict) -> str:
     """Fixed words and numbers only: never a path or a title."""
     how = info.get("how") if info.get("how") in ("doc", "terminal", "env", "none") else "none"
     return (f"{how} shells={int(info.get('shells', 0))} repos={int(info.get('repos', 0))} "
-            f"title_hits={int(info.get('title_hits', 0))}")
+            f"title_hits={int(info.get('title_hits', 0))} "
+            f"app={'terminal' if info.get('app') == 'terminal' else 'other'} procs={int(info.get('procs', 0))}")
 
 
 _GH_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")

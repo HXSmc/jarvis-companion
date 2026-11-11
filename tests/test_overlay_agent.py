@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 import sys
@@ -1065,6 +1066,7 @@ def _run6(tmp_path, monkeypatch):
     shells = {"101": home, "102": scratch, "103": clone, "104": home / "Downloads"}
 
     def fake_cmd(argv, timeout=1):
+        argv = [os.path.basename(argv[0]), *argv[1:]] if argv[0] in (overlay._PGREP, overlay._LSOF) else argv
         if argv[:2] == ["pgrep", "-x"]:
             return "50\n" if argv[2] == "Terminal" else ""
         if argv[:2] == ["pgrep", "-P"]:
@@ -1091,7 +1093,7 @@ def test_terminal_repo_run6_shape(tmp_path, monkeypatch):
     found = overlay._agent_repo(overlay.ScreenBody(app="Terminal", windows=windows), info)
     assert found is not None and found.resolve() == scratch.resolve()
     detail = overlay._repo_pick_detail(info)
-    assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1", detail) and "/" not in detail
+    assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1 app=terminal procs=\d+", detail) and "/" not in detail
     # The app name the screen reports may differ from the window owner's: the first terminal window counts.
     found = overlay._agent_repo(overlay.ScreenBody(app="Terminal.app", windows=windows), {})
     assert found is not None and found.resolve() == scratch.resolve()
@@ -1105,6 +1107,30 @@ def test_terminal_repo_run6_shape(tmp_path, monkeypatch):
         scratch, "jt-scratch6 — ~/jt-scratch6 — -fish")
 
 
+def test_terminal_repo_with_the_service_launchd_path(tmp_path, monkeypatch):
+    """R3 Mac 30: the service's launchd PATH (plist: ~/.local/bin, brew, /usr/bin, /bin) has no
+    /usr/sbin, where macOS keeps lsof, so a bare "lsof" never ran and every turn logged shells=0.
+    The tools are called by absolute path; the row now also shows terminal processes found."""
+    scratch, windows = _run6(tmp_path, monkeypatch)
+    fake = overlay._cmd
+    plist = (Path(__file__).parent.parent / "launchd" / "com.jarvis.overlay.service.plist").read_text()
+    path = re.search(r"<key>PATH</key>\s*<string>([^<]*)</string>", plist).group(1).split(":")
+    mac_bin = {"pgrep": "/usr/bin", "lsof": "/usr/sbin"}
+
+    def launchd_cmd(argv, timeout=1):
+        name = os.path.basename(argv[0])
+        found = argv[0] == f"{mac_bin.get(name)}/{name}" if "/" in argv[0] else mac_bin.get(name) in path
+        return fake(argv, timeout) if found else ""  # _cmd turns FileNotFoundError into ""
+
+    monkeypatch.setattr(overlay, "_cmd", launchd_cmd)
+    info: dict = {}
+    found = overlay._agent_repo(overlay.ScreenBody(app="Terminal", windows=windows), info)
+    assert found is not None and found.resolve() == scratch.resolve()
+    assert overlay._repo_pick_detail(info) == "terminal shells=5 repos=2 title_hits=1 app=terminal procs=9"
+    # Not a terminal in front: the row says so instead of a bare shells=0.
+    assert overlay._repo_pick_detail({"how": "none"}) == "none shells=0 repos=0 title_hits=0 app=other procs=0"
+
+
 def test_repo_pick_row_and_origin_line_reach_the_turn(client, tmp_path, monkeypatch):
     """The debug row carries counts only; the prompt names the GitHub origin, never the remote URL."""
     scratch, windows = _run6(tmp_path, monkeypatch)
@@ -1116,7 +1142,7 @@ def test_repo_pick_row_and_origin_line_reach_the_turn(client, tmp_path, monkeypa
     prompt = pool.made[0].prompts[0]
     assert "origin: o/r" in prompt and "ghp_FAKE" not in prompt
     steps = {s["step"]: s for s in overlay.debug_log.snapshot()["turns"][0]["steps"]}
-    assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1", steps["repo_pick"]["detail"])
+    assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1 app=terminal procs=\d+", steps["repo_pick"]["detail"])
 
 
 def test_agent_argv_hides_mcp_tools(tmp_path, monkeypatch):
