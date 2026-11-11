@@ -20,7 +20,7 @@ import pytest  # noqa: E402
 from conftest import AUTH_HEADER  # noqa: E402
 from gateway import overlay  # noqa: E402
 from test_overlay_service import (  # noqa: E402,F401  (shared stubs + fixtures)
-    FakeConversations, client, make_deps, reset_overlay_state, says, turn,
+    FakeConversations, FakeSession, client, make_deps, reset_overlay_state, says, turn,
 )
 
 # Labels hold no "@" and no four comma-separated numbers (the no-coordinates check relies on it).
@@ -241,3 +241,147 @@ def test_prompt_never_claims_text_only():
         assert "never say you cannot see where things are" in prompt
     for banned in ("WebSearch", "WebFetch", "image_search", "video_search"):
         assert banned not in overlay.QUIET_PROMPT
+
+
+# --- safety net (D3): the fallback model names a listed candidate; the service draws it ----------
+
+
+@pytest.fixture(autouse=True)
+def reset_card_text():
+    overlay._card_text.clear()
+    yield
+    overlay._card_text.clear()
+
+
+class ReplySession(FakeSession):
+    """A lean session whose reply is built from the prompt it gets."""
+
+    def __init__(self, reply):
+        super().__init__()
+        self.reply = reply
+
+    def ask(self, text, jpeg=None, on_text=None):
+        self.chunks = list(self.reply(text))
+        return super().ask(text, jpeg, on_text)
+
+
+class ReplyConversations(FakeConversations):
+    def __init__(self, reply):
+        super().__init__()
+        self.reply = reply
+
+    def get(self, conv_id):
+        return self.sessions.setdefault(conv_id, ReplySession(self.reply))
+
+
+def screen_block(prompt: str) -> str:
+    return re.search(r"<screen_data>\n(.*?)\n</screen_data>", prompt, re.S).group(1)
+
+
+def fallback(client, lines, texts=OCR_TEXT, conv="p1", first=(f'{{"say": "{SAY_1}"}}',), windows=None):
+    """Turn 1 answers; turn 2 "highlight it" misses grounding and the fallback replies `lines(prompt)`."""
+    def reply(prompt):
+        return [line + "\n" for line in (lines(prompt) if prompt.startswith(FOLLOWUP) else first)]
+    pool = ReplyConversations(reply)
+    overlay.set_deps(make_deps(vlm=HistoryVLM(needle="never there"), conversations=pool,
+                               quiet_conversations=pool))
+    shot = screen(texts)
+    if windows:
+        shot["windows"] = windows
+    turn(client, ASK_1, conv_id=conv, screen=shot)
+    events = turn(client, FOLLOWUP, conv_id=conv, followup=True, screen=shot)
+    prompt = next(p for p in pool.sessions[conv].prompts if p.startswith(FOLLOWUP))
+    return events, prompt
+
+
+def point_id(prompt, label=TARGET) -> str:
+    return '{"point": %s}' % re.search(r'\[(\d+)\] "' + re.escape(label) + '"', screen_block(prompt)).group(1)
+
+
+def test_point_id_draws_the_candidate_box(client):
+    events, prompt = fallback(client, lambda p: ['{"say": "It\'s the Total tokens line."}', point_id(p)])
+    got = shapes(events)
+    assert len(got) == 1 and near(got[0]["shape"]["box"], box_pt(OCR_TEXT, TARGET))
+    block = screen_block(prompt)
+    assert TARGET in block
+    assert "@" not in block and not re.search(r"\d+,\d+,\d+,\d+", block)  # no coordinates for the model
+    assert '{"point"' in prompt
+    assert "Here." not in says(events)  # the model already spoke
+    got = fields(ground_steps(client)[0]["detail"])
+    assert (got["reason"], got["via"], got["label"]) == ("null", "point_id", f'"{TARGET}"')
+
+
+def test_point_id_alone_says_here(client):
+    events, _ = fallback(client, lambda p: [point_id(p)])
+    assert len(shapes(events)) == 1 and says(events)[-1] == "Here."
+
+
+def test_point_text_matches_a_label(client):
+    events, _ = fallback(client, lambda p: ['{"say": "There."}', '{"point": "total tokens"}'])
+    got = shapes(events)
+    assert len(got) == 1 and got[0]["shape"]["label"] == TARGET
+    assert fields(ground_steps(client)[0]["detail"])["via"] == "point_text"
+
+
+@pytest.mark.parametrize("point", ['"xy"', "999", "true", '"weather forecast"'])
+def test_point_text_too_short_or_unknown_draws_nothing(client, point):
+    events, _ = fallback(client, lambda p: ['{"say": "There."}', '{"point": %s}' % point])
+    assert shapes(events) == []
+    assert says(events).count(overlay.NO_PIN_LINE) == 1
+
+
+def test_point_text_ignored_on_a_plain_answer_turn(client):
+    overlay.set_deps(make_deps(chunks=('{"say": "A stats page."}\n', '{"point": 1}\n',
+                                       '{"point": "Total tokens"}\n')))
+    events = turn(client, "what is on this screen", conv_id="pa1", screen=screen())
+    assert shapes(events) == [] and overlay.NO_PIN_LINE not in says(events)
+
+
+def test_point_window_candidates_follow_the_window_filter(client):
+    windows = [{"app": "Safari", "title": "Docs", "box": [0, 0, 500, 500]}]
+    _events, prompt = fallback(client, lambda p: ['{"say": "Hm."}'], windows=windows)
+    assert not re.search(r'\[\d+\] "Safari: Docs"', screen_block(prompt))  # not a window ask
+
+
+def test_no_pin_line_once_and_no_text_only_claim(client):
+    events, _ = fallback(client, lambda p: ['{"say": "It\'s on the Stats tab."}'])
+    spoken = says(events)
+    assert shapes(events) == [] and spoken.count(overlay.NO_PIN_LINE) == 1
+    bad = re.compile(r"(?i)only get|not where|can't see where|cannot see where|text only")
+    assert not any(bad.search(s) for s in spoken)
+    got = _check_detail(ground_steps(client)[0], None)
+    assert (got["reason"], got["via"], got["pick"]) == ("null", "none", "null")
+
+
+def test_point_null_means_not_on_screen(client):
+    events, _ = fallback(client, lambda p: ['{"say": "I don\'t see a weather forecast."}', '{"point": null}'])
+    assert shapes(events) == [] and overlay.NO_PIN_LINE not in says(events)
+    assert "I can't see it on screen." not in says(events)  # the model already said so
+    events, _ = fallback(client, lambda p: ['{"point": null}'], conv="p2")
+    assert says(events)[-1] == "I can't see it on screen."
+
+
+def test_no_box_from_the_model_on_a_look_turn(client):
+    events, _ = fallback(client, lambda p: [
+        '{"say": "There."}', '{"shape": {"kind": "rect", "box": [1, 2, 3, 4], "label": "x"}}'])
+    assert shapes(events) == []
+
+
+def test_target_only_on_my_own_card(client):
+    """The answer put "Total tokens" on a Jarvis card; the capture leaves the overlay out."""
+    texts = [t for t in OCR_TEXT if t != TARGET]
+    card = '{"card": {"type": "stat", "title": "Total tokens", "value": "32.0b", "label": "all time"}}'
+    events, _ = fallback(client, lambda p: ['{"say": "That figure is on my card."}', '{"point": "Total tokens"}'],
+                         texts=texts, first=(f'{{"say": "{SAY_1}"}}', card))
+    spoken = says(events)
+    assert shapes(events) == [] and spoken.count(overlay.OWN_CARD_LINE) == 1
+    assert overlay.NO_PIN_LINE not in spoken
+
+
+def test_log_has_no_screen_text_on_no_pin(client, caplog):
+    caplog.set_level(logging.DEBUG)
+    fallback(client, lambda p: ['{"say": "It\'s on the Stats tab."}'])
+    for rec in caplog.records:
+        msg = rec.getMessage()
+        assert not any(t in msg for t in OCR_TEXT), msg
+        assert ASK_1 not in msg and SAY_1 not in msg

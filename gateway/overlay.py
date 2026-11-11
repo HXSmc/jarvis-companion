@@ -54,6 +54,12 @@ GROUND_PROMPT = (
 )
 GROUND_TIMEOUT_S = 12
 NO_SCREEN_LINE = "I can't see the screen right now. Screen recording may be switched off for me."
+NO_PIN_LINE = "I can see it but couldn't pin it down."
+OWN_CARD_LINE = "That's on my own card, not on your screen."
+# Look fallback only: the model names a listed candidate, the service draws that candidate's box.
+POINT_RULE = ('To point at something on screen, reply {"point": <id>} with a number from the list'
+              ' above, or {"point": "<exact text on screen>"}. If it is not on screen, reply'
+              ' {"point": null}. Never write a shape or a box for it.')
 
 PERSONA = """You are Jarvis, the owner's long-serving British assistant: composed, fond of the owner (voice bm_daniel). Replies are spoken aloud.
 Warmth: note the hour, a long session or a win in a few words, only when real. No gushing, no exclamation marks.
@@ -423,6 +429,9 @@ _tainted: set[str] = set()
 # conv_id -> card ids already sent: a model-supplied id that repeats would silently replace
 # an earlier card in the app (and could overwrite a card the service itself sent).
 _card_ids: dict[str, set] = {}
+# conv_id -> lower-case text of the last cards sent: a look target found only there is on
+# Jarvis's own card, which the capture leaves out.
+_card_text: dict[str, deque] = {}
 _apps_cache: tuple[float, dict] | None = None
 # conv_id -> (cut-off text, clock): the user trailed off; the next follow-up utterance continues it.
 _pending: dict[str, tuple[str, float]] = {}
@@ -629,9 +638,15 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
             else:
                 g = await _ground(body, deps)
                 if g["pick"] is None:
+                    before = len(said)
                     async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                                    screen_ref=True, failed=failed):
+                                                    screen_ref=True, failed=failed, look=g):
                         yield event
+                    line = _look_miss_line(g, body.conv_id, spoke=len(said) > before)
+                    if line and not failed:  # a failed answer already spoke its one line
+                        async for ev in _speak(line, deps):
+                            yield ev
+                        said.append(line)
                 else:
                     for ev in _ground_events(g["pick"]):
                         yield ev
@@ -751,6 +766,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         _notes.pop(oldest, None)
         _tainted.discard(oldest)
         _card_ids.pop(oldest, None)
+        _card_text.pop(oldest, None)
         _pending.pop(oldest, None)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
@@ -810,20 +826,61 @@ def _ground_events(chosen: dict) -> list[dict]:
     return [event]
 
 
-def _screen_text(screen: ScreenBody) -> str:
-    """Compact screen context: frontmost app, visible window titles (front first), OCR lines."""
+def _screen_text(screen: ScreenBody, targets: list[dict] | None = None) -> str:
+    """Compact screen context: frontmost app, visible window titles (front first), then OCR
+    lines, or with `targets` the look candidates as `[id] "label"` (never coordinates)."""
     lines = [f"frontmost app: {screen.app}"] if screen.app else []
     for w in screen.windows[:20]:
         if isinstance(w, dict) and (w.get("title") or w.get("app")):
             lines.append(f"window: {str(w.get('app', ''))[:60]}: {str(w.get('title', ''))[:120]}")
-    lines += [str(e.get("text", ""))[:120] for e in screen.ocr[:60] if isinstance(e, dict)]
+    if targets:
+        lines += [f'[{c["id"]}] "{ground._safe_label(c["label"])}"' for c in targets]
+    else:
+        lines += [str(e.get("text", ""))[:120] for e in screen.ocr[:60] if isinstance(e, dict)]
     return "\n".join(lines)
+
+
+def _point_at(point, targets: list[dict]) -> tuple[dict, str] | None:
+    """The model's {"point": ...}: a listed id, or text (3+ chars) inside a candidate label."""
+    if isinstance(point, int) and not isinstance(point, bool):
+        hit = next((c for c in targets if c["id"] == point), None)
+        return (hit, "point_id") if hit else None
+    if isinstance(point, str) and len(point.strip()) >= 3:
+        want = point.strip().lower()
+        hit = next((c for c in targets if want in c["label"].lower()), None)
+        return (hit, "point_text") if hit else None
+    return None
+
+
+def _card_words(node) -> str:
+    if isinstance(node, dict):
+        return " ".join(_card_words(v) for v in node.values())
+    if isinstance(node, list):
+        return " ".join(_card_words(v) for v in node)
+    return str(node)
+
+
+def _look_miss_line(g: dict, conv_id: str, spoke: bool) -> str | None:
+    """The line after a look fallback: "Here." for a silent hit, else why nothing was drawn."""
+    if not g["offered"]:  # nothing on screen to point at: the model's own reply stands
+        return None
+    if g["pick"] is not None:
+        return None if spoke else "Here."
+    if "missed" not in g:  # no point at all
+        return NO_PIN_LINE
+    missed = g["missed"]
+    if missed is None:  # the model said it is not on screen
+        return None if spoke else "I can't see it on screen."
+    want = missed.strip().lower() if isinstance(missed, str) else ""
+    if len(want) >= 3 and any(want in t for t in _card_text.get(conv_id, ())):
+        return OWN_CARD_LINE
+    return NO_PIN_LINE
 
 
 async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        metrics: dict, said: list[str], start: float,
                        screen_ref: bool = False, escalate: list | None = None,
-                       failed: list | None = None) -> AsyncIterator[dict]:
+                       failed: list | None = None, look: dict | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
     produced = False  # the model's reply said or showed something (the ack never counts)
@@ -840,11 +897,14 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         for note in notes:
             untrusted = True
             parts.append(f'<context untrusted="true">\n{_scrub(note)}\n</context>')
-    if (body.screen is not None and (body.screen.ocr or body.screen.windows)
+    targets = look["offered"] if look else None  # look fallback: the model points by id or text
+    if (body.screen is not None and (body.screen.ocr or body.screen.windows or targets)
             and (screen_ref or re.search(SCREEN_REF, text, re.IGNORECASE))):
         untrusted = True
-        parts.append(f'<context untrusted="true">\n<screen_data>\n{_scrub(_screen_text(body.screen))}'
+        parts.append(f'<context untrusted="true">\n<screen_data>\n{_scrub(_screen_text(body.screen, targets))}'
                      '\n</screen_data>\n</context>')
+        if targets:
+            parts.append(POINT_RULE)
     parts.append(await asyncio.to_thread(_local_context, deps, body.screen))
     prompt = "\n\n".join(parts)
 
@@ -999,9 +1059,20 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             if card["id"] in seen:
                 card["id"] = uuid.uuid4().hex[:8]
             seen.add(card["id"])
+            _card_text.setdefault(body.conv_id, deque(maxlen=3)).append(_card_words(card).lower())
             produced = True
             yield {"type": "card", "card": card}
-        shape = hud.validate_shape(obj.get("shape")) if "shape" in obj else None
+        if targets and "point" in obj and look["pick"] is None:  # the first point wins
+            produced = True  # a point is an answer, hit or miss: the turn ends on its own line
+            hit = _point_at(obj["point"], targets)
+            if hit:
+                look.update(pick=hit[0], via=hit[1])
+                for ev in _ground_events(hit[0]):
+                    yield ev
+            else:
+                look["missed"] = obj["point"]
+        # A look turn never draws a model-written box: only a candidate's own box reaches the screen.
+        shape = hud.validate_shape(obj.get("shape")) if "shape" in obj and look is None else None
         if shape:
             produced = True
             yield {"type": "shape", "shape": shape}
