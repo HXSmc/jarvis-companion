@@ -153,13 +153,7 @@ final class SpeechInput {
     }
 
     /// Drops everything up to a "jarvis" near the start, and stray punctuation.
-    static func stripWake(_ raw: String) -> String {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The 2 s ring buffer can hold words said before the wake word: drop through it.
-        if let range = text.range(of: "jarvis", options: [.caseInsensitive]),
-           text.distance(from: text.startIndex, to: range.lowerBound) < 40 {
-            text = String(text[range.upperBound...])
-        }
+    static func stripWake(_ raw: String) -> String { TurnEndpointer.stripWake(raw) }
         return text
             .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?;:-"))
             .trimmingCharacters(in: .whitespacesAndNewlines)

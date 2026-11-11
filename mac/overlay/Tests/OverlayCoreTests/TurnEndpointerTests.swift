@@ -39,6 +39,10 @@ final class TurnEndpointerTests: XCTestCase {
                                                now: t0.addingTimeInterval(4)))
     }
 
+    func testStripWakeOneBreath() {
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis next change"), "next change")
+    }
+
     func testCompleteTextEndsDespiteRoomVoice() {
         let t0 = Date()
         XCTAssertFalse(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,

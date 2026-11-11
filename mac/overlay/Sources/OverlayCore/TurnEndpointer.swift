@@ -41,6 +41,15 @@ public enum TurnEndpointer {
         looksIncomplete(text) ? extended : fast
     }
 
+    /// The words after the wake word (moved from SpeechInput unchanged, so tests can pin it).
+    public static func stripWake(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The 2 s ring buffer can hold words said before the wake word: drop through it.
+        if let range = text.range(of: "jarvis", options: [.caseInsensitive]),
+           text.distance(from: text.startIndex, to: range.lowerBound) < 40 {
+            text = String(text[range.upperBound...])
+        }
+
     public static func shouldEnd(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> Bool {
         let needed = silence(after: text)
         if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return true }
