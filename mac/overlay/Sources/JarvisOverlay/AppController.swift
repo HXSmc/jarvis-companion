@@ -34,6 +34,11 @@ final class AppController {
     private var addOrder = ShapeTrack.AddOrder()
     private var addChain: Task<Void, Never>?
     private var lastRace: AddRace?
+    /// Model keys of the last committed `lines` boxes per file: a newer `lines` for that file
+    /// ("next change") replaces them. Keys only, the boxes live in the model.
+    private var linesKeys: [String: [Int]] = [:]
+    /// Gutter passes still retrying: a clear cancels them so no pass runs after it.
+    private var linesWork: [Task<[ElementTrack.Resolved], Never>] = []
 
     func start() {
         let overlay = OverlayPanel()
@@ -328,14 +333,21 @@ final class AppController {
                        template: shape)
         case .card(let card):
             model.add(card: card)
-        case .lines(let file, let ranges):
+        case .lines(let file, let ranges, let labels):
             // Every outcome posts one reason code to the turn's debug record (codes and numbers only).
             let note: @Sendable (String) -> Void = { detail in
                 Task { @MainActor [weak self] in self?.client.debugNote(step: "lines", detail: detail) }
             }
-            enqueueAdd(Task.detached(priority: .utility) { await ElementTrack.resolveBands(ranges, file: file, report: note) },
-                       budget: 5, fallback: { [] },
-                       template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: Self.bandLabel), note: note)
+            let work = Task.detached(priority: .utility) {
+                await ElementTrack.resolveBands(ranges, labels: labels, file: file, report: note)
+            }
+            linesWork = Array(linesWork.suffix(7)) + [work]  // finished ones need no cancel; keep the list short
+            // One box at a time: the earlier boxes of this file go now, while Jarvis says "Change 2 of 3",
+            // not when the new pass commits up to 5 s later (add() still replaces any that commit meanwhile).
+            if let old = linesKeys.removeValue(forKey: file) { model.remove(keys: old) }
+            enqueueAdd(work, budget: 5, fallback: { [] },
+                       template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: Self.bandLabel), note: note,
+                       linesFile: file)
         case .clear:
             clearAll()
         case .layout(let mode):
@@ -371,6 +383,9 @@ final class AppController {
     /// Clears at once; adds still resolving lose and are never drawn (ShapeTrack.AddOrder).
     private func clearAll() {
         addOrder.clear()
+        for work in linesWork { work.cancel() }
+        linesWork.removeAll()
+        linesKeys.removeAll()
         model.clear()
     }
 
@@ -383,7 +398,7 @@ final class AppController {
     /// ("late": the result still draws when it comes).
     private func enqueueAdd(_ work: Task<[ElementTrack.Resolved], Never>, budget seconds: Double,
                             fallback: @escaping @Sendable () -> [ElementTrack.Resolved], template: HUDShape,
-                            note: ((String) -> Void)? = nil) {
+                            note: ((String) -> Void)? = nil, linesFile: String? = nil) {
         let ticket = addOrder.begin()
         let race = AddRace(fallback: fallback)
         Task.detached {
@@ -400,15 +415,15 @@ final class AppController {
             guard let self else { return }
             switch outcome {
             case .done(let items):
-                if self.commit(items, ticket: ticket, template: template) == nil { note?("cleared") }
+                if self.commit(items, ticket: ticket, template: template, linesFile: linesFile) == nil { note?("cleared") }
             case .late(let items):
                 note?("late")
-                let keys = self.commit(items, ticket: ticket, template: template)
+                let keys = self.commit(items, ticket: ticket, template: template, linesFile: linesFile)
                 Task { [weak self] in
                     let real = await work.value
                     guard let self else { return }
                     if keys == nil || !self.addOrder.survives(ticket) { note?("cleared") }
-                    self.applyLate(real, replacing: keys, ticket: ticket, template: template)
+                    self.applyLate(real, replacing: keys, ticket: ticket, template: template, linesFile: linesFile)
                 }
             }
         }
@@ -419,25 +434,31 @@ final class AppController {
 
     /// Commits one add in order; its model keys, or nil when a clear won.
     private func commit(_ items: [ElementTrack.Resolved], ticket: ShapeTrack.AddOrder.Ticket,
-                        template: HUDShape) -> [Int]? {
+                        template: HUDShape, linesFile: String? = nil) -> [Int]? {
         guard addOrder.commit(ticket) else {
             ElementTrack.release(items.compactMap(\.track))
             return nil
         }
-        return add(items, template: template)
+        return add(items, template: template, linesFile: linesFile)
     }
 
-    /// Label of a `lines` band (the changed lines in the editor).
+    /// Label of a `lines` band when the service sent no per-hunk label (an older service).
     private static let bandLabel = "changed"
 
-    private func add(_ items: [ElementTrack.Resolved], template: HUDShape) -> [Int] {
-        // Cards came before the bands (the band waits for the editor scroll): move any card that
-        // covers the changed lines off them.
-        if template.label == Self.bandLabel, !items.isEmpty { cardPanel?.moveCards(off: items.map(\.rect)) }
+    /// `linesFile`: this add is a `lines` event's boxes for that file.
+    private func add(_ items: [ElementTrack.Resolved], template: HUDShape, linesFile: String? = nil) -> [Int] {
+        if let linesFile {
+            // A newer `lines` for the same file ("next change") replaces its earlier boxes.
+            if let old = linesKeys.removeValue(forKey: linesFile) { model.remove(keys: old) }
+            // Cards came before the bands (the band waits for the editor scroll): move any card that
+            // covers the changed lines off them.
+            if !items.isEmpty { cardPanel?.moveCards(off: items.map(\.rect)) }
+        }
         var keys: [Int] = []
         var tracks: [Int: TrackAnchor] = [:]
         for item in items {
             var shape = template
+            shape.label = item.label ?? template.label
             shape.box = [Double(item.rect.minX), Double(item.rect.minY), Double(item.rect.maxX), Double(item.rect.maxY)]
             let key = model.add(shape: shape)
             keys.append(key)
@@ -446,19 +467,20 @@ final class AppController {
         let gone = Set(model.anchor(tracks))
         ElementTrack.release(tracks.filter { gone.contains($0.key) }.map(\.value),
                              keeping: tracks.filter { !gone.contains($0.key) }.map(\.value))
+        if let linesFile { linesKeys[linesFile] = keys }
         return keys
     }
 
     /// A re-resolve that finished after its fallback was committed: move/upgrade the drawn box,
     /// draw what had no box, or remove a box whose target is positively gone. Nothing after a clear.
     private func applyLate(_ real: [ElementTrack.Resolved], replacing keys: [Int]?,
-                           ticket: ShapeTrack.AddOrder.Ticket, template: HUDShape) {
+                           ticket: ShapeTrack.AddOrder.Ticket, template: HUDShape, linesFile: String? = nil) {
         guard let keys, addOrder.survives(ticket) else {
             ElementTrack.release(real.compactMap(\.track))
             return
         }
         if keys.isEmpty {
-            _ = add(real, template: template)
+            _ = add(real, template: template, linesFile: linesFile)
         } else if real.isEmpty {
             model.remove(keys: keys)
         } else if real.count == keys.count {

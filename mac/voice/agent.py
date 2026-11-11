@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -26,6 +27,8 @@ FORBIDDEN = ("--allowedTools", "--allowed-tools", "--add-dir", "bypassPermission
 
 SUPPORT_DIR = Path(os.environ.get(
     "OVERLAY_SUPPORT_DIR", str(Path.home() / "Library/Application Support/JarvisOverlay")))
+
+_MCP_NAME = re.compile(r"^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 
 # Spoken as is when the owner asks for passwords, keys or the Secrets folder (no tool is tried).
 SECRETS_LINE = "Your passwords and keys are off limits to me, sir."
@@ -57,11 +60,17 @@ No other text, no markdown.""" % SECRETS_LINE
 
 
 def agent_argv(model: str = "sonnet", system_prompt: str = AGENT_PROMPT, mcp_config: str | None = None,
-               claude_bin: str = "claude", extra: tuple[str, ...] = ()) -> list[str]:
+               claude_bin: str = "claude", extra: tuple[str, ...] = (),
+               hidden: tuple[str, ...] | None = None) -> list[str]:
     """The claude argv for one agent session; ValueError if anything could bypass the host gate."""
     for arg in (model, *extra):
         if any(bad in arg for bad in FORBIDDEN):
             raise ValueError(f"refused agent argument: {arg!r}")
+    if hidden is None:
+        hidden = hidden_mcp_tools()
+    for name in hidden:
+        if not _MCP_NAME.fullmatch(name) or any(bad in name for bad in FORBIDDEN):
+            raise ValueError(f"refused hidden tool: {name!r}")
     return [
         claude_bin, "-p",
         "--input-format", "stream-json", "--output-format", "stream-json",
@@ -73,6 +82,7 @@ def agent_argv(model: str = "sonnet", system_prompt: str = AGENT_PROMPT, mcp_con
         # "" = load no user/project settings: the owner's bypassPermissions/allow rules stay out.
         "--setting-sources", "", "--strict-mcp-config",
         *(["--mcp-config", mcp_config] if mcp_config else []),
+        *(["--disallowedTools", *hidden] if hidden else []),
         "--disable-slash-commands", "--no-session-persistence",
         *extra,
     ]
@@ -84,13 +94,41 @@ def default_mcp_config() -> str | None:
     return str(path) if path.is_file() else None
 
 
+def mcp_tool_buckets() -> dict:
+    """agent-tools.json read once: read_only/confirm frozensets and a sorted hidden tuple."""
+    try:
+        data = json.loads((SUPPORT_DIR / "agent-tools.json").read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    def names(key: str) -> list[str]:
+        raw = data.get(key, [])
+        if not isinstance(raw, list):
+            return []
+        return [n for n in raw if isinstance(n, str) and _MCP_NAME.fullmatch(n)]
+
+    confirm_raw = data.get("confirm")
+    return {"read_only": frozenset(names("read_only")),
+            # confirm absent = old file: the host asks for every non-read-only tool.
+            "confirm": None if not isinstance(confirm_raw, list) else frozenset(names("confirm")),
+            "hidden": tuple(sorted(names("hidden")))}
+
+
 def read_only_mcp_tools() -> frozenset:
     """Exact MCP tool names from the local agent-tools.json that may run without a confirm."""
-    try:
-        names = json.loads((SUPPORT_DIR / "agent-tools.json").read_text()).get("read_only", [])
-    except (OSError, ValueError, AttributeError):
-        return frozenset()
-    return frozenset(n for n in names if isinstance(n, str) and n.startswith("mcp__"))
+    return mcp_tool_buckets()["read_only"]
+
+
+def confirm_mcp_tools() -> frozenset | None:
+    """MCP tools allowed after one owner confirm; None = old file, everything asks."""
+    return mcp_tool_buckets()["confirm"]
+
+
+def hidden_mcp_tools() -> tuple:
+    """Sorted MCP tool names never offered to the agent."""
+    return mcp_tool_buckets()["hidden"]
 
 
 class AgentSession:

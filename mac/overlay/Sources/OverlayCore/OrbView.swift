@@ -51,7 +51,7 @@ public struct OrbView: View {
             }
         }
         .frame(width: 44, height: 44)
-        .animation(Theme.reduceMotion ? nil : .easeOut(duration: 0.2), value: state)
+        .animation(Theme.reduceMotion ? nil : .easeOut(duration: Theme.motionShort), value: state)
         .accessibilityLabel(axLabel)
     }
 

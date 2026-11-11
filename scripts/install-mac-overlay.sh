@@ -229,6 +229,21 @@ for PLIST in com.jarvis.overlay.plist com.jarvis.overlay.service.plist; do
   fi
 done
 
+# (i2) setup checks (one line each): the editor CLI on the service's PATH, the notes vault
+SVC_PLIST="$HOME/Library/LaunchAgents/com.jarvis.overlay.service.plist"
+[ -f "$SVC_PLIST" ] || SVC_PLIST="$REPO/launchd/com.jarvis.overlay.service.plist"
+SVC_PATH="$(sed -n '/<key>PATH<\/key>/{n;s|.*<string>\(.*\)</string>.*|\1|p;}' "$SVC_PLIST" | sed "s|__HOME__|$HOME|g")"
+if PATH="$SVC_PATH" command -v code >/dev/null 2>&1; then
+  echo "VS Code CLI: found on the service PATH (the editor scrolls to changes)"
+else
+  echo "VS Code CLI: missing on the service PATH; in VS Code run Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\""
+fi
+if [ -n "${OVERLAY_VAULT:-}" ] || grep -qs '^OVERLAY_VAULT=' "$REPO/.env"; then
+  echo "Notes vault: OVERLAY_VAULT is set"
+else
+  echo "Notes vault: OVERLAY_VAULT is not set; add OVERLAY_VAULT=<your vault folder> to $REPO/.env, then rerun this installer"
+fi
+
 # (j) permissions to grant once, with deep links to the right System Settings pane
 cat <<'EOF'
 

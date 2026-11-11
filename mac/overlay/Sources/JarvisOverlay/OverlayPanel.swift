@@ -263,7 +263,7 @@ final class CardPanel: NSObject {
             guard let self else { return (.zero, []) }
             let (screen, visible) = self.geometry
             let permission = self.permissionWindow.isVisible ? [Self.flip(self.permissionWindow.frame)] : []
-            return (visible, [ScatterLayout.orbKeepOut(screen: screen)] + permission)
+            return (visible, [ScatterLayout.orbKeepOut(screen: screen), ScatterLayout.notificationZone(visible: visible)] + permission)
         }
         model.moveRefused = { [weak self] mode in
             guard let self else { return }

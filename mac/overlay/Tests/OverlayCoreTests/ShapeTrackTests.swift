@@ -931,4 +931,39 @@ final class ShapeTrackTests: XCTestCase {
         // Safari's address-field wrapper (y33-94, 61 pt): below the box, not on the URL text.
         XCTAssertEqual(ShapeTrack.labelCentreY(for: CGRect(x: 252, y: 33, width: 256, height: 61)), 108)
     }
+
+    // MARK: band retry (security note 3d: a clear stops the retry)
+
+    private actor PassCounter {
+        var value = 0
+        func bump() { value += 1 }
+    }
+
+    func testBandRetryStopsWhenCancelled() async {
+        let counter = PassCounter()
+        let task = Task {
+            await BandRetry.run(tries: 3, pause: { attempt in
+                if attempt > 1 { try? await Task.sleep(nanoseconds: 300_000_000) }
+            }, pass: { _ in await counter.bump(); return false }, done: { $0 })
+        }
+        while await counter.value < 1 { await Task.yield() }
+        task.cancel()  // what clearAll does while the retry waits for the editor scroll
+        let result = await task.value
+        XCTAssertNil(result)
+        let passes = await counter.value
+        XCTAssertEqual(passes, 1)  // no pass after the cancel
+    }
+
+    func testBandRetryStopsAtTheFirstGoodPass() async {
+        let counter = PassCounter()
+        let result = await BandRetry.run(tries: 3, pause: { _ in }, pass: { attempt in
+            await counter.bump()
+            return attempt == 2
+        }, done: { $0 })
+        XCTAssertEqual(result?.attempt, 2)
+        XCTAssertEqual(result?.pass, true)
+        let passes = await counter.value
+        XCTAssertEqual(passes, 2)
+    }
 }
+

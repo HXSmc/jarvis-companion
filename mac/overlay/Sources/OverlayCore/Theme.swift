@@ -22,6 +22,9 @@ public enum Theme {
     public static let microLabel = fontMicro
     public static let cardTitle = fontTitle
 
+    /// The one duration for fades and short overlay transitions (Reduce Motion uses 0).
+    public static let motionShort: TimeInterval = 0.2
+
     /// Respect the user's Reduce Motion setting (no pulse/rotation when on).
     public static var reduceMotion: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion

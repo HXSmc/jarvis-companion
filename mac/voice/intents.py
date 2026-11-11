@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | agent | answer
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code
 
@@ -67,6 +67,12 @@ _INCOMPLETE_RE = re.compile(r"(?:,|\b(?:" + "|".join(_TRAILING) + r"))\W*$", re.
 _FILLER_TAIL_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(FILLERS) + r"))+[\s,.?!]*$", re.I)
 _DATE_RE = re.compile(r"^(?:what(?:'s| is) (?:the date|today's date|the day)|what day is (?:it|today)"
                       r"|what date is it|tell me the date)(?: today| now| please)?$")
+# Hunk walk/why: whole utterances only, so history questions stay with the agent tier.
+_HUNK_MOVE_RE = re.compile(r"^(?:(?:go to|show me|jump to) )?(?:the )?(next|previous) "
+                           r"(?:change|hunk|one)(?: please)?$")
+_HUNK_NEXT_RE = re.compile(r"^next(?: please)?$")
+_HUNK_WHY_RE = re.compile(r"^(?:why did (?:this|that) change|why was (?:this|that) changed"
+                          r"|explain (?:this|that) change)(?: please)?$")
 # Owner-data agent work, first match in priority order picks the sub.
 _AGENT_SUBS = (
     ("mail", re.compile(r"\b(?:inbox|unread|my e-?mails?|(?:any|new|latest|recent) (?:new )?e-?mails?"
@@ -148,6 +154,14 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         return Intent("clock", "time")
     if _DATE_RE.match(low):
         return Intent("clock", "date")
+    move = _HUNK_MOVE_RE.match(low)
+    if move:
+        arg = "next" if move[1] == "next" else "prev"
+        return Intent("hunk", arg, arg)
+    if _HUNK_NEXT_RE.match(low):
+        return Intent("hunk", "next", "next")
+    if _HUNK_WHY_RE.match(low):
+        return Intent("hunk", "why", "why")
     # Owner-data work before git_diff so history words win over diff words;
     # deterministic opens win over everything ("open github.com" is a site, not agent work).
     if not low.startswith("open "):

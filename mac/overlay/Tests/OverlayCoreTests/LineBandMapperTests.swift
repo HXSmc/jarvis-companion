@@ -72,12 +72,82 @@ final class LineBandMapperTests: XCTestCase {
     }
 
     func testEditorWindowIsTheFrontMostTitleThatNamesTheFile() {
-        let terminal = (title: "ali — -zsh — overlay.pyc", frame: CGRect(x: 0, y: 0, width: 10, height: 10))
-        let code = (title: "● overlay.py — jarvis-companion-overlay", frame: CGRect(x: 1, y: 1, width: 10, height: 10))
-        let other = (title: "overlay.py — elsewhere", frame: CGRect(x: 2, y: 2, width: 10, height: 10))
+        let terminal = (app: "Terminal", title: "ali — -zsh — overlay.pyc", frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        let code = (app: "Code", title: "● overlay.py — jarvis-companion-overlay", frame: CGRect(x: 1, y: 1, width: 10, height: 10))
+        let other = (app: "Code", title: "overlay.py — elsewhere", frame: CGRect(x: 2, y: 2, width: 10, height: 10))
         XCTAssertEqual(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [terminal, code, other]), code.frame)
         XCTAssertNil(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [terminal]))
         XCTAssertNil(LineBandFit.editorWindow(file: "", windows: [code]))
         XCTAssertNil(LineBandFit.editorWindow(file: "lay.py", windows: [code]))  // a part of a word is no match
+    }
+
+    func testEditorWindowNeedsAnEditorApp() {
+        // Security note 3e: a browser tab titled like the file must not pick the gutter pass.
+        let safari = (app: "Safari", title: "overlay.py", frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        let code = (app: "Code", title: "overlay.py — repo", frame: CGRect(x: 1, y: 1, width: 10, height: 10))
+        XCTAssertEqual(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [safari, code]), code.frame)
+        XCTAssertNil(LineBandFit.editorWindow(file: "gateway/overlay.py", windows: [safari]))
+    }
+
+    func testThreeHunksGiveThreeBandsInOrder() throws {
+        // Gutter for lines 120-170, 20 pt apart from y=100 (gutter(_:_:) above).
+        let pass = LineBandFit.fit(ranges: [140...142, 149...149, 156...156], digits: gutter(120, 170),
+                                   window: CGRect(x: 0, y: 80, width: 900, height: 1200), partial: false)
+        XCTAssertEqual(pass.reason, "ok")
+        XCTAssertEqual(pass.bands.map(\.lines), [140...142, 149...149, 156...156])
+        let rowTop: (Int) -> CGFloat = { 100 + CGFloat($0 - 120) * 20 - 10 }
+        for (band, (first, last)) in zip(pass.bands, [(140, 142), (149, 149), (156, 156)]) {
+            XCTAssertEqual(band.rect.minY, rowTop(first), accuracy: 1)
+            XCTAssertEqual(band.rect.maxY, rowTop(last) + 20, accuracy: 1)
+        }
+        XCTAssertEqual(BandRetry.rangeIndex(of: 149...149, in: [140...142, 149...149, 156...156]), 1)
+        XCTAssertEqual(BandRetry.rangeIndex(of: 150...151, in: [140...142, 149...160]), 1)  // clipped on the last try
+        XCTAssertNil(BandRetry.rangeIndex(of: 1...2, in: [140...142]))
+        // R1 design 7: a band over two ranges takes the label of the one it covers most.
+        XCTAssertEqual(BandRetry.rangeIndex(of: 141...149, in: [140...142, 145...150]), 1)
+        XCTAssertEqual(BandRetry.rangeIndex(of: 140...146, in: [140...142, 145...150]), 0)
+        XCTAssertEqual(BandRetry.rangeIndex(of: 141...146, in: [140...142, 145...150]), 0)  // tie: the first
+    }
+
+    // MARK: R3 (Mac 33a): VS Code sticky-scroll headers above the scrolling gutter
+
+    /// Gutter rows read off the 33a frame (evidence mac-33/frame-08-14-hud.jpg, 1440 pt wide, y down):
+    /// sticky headers 587, 618, 678, 687, 689 on the top rows, 692 half hidden under them, then
+    /// 693...732 every 15 pt from y 204. Line 710 truly spans y 452-467.
+    private func stickyGutter() -> [(line: Int, centre: CGPoint, right: CGFloat)] {
+        let sticky: [(Int, CGFloat)] = [(587, 118), (618, 133), (678, 148), (687, 163), (689, 178), (692, 191)]
+        let rows = sticky + (693...732).map { ($0, 204 + CGFloat($0 - 693) * 15) }
+        return rows.map { (line: $0.0, centre: CGPoint(x: 215, y: $0.1), right: 225) }
+    }
+
+    func testStickyScrollHeadersDoNotShiftTheBand() throws {
+        let editor = CGRect(x: 0, y: 35, width: 1440, height: 790)
+        let pass = LineBandFit.fit(ranges: [710...710], digits: stickyGutter(), window: editor, partial: false)
+        XCTAssertEqual(pass.reason, "ok")
+        XCTAssertEqual(pass.seen, 692...732)
+        let band = try XCTUnwrap(pass.bands.first?.rect)
+        XCTAssertEqual(band.midY, 459.5, accuracy: 1.5)
+        XCTAssertEqual(band.height, 15, accuracy: 1)
+        let overlap = min(band.maxY, 467) - max(band.minY, 452)
+        XCTAssertGreaterThan(overlap / (max(band.maxY, 467) - min(band.minY, 452)), 0.8)  // IoU on y
+        // A changed line under a sticky header (689) is not a scrolling line on screen: no band there.
+        XCTAssertEqual(LineBandFit.fit(ranges: [689...689], digits: stickyGutter(), window: editor, partial: true).reason,
+                       "off_view")
+    }
+
+    func testEvenRunSkipsOutliersAndKeepsAFlatGutter() {
+        let flat = (120...170).map { (line: $0, midY: 100 + CGFloat($0 - 120) * 20) }
+        XCTAssertEqual(LineBandMapper.evenRun(flat).map(\.line), Array(120...170))
+        // One misread number in the middle (a 7 read as 1: 147 -> 141) is dropped, the rest kept.
+        var misread = flat
+        misread[27] = (line: 141, midY: misread[27].midY)
+        XCTAssertEqual(LineBandMapper.evenRun(misread).map(\.line), Array(120...170).filter { $0 != 147 })
+        // Missing rows (OCR skipped some) keep the grid: 120, 123, 124, 130 on a 20 pt pitch.
+        let gaps = [120, 123, 124, 130].map { (line: $0, midY: 100 + CGFloat($0 - 120) * 20) }
+        XCTAssertEqual(LineBandMapper.evenRun(gaps).map(\.line), [120, 123, 124, 130])
+        // Line numbers growing upward (negative pitch) work the same.
+        let up: [(line: Int, midY: CGFloat)] = (1...8).map { (line: $0, midY: 500 - CGFloat($0) * 18) } + [(line: 40, midY: 482)]
+        XCTAssertEqual(LineBandMapper.evenRun(up).map(\.line), Array(1...8))
+        XCTAssertEqual(LineBandMapper.evenRun([(line: 5, midY: 40)]).map(\.line), [5])
     }
 }

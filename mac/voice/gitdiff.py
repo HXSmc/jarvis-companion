@@ -20,12 +20,27 @@ from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
 _TIMEOUT = 10
 _EDITOR_TIMEOUT = 2  # the editor CLI returns at once when healthy
 # Every git call runs with repo config defused — the repo may come from an
-# archive, so no fsmonitor, no hooks, no external diff driver, no pager, no ext::/fd:: remote helper.
-_GIT_PREFIX = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-               "-c", "diff.external=", "-c", "core.pager=cat",
+# archive, so no fsmonitor, no hooks, no external diff driver, no pager, no ext::/fd:: remote helper,
+# no signature check (that runs gpg.program). Program keys the prefix can't defuse: has_filters.
+_GIT_PREFIX = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               "-c", "diff.external=", "-c", "core.pager=cat", "-c", "log.showSignature=false",
                "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"]
-# New side of a unified=0 hunk header: +<start>[,<count>]; a missing ,count means 1.
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+# Repo-scoped config keys whose value is a program git (or git-lfs) runs: gpg on a signature check,
+# ssh/askpass/credential/uploadpack on fetch and push, editors, aliases, drivers, tools, hooks. Git's
+# own names end in program/command/cmd/helper/editor/driver/askpass/proxy/hook; the rest are listed.
+# A repo that sets any of them is refused whole, so no git form (Allowed or Confirmed) can run one.
+_PROGRAM_KEY_RE = re.compile(
+    r"^(filter\..+|alias\..+|pager\..+|sendemail\..+|man\..+|browser\..+|web\.browser|imap\.tunnel"
+    r"|instaweb\..+|help\.browser|cvsimport\.cvsps"
+    r"|core\.pager|interactive\.difffilter|diff\..+\.textconv|submodule\..+\.update"
+    r"|remote\..+\.(uploadpack|receivepack|vcs)|(difftool|mergetool)\..+\.path"
+    r"|lfs\.customtransfer\..+\.path|lfs\.extension\..+\.(clean|smudge)"
+    r"|.*(program|command|cmd|helper|editor|driver|askpass|proxy|hook))$", re.I)
+_OWNER_SCOPES = ("global", "system", "command", "unknown")
+# Hunk header: -<start>[,<count>] +<start>[,<count>]; a missing ,count means 1 on either side.
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+# Overlay labels: only integers and fixed words ever reach the app from diff data.
+LABEL_RE = re.compile(r"^[0-9]{1,2}/[0-9]{1,2} (\+[0-9]{1,6}|changed|removed here)$")
 
 
 def _git(repo: Path, *args: str) -> str | None:
@@ -55,16 +70,23 @@ def repo_for(document: str | None) -> Path | None:
 
 
 def has_filters(repo: Path) -> bool:
-    """True when any filter comes from repo-controlled config (local, worktree, or their includes).
+    """True when repo-controlled config (local, worktree, includes) names a program git would run.
 
-    Those run repo-chosen commands during `git diff`; the overlay refuses such repos.
-    Only global/system filters (the owner's own, e.g. git-lfs) are allowed. All scopes are read
-    (not just --local): .git/config.worktree would otherwise slip past.
+    Filters, diff drivers, gpg.program, core.sshCommand, aliases and the rest (_PROGRAM_KEY_RE):
+    the overlay and the agent's git calls refuse such repos. The owner's own scopes are skipped:
+    global, system, command (our prefix, the owner's env) and unknown (Apple git lists Xcode's
+    built-in gitconfig, credential.helper, as "unknown"). Any other scope refuses, so local,
+    worktree (.git/config.worktree) and any scope a later git adds fail closed. A file the repo
+    pulls in with include.path / includeIf keeps the includer's scope (local / worktree; pinned in
+    tests). --name-only: a key is listed whole (a subsection holding "=" can't cut it short) and
+    no value can forge a line. No listing at all (git failed) refuses too.
     """
-    out = _git(Path(repo), "config", "--includes", "--show-scope", "--get-regexp", r"^filter\.")
-    for line in (out or "").splitlines():
-        scope = line.split("\t", 1)[0].strip()
-        if scope not in ("global", "system"):
+    out = _git(Path(repo), "config", "--includes", "--show-scope", "--name-only", "--list")
+    if out is None:
+        return True
+    for line in out.splitlines():
+        scope, _, key = line.partition("\t")
+        if scope.strip() not in _OWNER_SCOPES and _PROGRAM_KEY_RE.match(key):
             return True
     return False
 
@@ -78,8 +100,9 @@ def last_merge(repo: Path) -> str | None:
 def hunks(repo: Path, base: str) -> list[dict]:
     """New-side line ranges of the working-tree diff against `base`.
 
-    [{file, start, count}] in diff order. Deleted files (+++ /dev/null) are skipped;
-    pure deletions are kept with count 0 so the app can still highlight the old line.
+    [{file, start, count, old}] in diff order (count = new-side lines, old = old-side
+    lines). Deleted files (+++ /dev/null) are skipped; pure deletions are kept with
+    count 0 so the app can still highlight the old line.
     """
     out = _git(Path(repo), "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
     if not out:
@@ -93,8 +116,72 @@ def hunks(repo: Path, base: str) -> list[dict]:
             continue
         m = _HUNK_RE.match(line)
         if m and file:
-            result.append({"file": file, "start": int(m[1]), "count": int(m[2] or 1)})
+            result.append({"file": file, "start": int(m[2]), "count": int(m[3] or 1),
+                           "old": int(m[1] or 1)})
     return result
+
+
+def hunk_label(h: dict, i: int, n: int) -> str:
+    """Short overlay label for hunk `i` of `n`: "+k" added, "changed", or "removed here"."""
+    if h["old"] == 0:
+        return f"{i}/{n} +{h['count']}"
+    if h["count"] == 0:
+        return f"{i}/{n} removed here"
+    return f"{i}/{n} changed"
+
+
+def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000) -> str:
+    """Unified=3 hunk (header + body) covering new-side line `start` of `rel`; "" when nothing matches.
+
+    Exact hunk first; else the last hunk starting at or before `start` (the user's line
+    sits in its context or the removal just after it).
+    """
+    out = _git(Path(repo), "diff", "--unified=3", "--no-color", "--no-ext-diff", "--no-textconv",
+               base, "--", rel)
+    if not out:
+        return ""
+    parsed: list[tuple[int, int, str]] = []  # (new start, new count, hunk text)
+    cur: list[str] = []
+    head: tuple[int, int] | None = None
+    for line in out.splitlines():
+        m = _HUNK_RE.match(line)
+        if m:
+            if head:
+                parsed.append((*head, "\n".join(cur)))
+            head = (int(m[2]), int(m[3] or 1))
+            cur = [line]
+        elif head:
+            cur.append(line)
+    if head:
+        parsed.append((*head, "\n".join(cur)))
+    for s, c, text in parsed:
+        if s <= start <= s + max(c, 1) - 1:
+            return text[:limit]
+    before = [(s, text) for s, _, text in parsed if s <= start]
+    return max(before, key=lambda st: st[0])[1][:limit] if before else ""
+
+
+def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tuple[list[str], bool]:
+    """Subjects of the commits behind lines a..b of `rel`; second item True when a line is uncommitted."""
+    # blame applies a repo's textconv by default: --no-textconv, as in the policy's own blame
+    out = _git(Path(repo), "blame", "--no-textconv", "-L", f"{a},{b}", "--porcelain", "--", rel)
+    if not out:
+        return [], False
+    shas: list[str] = []
+    uncommitted = False
+    for line in out.splitlines():
+        m = re.match(r"^([0-9a-f]{40}) \d+ \d+", line)
+        if not m:
+            continue
+        if m[1] == "0" * 40:  # the all-zero sha marks not-committed-yet lines
+            uncommitted = True
+        elif m[1] not in shas:
+            shas.append(m[1])
+    subjects = []
+    for sha in shas[:max_n]:
+        log = _git(Path(repo), "log", "-1", "--no-show-signature", "--format=%s", sha)
+        subjects.append(log.splitlines()[0].strip()[:120] if log else "")
+    return subjects, uncommitted
 
 
 def diff_text(repo: Path, base: str, limit: int = 12000) -> str:
@@ -137,6 +224,11 @@ def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run,
     return "text-editor"
 
 
+def files_phrase(n: int) -> str:
+    """Count of files for the stat card and the spoken summary: 1 file, 3 files."""
+    return f"{n} file" if n == 1 else f"{n} files"
+
+
 def diff_cards(hunks: list[dict], base: str) -> list[dict]:
     """Stat + bar + "where it changed" info cards summarizing `hunks()` output, validated by common.hud.
 
@@ -155,7 +247,7 @@ def diff_cards(hunks: list[dict], base: str) -> list[dict]:
     cards = [
         validate_card(
             {"type": "stat", "title": "Changed since last merge",
-             "value": f"{len(per_file)} files", "label": short}
+             "value": files_phrase(len(per_file)), "label": short}
         ),
         validate_card(
             {"type": "bar", "title": "Changed lines by file",

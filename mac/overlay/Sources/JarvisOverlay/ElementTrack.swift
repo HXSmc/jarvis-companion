@@ -23,6 +23,8 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
     struct Resolved: Sendable {
         var rect: CGRect
         var track: TrackAnchor?
+        /// A `lines` band's own tag ("2/3 changed"); nil = the add's template label.
+        var label: String? = nil
     }
 
     weak var tracker: ShapeFollowTracker?
@@ -270,15 +272,20 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
     /// The service scrolls the editor to the change while this runs, so a pass that finds the
     /// wanted lines off view (or no gutter yet) is tried again: at 0.9 s, 1.9 s and 2.9 s plus OCR
     /// time. `report` gets one reason code for the debug page (codes and line numbers only).
-    static func resolveBands(_ ranges: [ClosedRange<Int>], file: String,
+    /// Cancelled (a clear): no further pass, nothing drawn, nothing reported here (the add reports
+    /// `cleared`). `labels`: one per range, or empty.
+    static func resolveBands(_ ranges: [ClosedRange<Int>], labels: [String] = [], file: String,
                              report: @escaping @Sendable (String) -> Void) async -> [Resolved] {
-        var pass = LineBandFit.Pass(reason: "no_ranges")
-        var detail = ""
-        for attempt in 1...bandTries {
-            try? await Task.sleep(nanoseconds: attempt == 1 ? 900_000_000 : 1_000_000_000)
-            (pass, detail) = await ScreenContext.lineBands(ranges: ranges, file: file, partial: attempt == bandTries)
-            detail += " try=\(attempt)"
-            if !pass.bands.isEmpty || pass.reason == "no_permission" || pass.reason == "no_ranges" { break }
+        guard let run = await BandRetry.run(
+            tries: bandTries,
+            pause: { attempt in try? await Task.sleep(nanoseconds: attempt == 1 ? 900_000_000 : 1_000_000_000) },
+            pass: { attempt in await ScreenContext.lineBands(ranges: ranges, file: file, partial: attempt == bandTries) },
+            done: { !$0.pass.bands.isEmpty || $0.pass.reason == "no_permission" || $0.pass.reason == "no_ranges" })
+        else { return [] }
+        let pass = run.pass.pass
+        let detail = run.pass.detail + " try=\(run.attempt)"
+        let label: (ClosedRange<Int>) -> String? = { band in
+            BandRetry.rangeIndex(of: band, in: ranges).flatMap { labels.indices.contains($0) ? labels[$0] : nil }
         }
         let wanted = ranges.map { "\($0.lowerBound)-\($0.upperBound)" }.prefix(3).joined(separator: ",")
         guard !pass.bands.isEmpty else {
@@ -294,7 +301,8 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
         for index in anchors.indices { anchors[index]?.scrollBar = bar }
         report("ok bands=\(pass.bands.count) anchored=\(anchors.compactMap { $0 }.count)" + detail + " want=\(wanted)")
         return zip(pass.bands, anchors).map { band, anchor in
-            Resolved(rect: band.rect, track: anchor.map { .band(BandAnchor(window: $0, lines: band.lines)) })
+            Resolved(rect: band.rect, track: anchor.map { .band(BandAnchor(window: $0, lines: band.lines)) },
+                     label: label(band.lines))
         }
     }
 

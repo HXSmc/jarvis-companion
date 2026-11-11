@@ -150,7 +150,7 @@ public struct MediaImageView: View {
                     .transition(.opacity)
             }
         }
-        .animation(Theme.reduceMotion ? nil : .easeOut(duration: 0.2), value: isLoaded)
+        .animation(Theme.reduceMotion ? nil : .easeOut(duration: Theme.motionShort), value: isLoaded)
     }
 
     private var isLoaded: Bool {
