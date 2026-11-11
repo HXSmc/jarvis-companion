@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import time
@@ -83,6 +84,16 @@ def repo(tmp_path):
     (r / "d.py").unlink()
     _git(r, "add", "-A")  # stage the edits: git diff <base> only sees tracked files
     return r, merge
+
+
+@pytest.fixture(autouse=True)
+def _editor_cli_identity(request, monkeypatch):
+    """editor_path resolves real macOS app bundles (absent on this Linux box), and most
+    tests here assert the exact ["code", "--goto", ...] argv: map editor -> itself, except
+    in the one test that exercises the real lookup."""
+    if request.function is not None and request.function.__name__ == "test_editor_path_finds_the_bundled_cli":
+        return
+    monkeypatch.setattr(gitdiff, "editor_path", lambda e: e)
 
 
 def test_last_merge_is_the_merge_sha(repo):
@@ -318,6 +329,118 @@ def test_blame_never_runs_a_repo_textconv(tmp_path):
     assert gitdiff.has_filters(repo)
 
 
+def test_hunks_between_commits(tmp_path):
+    """Commit-to-commit hunks match git's own -U0 output; pick_range walks uncommitted ->
+    since-merge -> the merge itself -> none."""
+    fx = _fixture()
+    mc = tmp_path / "mc"
+    truth = fx.build(mc, mode="merged-clean")
+    merge = truth["last_merge"]
+    out = _git(mc, "diff", "-U0", f"{merge}^", merge)
+    assert gitdiff.hunks_between(mc, f"{merge}^", merge) == gitdiff._parse_hunks(out) == [
+        {"file": "sample.py", "start": 30, "count": 1, "old": 1}]
+    for sub in ("auto", "merge"):
+        r = gitdiff.pick_range(mc, sub)
+        assert (r.kind, r.base, r.head) == ("merge_itself", f"{merge}^", merge)
+
+    dirty = tmp_path / "d"
+    fx.build(dirty, mode="dirty")
+    r = gitdiff.pick_range(dirty, "auto")
+    assert r.kind == "uncommitted" and r.base == "HEAD" and r.head is None
+    assert r.hunks == [{"file": "sample.py", "start": 20, "count": 1, "old": 1}]
+    r = gitdiff.pick_range(dirty, "merge")
+    assert r.kind == "since_merge" and r.base == truth["merge"] and r.head is None
+    assert len(r.hunks) == 4
+
+    plain = tmp_path / "p"
+    plain.mkdir()
+    _git(plain, "init", "-q", "-b", "main")
+    (plain / "x.py").write_text("x = 1\n")
+    _git(plain, "add", "-A")
+    _git(plain, "commit", "-qm", "only commit")
+    r = gitdiff.pick_range(plain, "auto")
+    assert r.kind == "none" and r.base is None and r.head is None and r.hunks == []
+
+
+def test_blame_commits_newest_first_and_clean(tmp_path):
+    fx = _fixture()
+    repo = tmp_path / "r"
+    fx.build(repo)
+    commits, uncommitted = gitdiff.blame_commits(repo, "sample.py", 149, 149)
+    assert uncommitted is False
+    assert [c["subject"] for c in commits] == ["Rename the timeout flag"]
+    assert re.match(r"^\d{4}-\d{2}-\d{2}$", commits[0]["date"])
+    assert commits[0]["sentence"] == ""
+    # tags, the bell control char and run-on spaces are cleaned; the body yields its first
+    # sentence; a range over two commits comes back newest committer time first
+    tagged = tmp_path / "t"
+    tagged.mkdir()
+    _git(tagged, "init", "-q", "-b", "main")
+    (tagged / "x.py").write_text("one\n")
+    _git(tagged, "add", "-A")
+    subprocess.run(["git", "-c", "user.name=Overlay Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-qm", "The older commit"], cwd=tagged,
+                   env={**GIT_ENV, "GIT_COMMITTER_DATE": "2026-01-01T00:00:00"},
+                   capture_output=True, text=True, check=True)
+    (tagged / "x.py").write_text("one\ntwo\n")
+    _git(tagged, "add", "-A")
+    _git(tagged, "commit", "-m", "Fix <b>bold</b>\x07 thing", "-m", "Renames the flag. Second sentence.")
+    commits, _ = gitdiff.blame_commits(tagged, "x.py", 1, 2)
+    assert [c["subject"] for c in commits] == ["Fix bold thing", "The older commit"]
+    assert commits[0]["sentence"] == "Renames the flag."
+    assert all(re.match(r"^\d{4}-\d{2}-\d{2}$", c["date"]) for c in commits)
+    # with head, blame reads the merge's version: line 30 is the feature commit's change
+    mc = tmp_path / "mc"
+    truth = fx.build(mc, mode="merged-clean")
+    commits, _ = gitdiff.blame_commits(mc, "sample.py", 30, 30, head=truth["last_merge"])
+    assert [c["subject"] for c in commits] == ["Tune the retry delay"]
+
+
+def test_editor_path_finds_the_bundled_cli(repo, tmp_path, monkeypatch):
+    """No editor on PATH: the first bundled CLI that is a file and executable wins (a
+    non-executable candidate is skipped); nothing found -> no CLI attempt; vim is refused."""
+    r, _ = repo
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    (tmp_path / "nx").mkdir()
+    (tmp_path / "nx" / "code").write_text("#!/bin/sh\n")
+    (tmp_path / "nx" / "code").chmod(0o644)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "code").write_text("#!/bin/sh\n")
+    (tmp_path / "bin" / "code").chmod(0o755)
+    monkeypatch.setattr(gitdiff.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(gitdiff, "EDITOR_CANDIDATES",
+                        {"code": (str(tmp_path / "nx" / "code"), str(tmp_path / "bin" / "code"))})
+    exe = str(tmp_path / "bin" / "code")
+    assert gitdiff.editor_path("code") == exe
+    assert gitdiff.open_in_editor(r, "a.py", 3, run=fake_run, fallback=False) == "code"
+    assert calls == [[exe, "--goto", f"{(r / 'a.py').resolve()}:3"]]
+
+    monkeypatch.setattr(gitdiff, "EDITOR_CANDIDATES", {"code": (str(tmp_path / "gone" / "code"),)})
+    assert gitdiff.editor_path("code") is None
+    calls.clear()
+    assert gitdiff.open_in_editor(r, "a.py", 3, run=fake_run, fallback=False) == "none"
+    assert calls == []
+    with pytest.raises(ValueError):
+        gitdiff.open_in_editor(r, "a.py", 3, run=fake_run, editor="vim")
+
+
+def test_diff_cards_fixed_ids_and_title(repo):
+    r, merge = repo
+    stat, bar, where = gitdiff.diff_cards(EXPECTED_HUNKS, merge)
+    assert [c["id"] for c in (stat, bar, where)] == ["gd-stat", "gd-bar", "gd-where"]
+    assert stat["title"] == "Changed since last merge"
+    stat, _, _ = gitdiff.diff_cards(EXPECTED_HUNKS, merge, title="Not committed yet")
+    assert stat["title"] == "Not committed yet"
+    empty = gitdiff.diff_cards([], merge, title="Not committed yet", empty="Nothing waiting")
+    assert len(empty) == 1 and empty[0]["id"] == "gd-stat"
+    assert empty[0]["title"] == "Not committed yet" and empty[0]["body"] == ["Nothing waiting"]
+
+
 # --- since-the-merge turn (the service on top of the fixture repo) ---------------------------
 
 
@@ -372,7 +495,7 @@ def test_since_merge_highlights_every_hunk_of_the_file_on_screen(overlay_client,
          "labels": ["1/3 +3", "2/3 changed", "3/3 removed here"]}]
     cards = [e["card"] for e in events if e["type"] == "card"]
     assert cards[-1]["title"] == "Changes in sample.py"
-    assert cards[-1]["body"] == ["1/3 lines 140-142 added", "2/3 line 149 changed",
+    assert cards[-1]["body"] == ["Now: 1/3 lines 140-142 added", "2/3 line 149 changed",
                                  "3/3 line 155 removed here", 'Say "next change" to jump.']
     assert _wait(lambda: calls == [["code", "--goto", f"{sample.resolve()}:140"]])  # hunk 1 only
     assert "2 files changed since the last merge. I've opened sample.py." in says(events)
