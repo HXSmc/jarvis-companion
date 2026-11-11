@@ -1489,7 +1489,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             card = hud.validate_card(raw_card) if quiet else media_lookup.fast_tier_card(raw_card)
         if card:
             seen = _card_ids.setdefault(body.conv_id, set())
-            if card["id"] in seen or card["id"] == _CONFIRM_CARD_ID:  # Confirm id: agent only
+            if card["id"] in seen or _host_card_id(card["id"]):
                 card["id"] = uuid.uuid4().hex[:8]
             seen.add(card["id"])
             _card_text.setdefault(body.conv_id, deque(maxlen=3)).append(_card_words(card).lower())
@@ -1627,6 +1627,12 @@ EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told i
 _CONFIRM_CARD_ID = "agentconfirm"  # one id per conv, so the HUD replaces the card once settled
 
 
+def _host_card_id(card_id: str) -> bool:
+    """Ids only the host issues (Confirm, git cards): a model card claiming one gets a new id, so it
+    can neither replace the host's card nor have it dropped with the model's group."""
+    return card_id == _CONFIRM_CARD_ID or card_id.startswith("gd-")
+
+
 @dataclass
 class AgentRun:
     """One agent turn's state; it outlives the HTTP response while a confirmation is pending."""
@@ -1749,7 +1755,7 @@ async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
 def _agent_card(run: AgentRun, card: dict) -> list[dict]:
     """An agent turn's card; its first one drops the cards of the conv's previous agent turn."""
     events = []
-    if not getattr(run, "cards_sent", False):
+    if not run.cards_sent:
         run.cards_sent = True
         drop = _drop_cards(run.conv_id, "agent")
         if drop:
@@ -2282,7 +2288,7 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         card = None
     if card:
         seen = _card_ids.setdefault(run.conv_id, set())
-        if card["id"] in seen or card["id"] == _CONFIRM_CARD_ID:  # the Confirm id is the host's only
+        if card["id"] in seen or _host_card_id(card["id"]):
             card["id"] = uuid.uuid4().hex[:8]
         seen.add(card["id"])
         for ev in _agent_card(run, card):
