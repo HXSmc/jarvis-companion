@@ -29,7 +29,7 @@ import sys
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -143,7 +143,10 @@ NO_VIDEO_LINES = {  # find_video reasons -> one plain line each; the card itself
     "key_rejected": "My video search key isn't working.",
     "error": "I couldn't reach the video search.",
 }
-QUIET_MEDIA_LINE = "Not after what I've read in this conversation. Say clear, then ask again."
+QUIET_MEDIA_LINE = "Not while your screen is in this chat. Say clear to start over, cards and all."
+# The same refusal while the agent tier holds the conversation: "clear" cannot reset it then. The app
+# starts a new conversation after five minutes without a turn.
+AGENT_MEDIA_LINE = "Not after reading your files in this chat. Ask again after five quiet minutes."
 LOOKUP_WAIT_S = 5  # media_lookup stops at 4 s; this only bounds the thread
 
 # Untrusted context is attached only when the utterance refers to it (exfil
@@ -488,6 +491,18 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     return _resets[conv_id]
 
 
+# conv_id -> turns of it running now. A fresh start waits until a turn is alone on its conversation:
+# a turn still running (or a preflight-answered one, which writes history in _finish) may hold text
+# from before the reset.
+_inflight: dict[str, int] = {}
+
+
+def _may_start_fresh(conv_id: str, deps: OverlayDeps, agent_state_at_start: bool) -> bool:
+    """No agent state when the turn began nor now, and no other turn of conv_id running."""
+    return (not agent_state_at_start and not _holds_agent_state(conv_id, deps)
+            and _inflight.get(conv_id, 0) <= 1)
+
+
 def _holds_agent_state(conv_id: str, deps: OverlayDeps) -> bool:
     """True while the agent tier holds anything for conv_id (a session, a pending or expired yes, a
     running turn): its read text and pending questions are not ours to drop, so no fresh start."""
@@ -617,6 +632,21 @@ async def _audio(text: str, deps: OverlayDeps) -> dict | None:
 
 async def run_turn(body: TurnBody, deps: OverlayDeps,
                    on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
+    """One turn; counted in _inflight while it runs (also when the client goes away mid-stream)."""
+    conv_id = body.conv_id
+    _inflight[conv_id] = _inflight.get(conv_id, 0) + 1
+    try:
+        async with aclosing(_run_turn(body, deps, on_step)) as events:
+            async for event in events:
+                yield event
+    finally:
+        left = _inflight.pop(conv_id, 1) - 1
+        if left > 0:
+            _inflight[conv_id] = left
+
+
+async def _run_turn(body: TurnBody, deps: OverlayDeps,
+                    on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     start = deps.clock()
     metrics: dict = {"stt_final_ms": body.stt_final_ms, "ack_ms": None,
                      "ttft_s": None, "first_answer_audio_s": None, "total_s": None}
@@ -642,8 +672,9 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         if on_step:
             on_step("continued", text=body.text)
     last = _last_reply.get(body.conv_id)
-    if (not agent_state and not body.followup and body.audio_ms is not None
-            and (last is None or deps.clock() - last[0] >= FRESH_AFTER_S)):
+    if (not body.followup and body.audio_ms is not None
+            and (last is None or deps.clock() - last[0] >= FRESH_AFTER_S)
+            and _may_start_fresh(body.conv_id, deps, agent_state)):
         # A spoken wake word after a quiet spell: a new conversation. A follow-up or a typed turn keeps it.
         resets, fresh = _fresh_conversation(body.conv_id, deps), "wake"
         if on_step:
@@ -675,7 +706,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
 
         if intent.kind == "clear":
             yield {"type": "clear"}
-            if not agent_state and fresh is None:  # the owner's own "clear" also clears the conversation
+            if fresh is None and _may_start_fresh(body.conv_id, deps, agent_state):  # the owner's "clear" too
                 resets, fresh = _fresh_conversation(body.conv_id, deps), "clear"
                 if on_step:
                     on_step("conversation", detail="fresh: clear")
@@ -854,8 +885,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
     while len(_history) >= 32 and body.conv_id not in _history:  # conv ids rotate: keep memory bounded
         oldest = next(iter(_history))
         _forget(oldest)
-        _card_ids.pop(oldest, None)
-        _resets.pop(oldest, None)
+        _card_ids.pop(oldest, None)  # _resets stays: a running turn compares against it (ints only)
     _last_reply[body.conv_id] = (deps.clock(), len(_card_ids.get(body.conv_id, ())) > cards_at_start)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
@@ -968,13 +998,18 @@ def _label_inside(point, targets: list[dict]) -> tuple[dict, str] | None:
     return (min(inside, key=lambda t: t[:2])[2], "point_text") if inside else None
 
 
-def _own_card(point, conv_id: str, text: str) -> bool:
+def _own_card(point, conv_id: str, text: str, targets: list[dict]) -> bool:
     """A point that missed the screen is on Jarvis's own card (the capture leaves it out): its text
     (5+ chars, so a short word cannot match a card's type or id) is on a recent card, or the owner
-    only referred back ("highlight it") right after a reply that showed a card."""
+    only referred back ("highlight it") right after a reply that showed a card whose words name
+    nothing on screen (a card about the page title may mean the title itself)."""
     want = " ".join(point.lower().split()) if isinstance(point, str) else ""
-    return ((len(want) >= 5 and any(want in t for t in _card_text.get(conv_id, ())))
-            or (_pure_reference(text) and _last_reply.get(conv_id, (0.0, False))[1]))
+    if len(want) >= 5 and any(want in t for t in _card_text.get(conv_id, ())):
+        return True
+    cards = _card_text.get(conv_id)
+    if not (cards and _pure_reference(text) and _last_reply.get(conv_id, (0.0, False))[1]):
+        return False
+    return _label_inside(cards[-1], targets) is None
 
 
 def _card_words(node) -> str:
@@ -995,7 +1030,7 @@ def _look_miss_line(g: dict, conv_id: str, spoke: bool, text: str) -> str | None
         return None
     missed = g["missed"]
     # The one line that says why no box came. Nothing on screen matched, also the looser way.
-    if _own_card(missed, conv_id, text):
+    if _own_card(missed, conv_id, text, g["offered"]):
         return OWN_CARD_LINE
     if spoke:  # the model already answered in words: never stack a second line on it
         return None
@@ -1010,6 +1045,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
     produced = False  # the model's reply said or showed something (the ack never counts)
+    # The last await before the pool pick: from the history read to the pool pick nothing may yield,
+    # or a fresh start by another turn could clear the taint under history it has not seen.
+    local = await asyncio.to_thread(_local_context, deps, body.screen)
     parts = [text]
     history = _history.get(body.conv_id) or []
     if history:
@@ -1033,7 +1071,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             parts.append(POINT_RULE)
     elif look is not None and body.screen is not None:  # a capture with nothing readable in it
         parts.append(NO_TARGETS_NOTE)
-    parts.append(await asyncio.to_thread(_local_context, deps, body.screen))
+    parts.append(local)
     prompt = "\n\n".join(parts)
 
     if untrusted:
@@ -1071,9 +1109,10 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if media_seen:
             return
         media_seen = True
-        async for ev in _speak(QUIET_MEDIA_LINE, deps):
+        line = AGENT_MEDIA_LINE if _holds_agent_state(body.conv_id, deps) else QUIET_MEDIA_LINE
+        async for ev in _speak(line, deps):
             yield ev
-        said.append(QUIET_MEDIA_LINE)
+        said.append(line)
 
     async def picture_events(wait: bool) -> AsyncIterator[dict]:
         """The lookup's media card once it is back (wait=True: at stream end), else the no-result line."""
@@ -1197,7 +1236,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if targets and "point" in obj and look["pick"] is None:  # the first point wins
             produced = True  # a point is an answer, hit or miss: the turn ends on its own line
             hit = _point_at(obj["point"], targets)
-            if hit is None and _own_card(obj["point"], body.conv_id, body.text):
+            if hit is None and _own_card(obj["point"], body.conv_id, body.text, targets):
                 hit = _label_inside(obj["point"], targets)  # what is on screen beats Jarvis's own card
             if hit:
                 look.update(pick=hit[0], via=hit[1])

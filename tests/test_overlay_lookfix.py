@@ -25,7 +25,7 @@ from test_overlay_seescreen import (  # noqa: E402,F401  (shared stubs + fixture
 @pytest.fixture(autouse=True)
 def reset_lookfix_state():
     stores = (overlay._card_text, overlay._last_reply, overlay._resets, overlay._pending, overlay._confirm,
-              overlay._expired, overlay._agent_busy, overlay._notes, overlay._card_ids)
+              overlay._expired, overlay._agent_busy, overlay._notes, overlay._card_ids, overlay._inflight)
     for store in stores:
         store.clear()
     overlay.debug_log.clear()
@@ -375,7 +375,9 @@ def test_clearing_guarded(client, monkeypatch, guard, ask):
     assert any(u == ASK_MOTTO for u, _ in overlay._history["g1"])
     assert media_cards(events) == []
     if ask == DOG and guard != "busy":  # busy: the preflight says the agent is busy and ends the turn
-        assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1
+        # An agent session survives the turn, so "clear" would not help: the line without that way out.
+        line = overlay.AGENT_MEDIA_LINE if guard == "session" else overlay.QUIET_MEDIA_LINE
+        assert says(events).count(line) == 1
     if guard == "confirm":  # a pending yes is answered out loud (not silently dropped) by the preflight
         assert any(e["type"] == "card" and e["card"]["title"] == "Not done" for e in events)
     assert steps_named(client, "conversation") == []
@@ -424,8 +426,12 @@ def test_reset_mid_turn_keeps_taint(client, monkeypatch):
 def test_quiet_prompt():
     assert "say so plainly" not in overlay.QUIET_PROMPT and '{"media": true}' in overlay.QUIET_PROMPT
     assert not any(w in overlay.QUIET_PROMPT for w in ("WebSearch", "WebFetch"))
-    line = overlay.QUIET_MEDIA_LINE
-    assert len(line) <= 80 and "clear" in line.lower() and line.count(".") == 2
+    for line in (overlay.QUIET_MEDIA_LINE, overlay.AGENT_MEDIA_LINE):
+        assert len(line) <= 80 and line.count(".") == 2
+    # Heard back by the mic, the normal line may only name "clear" (the way out it offers); the
+    # agent-tier line names no overlay action at all.
+    assert [m.lower() for m in overlay._OVERLAY_VERB_RE.findall(overlay.QUIET_MEDIA_LINE)] == ["clear"]
+    assert overlay._OVERLAY_VERB_RE.findall(overlay.AGENT_MEDIA_LINE) == []
 
 
 # --- D6: the dropped-directive line and the look-miss line are both spoken ---------------------
@@ -448,3 +454,94 @@ def test_miss_line_never_repeats_after_a_spoken_answer(client):
                                                     '{"point": null}'])
     spoken = says(events)
     assert "I can't see it on screen." not in spoken and spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+
+
+# --- Round 1 -------------------------------------------------------------------------------------
+
+def test_reset_during_local_context_never_sends_old_history_to_the_web(client, monkeypatch):
+    """S1: another turn's fresh start lands inside the answer's last await (the local context)."""
+    deps, web, _quiet, _log = life(monkeypatch)
+    screen_question(client, "s1")
+    fired = []
+
+    def system():
+        if not fired:
+            fired.append(True)
+            overlay._fresh_conversation("s1", deps)  # the other turn's reset, mid-await
+        return ""
+    deps.system = system
+    turn(client, "what is the capital of France", conv_id="s1", followup=True)
+    assert fired
+    for prompt in web.prompts():
+        assert not any(w in prompt for w in OCR_WORDS + (ASK_MOTTO,))
+    assert len(web.prompts()) == 1  # the history it read was the fresh, empty one
+
+
+def test_eviction_keeps_reset_counts(client, monkeypatch):
+    """S2: a running turn's reset snapshot can never be matched again by a recycled counter."""
+    from collections import deque
+    life(monkeypatch)
+    for i in range(32):
+        overlay._history[f"old{i}"] = deque(maxlen=6)
+    overlay._resets["old0"] = 3
+    turn(client, "what is the capital of France", conv_id="new")
+    assert "old0" not in overlay._history and overlay._resets["old0"] == 3
+
+
+def test_no_fresh_start_while_another_turn_runs(client, monkeypatch):
+    """G1: a turn of the same conversation still running (its _finish or answer may write history
+    from before) blocks the fresh start; the conversation stays tainted."""
+    deps, web, _quiet, log = life(monkeypatch)
+    screen_question(client, "i1", **SPOKEN)
+    log.clear()
+    overlay._inflight["i1"] = 1  # the other turn
+    deps.clock.t += 91
+    events = turn(client, DOG, conv_id="i1", **SPOKEN)
+    assert ("quiet", "drop", "i1") not in log and "i1" in overlay._tainted and web.sessions == {}
+    assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1
+    assert overlay._inflight == {"i1": 1}  # this turn's own count came and went
+    turn(client, "clear", conv_id="i1", followup=True)
+    assert "i1" in overlay._tainted
+
+
+def test_inflight_count_drops_when_the_client_goes_away(monkeypatch):
+    import asyncio
+    deps, _web, _quiet, _log = life(monkeypatch)
+
+    async def first_event_then_close():
+        events = overlay.run_turn(overlay.TurnBody(text="what is the capital of France", conv_id="x1"), deps)
+        await events.__anext__()
+        assert overlay._inflight == {"x1": 1}
+        await events.aclose()
+    asyncio.run(first_event_then_close())
+    assert overlay._inflight == {}
+
+
+def test_agent_state_rechecked_at_the_reset(monkeypatch):
+    """G2: agent state that appears after the turn's first look still blocks the fresh start."""
+    deps, _web, _quiet, _log = life(monkeypatch)
+    assert overlay._may_start_fresh("r2", deps, False)
+    assert not overlay._may_start_fresh("r2", deps, True)
+    overlay._agent_busy["r2"] = agent_run("r2", deps)
+    assert not overlay._may_start_fresh("r2", deps, False)
+
+
+@pytest.mark.parametrize("media", ['{"image_search": {"query": "dog"}}', '{"video_search": {"query": "dog"}}',
+                                   '{"media": true}'])
+def test_agent_media_line(client, monkeypatch, media):
+    """U1: with an agent session on the conversation, "clear" cannot help: no such promise."""
+    deps, _web, _quiet, _log = life(monkeypatch, quiet_media=media)
+    deps.agent_conversations = lean.Conversations(lambda: SimpleNamespace(close=lambda: None))
+    screen_question(client, "u1")
+    deps.agent_conversations.get("u1")
+    events = turn(client, DOG, conv_id="u1", followup=True)
+    spoken = says(events)
+    assert spoken.count(overlay.AGENT_MEDIA_LINE) == 1 and overlay.QUIET_MEDIA_LINE not in spoken
+    assert media_cards(events) == []
+
+
+def test_reference_after_card_about_the_screen_is_not_own_card(client):
+    """U3: "highlight it" after a card whose words name something on screen (the page title):
+    nothing is drawn, but Jarvis does not claim it is only on his card."""
+    events, _vlm, _calls = look(client, ASK_MOTTO, MOTTO, "highlight it", fallback=lambda p: ['{"point": null}'])
+    assert says(events)[-1] == "I can't see it on screen." and overlay.OWN_CARD_LINE not in says(events)
