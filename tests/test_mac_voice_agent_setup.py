@@ -112,7 +112,7 @@ def _fake_run(stdout: str | Exception):
     def fake(*_a, **_k):
         if isinstance(stdout, Exception):
             raise stdout
-        return SimpleNamespace(stdout=stdout)
+        return SimpleNamespace(stdout=stdout, returncode=0)
     return fake
 
 
@@ -212,4 +212,37 @@ def test_refresh_failure_keeps_the_last_tool_lists(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run(OSError("boom")))
     assert agent_setup.main([]) == 0
     assert "agent-tools.json left as it was" in capsys.readouterr().out
+    assert json.loads((support / "agent-tools.json").read_text()) == good
+
+
+def test_confirm_needs_the_verb_first_and_a_mail_object():
+    """R1 security 5: substring matching put delete_draft, create_forwarding_address and forward_settings
+    behind one spoken yes; a forwarding rule is an exfil channel. They are hidden now."""
+    servers = {"fake-mail": {}, "calendar": {}}
+    names = _names("fake-mail", ["delete_draft", "create_forwarding_address", "forward_settings",
+                                 "update_draft", "send_message", "reply_all", "send_draft"]) \
+        + _names("calendar", ["create_calendar", "update_event_acl", "respond_to_event"])
+    split = agent_setup.split_tools(names, servers)
+    assert split["confirm"] == sorted(_names("fake-mail", ["update_draft", "send_message", "reply_all",
+                                                           "send_draft"]) + _names("calendar", ["respond_to_event"]))
+    assert split["hidden"] == sorted(_names("fake-mail", ["delete_draft", "create_forwarding_address",
+                                                          "forward_settings"])
+                                     + _names("calendar", ["create_calendar", "update_event_acl"]))
+
+
+def test_refresh_with_no_mcp_tools_keeps_the_last_tool_lists(tmp_path, monkeypatch, capsys):
+    """R1 code 4: an init event with no MCP tools (servers failed to start), empty stdout, or a non-zero
+    exit is a failed listing too: the last good lists stay."""
+    home, support = _main_env(tmp_path, monkeypatch)
+    (support / "agent-mcp.json").write_text(json.dumps({"mcpServers": {"mailbox": {"command": "x"}}}))
+    good = {"read_only": ["mcp__mailbox__search_messages"], "confirm": [], "hidden": ["mcp__mailbox__delete"]}
+    (support / "agent-tools.json").write_text(json.dumps(good))
+    for out in ("", '{"type":"system","subtype":"init","tools":["Bash"]}\n'):
+        monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run(out))
+        assert agent_setup.main([]) == 0
+        assert "agent-tools.json left as it was" in capsys.readouterr().out
+        assert json.loads((support / "agent-tools.json").read_text()) == good
+    monkeypatch.setattr(agent_setup.subprocess, "run",
+                        lambda *_a, **_k: SimpleNamespace(stdout=INIT, returncode=1))
+    assert agent_setup.main([]) == 0
     assert json.loads((support / "agent-tools.json").read_text()) == good

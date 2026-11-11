@@ -57,7 +57,7 @@ def repo_for(document: str | None) -> Path | None:
 
 
 def has_filters(repo: Path) -> bool:
-    """True when any filter or diff driver program comes from repo-controlled config (local, worktree, or their includes).
+    """True when a filter or diff driver program comes from repo-controlled config (local, worktree, includes).
 
     Those run repo-chosen commands during `git diff`; the overlay refuses such repos.
     Only global/system filters (the owner's own, e.g. git-lfs) are allowed. All scopes are read

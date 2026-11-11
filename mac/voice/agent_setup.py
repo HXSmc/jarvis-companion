@@ -27,9 +27,14 @@ READ_PREFIX = ("search", "list", "get", "read", "find", "fetch", "query", "check
 WRITE_HINT = ("send", "reply", "forward", "draft", "delete", "remove", "trash", "archive",
               "label", "move", "modify", "update", "create", "write", "set", "add", "mark",
               "accept", "decline", "respond")
-# Tool words that act (not just read) but stay usable after one owner confirm.
-CONFIRM_MAIL = ("send", "reply", "forward", "draft")
+# Tools that act (not just read) but stay usable after one owner confirm: the verb is the FIRST word of
+# the name and every other word names the thing it acts on, so delete_draft, create_forwarding_address or
+# forward_settings (a standing forwarding rule) stay hidden. Drafts may be created or updated.
+CONFIRM_MAIL = ("send", "reply", "forward")
+DRAFT_VERBS = ("create", "save", "update")
+MAIL_OBJECTS = {"email", "emails", "mail", "message", "messages", "draft", "drafts", "thread", "all", "reply"}
 CONFIRM_CALENDAR = ("create", "update", "respond")
+CALENDAR_OBJECTS = {"event", "events", "to", "invite", "invitation", "meeting"}
 
 
 def select_servers(claude_cfg: dict, home: str) -> dict:
@@ -65,8 +70,11 @@ def split_tools(tool_names: list[str], servers: dict) -> dict:
         if name in read_only:
             continue
         server, tool = parts[1].casefold(), parts[2].casefold()
-        if ("mail" in server and any(w in tool for w in CONFIRM_MAIL)) or \
-                ("calendar" in server and any(w in tool for w in CONFIRM_CALENDAR)):
+        verb, rest = tool.split("_")[0], set(tool.split("_")[1:])
+        mail_ok = rest <= MAIL_OBJECTS and (verb in CONFIRM_MAIL
+                                            or (verb in DRAFT_VERBS and bool(rest & {"draft", "drafts"})))
+        if ("mail" in server and mail_ok) or \
+                ("calendar" in server and verb in CONFIRM_CALENDAR and rest <= CALENDAR_OBJECTS):
             confirm.add(name)
         else:
             hidden.add(name)
@@ -112,9 +120,11 @@ def list_tools(mcp_path: Path) -> list[str] | None:
             cwd=tempfile.mkdtemp(prefix="jov-agent-"),
             env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
             timeout=90)
-        return tool_names_from_init(proc.stdout.splitlines())
     except (OSError, subprocess.SubprocessError):
         return None
+    names = tool_names_from_init(proc.stdout.splitlines()) if proc.returncode == 0 else []
+    # No MCP tool at all = the servers did not start (or no init event): a failed listing, not an empty one.
+    return names if any(n.startswith("mcp__") for n in names) else None
 
 
 def main(argv: list[str] | None = None) -> int:
