@@ -991,7 +991,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
     """Settle a pending confirmation and refuse a second request while the agent works.
 
     Ends with a `done` event when it answered the turn; otherwise the utterance goes on through the
-    normal pipeline (after any "Alright, I won't." it yielded for a dropped confirmation).
+    normal pipeline (after any "Very well, I won't." it yielded for a dropped confirmation).
     """
     for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
         run = _take_confirm(other)

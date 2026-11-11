@@ -31,9 +31,9 @@ PHRASES = {
     "progress_other": "Still working on it.",
     "stopped": "Stopped.",
     "timeout": "That took too long, so I stopped.",
-    "busy": "Still working on the last one.",
-    "not_confirmed": "Alright, I won't.",
-    "expired": "That request expired, so I didn't do it.",
+    "busy": "Still on the last one, I'm afraid.",
+    "not_confirmed": "Very well, I won't.",
+    "expired": "That request expired, so I haven't done it.",
 }
 
 _ACK_KEYS = {
