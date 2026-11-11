@@ -597,4 +597,43 @@ final class ScatterLayoutTests: XCTestCase {
         XCTAssertFalse(retired.contains("c1"), "the pinned card retired while unpinned cards were left")
         XCTAssertEqual(state.frames["c1"], corner)
     }
+
+    func testNewLineBandMovesUnpinnedCardsOffItOnce() throws {
+        var state = ScatterLayout.LayoutState()
+        state.cardAdded("history", size: sizes[0], visible: V, keepOut: [orb])
+        state.cardAdded("pinned", size: sizes[2], visible: V, keepOut: [orb])
+        let history = try XCTUnwrap(state.frames["history"])
+        let pinnedFrame = try XCTUnwrap(state.frames["pinned"])
+        state.cardDragged("pinned", to: pinnedFrame, visible: V)
+        // The band arrives later, right under the history card (and the pinned one).
+        let band = ScatterLayout.shapeKeepOut(history.union(pinnedFrame).insetBy(dx: 10, dy: 10), screenWidth: F.width)
+        let retired = state.moveOff([band], visible: V, keepOut: [orb, band])
+        XCTAssertEqual(retired, [])
+        let moved = try XCTUnwrap(state.frames["history"])
+        XCTAssertFalse(moved.intersects(band))
+        XCTAssertEqual(state.frames["pinned"], pinnedFrame)  // the user's spot stays
+        // A band nobody covers moves nothing.
+        let before = state
+        state.moveOff([CGRect(x: -500, y: -500, width: 10, height: 10)], visible: V, keepOut: [orb])
+        XCTAssertEqual(state, before)
+    }
+
+    func testCardWithNoOtherSpotStaysPut() throws {
+        var state = ScatterLayout.LayoutState()
+        state.cardAdded("a", size: sizes[0], visible: V, keepOut: [orb])
+        let frame = try XCTUnwrap(state.frames["a"])
+        let everywhere = V.insetBy(dx: -50, dy: -50)
+        state.moveOff([everywhere], visible: V, keepOut: [everywhere])
+        XCTAssertEqual(state.frames["a"], frame)
+        XCTAssertTrue(state.waiting.isEmpty)
+    }
+
+    func testAsideMovesNothing() {
+        var state = ScatterLayout.LayoutState()
+        state.cardAdded("a", size: sizes[0], visible: V, keepOut: [orb])
+        state.aside()
+        let before = state
+        state.moveOff([V], visible: V, keepOut: [V])
+        XCTAssertEqual(state, before)
+    }
 }

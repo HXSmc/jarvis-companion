@@ -3,27 +3,31 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Step-by-step log of recent Jarvis voice turns on this Mac.">
 <title>Jarvis voice debug</title>
 <style>
-  :root { color-scheme: dark; --ok: #5ad19a; --bad: #ff6b6b; --dim: #8a93a3; --line: #262b35; }
+  /* Hallmark · shape: app screen · posture: restrained · hero: none · nav: header · footer: none */
+  :root { color-scheme: dark; --ok: #5ad19a; --bad: #ff6b6b; --dim: #8a93a3; --line: #262b35;
+          --bg: #0f1218; --bg-glass: #0f1218ee; --fg: #e6e9ef; --quote: #ffd479; }
+  html, body { overflow-x: clip; }
   body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-         background: #0f1218; color: #e6e9ef; }
-  header { position: sticky; top: 0; background: #0f1218ee; border-bottom: 1px solid var(--line);
+         background: var(--bg); color: var(--fg); }
+  header { position: sticky; top: 0; background: var(--bg-glass); border-bottom: 1px solid var(--line);
            padding: 12px 20px; display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap; }
-  h1 { font-size: 16px; margin: 0; }
+  h1 { font-size: 16px; margin: 0; text-wrap: balance; }
   #listener, #status { color: var(--dim); }
-  main { padding: 12px 20px 40px; max-width: 980px; }
-  .turn { border: 1px solid var(--line); border-radius: 10px; margin: 12px 0; padding: 10px 14px; }
+  main { padding: 12px 20px 40px; max-width: 980px; margin: 0 auto; }
+  .turn { border: 1px solid var(--line); border-radius: 10px; margin: 12px 0; padding: 12px 16px; }
   .turn.err { border-color: var(--bad); }
-  .when { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+  .when { color: var(--dim); font-size: 12px; margin-bottom: 8px; }
   ol { margin: 0; padding: 0; list-style: none; }
-  li { display: grid; grid-template-columns: 110px 70px 1fr; gap: 10px; padding: 3px 0; }
+  li { display: grid; grid-template-columns: 110px 70px 1fr; gap: 12px; padding: 4px 0; }
   .step { font-weight: 600; }
   .t { color: var(--dim); font-variant-numeric: tabular-nums; }
   .fail .step, .fail .v { color: var(--bad); }
   .v { word-break: break-word; }
-  q { color: #ffd479; }
-  .empty { color: var(--dim); padding: 30px 0; }
+  q { color: var(--quote); }
+  .empty { color: var(--dim); padding: 32px 0; }
 </style>
 </head>
 <body>
@@ -32,7 +36,7 @@
   <span id="listener">wake listener: …</span>
   <span id="status">connecting…</span>
 </header>
-<main id="turns"><p class="empty">No turns yet. Say "Hey Jarvis …".</p></main>
+<main id="turns"><p class="empty">No turns yet. Say “Hey Jarvis …”.</p></main>
 <script>
 "use strict";
 // Token comes from the URL fragment (never sent to the server), then leaves the address bar.
@@ -43,6 +47,8 @@ const token = sessionStorage.getItem("overlayToken");
 const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "transcribed",
                 intent: "intent", spoke: "Jarvis spoke", done: "response done",
                 no_speech: "no speech", app_error: "app error",
+                agent: "agent started", agent_tool: "agent tool", agent_confirm: "confirmation",
+                agent_progress: "progress line", lines: "line highlight", editor_scroll: "editor scroll",
                 incomplete: "waiting for more", continued: "continued after a pause" };
 
 function el(tag, cls, text) {
@@ -62,10 +68,20 @@ function describe(s) {
     case "continued": return `as one request: "${s.text}"`;
     case "intent": return s.kind + (s.arg ? ` → ${s.arg}` : "");
     case "spoke": return null;
-    case "done": return `${s.cards} cards, ${s.shapes} shapes` +
+    case "agent_progress": return null;  // rendered as a quote
+    case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
+    case "agent_tool": return `${s.tool} · ${s.decision}` + (s.kind ? ` · ${s.kind}` : "") +
+                              (s.reason ? ` · ${s.reason}` : "") + (s.ms != null ? ` · ${s.ms} ms` : "");
+    case "agent_confirm": return s.state;
+    case "done": return `${s.cards} cards, ${s.shapes} shapes` + (s.lines ? `, ${s.lines} line highlights` : "") +
                         (s.first_audio_ms != null ? `, first audio ${s.first_audio_ms} ms` : ", no audio") +
                         (s.total_s != null ? `, total ${s.total_s} s` : "") +
-                        (s.error ? `, ERROR: ${s.error}` : "");
+                        (s.error ? `, ERROR: ${s.error}` : "") +
+                        (s.agent_first_progress_s != null || s.agent_total_s != null
+                          ? `, first progress ${s.agent_first_progress_s ?? "?"} s, agent ${s.agent_total_s ?? "?"} s` : "") +
+                        (s.agent_first_token_s != null ? `, first model token ${s.agent_first_token_s} s` : "") +
+                        (s.agent_first_tool_s != null ? `, first tool ${s.agent_first_tool_s} s` : "") +
+                        (s.agent_cold ? ", cold" : "");
     default: return s.detail || "";
   }
 }
@@ -81,7 +97,7 @@ function render(data) {
 
   const root = document.getElementById("turns");
   root.replaceChildren();
-  if (!data.turns.length) { root.append(el("p", "empty", 'No turns yet. Say "Hey Jarvis …".')); return; }
+  if (!data.turns.length) { root.append(el("p", "empty", "No turns yet. Say “Hey Jarvis …”.")); return; }
   for (const turn of data.turns) {
     const box = el("section", "turn");
     const t0 = turn.steps.length ? turn.steps[0].at : 0;
@@ -89,14 +105,19 @@ function render(data) {
     const ol = el("ol");
     for (const s of turn.steps) {
       const failed = (s.step === "done" && s.error) || s.step === "no_speech" || s.step === "app_error";
+      // red row, not a failed turn: a denied tool call, or a confirmation that did not go ahead
+      const denied = (s.step === "agent_tool" && s.decision === "deny")
+                     || (s.step === "agent_confirm" && s.state !== "asked" && s.state !== "allowed")
+                     || (s.step === "lines" && !String(s.detail || "").startsWith("ok"))
+                     || (s.step === "editor_scroll" && !String(s.detail || "").startsWith("code"));
       if (failed) box.classList.add("err");
-      const li = el("li", failed ? "fail" : "");
+      const li = el("li", failed || denied ? "fail" : "");
       li.append(el("span", "step", LABEL[s.step] || s.step));
       li.append(el("span", "t", `+${((s.at - t0)).toFixed(2)} s`));
       const v = el("span", "v");
       const d = describe(s);
       if (d !== null) v.textContent = d;
-      if (s.step === "transcribed") v.append(el("q", "", s.text));
+      if (s.step === "transcribed" || s.step === "agent_progress") v.append(el("q", "", s.text));
       if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : ` · text at ${s.ms} ms, no audio`); }
       li.append(v);
       ol.append(li);

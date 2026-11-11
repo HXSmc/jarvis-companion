@@ -371,6 +371,23 @@ public enum ScatterLayout {
             return cardAdded(key, size: size, visible: visible, keepOut: keepOut)
         }
 
+        /// New line highlights arrived after the cards (a `lines` band waits for the editor
+        /// scroll): each unpinned card that covers one is placed again, once, against `keepOut`
+        /// (which holds the new highlights). A card with no other spot stays where it is (it dims).
+        /// Returns the keys retired to make room.
+        @discardableResult
+        public mutating func moveOff(_ highlights: [CGRect], visible: CGRect, keepOut: [CGRect]) -> [String] {
+            guard mode == .normal else { return [] }  // aside: cards are chips, nothing covers the code
+            var retired: [String] = []
+            for key in order where !pinned.contains(key) && !retired.contains(key) {
+                guard let frame = frames[key], highlights.contains(where: { $0.intersects(frame) }) else { continue }
+                let before = self
+                let gone = cardAdded(key, size: frame.size, visible: visible, keepOut: keepOut)
+                if frames[key] == nil { self = before } else { retired += gone }
+            }
+            return retired
+        }
+
         /// The user drags a card (called when the drag starts and when it is dropped): it comes
         /// to the front, is pinned, and its frame is clamped fully inside the visible frame.
         public mutating func cardDragged(_ key: String, to frame: CGRect, visible: CGRect) {

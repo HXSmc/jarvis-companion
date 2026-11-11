@@ -267,21 +267,38 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
     }
 
     /// Line bands for a `.lines` event, each anchored to its window with the scroll signal.
-    static func resolveBands(_ ranges: [ClosedRange<Int>]) async -> [Resolved] {
-        try? await Task.sleep(nanoseconds: 900_000_000)  // let the editor settle before the gutter OCR pass
-        let bands = await ScreenContext.lineBands(ranges: ranges)
-        guard !bands.isEmpty else { return [] }
+    /// The service scrolls the editor to the change while this runs, so a pass that finds the
+    /// wanted lines off view (or no gutter yet) is tried again: at 0.9 s, 1.9 s and 2.9 s plus OCR
+    /// time. `report` gets one reason code for the debug page (codes and line numbers only).
+    static func resolveBands(_ ranges: [ClosedRange<Int>], file: String,
+                             report: @escaping @Sendable (String) -> Void) async -> [Resolved] {
+        var pass = LineBandFit.Pass(reason: "no_ranges")
+        var detail = ""
+        for attempt in 1...bandTries {
+            try? await Task.sleep(nanoseconds: attempt == 1 ? 900_000_000 : 1_000_000_000)
+            (pass, detail) = await ScreenContext.lineBands(ranges: ranges, file: file, partial: attempt == bandTries)
+            detail += " try=\(attempt)"
+            if !pass.bands.isEmpty || pass.reason == "no_permission" || pass.reason == "no_ranges" { break }
+        }
+        let wanted = ranges.map { "\($0.lowerBound)-\($0.upperBound)" }.prefix(3).joined(separator: ",")
+        guard !pass.bands.isEmpty else {
+            report(pass.reason + detail + " want=\(wanted)")
+            return []
+        }
         let windows = WindowFollower.normalWindows()
-        var anchors = bands.map { ShapeFollow.anchor(rect: $0, windows: windows) }
-        // One scroll bar per band window (all bands come from the frontmost window), shared.
+        var anchors = pass.bands.map { ShapeFollow.anchor(rect: $0.rect, windows: windows) }
+        // One scroll bar per band window (all bands come from the same window), shared.
         let bar = anchors.compactMap { $0 }.first.flatMap {
             scrollBar(at: CGPoint(x: $0.rect.midX, y: $0.rect.midY), pid: $0.pid)
         }
         for index in anchors.indices { anchors[index]?.scrollBar = bar }
-        return zip(zip(ranges, bands), anchors).map { pair, anchor in
-            Resolved(rect: pair.1, track: anchor.map { .band(BandAnchor(window: $0, lines: pair.0)) })
+        report("ok bands=\(pass.bands.count) anchored=\(anchors.compactMap { $0 }.count)" + detail + " want=\(wanted)")
+        return zip(pass.bands, anchors).map { band, anchor in
+            Resolved(rect: band.rect, track: anchor.map { .band(BandAnchor(window: $0, lines: band.lines)) })
         }
     }
+
+    private static let bandTries = 3
 
     /// Tier C (or static) placement; `scrollBar`: look up the scroll bar under the box so a
     /// keyboard or scroll-bar scroll hides it too (not for whole-window boxes).
