@@ -10,6 +10,10 @@ Content filter (no key, no dependency): bitmap files only, the ~800 px thumbnail
 original, and a word blocklist on the query, the file title, its object name and its categories.
 shortcut: Commons has no safe-search flag, so an explicit file with innocent words and no telling
 title or category still gets through; upgrade to a real image classifier if that ever shows up.
+
+Videos: find_video(query) asks the YouTube Data API search endpoint (fixed safe params, the API
+key from the environment or the repo .env, sent as a header and never in the URL) and returns one
+safe video card or a reason; quota and bad-key backoffs plus a 6 h result cache keep it cheap.
 """
 
 from __future__ import annotations
@@ -17,11 +21,15 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 import threading
 import time
 import unicodedata
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -215,8 +223,9 @@ def search(query, count=1) -> list[dict]:
         pages = result.get("pages") if isinstance(result, dict) else None
         if not isinstance(pages, list):
             return []
-        pages = sorted((p for p in pages if isinstance(p, dict)),
-                       key=lambda p: p.get("index") if isinstance(p.get("index"), int) else 1 << 30)
+        pages = [p for _, _, p in sorted(  # by index, stable via the sequence tiebreak
+            (p.get("index") if isinstance(p.get("index"), int) else 1 << 30, i, p)
+            for i, p in enumerate(pages) if isinstance(p, dict))]
         hits = [h for h in map(_hit, pages) if h]
         return hits[:_count(count)]
     except Exception as e:  # a lookup bug must never break the spoken answer
@@ -245,6 +254,176 @@ def find(query, count=1) -> dict | None:
     """image_search -> raw image card or None (nothing safe found / lookup down)."""
     n = _count(count)
     return card(query, search(query, n))
+
+
+YOUTUBE_ENDPOINT = "https://www.googleapis.com/youtube/v3/search"
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"  # repo .env; tests point it at tmp_path
+VIDEO_CACHE_MAX, VIDEO_CACHE_TTL = 64, timedelta(hours=6)
+KEY_RETRY = timedelta(minutes=10)
+_video_cache: dict[str, tuple[datetime, dict | None]] = {}  # cleaned lowercase query -> (stored at, card or None)
+_quota_until: datetime | None = None
+_key_retry_until: datetime | None = None
+# Error reason strings: https://developers.google.com/youtube/v3/docs/errors
+# and https://developers.google.com/youtube/v3/docs/core_errors
+_QUOTA_REASONS = frozenset({"quotaExceeded", "rateLimitExceeded", "dailyLimitExceeded"})
+_BAD_KEY_REASONS = frozenset({"API_KEY_INVALID", "keyInvalid", "keyExpired", "accessNotConfigured", "forbidden"})
+
+
+def _now() -> datetime:
+    """The only clock for the quota gate, the key gate and the cache TTL."""
+    return datetime.now(timezone.utc)
+
+
+def _next_midnight_pt(now: datetime) -> datetime:
+    """Next midnight America/Los_Angeles as an aware UTC datetime (the daily quota resets at
+    midnight Pacific: https://developers.google.com/youtube/v3/determine_quota_cost)."""
+    local = now.astimezone(ZoneInfo("America/Los_Angeles"))
+    return (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def _key() -> str:
+    """YOUTUBE_API_KEY from the environment (stripped), else the one YOUTUBE_API_KEY line of the
+    repo .env (same parsing as common.config.load_env_file), else ''."""
+    env = os.environ.get("YOUTUBE_API_KEY")
+    if env is not None and env.strip():
+        return env.strip()
+    try:
+        lines = _ENV_PATH.read_text().splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        name, _, value = stripped.partition("=")
+        if name.strip() != "YOUTUBE_API_KEY":
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        return value
+    return ""
+
+
+def _video_get(words, apikey):
+    """One GET to the fixed video endpoint -> (status, parsed JSON) or (None, the exception).
+    Params per https://developers.google.com/youtube/v3/docs/search/list, the key in a header
+    per https://cloud.google.com/docs/authentication/api-keys-use (never a query parameter)."""
+    deadline = time.monotonic() + TIMEOUT_S
+    try:
+        with httpx.Client(timeout=TIMEOUT_S, follow_redirects=False, transport=_transport,
+                          headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity",
+                                   "X-goog-api-key": apikey}) as client:
+            with client.stream("GET", YOUTUBE_ENDPOINT, params={
+                    "part": "snippet", "q": words, "type": "video", "videoEmbeddable": "true",
+                    "safeSearch": "strict", "maxResults": "10"}) as resp:
+                body = bytearray()
+                for chunk in resp.iter_raw():  # raw bytes: the cap is on what crosses the wire
+                    body += chunk
+                    if len(body) > MAX_BYTES:
+                        raise httpx.HTTPError("response over cap")
+                    if time.monotonic() > deadline:
+                        raise httpx.TimeoutException("deadline")
+                return resp.status_code, (json.loads(bytes(body)) if body else None)
+    except Exception as e:  # the caller classifies by exception type, logging the type name only
+        return None, e
+
+
+def _error_reasons(body) -> set[str]:
+    """Reason strings from a YouTube error body; every level may be missing or the wrong type."""
+    reasons: set[str] = set()
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return reasons
+    for group in ("errors", "details"):
+        entries = error.get(group)
+        if isinstance(entries, list):
+            reasons.update(e["reason"] for e in entries
+                           if isinstance(e, dict) and isinstance(e.get("reason"), str))
+    return reasons
+
+
+def _video_hit(item) -> dict | None:
+    """One search item -> {"type", "title", "youtube_id"}, or None to skip it. Never raises."""
+    if not isinstance(item, dict):
+        return None
+    vid = item.get("id")
+    if not isinstance(vid, dict):
+        return None
+    yid = vid.get("videoId")
+    if not (isinstance(yid, str) and hud._YOUTUBE_ID.fullmatch(yid)):
+        return None
+    snippet = item.get("snippet")
+    if not isinstance(snippet, dict) or snippet.get("liveBroadcastContent") != "none":
+        return None
+    raw = " ".join(v for v in (snippet.get("title"), snippet.get("description"),
+                                snippet.get("channelTitle")) if isinstance(v, str))
+    if _BLOCK.search(raw):
+        return None
+    title = clean_text(snippet.get("title"), MAX_TITLE)
+    if not title:
+        return None
+    card = {"type": "video", "title": title, "youtube_id": yid}
+    return card if hud.validate_card(card) is not None else None
+
+
+def find_video(query) -> tuple[dict | None, str]:
+    """Video search -> (raw video card or None, reason in ok/none/timeout/quota/key_missing/
+    key_rejected/error). Never raises."""
+    global _quota_until, _key_retry_until
+    try:
+        words = clean_query(query)
+        if not words:
+            return None, "none"
+        if _BLOCK.search(words):
+            logger.info("video lookup: query refused by the content filter")
+            return None, "none"
+        lowered = words.lower()
+        with _lock:
+            hit = _video_cache.get(lowered)
+            if hit is not None and _now() - hit[0] < VIDEO_CACHE_TTL:
+                return hit[1], "ok" if hit[1] else "none"
+            if _quota_until is not None and _now() < _quota_until:
+                logger.info("video lookup: quota")
+                return None, "quota"
+            if _key_retry_until is not None and _now() < _key_retry_until:
+                logger.info("video lookup: key_rejected")
+                return None, "key_rejected"
+        apikey = _key()
+        if not apikey:
+            logger.info("video lookup: key_missing")
+            return None, "key_missing"
+        status, payload = _video_get(words, apikey)
+        if status is None:
+            if isinstance(payload, httpx.TimeoutException):
+                logger.info("video lookup: timeout")
+                return None, "timeout"
+            logger.info("video lookup: %s", type(payload).__name__)
+            return None, "error"
+        if status != 200:
+            logger.info("video lookup: HTTP %s", status)
+            reasons = _error_reasons(payload)
+            if status in (403, 429) and reasons & _QUOTA_REASONS:
+                with _lock:
+                    _quota_until = _next_midnight_pt(_now())
+                return None, "quota"
+            if status in (400, 403) and reasons & _BAD_KEY_REASONS:
+                with _lock:
+                    _key_retry_until = _now() + KEY_RETRY
+                return None, "key_rejected"
+            return None, "error"
+        items = payload.get("items") if isinstance(payload, dict) else None
+        card = next((c for c in map(_video_hit, items) if c), None) if isinstance(items, list) else None
+        now = _now()
+        with _lock:
+            if len(_video_cache) >= VIDEO_CACHE_MAX:
+                _video_cache.pop(next(iter(_video_cache)))  # drop the oldest (dict insertion order)
+            _video_cache[lowered] = (now, card)
+        logger.info("video lookup: %s", "ok" if card else "none")
+        return card, "ok" if card else "none"
+    except Exception as e:  # a lookup bug must never break the spoken answer
+        logger.info("video lookup: %s", type(e).__name__)
+        return None, "error"
 
 
 def fast_tier_card(raw) -> dict | None:

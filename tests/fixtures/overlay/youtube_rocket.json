@@ -1,0 +1,23 @@
+{
+  "kind": "youtube#searchListResponse",
+  "items": [
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "short12345"},
+     "snippet": {"title": "Rocket launch short id", "description": "A launch", "channelTitle": "Space", "liveBroadcastContent": "none"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "abc/def1234"},
+     "snippet": {"title": "Rocket launch bad id", "description": "A launch", "channelTitle": "Space", "liveBroadcastContent": "none"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "aaaaaaaaaaa"},
+     "snippet": {"title": "Rocket launch upcoming", "description": "A launch", "channelTitle": "Space", "liveBroadcastContent": "upcoming"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "bbbbbbbbbbb"},
+     "snippet": {"title": "Rocket launch show", "description": "a nude scene in the description", "channelTitle": "Space", "liveBroadcastContent": "none"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "ccccccccccc"},
+     "snippet": {"title": "Rocket launch channel", "description": "A launch", "channelTitle": "gore channel", "liveBroadcastContent": "none"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "ddddddddddd"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": null},
+     "snippet": {"title": "Rocket launch null id", "description": "A launch", "channelTitle": "Space", "liveBroadcastContent": "none"}},
+    "x",
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "Kq8Z1v2Rk3E"},
+     "snippet": {"title": "Falcon 9 &amp; Starship <b>launch</b> compilation", "description": "Falcon 9 and Starship launch compilation", "channelTitle": "Space Videos", "liveBroadcastContent": "none"}},
+    {"kind": "youtube#searchResult", "id": {"kind": "youtube#video", "videoId": "QkR9x7Lm2Ab"},
+     "snippet": {"title": "Rocket launch highlights", "description": "Best rocket launches", "channelTitle": "Space Videos", "liveBroadcastContent": "none"}}
+  ]
+}
