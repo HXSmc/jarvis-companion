@@ -160,24 +160,24 @@ def _names(server: str, tools: list[str]) -> list[str]:
 
 
 def test_tools_split_and_refreshed(tmp_path, monkeypatch, capsys):
-    servers = {"multi-gmail": {}, "calendar": {}}
-    names = _names("multi-gmail", MAIL_TOOLS) + _names("calendar", CAL_TOOLS)
+    servers = {"fake-mail": {}, "calendar": {}}
+    names = _names("fake-mail", MAIL_TOOLS) + _names("calendar", CAL_TOOLS)
     split = agent_setup.split_tools(names, servers)
     assert split["read_only"] == sorted(
-        _names("multi-gmail", ["search_emails", "get_email", "list_accounts", "read_thread",
+        _names("fake-mail", ["search_emails", "get_email", "list_accounts", "read_thread",
                                "get_attachment", "find_contacts", "fetch_profile", "query_inbox"])
         + _names("calendar", ["list_events", "get_event"]))
     assert split["confirm"] == sorted(
-        _names("multi-gmail", ["send_email", "create_draft", "reply_email", "forward_email"])
+        _names("fake-mail", ["send_email", "create_draft", "reply_email", "forward_email"])
         + _names("calendar", ["create_event", "update_event", "respond_to_event"]))
     # list_labels lands here too: "label" is a WRITE_HINT, so criterion 2's read_only excludes it.
     assert split["hidden"] == sorted(
-        _names("multi-gmail", ["remove_account", "delete_email", "modify_labels", "add_account",
+        _names("fake-mail", ["remove_account", "delete_email", "modify_labels", "add_account",
                                "trash_email", "archive_email", "list_labels"])
         + _names("calendar", ["delete_event"]))
     home, support = _main_env(tmp_path, monkeypatch)
     mcp = support / "agent-mcp.json"
-    mcp.write_text(json.dumps({"mcpServers": {"multi-gmail": {"command": "x"},
+    mcp.write_text(json.dumps({"mcpServers": {"fake-mail": {"command": "x"},
                                               "calendar": {"command": "y"}}}))
     mcp.chmod(0o600)
     before = mcp.read_bytes()
