@@ -707,7 +707,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append("no repository")
             elif await asyncio.to_thread(gitdiff.has_filters, repo):
                 # Repo config naming a program (filter, gpg.program, ...) would run it during git: refuse.
-                async for ev in _speak("This repository's git config runs its own programs, so I won't run git in it.", deps):
+                async for ev in _speak("This repo's git config runs programs. I won't run git here.", deps):
                     yield ev
                 card = hud.validate_card({"type": "info", "title": "Diff skipped for safety",
                                           "body": ["This repository's own git config names a program.",

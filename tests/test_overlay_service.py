@@ -510,7 +510,7 @@ def test_git_diff_refused_when_repo_defines_filters(client, monkeypatch, tmp_pat
     monkeypatch.setattr(gitdiff, "last_merge", lambda r: pytest.fail("git must not run in a filtered repo"))
     overlay.set_deps(make_deps())
     events = turn(client, "show the diff", conv_id="f1")
-    assert "This repository's git config runs its own programs, so I won't run git in it." in says(events)
+    assert "This repo's git config runs programs. I won't run git here." in says(events)
     cards = [e["card"] for e in events if e["type"] == "card"]
     assert cards and cards[0]["title"] == "Diff skipped for safety"
 
