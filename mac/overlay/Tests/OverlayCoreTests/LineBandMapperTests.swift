@@ -152,8 +152,8 @@ final class LineBandMapperTests: XCTestCase {
 
     func testFoldedRangeIsNotBoxed() {
         // B5a: the editor folded lines 10-29 away, so line 30 sits one row below line 9.
-        let folded = (1...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: 52) }
-            + (30...40).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 21) * 20), right: 52) }
+        let folded = (1...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: CGFloat(52)) }
+            + (30...40).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 21) * 20), right: CGFloat(52)) }
         let pass = LineBandFit.fit(ranges: [12...12], digits: folded, window: window, partial: true)
         XCTAssertEqual(pass.reason, "folded")
         XCTAssertTrue(pass.bands.isEmpty)
@@ -163,8 +163,8 @@ final class LineBandMapperTests: XCTestCase {
         // B5b: line 5 wraps over 3 rows (line 6 starts 3 rows below line 5's centre). Lines 6-9
         // only after the wrap: with 6-11 evenRun would pick that longer run and the pass would
         // say off_view for line 5.
-        let wrapped = (1...5).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: 52) }
-            + (6...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 + 1) * 20), right: 52) }
+        let wrapped = (1...5).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: CGFloat(52)) }
+            + (6...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 + 1) * 20), right: CGFloat(52)) }
         let pass = LineBandFit.fit(ranges: [5...5], digits: wrapped, window: window, partial: true)
         XCTAssertEqual(pass.reason, "ok")
         let band = try XCTUnwrap(pass.bands.first)
