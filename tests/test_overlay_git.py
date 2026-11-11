@@ -452,7 +452,11 @@ _PROGRAM_KEYS = ["gpg.program", "gpg.openpgp.program", "gpg.ssh.defaultKeyComman
                  "browser.x.cmd", "web.browser", "man.x.path", "man.viewer", "sendemail.smtpServer",
                  "sendemail.toCmd", "imap.tunnel", "tar.tgz.command", "trailer.t.cmd", "trailer.t.command",
                  "hook.pre.command", "gc.recentObjectsHook", "uploadpack.packObjectsHook", "http.proxy",
-                 "lfs.customtransfer.x.path", "lfs.extension.x.clean", "lfs.extension.x.smudge"]
+                 "lfs.customtransfer.x.path", "lfs.extension.x.clean", "lfs.extension.x.smudge",
+                 # R3: programs git instaweb / git help -w / git cvsimport run (glm-cross R2)
+                 "instaweb.httpd", "instaweb.browser", "help.browser", "cvsimport.cvsps",
+                 # R3: a subsection name holding "=" must not cut the key short (security R2 LOW)
+                 "remote.a=b.uploadpack", "credential.https://h/a=b.helper", "merge.a=b.driver"]
 # Common repo-local keys that run nothing: they must not make a normal repo unusable.
 _SAFE_KEYS = {"remote.origin.url": "https://example.invalid/a.git", "remote.origin.partialclonefilter": "blob:none",
               "branch.main.vscode-merge-base": "origin/main", "branch.main.remote": "origin",
@@ -463,6 +467,53 @@ _SAFE_KEYS = {"remote.origin.url": "https://example.invalid/a.git", "remote.orig
 def test_has_filters_refuses_every_repo_program_key(repo, key):
     r, _ = repo
     _git(r, "config", key, "/tmp/never-run")
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_ignores_unknown_scope(repo, monkeypatch):
+    """R3 Mac blocker: Apple git lists Xcode's built-in gitconfig (credential.helper) with scope
+    "unknown"; it is not the repo's, so it must not refuse every repo. Local/worktree still refuse."""
+    r, _ = repo
+    real = gitdiff._git
+    seen = []
+
+    def fake(repo_, *args):
+        seen.append(args)
+        out = real(repo_, *args)
+        return "unknown\tcredential.helper\n" + out + "unknown\tcore.pager\n"
+
+    monkeypatch.setattr(gitdiff, "_git", fake)
+    assert gitdiff.has_filters(r) is False
+    assert "--name-only" in seen[0]
+    _git(r, "config", "credential.helper", "/tmp/never-run")
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_fails_closed(repo, monkeypatch):
+    """No listing (git failed or timed out) refuses the repo (security R2 INFO)."""
+    r, _ = repo
+    monkeypatch.setattr(gitdiff, "_git", lambda *a: None)
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_includes_keep_the_includer_scope(repo, tmp_path):
+    """Real git: a file pulled in by the repo's own include.path / includeIf is listed with the
+    includer's scope (local / worktree), never as global/system/unknown, so the gate still refuses it."""
+    r, _ = repo
+    inc = tmp_path / "inc.gitconfig"
+    inc.write_text("[core]\n\tsshCommand = /tmp/never-run\n")
+    _git(r, "config", "include.path", str(inc))
+    assert gitdiff.has_filters(r) is True
+    _git(r, "config", "--unset", "include.path")
+    assert gitdiff.has_filters(r) is False
+    _git(r, "config", f"includeIf.gitdir:{r}/.path", str(inc))
+    assert gitdiff.has_filters(r) is True
+    _git(r, "config", "--unset", f"includeIf.gitdir:{r}/.path")
+    _git(r, "config", "extensions.worktreeConfig", "true")
+    _git(r, "config", "--worktree", "include.path", str(inc))
+    listing = subprocess.run(["git", "config", "--includes", "--show-scope", "--name-only", "--list"],
+                             cwd=r, capture_output=True, text=True, check=True).stdout
+    assert "worktree\tcore.sshcommand" in listing.splitlines()
     assert gitdiff.has_filters(r) is True
 
 

@@ -31,10 +31,12 @@ _GIT_PREFIX = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.ho
 # A repo that sets any of them is refused whole, so no git form (Allowed or Confirmed) can run one.
 _PROGRAM_KEY_RE = re.compile(
     r"^(filter\..+|alias\..+|pager\..+|sendemail\..+|man\..+|browser\..+|web\.browser|imap\.tunnel"
+    r"|instaweb\..+|help\.browser|cvsimport\.cvsps"
     r"|core\.pager|interactive\.difffilter|diff\..+\.textconv|submodule\..+\.update"
     r"|remote\..+\.(uploadpack|receivepack|vcs)|(difftool|mergetool)\..+\.path"
     r"|lfs\.customtransfer\..+\.path|lfs\.extension\..+\.(clean|smudge)"
     r"|.*(program|command|cmd|helper|editor|driver|askpass|proxy|hook))$", re.I)
+_OWNER_SCOPES = ("global", "system", "command", "unknown")
 # Hunk header: -<start>[,<count>] +<start>[,<count>]; a missing ,count means 1 on either side.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 # Overlay labels: only integers and fixed words ever reach the app from diff data.
@@ -71,14 +73,20 @@ def has_filters(repo: Path) -> bool:
     """True when repo-controlled config (local, worktree, includes) names a program git would run.
 
     Filters, diff drivers, gpg.program, core.sshCommand, aliases and the rest (_PROGRAM_KEY_RE):
-    the overlay and the agent's git calls refuse such repos. Only global/system values (the owner's
-    own, e.g. git-lfs or GPG Suite) are allowed. All scopes are read (not just --local):
-    .git/config.worktree would otherwise slip past.
+    the overlay and the agent's git calls refuse such repos. The owner's own scopes are skipped:
+    global, system, command (our prefix, the owner's env) and unknown (Apple git lists Xcode's
+    built-in gitconfig, credential.helper, as "unknown"). Any other scope refuses, so local,
+    worktree (.git/config.worktree) and any scope a later git adds fail closed. A file the repo
+    pulls in with include.path / includeIf keeps the includer's scope (local / worktree; pinned in
+    tests). --name-only: a key is listed whole (a subsection holding "=" can't cut it short) and
+    no value can forge a line. No listing at all (git failed) refuses too.
     """
-    out = _git(Path(repo), "config", "--includes", "--show-scope", "--list")
-    for line in (out or "").splitlines():
-        scope, _, entry = line.partition("\t")
-        if scope.strip() not in ("global", "system", "command") and _PROGRAM_KEY_RE.match(entry.split("=", 1)[0]):
+    out = _git(Path(repo), "config", "--includes", "--show-scope", "--name-only", "--list")
+    if out is None:
+        return True
+    for line in out.splitlines():
+        scope, _, key = line.partition("\t")
+        if scope.strip() not in _OWNER_SCOPES and _PROGRAM_KEY_RE.match(key):
             return True
     return False
 
