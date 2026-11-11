@@ -342,6 +342,9 @@ final class AppController {
                 await ElementTrack.resolveBands(ranges, labels: labels, file: file, report: note)
             }
             linesWork = Array(linesWork.suffix(7)) + [work]  // finished ones need no cancel; keep the list short
+            // One box at a time: the earlier boxes of this file go now, while Jarvis says "Change 2 of 3",
+            // not when the new pass commits up to 5 s later (add() still replaces any that commit meanwhile).
+            if let old = linesKeys.removeValue(forKey: file) { model.remove(keys: old) }
             enqueueAdd(work, budget: 5, fallback: { [] },
                        template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: Self.bandLabel), note: note,
                        linesFile: file)

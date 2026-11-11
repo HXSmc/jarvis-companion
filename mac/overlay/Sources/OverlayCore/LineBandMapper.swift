@@ -117,8 +117,15 @@ public enum BandRetry {
     }
 
     /// Index of the wanted range a drawn band belongs to (a band on the last try may be the visible
-    /// part of its range), for its label; nil when none overlaps.
+    /// part of its range), for its label: an exact match, else the range it overlaps most (the first on
+    /// a tie); nil when none overlaps.
     public static func rangeIndex(of band: ClosedRange<Int>, in ranges: [ClosedRange<Int>]) -> Int? {
-        ranges.firstIndex(of: band) ?? ranges.firstIndex { $0.overlaps(band) }
+        if let exact = ranges.firstIndex(of: band) { return exact }
+        var best: (index: Int, rows: Int)?
+        for (index, range) in ranges.enumerated() where range.overlaps(band) {
+            let rows = min(range.upperBound, band.upperBound) - max(range.lowerBound, band.lowerBound) + 1
+            if rows > (best?.rows ?? 0) { best = (index, rows) }
+        }
+        return best?.index
     }
 }

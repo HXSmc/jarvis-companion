@@ -103,5 +103,9 @@ final class LineBandMapperTests: XCTestCase {
         XCTAssertEqual(BandRetry.rangeIndex(of: 149...149, in: [140...142, 149...149, 156...156]), 1)
         XCTAssertEqual(BandRetry.rangeIndex(of: 150...151, in: [140...142, 149...160]), 1)  // clipped on the last try
         XCTAssertNil(BandRetry.rangeIndex(of: 1...2, in: [140...142]))
+        // R1 design 7: a band over two ranges takes the label of the one it covers most.
+        XCTAssertEqual(BandRetry.rangeIndex(of: 141...149, in: [140...142, 145...150]), 1)
+        XCTAssertEqual(BandRetry.rangeIndex(of: 140...146, in: [140...142, 145...150]), 0)
+        XCTAssertEqual(BandRetry.rangeIndex(of: 141...146, in: [140...142, 145...150]), 0)  // tie: the first
     }
 }
