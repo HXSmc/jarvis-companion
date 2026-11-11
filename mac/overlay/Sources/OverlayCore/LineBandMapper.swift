@@ -33,3 +33,64 @@ public struct LineBandMapper: Equatable {
         return CGRect(x: x, y: min(top, bottom), width: width, height: abs(bottom - top))
     }
 }
+
+/// One gutter-OCR pass for a `lines` event: the bands to draw, or a short reason code for none.
+/// Codes and line numbers only (no text, no paths): they go to the debug page as they are.
+public enum LineBandFit {
+    public struct Pass {
+        public var bands: [(lines: ClosedRange<Int>, rect: CGRect)] = []
+        /// ok | no_gutter | no_fit | narrow | off_view (no wanted line in view) | partial (a wanted
+        /// range is only partly in view, not the last try) | off_clip (band outside the window).
+        public var reason: String
+        /// Line numbers the gutter showed.
+        public var seen: ClosedRange<Int>?
+
+        public init(bands: [(lines: ClosedRange<Int>, rect: CGRect)] = [], reason: String, seen: ClosedRange<Int>? = nil) {
+            self.bands = bands
+            self.reason = reason
+            self.seen = seen
+        }
+    }
+
+    /// Bands from gutter digits (points, `right` = the digit box's right edge) inside `window`.
+    /// Never extrapolates past the lines on screen: a pass taken before the editor scrolled says
+    /// off_view (retry), not a band far off screen. A range fully in view wins; on the last try
+    /// (`partial`) the visible part of a range that is only partly in view is drawn too.
+    public static func fit(ranges: [ClosedRange<Int>], digits: [(line: Int, centre: CGPoint, right: CGFloat)],
+                           window: CGRect, partial: Bool) -> Pass {
+        guard let gutter = ShapeTrack.gutterMarks(digits: digits, window: window) else { return Pass(reason: "no_gutter") }
+        let lines = gutter.marks.map(\.line)
+        guard LineBandMapper(marks: gutter.marks) != nil, let low = lines.min(), let high = lines.max()
+        else { return Pass(reason: "no_fit") }
+        let seen = low...high
+        let x = gutter.right + 4
+        let width = window.maxX - 8 - x
+        guard width > 0 else { return Pass(reason: "narrow", seen: seen) }
+        let full = ranges.filter { seen.contains($0.lowerBound) && seen.contains($0.upperBound) }
+        let parts = ranges.compactMap { $0.overlaps(seen) ? $0.clamped(to: seen) : nil }
+        let wanted = !full.isEmpty ? full : (partial ? parts : [])
+        if wanted.isEmpty { return Pass(reason: parts.isEmpty ? "off_view" : "partial", seen: seen) }
+        let bands = wanted.compactMap { range -> (lines: ClosedRange<Int>, rect: CGRect)? in
+            ShapeTrack.placeBand(lines: range, marks: gutter.marks, x: x, width: width, clip: window).map { (lines: range, rect: $0) }
+        }
+        return Pass(bands: bands, reason: bands.isEmpty ? "off_clip" : "ok", seen: seen)
+    }
+
+    /// Front-most window whose title names `file` (its last path part as a whole word, e.g.
+    /// "● overlay.py — repo"), or nil. `windows` front to back.
+    public static func editorWindow(file: String, windows: [(title: String, frame: CGRect)]) -> CGRect? {
+        let name = file.split(separator: "/").last.map(String.init) ?? ""
+        guard !name.isEmpty else { return nil }
+        let wordChar: (Character) -> Bool = { $0.isLetter || $0.isNumber || "._-".contains($0) }
+        return windows.first { window in
+            var rest = window.title[...]
+            while let hit = rest.range(of: name) {
+                let before = hit.lowerBound == window.title.startIndex ? nil : window.title[window.title.index(before: hit.lowerBound)]
+                let after = hit.upperBound == window.title.endIndex ? nil : window.title[hit.upperBound]
+                if !(before.map(wordChar) ?? false), !(after.map(wordChar) ?? false) { return true }
+                rest = window.title[hit.upperBound...]
+            }
+            return false
+        }?.frame
+    }
+}

@@ -18,10 +18,12 @@ from pathlib import Path
 from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
 
 _TIMEOUT = 10
+_EDITOR_TIMEOUT = 2  # the editor CLI returns at once when healthy
 # Every git call runs with repo config defused — the repo may come from an
-# archive, so no fsmonitor, no hooks, no external diff driver, no pager.
+# archive, so no fsmonitor, no hooks, no external diff driver, no pager, no ext::/fd:: remote helper.
 _GIT_PREFIX = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-               "-c", "diff.external=", "-c", "core.pager=cat"]
+               "-c", "diff.external=", "-c", "core.pager=cat",
+               "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"]
 # New side of a unified=0 hunk header: +<start>[,<count>]; a missing ,count means 1.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
@@ -101,24 +103,37 @@ def diff_text(repo: Path, base: str, limit: int = 12000) -> str:
     return (out or "")[:limit]
 
 
-def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run) -> str:
-    """Open <repo/file> at `line` in VS Code; fall back to the default text editor.
+def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run,
+                   editor: str = "code", fallback: bool = True) -> str:
+    """Open <repo/file> at `line` in VS Code (`editor`: "code" or "cursor"); fall back to the default
+    text editor, or with fallback=False do nothing more.
 
-    Returns "code"|"text-editor". `file` is repo-relative and untrusted: a path
+    Returns "code"|"text-editor"|"none". `file` is repo-relative and untrusted: a path
     resolving outside the repo is refused. The fallback is `open -t`, never plain
     `open` — a file checked out of a repo must not be executed (.command/.workflow).
     """
+    if editor not in ("code", "cursor"):
+        raise ValueError(f"unknown editor: {editor!r}")
     root = Path(repo).resolve()
     target = (root / file).resolve()
     if not target.is_relative_to(root):
         raise ValueError(f"path escapes the repo: {file!r}")
     try:
-        proc = run(["code", "--goto", f"{target}:{line}"], check=False, capture_output=True)
-        if proc is not None and proc.returncode == 0:
-            return "code"
+        if ":" not in target.name:  # --goto reads a trailing :N[:M] as line/column: `a:9` would open `a`
+            proc = run([editor, "--goto", f"{target}:{int(line)}"], check=False, capture_output=True,
+                       timeout=_EDITOR_TIMEOUT)
+            if proc is not None and proc.returncode == 0:
+                return "code"
     except FileNotFoundError:
         pass
-    run(["open", "-t", str(target)], check=False, capture_output=True)
+    except subprocess.SubprocessError:  # a hung CLI (stuck IPC): don't open a second editor too
+        return "none"
+    if not fallback:
+        return "none"
+    try:
+        run(["open", "-t", str(target)], check=False, capture_output=True, timeout=_EDITOR_TIMEOUT)
+    except subprocess.SubprocessError:
+        return "none"
     return "text-editor"
 
 

@@ -125,29 +125,36 @@ enum ScreenContext {
         return best.map { ($0.item.frame, $0.item.element) }
     }
 
-    /// Gutter OCR -> LineBandMapper; [] when no gutter found.
-    static func lineBands(ranges: [ClosedRange<Int>]) async -> [CGRect] {
-        guard !ranges.isEmpty, CGPreflightScreenCaptureAccess(),
-              let shot = try? await captureMainDisplay(),
-              let pid = frontmostPID(),
-              let window = walkFrontApp(pid: pid).windowFrame
-        else { return [] }
-        // 1-5 digit observations inside the frontmost window, converted to points.
+    /// One gutter-OCR pass for a `lines` event in the editor window that shows `file` (the
+    /// front-most window whose title names it, so a card, Terminal or another app in front does
+    /// not steal the pass; else the frontmost app's window). No bands: `reason` says which guard.
+    /// `detail`: window pick and line numbers only.
+    static func lineBands(ranges: [ClosedRange<Int>], file: String, partial: Bool) async
+        -> (pass: LineBandFit.Pass, detail: String) {
+        guard !ranges.isEmpty else { return (LineBandFit.Pass(reason: "no_ranges"), "") }
+        guard CGPreflightScreenCaptureAccess() else { return (LineBandFit.Pass(reason: "no_permission"), "") }
+        guard let shot = try? await captureMainDisplay() else { return (LineBandFit.Pass(reason: "capture_failed"), "") }
+        let titled = visibleWindows().map { (title: $0.title, frame: CGRect(x: $0.box[0], y: $0.box[1],
+                                                                          width: $0.box[2] - $0.box[0],
+                                                                          height: $0.box[3] - $0.box[1])) }
+        var pick = "title"
+        var found = LineBandFit.editorWindow(file: file, windows: titled)
+        if found == nil, let pid = frontmostPID() {
+            pick = "front"
+            found = walkFrontApp(pid: pid).windowFrame
+        }
+        guard let window = found else { return (LineBandFit.Pass(reason: "no_window"), "") }
+        // 1-5 digit observations, converted to points (fit keeps those inside the window).
         var digits: [(line: Int, centre: CGPoint, right: CGFloat)] = []
         for pair in ocrText(in: shot.image) {
             guard let line = ShapeTrack.lineNumber(pair.text) else { continue }
             let centre = CGPoint(x: (pair.box[0] + pair.box[2]) / 2 / shot.scale,
                                  y: (pair.box[1] + pair.box[3]) / 2 / shot.scale)
-            guard window.contains(centre) else { continue }
             digits.append((line, centre, pair.box[2] / shot.scale))
         }
-        guard let gutter = ShapeTrack.gutterMarks(digits: digits, window: window),
-              let mapper = LineBandMapper(marks: gutter.marks)
-        else { return [] }
-        let x = gutter.right + 4
-        let width = window.maxX - 8 - x
-        guard width > 0 else { return [] }
-        return ranges.map { mapper.band(for: $0, x: x, width: width) }
+        let pass = LineBandFit.fit(ranges: ranges, digits: digits, window: window, partial: partial)
+        let seen = pass.seen.map { " seen=\($0.lowerBound)-\($0.upperBound)" } ?? ""
+        return (pass, " win=\(pick)\(seen)")
     }
 
     // MARK: screen shot

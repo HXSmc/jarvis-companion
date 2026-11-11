@@ -120,9 +120,13 @@ final class AppController {
                 let health = try await client.health()
                 serviceVoice = health.voice
                 endOutage()
-                for try await name in client.events() {
+                for try await event in client.events() {
                     endOutage()
-                    if name == "wake" { await handleWake() }
+                    if event.name == "wake" {
+                        await handleWake()
+                    } else if event.name == "hud" {
+                        handlePush(OverlayEvent.decode(line: Data(event.data.utf8)))
+                    }
                 }
                 serviceUnreachable("event stream ended")
             } catch {
@@ -130,6 +134,20 @@ final class AppController {
             }
             // Retry fast: a reinstall or a Mac wake drops the service for only a few seconds.
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    /// A `hud` event pushed after its turn ended (an expired Confirm): card always, line only when idle.
+    private func handlePush(_ event: OverlayEvent) {
+        switch event.pushed(idle: model.orb == .idle && !audio.isBusy) {
+        case .card(let card)?:
+            model.add(card: card)
+        case .audio(_, let rate, let pcm)?:
+            audio.enqueue(pcm: pcm, rate: rate)
+        case .say(let text)?:
+            if serviceVoice == nil { audio.speakLocally(text) }
+        default:
+            break
         }
     }
 
@@ -294,10 +312,14 @@ final class AppController {
                        template: shape)
         case .card(let card):
             model.add(card: card)
-        case .lines(_, let ranges):
-            enqueueAdd(Task.detached(priority: .utility) { await ElementTrack.resolveBands(ranges) },
+        case .lines(let file, let ranges):
+            // Every outcome posts one reason code to the turn's debug record (codes and numbers only).
+            let note: @Sendable (String) -> Void = { detail in
+                Task { @MainActor [weak self] in self?.client.debugNote(step: "lines", detail: detail) }
+            }
+            enqueueAdd(Task.detached(priority: .utility) { await ElementTrack.resolveBands(ranges, file: file, report: note) },
                        budget: 5, fallback: { [] },
-                       template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: "changed"))
+                       template: HUDShape(kind: .rect, box: [0, 0, 0, 0], label: Self.bandLabel), note: note)
         case .clear:
             clearAll()
         case .layout(let mode):
@@ -341,8 +363,11 @@ final class AppController {
     /// most 1.5 s after a later item arrived; then its fallback commits and the real result,
     /// when it comes, upgrades it (applyLate). An item that loses to a `.clear` is dropped with
     /// its AX refs.
+    /// `note`: told when a clear wins over this add ("cleared") or its budget ran out first
+    /// ("late": the result still draws when it comes).
     private func enqueueAdd(_ work: Task<[ElementTrack.Resolved], Never>, budget seconds: Double,
-                            fallback: @escaping @Sendable () -> [ElementTrack.Resolved], template: HUDShape) {
+                            fallback: @escaping @Sendable () -> [ElementTrack.Resolved], template: HUDShape,
+                            note: ((String) -> Void)? = nil) {
         let ticket = addOrder.begin()
         let race = AddRace(fallback: fallback)
         Task.detached {
@@ -359,12 +384,14 @@ final class AppController {
             guard let self else { return }
             switch outcome {
             case .done(let items):
-                _ = self.commit(items, ticket: ticket, template: template)
+                if self.commit(items, ticket: ticket, template: template) == nil { note?("cleared") }
             case .late(let items):
+                note?("late")
                 let keys = self.commit(items, ticket: ticket, template: template)
                 Task { [weak self] in
                     let real = await work.value
                     guard let self else { return }
+                    if keys == nil || !self.addOrder.survives(ticket) { note?("cleared") }
                     self.applyLate(real, replacing: keys, ticket: ticket, template: template)
                 }
             }
@@ -384,7 +411,13 @@ final class AppController {
         return add(items, template: template)
     }
 
+    /// Label of a `lines` band (the changed lines in the editor).
+    private static let bandLabel = "changed"
+
     private func add(_ items: [ElementTrack.Resolved], template: HUDShape) -> [Int] {
+        // Cards came before the bands (the band waits for the editor scroll): move any card that
+        // covers the changed lines off them.
+        if template.label == Self.bandLabel, !items.isEmpty { cardPanel?.moveCards(off: items.map(\.rect)) }
         var keys: [Int] = []
         var tracks: [Int: TrackAnchor] = [:]
         for item in items {

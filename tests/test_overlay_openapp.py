@@ -107,7 +107,7 @@ def test_model_tie_asks(client):
 
 @pytest.mark.parametrize("text,app", [
     ("tell me a joke", "Messages"), ("tell me a joke", "Xcode"),
-    ("what is in my notes about the budget", "Notes"), ("play some music", "Music"),
+    ("what is in the notes about the budget", "Notes"), ("play some music", "Music"),
     ("what does this error in Terminal mean", "Terminal"),
 ])
 def test_no_owner_intent_no_launch(client, text, app):
