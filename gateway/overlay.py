@@ -476,11 +476,11 @@ def _forget(conv_id: str) -> None:
     _tainted.discard(conv_id)
 
 
-def _fresh_conversation(conv_id: str, deps: "OverlayDeps") -> int:
+def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     """Start conv_id over as if it were a new conversation id: the stores and both answer pools'
     CLI sessions (their own memory of earlier prompts) go in one step with no await in between, so
     the taint never outlives the text it guards. Agent-tier state is not touched: callers check
-    _agent_state first. Returns the conversation's new reset count."""
+    _holds_agent_state first. Returns the conversation's new reset count."""
     _forget(conv_id)
     deps.conversations.drop(conv_id)
     deps.quiet_conversations.drop(conv_id)
@@ -488,7 +488,7 @@ def _fresh_conversation(conv_id: str, deps: "OverlayDeps") -> int:
     return _resets[conv_id]
 
 
-def _agent_state(conv_id: str, deps: "OverlayDeps") -> bool:
+def _holds_agent_state(conv_id: str, deps: OverlayDeps) -> bool:
     """True while the agent tier holds anything for conv_id (a session, a pending or expired yes, a
     running turn): its read text and pending questions are not ours to drop, so no fresh start."""
     if conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy:
@@ -626,7 +626,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
     resets = _resets.get(body.conv_id, 0)
     # Read before the preflight settles a pending yes: a turn that began with agent state never
     # starts the conversation afresh, even once the preflight has answered that state.
-    agent_state = _agent_state(body.conv_id, deps)
+    agent_state = _holds_agent_state(body.conv_id, deps)
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
