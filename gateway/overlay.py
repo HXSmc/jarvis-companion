@@ -102,6 +102,38 @@ def _scrub(text: str) -> str:
     return text.replace("<", "").replace(">", "")
 
 
+# Answer-step failure classes: spoken line + info-card title per class. Plain words only:
+# no stack, path, token, account or reset time ever reaches the voice or a card (log only).
+ANSWER_FAIL = {
+    "usage_limit": ("I've hit my usage limit, so I can't answer right now.", "Usage limit reached"),
+    "not_signed_in": ("I'm not signed in, so I can't answer right now.", "Not signed in"),
+    "timeout": ("That took too long, so I stopped.", "Timed out"),
+    "error": ("Something went wrong on my side.", "No answer"),
+}
+ANSWER_WALL_S = 45.0  # default wall clock per fast-tier answer step; OVERLAY_ANSWER_WALL_S overrides
+
+_REDACT = (
+    (re.compile(r"sk-[A-Za-z0-9_\-]{4,}"), "[key]"),
+    (re.compile(r"(?i)\b(bearer|token)[ =:]+[A-Za-z0-9._\-]{8,}"), r"\1 [key]"),
+    (re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+"), "[email]"),
+    (re.compile(r"(?:~|/)[\w.\-]*(?:/[\w.\-@ ]+)+"), "[path]"),
+)
+
+
+def _redact(text: str, limit: int = 300) -> str:
+    """Raw error text for the log: keys, emails and paths removed, truncated."""
+    for pattern, repl in _REDACT:
+        text = pattern.sub(repl, text)
+    return text.replace("\n", " ")[:limit]
+
+
+def _answer_wall_s() -> float:
+    try:
+        return float(os.environ.get("OVERLAY_ANSWER_WALL_S", ANSWER_WALL_S))
+    except ValueError:
+        return ANSWER_WALL_S
+
+
 # --- Body models (422 on oversize input before any work happens) ---
 
 class ScreenBody(BaseModel):
@@ -511,6 +543,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         metrics["total_s"] = round(deps.clock() - start, 3)
         yield {"type": "done", "metrics": metrics, "error": None}
         return
+    failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         intent = intents.parse(body.text, apps=apps)
@@ -559,7 +592,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                 chosen = await _ground(body, deps)
             if chosen is None:
                 async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                                screen_ref=True):
+                                                screen_ref=True, failed=failed):
                     yield event
             else:
                 for ev in _ground_events(chosen):
@@ -654,7 +687,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         else:  # answer
             escalate: list[bool] = []
             async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                            escalate=escalate):
+                                            escalate=escalate, failed=failed):
                 yield event
             if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
                 if on_step:
@@ -663,9 +696,12 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                     yield event
     except Exception as exc:  # never leak the prompt or token, only the class
         error = type(exc).__name__
+        failed.clear()  # the outer catch speaks its own line: it owns the error
         async for ev in _speak("Something went wrong on my side.", deps):
             yield ev
 
+    if failed and error is None:
+        error = failed[0]  # the answer step's reason class, shown on the debug page's done row
     metrics["total_s"] = round(deps.clock() - start, 3)
     logger.info("overlay turn %s", json.dumps({**metrics, "error": error}))
     while len(_history) >= 32 and body.conv_id not in _history:  # conv ids rotate: keep memory bounded
@@ -712,9 +748,11 @@ def _screen_text(screen: ScreenBody) -> str:
 
 async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        metrics: dict, said: list[str], start: float,
-                       screen_ref: bool = False, escalate: list | None = None) -> AsyncIterator[dict]:
+                       screen_ref: bool = False, escalate: list | None = None,
+                       failed: list | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
+    produced = False  # the model's reply said or showed something (the ack never counts)
     parts = [text]
     history = _history.get(body.conv_id) or []
     if history:
@@ -753,15 +791,17 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel: stream over
 
+    t0 = time.monotonic()
     task = asyncio.get_running_loop().create_task(asyncio.to_thread(run_ask))
     buf = ""
 
     async def model_open(name: str) -> AsyncIterator[dict]:
         """The model asked to open an app: launch only an installed app the owner's words asked for."""
-        nonlocal open_seen
+        nonlocal open_seen, produced
         if open_seen:
             return
         open_seen = True
+        produced = True  # the model answered with an action; a refused open stays silent by design
         line = None  # None = stay silent: the owner did not ask to open anything
         if _owner_said_open_verb(text):
             line = "I couldn't find that app."
@@ -784,6 +824,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         said.append(line)
 
     async def flush_line(line: str) -> AsyncIterator[dict]:
+        nonlocal produced
         line = line.strip()
         if not line:
             return
@@ -795,12 +836,15 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             obj = {"say": line}
         if escalate is not None and (escalate or obj.get("agent") is True):
             escalate.append(True)  # hand over: nothing else from this reply is spoken or shown
+            produced = True
             return
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
             _pending[body.conv_id] = (body.text, deps.clock())
+            produced = True
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
             say_text = obj["say"].strip()
+            produced = True
             yield _say(say_text)
             said.append(say_text)
             audio = await _audio(say_text, deps)
@@ -819,14 +863,26 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             if card["id"] in seen:
                 card["id"] = uuid.uuid4().hex[:8]
             seen.add(card["id"])
+            produced = True
             yield {"type": "card", "card": card}
         shape = hud.validate_shape(obj.get("shape")) if "shape" in obj else None
         if shape:
+            produced = True
             yield {"type": "shape", "shape": shape}
 
+    fail_reason: str | None = None
+    fail_detail = ""
+    wall = _answer_wall_s()
     try:
         while True:
-            chunk = await queue.get()
+            left = wall - (time.monotonic() - t0)
+            try:
+                chunk = await asyncio.wait_for(queue.get(), timeout=max(left, 0.0))
+            except asyncio.TimeoutError:
+                # drop FIRST: close() ends the CLI, its stdout hits EOF and the ask thread returns.
+                pool.drop(body.conv_id)
+                fail_reason, fail_detail = "timeout", f"no answer within {wall:g}s"
+                break
             if chunk is None:
                 break
             if metrics["ttft_s"] is None:
@@ -836,14 +892,39 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 line, buf = buf.split("\n", 1)
                 async for event in flush_line(line):
                     yield event
-        if buf.strip():
+        if fail_reason is None and buf.strip():
             async for event in flush_line(buf):
                 yield event
-        await task
+        if fail_reason is None:
+            try:
+                await task
+            except Exception as exc:
+                # Dead or failing claude: the typed failure carries its class; anything else is `error`.
+                pool.drop(body.conv_id)  # the next turn starts a fresh CLI (history carries the context)
+                if isinstance(exc, lean.LeanError):
+                    fail_reason, fail_detail = exc.reason, exc.detail
+                else:
+                    fail_reason, fail_detail = "error", f"{type(exc).__name__}: {exc}"
+        if fail_reason is None and not produced:
+            # A clean but empty reply: the CLI is alive, so keep the session (only raise/timeout drop it).
+            fail_reason, fail_detail = "error", "the answer step produced nothing"
+        if fail_reason is not None:
+            if fail_reason not in ANSWER_FAIL:
+                fail_reason = "error"
+            logger.warning("overlay answer failed: class=%s detail=%s", fail_reason, _redact(fail_detail))
+            if failed is not None:
+                failed.append(f"answer_{fail_reason}")
+            if not produced:  # never a second line after speech, never when the turn handed over
+                line_text, title = ANSWER_FAIL[fail_reason]
+                card = hud.validate_card({"id": uuid.uuid4().hex[:8], "type": "info", "title": title,
+                                          "body": [line_text]})
+                if card:  # the card goes first: it does not wait on the voice
+                    yield {"type": "card", "card": card}
+                async for ev in _speak(line_text, deps):
+                    yield ev
+                said.append(line_text)
     except Exception:
-        # Dead claude process: drop the session so the next turn starts fresh
-        # (the history above still carries the context).
-        pool.drop(body.conv_id)
+        pool.drop(body.conv_id)  # a stream/flush failure: start the next turn on a fresh CLI
         raise
     finally:
         # Client disconnected mid-stream (GeneratorExit): cancel the pending
