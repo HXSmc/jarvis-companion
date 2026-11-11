@@ -57,13 +57,15 @@ def repo_for(document: str | None) -> Path | None:
 
 
 def has_filters(repo: Path) -> bool:
-    """True when any filter comes from repo-controlled config (local, worktree, or their includes).
+    """True when any filter or diff driver program comes from repo-controlled config (local, worktree, or their includes).
 
     Those run repo-chosen commands during `git diff`; the overlay refuses such repos.
     Only global/system filters (the owner's own, e.g. git-lfs) are allowed. All scopes are read
     (not just --local): .git/config.worktree would otherwise slip past.
     """
-    out = _git(Path(repo), "config", "--includes", "--show-scope", "--get-regexp", r"^filter\.")
+    # filter.* runs on checkout/diff; diff.<x>.textconv / .command run on diff and blame.
+    out = _git(Path(repo), "config", "--includes", "--show-scope", "--get-regexp",
+               r"^(filter\.|diff\..+\.(textconv|command)$)")
     for line in (out or "").splitlines():
         scope = line.split("\t", 1)[0].strip()
         if scope not in ("global", "system"):
@@ -143,7 +145,8 @@ def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000) ->
 
 def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tuple[list[str], bool]:
     """Subjects of the commits behind lines a..b of `rel`; second item True when a line is uncommitted."""
-    out = _git(Path(repo), "blame", "-L", f"{a},{b}", "--porcelain", "--", rel)
+    # blame applies a repo's textconv by default: --no-textconv, as in the policy's own blame
+    out = _git(Path(repo), "blame", "--no-textconv", "-L", f"{a},{b}", "--porcelain", "--", rel)
     if not out:
         return [], False
     shas: list[str] = []
@@ -158,7 +161,7 @@ def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tupl
             shas.append(m[1])
     subjects = []
     for sha in shas[:max_n]:
-        log = _git(Path(repo), "log", "-1", "--format=%s", sha)
+        log = _git(Path(repo), "log", "-1", "--no-show-signature", "--format=%s", sha)
         subjects.append(log.splitlines()[0].strip()[:120] if log else "")
     return subjects, uncommitted
 

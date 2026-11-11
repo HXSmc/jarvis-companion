@@ -298,6 +298,26 @@ def test_blame_subjects_and_hunk_diff(tmp_path):
     assert text.startswith("@@") and "+L904 = 146" in text
 
 
+def test_blame_never_runs_a_repo_textconv(tmp_path):
+    """R1 security 1: a repo from an archive may set diff.<x>.textconv + .gitattributes; git blame
+    applies textconv by default, so "why did this change?" must not run that program."""
+    repo = tmp_path / "r"
+    _fixture().build(repo)
+    marker = tmp_path / "pwned"
+    script = tmp_path / "conv.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat \"$1\"\n")
+    script.chmod(0o755)
+    _git(repo, "config", "diff.evil.textconv", str(script))
+    (repo / ".gitattributes").write_text("*.py diff=evil\n")
+    subjects, _ = gitdiff.blame_subjects(repo, "sample.py", 149, 149)
+    assert not marker.exists()
+    assert subjects == ["Rename the timeout flag"]
+    assert gitdiff.has_filters(repo)  # the overlay refuses such a repo before any diff
+    _git(repo, "config", "--unset", "diff.evil.textconv")
+    _git(repo, "config", "diff.evil.command", str(script))
+    assert gitdiff.has_filters(repo)
+
+
 # --- since-the-merge turn (the service on top of the fixture repo) ---------------------------
 
 
