@@ -449,19 +449,20 @@ public enum ScatterLayout {
             let spanX = area.minX...area.maxX, spanY = area.minY...area.maxY
             var xs = old.map(\.minX), ys = old.map(\.minY)
             let widths = old.map(\.width), heights = old.map(\.height)
-            let rows: () -> [ClosedRange<CGFloat>] = { old.indices.map { ys[$0]...(ys[$0] + heights[$0]) } }
-            let columns: () -> [ClosedRange<CGFloat>] = { old.indices.map { xs[$0]...(xs[$0] + widths[$0]) } }
+            // Strips are kept between cards that shared a row (x squeeze) or a column (y squeeze) before
+            // the move; a corner squeeze on both axes does not stack the two.
+            let rows = old.map { $0.minY...$0.maxY }, columns = old.map { $0.minX...$0.maxX }
             let toLeft = {
-                xs = ScatterLayout.packed(xs, lengths: widths, across: rows(), from: area.minX, to: area.minX + halfX, atEnd: false, limit: spanX)
+                xs = ScatterLayout.packed(xs, lengths: widths, across: rows, from: area.minX, to: area.minX + halfX, atEnd: false, limit: spanX)
             }
             let toRight = {
-                xs = ScatterLayout.packed(xs, lengths: widths, across: rows(), from: area.maxX - halfX, to: area.maxX, atEnd: true, limit: spanX)
+                xs = ScatterLayout.packed(xs, lengths: widths, across: rows, from: area.maxX - halfX, to: area.maxX, atEnd: true, limit: spanX)
             }
             let toTop = {
-                ys = ScatterLayout.packed(ys, lengths: heights, across: columns(), from: area.minY, to: area.minY + halfY, atEnd: false, limit: spanY)
+                ys = ScatterLayout.packed(ys, lengths: heights, across: columns, from: area.minY, to: area.minY + halfY, atEnd: false, limit: spanY)
             }
             let toBottom = {
-                ys = ScatterLayout.packed(ys, lengths: heights, across: columns(), from: area.maxY - halfY, to: area.maxY, atEnd: true, limit: spanY)
+                ys = ScatterLayout.packed(ys, lengths: heights, across: columns, from: area.maxY - halfY, to: area.maxY, atEnd: true, limit: spanY)
             }
             switch direction {
             case .left: toLeft()
