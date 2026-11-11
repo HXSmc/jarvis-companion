@@ -906,6 +906,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         pool.drop(body.conv_id)
         raise
     finally:
+        if pictures is not None:  # barge-in, disconnect or error: no card for a turn that is over
+            pictures.cancel()
+            pictures.add_done_callback(lambda t: t.cancelled() or t.exception())  # retrieve, no warning
         # Client disconnected mid-stream (GeneratorExit): cancel the pending
         # ask and drop the session so the orphaned turn stops writing.
         if not task.done():

@@ -260,3 +260,56 @@ def test_only_attribution_licences_found_says_no_result(monkeypatch):
     events = run(make_deps(chunks=lines({"say": "Looking for a picture of a fox."},
                                         {"image_search": {"query": "fox", "count": 1}})))
     assert cards(events) == [] and says(events)[-1] == overlay.NO_PICTURE_LINE
+
+
+class RaisingSession:
+    """Streams an image_search line, then dies like a crashed claude process."""
+
+    def __init__(self):
+        self.prompts = []
+
+    def ask(self, text, jpeg=None, on_text=None):
+        self.prompts.append(text)
+        on_text(json.dumps({"image_search": {"query": "dog", "count": 1}}) + "\n")
+        raise RuntimeError("claude died")
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("how", ["disconnect", "error"])
+def test_lookup_is_cancelled_when_the_turn_ends_early(fake, how):
+    gate = threading.Event()  # the lookup stays in flight until the test ends
+    fake(hits=[hit(1)], gate=gate)
+    if how == "disconnect":
+        deps = make_deps(chunks=lines({"image_search": {"query": "dog", "count": 1}},
+                                      {"say": "Looking for a picture of a dog."}))
+    else:
+        convs = FakeConversations()
+        convs.sessions["c1"] = RaisingSession()
+        deps = make_deps(conversations=convs)
+    problems = []
+
+    async def go():
+        asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: problems.append(ctx["message"]))
+        agen = overlay.run_turn(overlay.TurnBody(text="show me a picture of a dog", conv_id="c1"), deps)
+        events = []
+        try:
+            async for ev in agen:
+                events.append(ev)
+                if how == "disconnect" and ev["type"] == "say" and ev["text"].startswith("Looking"):
+                    break
+        except RuntimeError:
+            pass
+        await agen.aclose()
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+        return events, pending
+    events, pending = asyncio.run(go())
+    gate.set()
+    import gc
+    gc.collect()
+    assert pending == [] and cards(events) == []
+    assert overlay.NO_PICTURE_LINE not in says(events)
+    assert not any("never retrieved" in m for m in problems)
