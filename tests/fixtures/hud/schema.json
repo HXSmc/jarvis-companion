@@ -292,6 +292,10 @@
               "type": "string",
               "maxLength": 120
             },
+            "caption": {
+              "type": "string",
+              "maxLength": 120
+            },
             "source_page": {
               "type": "string",
               "pattern": "^https://",
@@ -310,6 +314,10 @@
                     "maxLength": 2048
                   },
                   "alt": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "caption": {
                     "type": "string",
                     "maxLength": 120
                   },

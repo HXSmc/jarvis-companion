@@ -99,6 +99,21 @@ def test_image_gallery_items():
     assert len(eight["items"]) == hud.MAX_MEDIA_ITEMS
 
 
+def test_image_caption_is_plain_capped_text():
+    out = hud.validate_card({"id": "i", "type": "image", "title": "T", "url": "https://example.com/a.jpg",
+                             "caption": "Bob\x00\x1b, CC BY 4.0" + "x" * 200})
+    assert out["caption"].startswith("Bob") and len(out["caption"]) == hud.MAX_CAPTION
+    assert "\x00" not in out["caption"] and "\x1b" not in out["caption"]
+    gal = hud.validate_card({"id": "g", "type": "image", "title": "T", "items": [
+        {"url": "https://example.com/1.jpg", "caption": "A, CC0"}, {"url": "https://example.com/2.jpg", "caption": 7}]})
+    assert gal["items"][0]["caption"] == "A, CC0" and gal["items"][1]["caption"] == "7"
+    one = hud.validate_card({"id": "g", "type": "image", "title": "T",
+                             "items": [{"url": "https://example.com/1.jpg", "caption": "A, CC0"}]})
+    assert one["caption"] == "A, CC0"  # a one-item gallery keeps the item's caption
+    assert "caption" not in hud.validate_card({"id": "i", "type": "image", "title": "T",
+                                               "url": "https://example.com/a.jpg", "caption": None})
+
+
 YT_URLS = [
     f"https://www.youtube.com/watch?v={YT_ID}",
     f"https://youtube.com/watch?v={YT_ID}&t=30",

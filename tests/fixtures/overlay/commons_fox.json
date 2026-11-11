@@ -1,0 +1,118 @@
+{
+ "batchcomplete": true,
+ "query": {
+  "pages": [
+   {
+    "ns": 6,
+    "title": "File:Common foxes in the snow.jpg",
+    "index": 1,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/8/84/Common_foxes_in_the_snow.jpg/960px-Common_foxes_in_the_snow.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 526,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/8/84/Common_foxes_in_the_snow.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Common_foxes_in_the_snow.jpg",
+      "mime": "image/jpeg",
+      "width": 2000,
+      "height": 1316,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Common foxes in the snow"
+       },
+       "Categories": {
+        "value": "Retouched pictures|PD-scan (PD-old-auto-expired)|Featured pictures on Wikipedia, Vietnamese|CC-PD-Mark|PD-old-95-expired|Paintings without Wikidata item|Foxes in art of Germany|Featured pictures of Vulpes vulpes|Paintings of snowscapes|Featured pictures in the public domain|Paintings by Wilhelm Kuhnert|Vulpes vulpes in snow|Assessment tagged pages marked as POTY candidates|Vulpes vulpes (illustrations)|1890s paintings of foxes"
+       },
+       "Artist": {
+        "value": "<bdi><a href=\"https://en.wikipedia.org/wiki/en:Wilhelm_Kuhnert\" class=\"extiw\" title=\"w:en:Wilhelm Kuhnert\"><span title=\"German painter (1865-1926)\">Wilhelm Kuhnert</span></a></bdi>"
+       },
+       "LicenseShortName": {
+        "value": "Public domain"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "pd"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Red fox in yard, Charlton MA 2025-12-26.jpg",
+    "index": 2,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/37/Red_fox_in_yard%2C_Charlton_MA_2025-12-26.jpg/960px-Red_fox_in_yard%2C_Charlton_MA_2025-12-26.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 640,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/37/Red_fox_in_yard%2C_Charlton_MA_2025-12-26.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_fox_in_yard,_Charlton_MA_2025-12-26.jpg",
+      "mime": "image/jpeg",
+      "width": 5000,
+      "height": 4000,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red fox in yard, Charlton MA 2025-12-26"
+       },
+       "Categories": {
+        "value": "CC-Zero|Self-published work|Vulpes vulpes in Massachusetts|Vulpes vulpes in snow|Taken with Canon EOS R100|Taken with Canon RF-S 55-210mm F5-7.1 IS STM|Photographs by PeterCooperJr|Side views of Vulpes vulpes"
+       },
+       "Artist": {
+        "value": "<a href=\"//commons.wikimedia.org/wiki/User:PeterCooperJr\" title=\"User:PeterCooperJr\">Peter Cooper Jr.</a>"
+       },
+       "LicenseShortName": {
+        "value": "CC0"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "cc0"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "ns": 6,
+    "title": "File:Red Fox (Vulpes vulpes) (48490221346).jpg",
+    "index": 3,
+    "imageinfo": [
+     {
+      "thumburl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/2/24/Red_Fox_%28Vulpes_vulpes%29_%2848490221346%29.jpg/960px-Red_Fox_%28Vulpes_vulpes%29_%2848490221346%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+      "thumbwidth": 800,
+      "thumbheight": 533,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/2/24/Red_Fox_%28Vulpes_vulpes%29_%2848490221346%29.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Red_Fox_(Vulpes_vulpes)_(48490221346).jpg",
+      "mime": "image/jpeg",
+      "width": 6720,
+      "height": 4480,
+      "extmetadata": {
+       "ObjectName": {
+        "value": "Red Fox (Vulpes vulpes) (48490221346)"
+       },
+       "Categories": {
+        "value": "PD US NPS|Flickr images reviewed by FlickreviewR 2|Vulpes vulpes in the United States|Vulpes vulpes sitting"
+       },
+       "Artist": {
+        "value": "<a rel=\"nofollow\" class=\"external text\" href=\"https://www.flickr.com/people/43288043@N04\">GlacierNPS</a>"
+       },
+       "LicenseShortName": {
+        "value": "Public domain"
+       },
+       "AttributionRequired": {
+        "value": "false"
+       },
+       "License": {
+        "value": "pd"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}
