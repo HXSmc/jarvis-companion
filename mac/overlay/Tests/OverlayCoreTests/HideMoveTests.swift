@@ -156,7 +156,7 @@ final class HideMoveTests: XCTestCase {
     /// squeezes the group into the named part, order kept.
     func testScatteredGroupStillMovesVisibly() {
         var scattered = ScatterLayout.LayoutState()
-        let columns: [CGFloat] = [16, 382, 748, 1124], rows: [CGFloat] = [41, 300, 560]
+        let columns: [CGFloat] = [16, 382, 748, 1124], rows: [CGFloat] = [41, 407.5, 774]  // edge to edge both ways
         var i = 0
         for y in rows {
             for x in columns {
@@ -168,6 +168,7 @@ final class HideMoveTests: XCTestCase {
         }
         XCTAssertEqual(scattered.order.count, 12)
         XCTAssertEqual(group(scattered).width, area.width, accuracy: 0.001)
+        XCTAssertEqual(group(scattered).height, area.height, accuracy: 0.001)
         for direction in moves where direction != .otherSide {
             var state = scattered
             state.moveAll(direction, visible: visible)
