@@ -55,6 +55,8 @@ final class HUDWindow: NSPanel {
     /// A press that landed on a live player: its whole stream goes to the player untouched.
     private var pressOnPlayer = false
     private(set) var isDragging = false
+    /// AppKit frame an animated move is heading to; a sync during the animation must not cut it short.
+    private var moveTarget: CGRect?
 
     init() {
         super.init(contentRect: .zero,
@@ -86,7 +88,7 @@ final class HUDWindow: NSPanel {
         ignoresMouseEvents = true
         if alpha > 0, !isVisible { orderFrontRegardless() }
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Theme.reduceMotion ? 0 : 0.2
+            context.duration = Theme.reduceMotion ? 0 : ScatterLayout.motionShort
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = alpha
         }, completionHandler: { [self] in
@@ -121,6 +123,7 @@ final class HUDWindow: NSPanel {
             if !isDragging {
                 guard ScatterLayout.isDrag(from: press.pointer, to: pointer) else { return }
                 isDragging = true
+                stopMove()  // a card grabbed mid-slide follows the pointer, not the slide
                 orderFrontRegardless()
                 dragged(frame, false)
             }
@@ -144,10 +147,61 @@ final class HUDWindow: NSPanel {
     }
 
     /// Top-left global rect (HUD space) to this panel's AppKit frame; no-op when unchanged.
-    func place(_ rect: CGRect) {
+    /// `animated` (a voice move of a shown panel) slides there, longer for a longer way
+    /// (ScatterLayout.moveDuration), ease in-out; instant with Reduce Motion.
+    func place(_ rect: CGRect, animated: Bool = false) {
         guard !isDragging else { return }
         let frame = CardPanel.flip(rect)
-        if frame != self.frame { setFrame(frame, display: false) }
+        guard frame != self.frame, frame != moveTarget else { return }
+        guard animated, isVisible, !Theme.reduceMotion else {
+            return moveTarget == nil ? setFrame(frame, display: false) : stopMove(at: frame)
+        }
+        moveTarget = frame
+        let distance = hypot(frame.midX - self.frame.midX, frame.midY - self.frame.midY)
+        let width = (screen ?? NSScreen.main)?.visibleFrame.width ?? 0
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = ScatterLayout.moveDuration(distance: distance, across: width)
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            self.animator().setFrame(frame, display: false)
+        }, completionHandler: { [self] in
+            MainActor.assumeIsolated {
+                if moveTarget == frame { moveTarget = nil }
+            }
+        })
+    }
+
+    /// A refused move: lean `offset` (AppKit points) and back, `ScatterLayout.nudgeDuration` in
+    /// all; nothing under Reduce Motion, while hidden, dragged or sliding.
+    func nudge(by offset: CGVector) {
+        guard isVisible, !isDragging, moveTarget == nil, !Theme.reduceMotion else { return }
+        let home = frame
+        let half = ScatterLayout.nudgeDuration / 2
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = half
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(home.offsetBy(dx: offset.dx, dy: offset.dy), display: false)
+        }, completionHandler: { [self] in
+            MainActor.assumeIsolated {
+                guard moveTarget == nil, !isDragging else { return }
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = half
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    self.animator().setFrame(home, display: false)
+                }
+            }
+        })
+    }
+
+    /// Ends an in-flight slide at `target` (default: where the panel is now). A zero-length
+    /// animation replaces the running one; a plain setFrame could be overwritten by it.
+    private func stopMove(at target: CGRect? = nil) {
+        guard moveTarget != nil else { return }
+        moveTarget = nil
+        let end = target ?? frame
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            self.animator().setFrame(end, display: false)
+        }
     }
 
     /// True when the press lands inside a live player host, so its events go untouched.
@@ -187,6 +241,8 @@ final class CardPanel: NSObject {
     private var stacked: [String] = []
     /// The keep-outs `sync` last placed with (orb, highlights, permission card), for remeasure.
     private var keepOut: [CGRect] = []
+    /// `layout.moveCount` as of the last sync: a change means a voice move, which panels animate.
+    private var movesSeen = 0
     private var cancellables: [AnyCancellable] = []
 
     init(surface: NSWindow) {
@@ -203,12 +259,26 @@ final class CardPanel: NSObject {
         self.model = model
         permissionWindow.contentView = NSHostingView(rootView: PermissionCard(missing: []))
         model.pointerOnPanel = { [weak self] in self?.pointerOnPanel() ?? false }
+        model.moveBounds = { [weak self] in
+            guard let self else { return (.zero, []) }
+            let (screen, visible) = self.geometry
+            let permission = self.permissionWindow.isVisible ? [Self.flip(self.permissionWindow.frame)] : []
+            return (visible, [ScatterLayout.orbKeepOut(screen: screen)] + permission)
+        }
+        model.moveRefused = { [weak self] mode in
+            guard let self else { return }
+            let lean = ScatterLayout.nudgeOffset(mode)
+            for entry in self.entries.values {
+                entry.window.nudge(by: CGVector(dx: lean.dx, dy: -lean.dy))  // AppKit y points up
+            }
+        }
         // @Published fires before the value lands: sync on the next main-loop turn.
         let refit = { [weak self] (_: Any) in DispatchQueue.main.async { self?.sync() } }
         cancellables = [
             model.$cards.sink(receiveValue: refit),
             model.$missingPermissions.sink(receiveValue: refit),
-            model.$layout.map(\.mode).removeDuplicates().sink(receiveValue: refit),
+            model.$layout.map { ($0.mode, $0.hidden, $0.moveCount) }.removeDuplicates { $0 == $1 }
+                .sink(receiveValue: refit),
             model.$shapes.throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)
                 .sink(receiveValue: refit),
         ]
@@ -292,27 +362,30 @@ final class CardPanel: NSObject {
         }
 
         let aside = model.layout.mode == .aside
+        let hidden = model.layout.hidden
+        let animateMove = model.layout.moveCount != movesSeen
+        movesSeen = model.layout.moveCount
         let dragBounds = Self.flip(visible)
         for card in model.cards {
             let key = card.listKey
             guard var entry = entries[key], !entry.window.isDragging else { continue }
             entry.window.dragBounds = dragBounds
             let active = MediaPolicy.shouldAutoLoad(cardVisible: model.layout.frames[key] != nil,
-                                                    aside: aside, retired: false)
+                                                    aside: aside || hidden, retired: false)
             if active != entry.active {
                 entry.active = active
                 entry.host.rootView = tile(card, active: active)
                 entries[key] = entry
             }
-            guard !aside, let frame = model.layout.frames[key] else {
+            guard !aside, !hidden, let frame = model.layout.frames[key] else {
                 entry.window.fade(to: 0)
                 continue
             }
-            entry.window.place(frame)
+            entry.window.place(frame, animated: animateMove)
             // A highlight under a card dims it. Only a new line band moves cards off it, once (moveCards).
             entry.window.fade(to: highlights.contains { $0.intersects(frame) } ? 0.25 : 1)
         }
-        restack(aside ? [] : model.layout.order.filter { entries[$0] != nil })
+        restack(aside || hidden ? [] : model.layout.order.filter { entries[$0] != nil })
         syncChips(model, visible: visible, highlights: highlights, aside: aside)
     }
 

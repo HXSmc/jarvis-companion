@@ -15,6 +15,11 @@ PHRASES = {
     "diff": "Pulling up the changes.",
     "answer": "Just a moment.",
     "clear": "All cleared.",
+    "hide": "Hidden.",
+    "show": "Back on screen.",
+    "aside": "Out of the way.",
+    "restore": "Putting them back.",
+    "move": "Moving them.",
     "generic": "On it.",
     "agent_git": "Checking the git history.",
     "agent_gh": "Looking at GitHub.",
@@ -51,6 +56,11 @@ _ACK_KEYS = {
     "hunk": "hunk",
     "clear": "clear",
     "answer": "answer",
+    "hide": "hide",
+    "show": "show",
+    "aside": "aside",
+    "restore": "restore",
+    "move": "move",
 }
 
 
