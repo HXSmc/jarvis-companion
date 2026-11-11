@@ -135,17 +135,12 @@ final class MoveFixTests: XCTestCase {
         return (named.0, named.1, named.0 ?? (group.midX > area.midX), named.1 ?? (group.midY > area.midY))
     }
 
-    /// Card k of the old reading order sits in slot k of the row walk from the anchor corner.
+    /// f52-cardfix: the new frames read (top to bottom, then left to right) in the old reading order.
     private func assertRowsKeepReadingOrder(old: [CGRect], new: [CGRect], direction: LayoutMode, area: CGRect,
                                             visible: CGRect, label: String, line: UInt) {
-        let side = anchor(direction, old: old, area: area, visible: visible)
         let reading = old.indices.sorted { (old[$0].minY, old[$0].minX, $0) < (old[$1].minY, old[$1].minX, $1) }
-        let walk = new.indices.sorted {
-            let a = (side.resolvedBottom ? -new[$0].maxY : new[$0].minY, side.resolvedRight ? -new[$0].maxX : new[$0].minX)
-            let b = (side.resolvedBottom ? -new[$1].maxY : new[$1].minY, side.resolvedRight ? -new[$1].maxX : new[$1].minX)
-            return a < b
-        }
-        XCTAssertEqual(walk, reading, "reading order: \(label)", line: line)
+        let readNew = new.indices.sorted { (new[$0].minY, new[$0].minX, $0) < (new[$1].minY, new[$1].minX, $1) }
+        XCTAssertEqual(readNew, reading, "reading order: \(label)", line: line)
     }
 
     /// The group touches each named edge within 0.5 pt, or stops `minGap` short of a keep-out
@@ -190,6 +185,9 @@ final class MoveFixTests: XCTestCase {
     }
 
     // MARK: D1 diagrams, top_right (exact origins; cards 320x160, gap 20)
+    // f52-cardfix rule: a top anchor fills the top row with the first cards; a right anchor walks
+    // each row's slots from the right edge and gives the rightmost slot the row's LAST card, so
+    // every row reads left to right in the old reading order (card 1 first).
 
     /// Quarter x 720-1424, y 41-462.5. Row 1 (y 41): x 1104 hits the zone, the row jumps to end
     /// at 1040 -> x 720; x 380 is past the quarter. Row 2 (y 221): x 1104.
@@ -198,38 +196,44 @@ final class MoveFixTests: XCTestCase {
     }
 
     /// The quarter holds 3 (row 3 would end at y 561 > 462.5): the right half (x 720-1424, holds 7).
+    /// Row 1 (y 41): card 1 at 720 (zone jump). Row 2 (y 221): slots 1104, 764 take cards 2-3, card 3
+    /// rightmost -> card 2 at 764, card 3 at 1104. Row 3 (y 401): card 4 at 1104.
     func testDiagramLaptopFourCards() {
-        assertDiagram(4, laptop, [(720, 41), (1104, 221), (764, 221), (1104, 401)])
+        assertDiagram(4, laptop, [(720, 41), (764, 221), (1104, 221), (1104, 401)])
     }
 
-    /// Right half holds 7 (row 5 would end at y 921 > 884): the whole area, rows of 3 / 4 / 4 / 1.
+    /// Right half holds 7 (row 5 would end at y 921 > 884): the whole area, rows of 3 / 4 / 1.
+    /// Row 1 slots 720, 380, 40 hold cards 1-3 (card 3 at 720); row 2 slots 1104, 764, 424, 84 hold
+    /// cards 4-7 (card 7 at 1104); row 3: card 8 at 1104.
     func testDiagramLaptopEightCards() {
-        assertDiagram(8, laptop, [(720, 41), (380, 41), (40, 41), (1104, 221), (764, 221), (424, 221), (84, 221), (1104, 401)])
+        assertDiagram(8, laptop, [(40, 41), (380, 41), (720, 41), (84, 221), (424, 221), (764, 221), (1104, 221), (1104, 401)])
     }
 
-    /// Row 4 (y 581) ends at y 741, above the orb keep-out (768).
+    /// Rows of 3 / 4 / 4 / 1, each read left to right. Row 4 (y 581) ends at y 741, above the orb
+    /// keep-out (768).
     func testDiagramLaptopTwelveCards() {
-        assertDiagram(12, laptop, [(720, 41), (380, 41), (40, 41), (1104, 221), (764, 221), (424, 221), (84, 221),
-                                   (1104, 401), (764, 401), (424, 401), (84, 401), (1104, 581)])
+        assertDiagram(12, laptop, [(40, 41), (380, 41), (720, 41), (84, 221), (424, 221), (764, 221), (1104, 221),
+                                   (84, 401), (424, 401), (764, 401), (1104, 401), (1104, 581)])
     }
 
-    /// Quarter x 1720-3424, y 41-732.5. Row 1: x 3104 hits the zone -> 2720, 2380, 2040 (1700 is
-    /// past the quarter). Rows 2 and 3: 3104, 2764, 2424, 2084, 1744. The quarter holds 13.
+    /// Quarter x 1720-3424, y 41-732.5. Row 1: x 3104 hits the zone -> slots 2720, 2380, 2040 (1700
+    /// is past the quarter). Rows 2 and 3: slots 3104, 2764, 2424, 2084, 1744. The quarter holds 13.
+    /// Each row's run sits left to right, its last card in the rightmost slot.
     func testDiagramUltrawideTwoCards() {
-        assertDiagram(2, ultrawide, [(2720, 41), (2380, 41)])
+        assertDiagram(2, ultrawide, [(2380, 41), (2720, 41)])
     }
 
     func testDiagramUltrawideFourCards() {
-        assertDiagram(4, ultrawide, [(2720, 41), (2380, 41), (2040, 41), (3104, 221)])
+        assertDiagram(4, ultrawide, [(2040, 41), (2380, 41), (2720, 41), (3104, 221)])
     }
 
     func testDiagramUltrawideEightCards() {
-        assertDiagram(8, ultrawide, [(2720, 41), (2380, 41), (2040, 41), (3104, 221), (2764, 221), (2424, 221), (2084, 221), (1744, 221)])
+        assertDiagram(8, ultrawide, [(2040, 41), (2380, 41), (2720, 41), (1744, 221), (2084, 221), (2424, 221), (2764, 221), (3104, 221)])
     }
 
     func testDiagramUltrawideTwelveCards() {
-        assertDiagram(12, ultrawide, [(2720, 41), (2380, 41), (2040, 41), (3104, 221), (2764, 221), (2424, 221), (2084, 221),
-                                      (1744, 221), (3104, 401), (2764, 401), (2424, 401), (2084, 401)])
+        assertDiagram(12, ultrawide, [(2040, 41), (2380, 41), (2720, 41), (1744, 221), (2084, 221), (2424, 221), (2764, 221),
+                                      (3104, 221), (2084, 401), (2424, 401), (2764, 401), (3104, 401)])
     }
 
     /// `left` from an upper group (centre above the area's centre): left half x 16-720, rows from the top.

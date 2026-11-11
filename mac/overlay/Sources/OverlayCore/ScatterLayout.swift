@@ -149,6 +149,15 @@ public enum ScatterLayout {
         return (total, overlapped == 1 && inBand)
     }
 
+    /// A card resized from `old` to `new` covers one of `others` past `maxOverlap` of the smaller
+    /// card, and more than it did before (an overlap the user dragged into stays theirs).
+    static func growsPastCap(from old: CGRect, to new: CGRect, over others: [CGRect]) -> Bool {
+        others.contains { other in
+            let overlap = overlapArea(new, other)
+            return overlap > overlapArea(old, other) && overlap / min(area(new), area(other)) > maxOverlap
+        }
+    }
+
     /// `top` lies over one corner of `below`: the shared part is `minGap` to `maxCornerShare` of
     /// the smaller card deep on each axis, and `below`'s top-left corner (where its title
     /// starts) stays uncovered.
@@ -222,10 +231,10 @@ public enum ScatterLayout {
     /// Size of the area kept free for a macOS notification banner (the banner is 344 pt wide; the
     /// rest is its margin and shadow), top right of the visible frame.
     public static let notificationZoneSize = CGSize(width: 380, height: 130)
-    /// Kept free for a macOS notification banner (344 pt wide plus margins), top right of the
+    /// The notification banner's area (`notificationZoneSize`) in the top-right corner of the
     /// visible frame. Every card placement and voice move keeps it free (callers pass it as a keep-out).
     public static func notificationZone(visible: CGRect) -> CGRect {
-        CGRect(x: visible.maxX - notificationZoneSize.width, y: visible.minY, width: notificationZoneSize.width, height: notificationZoneSize.height)
+        CGRect(origin: CGPoint(x: visible.maxX - notificationZoneSize.width, y: visible.minY), size: notificationZoneSize)
     }
 
     /// A voice move of the group `old` toward `direction`, inside the inset area and off every
@@ -233,14 +242,17 @@ public enum ScatterLayout {
     /// - Stage 0: the whole group shifts to touch the named edge(s) of its first region (the
     ///   quarter for a corner, the half for a side; a group on one side mirrors for otherSide),
     ///   taking the shortest shared shift off a keep-out. Layout and overlaps stay as they were.
-    ///   A shift under `visibleShift` counts as done and moves nothing.
-    /// - Stage 1: cards in reading order (top to bottom, then left to right) fill rows from the
-    ///   anchor corner, `minGap` apart, no overlap, jumping past keep-outs; regions are tried from
-    ///   the quarter or half out to the whole area.
+    ///   A shift under `visibleShift` counts as done and moves nothing (a card left outside the
+    ///   area, by a Dock or display change, only comes back inside).
+    /// - Stage 1: cards in reading order (top to bottom, then left to right) fill rows against the
+    ///   anchor corner, `minGap` apart, no overlap, jumping past keep-outs, and keep that reading
+    ///   order (`rows`); regions are tried from the quarter or half out to the whole area.
     /// - Stage 2: only when stage 1 cannot fit them: an overlapping grid in reading order (later
     ///   cards in front), each card's top-left `minStrip` square uncovered, largest steps first.
     /// The anchor corner: the named side(s); an unnamed axis takes the side the group's centre is
     /// on. otherSide goes toward the half away from the group's centre.
+    /// A group that stage 1 or 2 would leave exactly where it is stays put (stage 0, no motion),
+    /// so asking for the same move again changes nothing.
     public static func reflow(old: [CGRect], direction: LayoutMode, visible: CGRect,
                               keepOut: [CGRect]) -> (frames: [CGRect], stage: Int)? {
         let area = insetArea(visible)
@@ -265,17 +277,50 @@ public enum ScatterLayout {
         }
         let right = named.right ?? (group.midX > area.midX)
         let bottom = named.bottom ?? (group.midY > area.midY)
-        let column = CGRect(x: right ? area.midX : area.minX, y: area.minY, width: area.width / 2, height: area.height)
-        let band = CGRect(x: area.minX, y: bottom ? area.midY : area.minY, width: area.width, height: area.height / 2)
-        let regions: [CGRect]
-        if named.right != nil, named.bottom != nil {
-            regions = [column.intersection(band), column, area]
-        } else {
-            regions = [named.right != nil ? column : band, area]
+        func regions(right: Bool, bottom: Bool) -> [CGRect] {
+            let column = CGRect(x: right ? area.midX : area.minX, y: area.minY, width: area.width / 2, height: area.height)
+            let band = CGRect(x: area.minX, y: bottom ? area.midY : area.minY, width: area.width, height: area.height / 2)
+            if named.right != nil, named.bottom != nil { return [column.intersection(band), column, area] }
+            return [named.right != nil ? column : band, area]
+        }
+
+        let reading = old.indices.sorted { (old[$0].minY, old[$0].minX, $0) < (old[$1].minY, old[$1].minX, $1) }
+        let sizes = reading.map { old[$0].size }
+        func inOldOrder(_ slots: [CGRect]) -> [CGRect] {
+            var frames = old
+            for (slot, index) in reading.enumerated() { frames[index] = slots[slot] }
+            return frames
+        }
+        func flow(right: Bool, bottom: Bool) -> (frames: [CGRect], stage: Int)? {
+            // Stage 1: rows without overlap, smallest region first.
+            for region in regions(right: right, bottom: bottom) {
+                if let slots = rows(sizes, in: region, right: right, bottom: bottom, keepOut: keepOut) {
+                    return (inOldOrder(slots), 1)
+                }
+            }
+            // Stage 2: the overlapping grid with the largest steps in any room clear of the keep-outs.
+            var best: (frames: [CGRect], step: CGFloat)?
+            for space in rooms(area, keepOut: keepOut) {
+                if let found = grid(sizes, in: space, right: right, bottom: bottom, keepOut: keepOut),
+                   found.step > best?.step ?? 0 {
+                    best = found
+                }
+            }
+            guard let best else { return nil }
+            return (inOldOrder(best.frames), 2)
+        }
+        // Fixed point: the group already sits where stage 1 or 2 puts it for this direction (a
+        // repeated move), on either side of an unnamed axis (a block stage 2 put in a room away from
+        // the side it started on). Checked before stage 0, whose flush shift off a keep-out would
+        // nudge rows laid `minGap` from it.
+        for right in named.right.map({ [$0] }) ?? [true, false] {
+            for bottom in named.bottom.map({ [$0] }) ?? [true, false] {
+                if let flowed = flow(right: right, bottom: bottom), sameFrames(flowed.frames, old) { return (old, 0) }
+            }
         }
 
         // Stage 0: one shared shift keeps the owner's layout.
-        let first = regions[0]
+        let first = regions(right: right, bottom: bottom)[0]
         var dx: CGFloat = 0, dy: CGFloat = 0
         if mirror {
             dx = 2 * visible.midX - group.maxX - group.minX
@@ -286,64 +331,79 @@ public enum ScatterLayout {
         let room = mirror ? area : first
         let clear = { (frames: [CGRect]) -> Bool in !frames.contains { frame in keepOut.contains { overlapArea($0, frame) > 0 } } }
         if room.insetBy(dx: -0.5, dy: -0.5).contains(group.offsetBy(dx: dx, dy: dy)) {
-            if hypot(dx, dy) < visibleShift, clear(old) { return (old, 0) }
+            if hypot(dx, dy) < visibleShift {
+                // Close enough: no motion, except a card a Dock or display change left outside the area comes back in.
+                let slack = area.insetBy(dx: -0.5, dy: -0.5)
+                let inside = old.allSatisfy { slack.contains($0) } ? old : old.map { clamp($0, into: area) }
+                if clear(inside) { return (inside, 0) }
+            }
             if let placed = clearOf(keepOut, old.map { $0.offsetBy(dx: dx, dy: dy) }, area: room) { return (placed, 0) }
         }
-
-        let reading = old.indices.sorted { (old[$0].minY, old[$0].minX, $0) < (old[$1].minY, old[$1].minX, $1) }
-        let sizes = reading.map { old[$0].size }
-        func inOldOrder(_ slots: [CGRect]) -> [CGRect] {
-            var frames = old
-            for (slot, index) in reading.enumerated() { frames[index] = slots[slot] }
-            return frames
-        }
-        // Stage 1: rows without overlap, smallest region first.
-        for region in regions {
-            if let slots = rows(sizes, in: region, right: right, bottom: bottom, keepOut: keepOut) {
-                return (inOldOrder(slots), 1)
-            }
-        }
-        // Stage 2: the overlapping grid with the largest steps in any room clear of the keep-outs.
-        var best: (frames: [CGRect], step: CGFloat)?
-        for space in rooms(area, keepOut: keepOut) {
-            if let found = grid(sizes, in: space, right: right, bottom: bottom, keepOut: keepOut),
-               found.step > best?.step ?? 0 {
-                best = found
-            }
-        }
-        guard let best else { return nil }
-        return (inOldOrder(best.frames), 2)
+        return flow(right: right, bottom: bottom)
     }
 
-    /// Cards of `sizes` (in order) in rows from the (`right`, `bottom`) corner of `region`, each row
-    /// `minGap` past the tallest card of the one before, each card `minGap` past the one before.
-    /// A card that would cover a keep-out jumps past it; a card past the region's far side starts
-    /// the next row. Nil when a row would pass the region's far edge.
+    /// Same count, and each frame within 0.5 pt of its partner on every edge.
+    static func sameFrames(_ a: [CGRect], _ b: [CGRect]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { pair in
+            abs(pair.0.minX - pair.1.minX) <= 0.5 && abs(pair.0.minY - pair.1.minY) <= 0.5
+                && abs(pair.0.maxX - pair.1.maxX) <= 0.5 && abs(pair.0.maxY - pair.1.maxY) <= 0.5
+        }
+    }
+
+    /// Cards of `sizes` (in reading order) in rows against the (`right`, `bottom`) corner of
+    /// `region`, each row `minGap` past the tallest card of the one before, each card `minGap` past
+    /// its neighbour, the cards of a row sharing its top edge. A top anchor fills the top row with
+    /// the first cards, a bottom anchor the bottom row with the last ones; a row takes the longest
+    /// run that fits, laid out from the anchor's side so the run reads left to right. So the slots
+    /// read top to bottom, left to right in the order of `sizes`, and a second pass over them gives
+    /// the same slots. A card that would cover a keep-out jumps past it; a row where not even one
+    /// card fits is skipped. Slots come back in the order of `sizes`; nil when a row would pass the
+    /// region's far edge.
     static func rows(_ sizes: [CGSize], in region: CGRect, right: Bool, bottom: Bool, keepOut: [CGRect]) -> [CGRect]? {
         let eps: CGFloat = 0.001
-        var slots: [CGRect] = []
-        var line = bottom ? region.maxY : region.minY  // the row's edge nearest the anchor
-        while slots.count < sizes.count {
+        /// Slots of the cards `run` in the row whose edge nearest the anchor is `line`, in run
+        /// order; nil when a card would leave the region sideways.
+        func row(_ run: Range<Int>, line: CGFloat) -> [CGRect]? {
+            let top = bottom ? line - run.map { sizes[$0].height }.max()! : line
             var edge = right ? region.maxX : region.minX  // the next card's side nearest the anchor
-            var tallest: CGFloat = 0
-            while slots.count < sizes.count {
-                let size = sizes[slots.count]
-                let frame = CGRect(x: right ? edge - size.width : edge, y: bottom ? line - size.height : line,
-                                   width: size.width, height: size.height)
-                if frame.minY < region.minY - eps || frame.maxY > region.maxY + eps { return nil }
-                if frame.minX < region.minX - eps || frame.maxX > region.maxX + eps {
-                    if tallest == 0 { tallest = size.height }  // nothing fit in this row: try the next
-                    break
-                }
-                let hits = keepOut.filter { overlapArea($0, frame) > 0 }
-                if !hits.isEmpty {
+            var placed: [Int: CGRect] = [:]
+            for index in right ? Array(run.reversed()) : Array(run) {
+                let size = sizes[index]
+                while true {
+                    let frame = CGRect(x: right ? edge - size.width : edge, y: top, width: size.width, height: size.height)
+                    if frame.minX < region.minX - eps || frame.maxX > region.maxX + eps { return nil }
+                    let hits = keepOut.filter { overlapArea($0, frame) > 0 }
+                    if hits.isEmpty {
+                        placed[index] = frame
+                        edge = right ? frame.minX - minGap : frame.maxX + minGap
+                        break
+                    }
                     edge = right ? hits.map(\.minX).min()! - minGap : hits.map(\.maxX).max()! + minGap
-                    continue
                 }
-                slots.append(frame)
-                tallest = max(tallest, size.height)
-                edge = right ? frame.minX - minGap : frame.maxX + minGap
             }
+            return run.map { placed[$0]! }
+        }
+        var slots = sizes.map { CGRect(origin: .zero, size: $0) }
+        var rest = sizes.indices  // cards not placed yet
+        var line = bottom ? region.maxY : region.minY  // the row's edge nearest the anchor
+        while !rest.isEmpty {
+            var fitted: (run: Range<Int>, frames: [CGRect])?
+            for count in 1...rest.count {
+                let run = bottom ? rest.upperBound - count..<rest.upperBound : rest.lowerBound..<rest.lowerBound + count
+                let tallest = run.map { sizes[$0].height }.max()!
+                // A taller card here only gets farther from the anchor in a later row.
+                if bottom ? line - tallest < region.minY - eps : line + tallest > region.maxY + eps { return nil }
+                guard let frames = row(run, line: line) else { break }
+                fitted = (run, frames)
+            }
+            guard let fitted else {  // not even one card fits this row: try the next
+                let height = sizes[bottom ? rest.upperBound - 1 : rest.lowerBound].height
+                line += bottom ? -(height + minGap) : height + minGap
+                continue
+            }
+            for (index, frame) in zip(fitted.run, fitted.frames) { slots[index] = frame }
+            rest = bottom ? rest.lowerBound..<fitted.run.lowerBound : fitted.run.upperBound..<rest.upperBound
+            let tallest = fitted.run.map { sizes[$0].height }.max()!
             line += bottom ? -(tallest + minGap) : tallest + minGap
         }
         return slots
@@ -594,14 +654,20 @@ public enum ScatterLayout {
         /// permission card, notification zone). Returns false, changing nothing (still hidden or
         /// parked), when there is no room, nothing to move, or the mode is not a move. Otherwise
         /// shows, restores, moves and pins the cards; after a grid, `order` follows reading order
-        /// so later cards lie in front and every card's corner stays uncovered.
+        /// so later cards lie in front and every card's corner stays uncovered. A group already in
+        /// place succeeds without motion: frames, `order` and `moveCount` stay as they are.
         @discardableResult
         public mutating func moveAll(_ direction: LayoutMode, visible: CGRect, keepOut: [CGRect] = []) -> Bool {
             let keys = order.filter { frames[$0] != nil }
-            guard let result = ScatterLayout.reflow(old: keys.compactMap { frames[$0] }, direction: direction,
+            let old = keys.compactMap { frames[$0] }
+            guard let result = ScatterLayout.reflow(old: old, direction: direction,
                                                     visible: visible, keepOut: keepOut) else { return false }
             hidden = false
             mode = .normal
+            if ScatterLayout.sameFrames(result.frames, old) {
+                pinned.formUnion(keys)
+                return true
+            }
             for (index, key) in keys.enumerated() {
                 frames[key] = result.frames[index]
                 pinned.insert(key)
@@ -649,22 +715,30 @@ public enum ScatterLayout {
         /// unpinned cards (older ones below it, newer ones on top); otherwise that card alone is
         /// placed again (no other card moves), retiring the oldest if needed. Returns the retired
         /// keys. A pinned card only stays on screen. A highlight already under the old frame
-        /// does not move it (the card dims instead).
+        /// does not move it (the card dims instead). Neither kind may grow over another card past
+        /// `maxOverlap` (pinned cards included): that card is placed again instead.
         @discardableResult
         public mutating func cardResized(_ key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) -> [String] {
             guard let old = frames[key], let position = order.firstIndex(of: key) else { return [] }
             let moved = CGRect(origin: old.origin, size: size)
+            let all = order.filter { $0 != key }.compactMap { frames[$0] }
             if pinned.contains(key) {
-                frames[key] = ScatterLayout.clamp(moved, into: visible)
-                return []
+                let frame = ScatterLayout.clamp(moved, into: visible)
+                guard ScatterLayout.growsPastCap(from: old, to: frame, over: all) else {
+                    frames[key] = frame
+                    return []
+                }
+                return cardAdded(key, size: size, visible: visible, keepOut: keepOut)
             }
             let frame = ScatterLayout.clamp(moved, into: ScatterLayout.insetArea(visible))
             guard frame != old else { return [] }
-            // Overlaps with a pinned card are the user's choice, not something the new size broke.
+            // Overlaps with a pinned card are the user's choice (only the overlap cap applies to
+            // them), not something the new size broke.
             let older = order[..<position].filter { !pinned.contains($0) }
             let newer = order[(position + 1)...].filter { !pinned.contains($0) }
             let others = (older + newer).compactMap { frames[$0] }
             if !keepOut.contains(where: { $0.intersects(frame) && !$0.intersects(old) }),
+               !ScatterLayout.growsPastCap(from: old, to: frame, over: all),
                ScatterLayout.fitness(frame, existing: others, covered: ScatterLayout.coverage(others),
                                      newerFrom: older.count) != nil {
                 frames[key] = frame
@@ -721,6 +795,43 @@ public enum ScatterLayout {
             let area = ScatterLayout.insetArea(visible)
             for (key, frame) in frames {
                 frames[key] = ScatterLayout.clamp(frame, into: pinned.contains(key) ? visible : area)
+            }
+        }
+    }
+
+    // MARK: - Idle stash
+
+    /// The cards the 60 s idle clear took off screen, kept so "show them" brings them back at the
+    /// same places. Memory only (never written or logged), one set at a time, for `retention` at
+    /// most; `clear`, a new card or shape, or a move / aside / restore with cards shown drop it.
+    public struct IdleStash {
+        /// How long an idle-cleared set stays restorable.
+        public static let retention: TimeInterval = 600
+
+        public let cards: [HUDCard]
+        /// Frames, order and pins as they were; a screen change reclamps them like shown cards.
+        public var layout: LayoutState
+        public let clearedAt: Date
+
+        public init(cards: [HUDCard], layout: LayoutState, clearedAt: Date) {
+            self.cards = cards
+            self.layout = layout
+            self.clearedAt = clearedAt
+        }
+
+        public func restorable(now: Date) -> Bool {
+            now.timeIntervalSince(clearedAt) < Self.retention
+        }
+
+        public enum Event { case clear, newCard, newShape, layout(LayoutMode) }
+
+        /// Whether a stash outlives `event`: never `clear`, a new card or a new shape; a move,
+        /// aside or restore only when no card is on screen; hide and show always (show restores it).
+        public static func survives(_ event: Event, cardsOnScreen: Bool) -> Bool {
+            switch event {
+            case .clear, .newCard, .newShape: return false
+            case .layout(.hide), .layout(.show): return true
+            case .layout: return !cardsOnScreen
             }
         }
     }
