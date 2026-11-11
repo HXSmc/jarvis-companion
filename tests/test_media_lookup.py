@@ -148,7 +148,6 @@ def test_card_single_and_gallery(commons):
     gal = hud.validate_card(media_lookup.find("red fox", 3))
     assert len(gal["items"]) == 3 and gal["url"] == gal["items"][0]["url"]
     assert all(it["caption"].endswith("Wikimedia Commons") for it in gal["items"])
-    assert media_lookup.find("red fox", 3) == gal | {"id": media_lookup.find("red fox", 3).get("id", gal["id"])} or True
 
 
 def test_caption_truncates_artist_never_licence():
