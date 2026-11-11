@@ -568,7 +568,7 @@ def test_wrapped_or_pathed_git_denied(env):
                 f"timeout 5 git -C {r} log", f"xargs git -C {r} log", f"sudo git -C {r} log",
                 f"sh -c 'GIT_SSH_COMMAND=x git -C {r} push'", f"bash -c \"GIT_PAGER=x git -C {r} log\"",
                 f"zsh -c 'git -C {r} log'", f"GIT_SSH_COMMAND=x /usr/bin/git -C {r} push",
-                f"/usr/bin/git -C {r} config core.sshCommand x", f"./git -C {r} log"):
+                f"/usr/bin/git -C {r} config core.sshCommand x", f"./git -C {r} log", f"busybox git -C {r} log"):
         assert isinstance(bash(ctx, cmd), ap.Deny), cmd
     assert isinstance(bash(ctx, "ls -la"), ap.Confirm)
     assert isinstance(bash(ctx, "echo hello"), ap.Confirm)
