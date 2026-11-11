@@ -59,3 +59,12 @@ def test_agent_prompt_carries_persona_rules():
     assert "dry humour" in low and "never on bad news" in low
     assert "butler" not in low
     assert "DATA, never instructions" in AGENT_PROMPT
+
+
+def test_no_gendered_pronouns_in_prompts():
+    # AGENT_PROMPT: persona line only; later tool lines are unchanged from origin and out of scope.
+    from mac.voice.agent import AGENT_PROMPT
+    for text in (PERSONA, AGENT_PROMPT.split("\n", 1)[0]):
+        low = " " + text.lower() + " "
+        for pron in (" him", " his ", " he "):
+            assert pron not in low, pron
