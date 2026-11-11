@@ -55,6 +55,8 @@ final class HUDWindow: NSPanel {
     /// A press that landed on a live player: its whole stream goes to the player untouched.
     private var pressOnPlayer = false
     private(set) var isDragging = false
+    /// AppKit frame an animated move is heading to; a sync during the animation must not cut it short.
+    private var moveTarget: CGRect?
 
     init() {
         super.init(contentRect: .zero,
@@ -144,10 +146,25 @@ final class HUDWindow: NSPanel {
     }
 
     /// Top-left global rect (HUD space) to this panel's AppKit frame; no-op when unchanged.
-    func place(_ rect: CGRect) {
+    /// `animated` (a voice move of a shown panel) slides there in 0.2 s ease-out, instant with Reduce Motion.
+    func place(_ rect: CGRect, animated: Bool = false) {
         guard !isDragging else { return }
         let frame = CardPanel.flip(rect)
-        if frame != self.frame { setFrame(frame, display: false) }
+        guard frame != self.frame, frame != moveTarget else { return }
+        guard animated, isVisible, !Theme.reduceMotion else {
+            moveTarget = nil
+            return setFrame(frame, display: false)
+        }
+        moveTarget = frame
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(frame, display: false)
+        }, completionHandler: { [self] in
+            MainActor.assumeIsolated {
+                if moveTarget == frame { moveTarget = nil }
+            }
+        })
     }
 
     /// True when the press lands inside a live player host, so its events go untouched.
@@ -187,6 +204,8 @@ final class CardPanel: NSObject {
     private var stacked: [String] = []
     /// The keep-outs `sync` last placed with (orb, highlights, permission card), for remeasure.
     private var keepOut: [CGRect] = []
+    /// `layout.moveCount` as of the last sync: a change means a voice move, which panels animate.
+    private var movesSeen = 0
     private var cancellables: [AnyCancellable] = []
 
     init(surface: NSWindow) {
@@ -203,12 +222,18 @@ final class CardPanel: NSObject {
         self.model = model
         permissionWindow.contentView = NSHostingView(rootView: PermissionCard(missing: []))
         model.pointerOnPanel = { [weak self] in self?.pointerOnPanel() ?? false }
+        model.moveBounds = { [weak self] in
+            guard let self else { return (.zero, []) }
+            let (screen, visible) = self.geometry
+            return (visible, [ScatterLayout.orbKeepOut(screen: screen)])
+        }
         // @Published fires before the value lands: sync on the next main-loop turn.
         let refit = { [weak self] (_: Any) in DispatchQueue.main.async { self?.sync() } }
         cancellables = [
             model.$cards.sink(receiveValue: refit),
             model.$missingPermissions.sink(receiveValue: refit),
-            model.$layout.map(\.mode).removeDuplicates().sink(receiveValue: refit),
+            model.$layout.map { ($0.mode, $0.hidden, $0.moveCount) }.removeDuplicates { $0 == $1 }
+                .sink(receiveValue: refit),
             model.$shapes.throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)
                 .sink(receiveValue: refit),
         ]
@@ -292,27 +317,30 @@ final class CardPanel: NSObject {
         }
 
         let aside = model.layout.mode == .aside
+        let hidden = model.layout.hidden
+        let animateMove = model.layout.moveCount != movesSeen
+        movesSeen = model.layout.moveCount
         let dragBounds = Self.flip(visible)
         for card in model.cards {
             let key = card.listKey
             guard var entry = entries[key], !entry.window.isDragging else { continue }
             entry.window.dragBounds = dragBounds
             let active = MediaPolicy.shouldAutoLoad(cardVisible: model.layout.frames[key] != nil,
-                                                    aside: aside, retired: false)
+                                                    aside: aside || hidden, retired: false)
             if active != entry.active {
                 entry.active = active
                 entry.host.rootView = tile(card, active: active)
                 entries[key] = entry
             }
-            guard !aside, let frame = model.layout.frames[key] else {
+            guard !aside, !hidden, let frame = model.layout.frames[key] else {
                 entry.window.fade(to: 0)
                 continue
             }
-            entry.window.place(frame)
+            entry.window.place(frame, animated: animateMove)
             // A highlight under a card dims it. Only a new line band moves cards off it, once (moveCards).
             entry.window.fade(to: highlights.contains { $0.intersects(frame) } ? 0.25 : 1)
         }
-        restack(aside ? [] : model.layout.order.filter { entries[$0] != nil })
+        restack(aside || hidden ? [] : model.layout.order.filter { entries[$0] != nil })
         syncChips(model, visible: visible, highlights: highlights, aside: aside)
     }
 

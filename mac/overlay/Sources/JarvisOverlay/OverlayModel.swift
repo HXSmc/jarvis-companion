@@ -28,6 +28,8 @@ final class OverlayModel: ObservableObject {
     /// Set by CardPanel: whether the pointer rests on a shown card, chip or the permission card
     /// right now. Read at the idle deadline only, so no remembered hover state can stick.
     var pointerOnPanel: @MainActor () -> Bool = { false }
+    /// Set by CardPanel: the visible frame (top-left points) and the orb keep-out a group move uses.
+    var moveBounds: @MainActor () -> (visible: CGRect, keepOut: [CGRect]) = { (.zero, []) }
     private static let maxShapes = 40
 
     /// Every shape held, oldest first; `shapes` is the visible part (hidden anchored shapes
@@ -51,6 +53,7 @@ final class OverlayModel: ObservableObject {
     /// Returns the key that anchor(_:) takes once the shape's window is known.
     @discardableResult
     func add(shape: HUDShape) -> Int {
+        unhide()
         nextShapeKey += 1
         entries.append(ShapeEntry(key: nextShapeKey, shape: shape))
         let dropsAnchor = entries.count > Self.maxShapes && entries[0].anchor != nil
@@ -108,6 +111,7 @@ final class OverlayModel: ObservableObject {
     }
 
     func add(card: HUDCard) {
+        unhide()  // a new answer is never invisible
         if let id = card.id, let index = cards.firstIndex(where: { $0.id == id }) {
             cards[index] = card
         } else {
@@ -153,9 +157,24 @@ final class OverlayModel: ObservableObject {
     }
 
     /// Aside parks every card as a chip and drops the current highlight boxes; restore puts
-    /// each card back at its stored frame and restarts the idle countdown. Repeats are no-ops.
+    /// each card back at its stored frame and restarts the idle countdown. Hide fades every card
+    /// and chip out (kept, idle countdown paused, highlights and media stopped); show and every
+    /// other mode make them visible again. A move restores parked cards, then moves the group.
+    /// Repeats are no-ops.
     func setLayout(_ mode: LayoutMode) {
+        if mode == .hide {
+            guard !layout.hidden else { return }
+            layout.hide()
+            MediaPlaybackController.shared.stopAll()
+            clearShapes()
+            idleTask?.cancel()
+            idleTask = nil
+            return
+        }
+        unhide()
         switch mode {
+        case .hide, .show:
+            break
         case .aside:
             guard layout.mode == .normal else { return }
             layout.aside()
@@ -165,7 +184,18 @@ final class OverlayModel: ObservableObject {
             guard layout.mode == .aside else { return }
             layout.restore()
             bumpIdle()
+        case .left, .right, .up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight, .otherSide:
+            let bounds = moveBounds()
+            layout.moveAll(mode, visible: bounds.visible, keepOut: bounds.keepOut)
+            bumpIdle()
         }
+    }
+
+    /// Hidden cards come back (show, any other layout command, a new card or shape).
+    private func unhide() {
+        guard layout.hidden else { return }
+        layout.show()
+        bumpIdle()
     }
 
     func clear() {
@@ -196,7 +226,7 @@ final class OverlayModel: ObservableObject {
             return
         }
         clearShapes()
-        if layout.mode == .normal { cards = [] }
+        if layout.mode == .normal && !layout.hidden { cards = [] }
     }
 
     private func clearShapes() {

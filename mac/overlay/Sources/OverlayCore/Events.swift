@@ -11,9 +11,12 @@ public struct AXCheck: Codable, Equatable {
     }
 }
 
-/// Mode of a layout event: aside parks every card as a chip, restore puts each one back.
-public enum LayoutMode: String, Equatable {
-    case aside, restore
+/// Mode of a layout event: aside parks every card as a chip, restore puts each one back; hide
+/// and show fade every card out and back (nothing is removed); the rest move all cards as one group.
+public enum LayoutMode: String, Equatable, CaseIterable {
+    case aside, restore, hide, show, left, right, up, down
+    case topLeft = "top_left", topRight = "top_right", bottomLeft = "bottom_left", bottomRight = "bottom_right"
+    case otherSide = "other_side"
 }
 
 /// One NDJSON event line from POST /overlay/utterance. Unknown or malformed

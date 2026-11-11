@@ -301,11 +301,17 @@ public enum ScatterLayout {
         public private(set) var pinned: Set<String> = []
         /// Cards with no spot yet (no room while aside, or only a keep-out in the way), oldest first.
         public private(set) var waiting: [String] = []
+        /// Hidden: no card or chip shows; frames, order, pins and the mode are kept for show().
+        public private(set) var hidden = false
+        /// Bumped by every group move, so the panels animate that change (and no other).
+        public private(set) var moveCount = 0
 
         public init() {}
 
         /// Keys shown as chips: every card while aside (placed or still waiting), none otherwise.
-        public var chipKeys: [String] { mode == .aside ? order + waiting : [] }
+        public var chipKeys: [String] { mode == .aside && !hidden ? order + waiting : [] }
+        /// Keys shown as cards at their frames: every placed card while normal and not hidden.
+        public var visibleKeys: [String] { mode == .normal && !hidden ? order : [] }
 
         /// Who goes first when room is needed: unpinned cards, back to front, then pinned ones.
         public var retireOrder: [String] { order.filter { !pinned.contains($0) } + order.filter { pinned.contains($0) } }
@@ -313,6 +319,48 @@ public enum ScatterLayout {
         public mutating func aside() { mode = .aside }
         public mutating func restore() { mode = .normal }
         public mutating func clear() { self = LayoutState() }
+        public mutating func hide() { hidden = true }
+        public mutating func show() { hidden = false }
+
+        /// Moves every placed card as one group (relative layout kept) to an edge or corner of the
+        /// inset area: left/right change only x, up/down only y, otherSide translates the group to
+        /// its mirror image across the visible frame's centre line. A group that would cover a
+        /// keep-out (the orb) is lifted clear of it; each card is then clamped inside the inset
+        /// area and pinned, so later placements keep it. Shows and restores first. Other modes: no-op.
+        public mutating func moveAll(_ direction: LayoutMode, visible: CGRect, keepOut: [CGRect] = []) {
+            let area = ScatterLayout.insetArea(visible)
+            let keys = order.filter { frames[$0] != nil }
+            guard let group = keys.compactMap({ frames[$0] }).reduce(nil as CGRect?, { $0?.union($1) ?? $1 }),
+                  area.width > 0, area.height > 0 else { return }
+            let toLeft = area.minX - group.minX, toRight = area.maxX - group.maxX
+            let toTop = area.minY - group.minY, toBottom = area.maxY - group.maxY
+            let delta: CGPoint
+            switch direction {
+            case .left: delta = CGPoint(x: toLeft, y: 0)
+            case .right: delta = CGPoint(x: toRight, y: 0)
+            case .up: delta = CGPoint(x: 0, y: toTop)
+            case .down: delta = CGPoint(x: 0, y: toBottom)
+            case .topLeft: delta = CGPoint(x: toLeft, y: toTop)
+            case .topRight: delta = CGPoint(x: toRight, y: toTop)
+            case .bottomLeft: delta = CGPoint(x: toLeft, y: toBottom)
+            case .bottomRight: delta = CGPoint(x: toRight, y: toBottom)
+            case .otherSide: delta = CGPoint(x: 2 * visible.midX - group.maxX - group.minX, y: 0)
+            case .aside, .restore, .hide, .show: return
+            }
+            // shortcut: one lift up off the keep-outs, a group taller than the space above the orb still covers it.
+            let moved = keys.compactMap { frames[$0]?.offsetBy(dx: delta.x, dy: delta.y) }
+            let lift = moved.flatMap { frame in
+                keepOut.filter { $0.intersects(frame) }.map { frame.maxY - $0.minY }
+            }.max() ?? 0
+            hidden = false
+            mode = .normal
+            for key in keys {
+                guard let frame = frames[key] else { continue }
+                frames[key] = ScatterLayout.clamp(frame.offsetBy(dx: delta.x, dy: delta.y - lift), into: area)
+                pinned.insert(key)
+            }
+            moveCount &+= 1
+        }
 
         /// Places a measured card against the stored frames. Returns the keys retired to make
         /// room, oldest first. The card stays unplaced when only a keep-out is in the way, or
