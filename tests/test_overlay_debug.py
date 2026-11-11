@@ -51,6 +51,8 @@ def test_debug_turn_steps_newest_first(client):
     overlay.set_deps(make_deps(chunks=['{"say": "Paris."}\n',
                                        '{"card": {"type": "stat", "title": "Capital", "value": "Paris"}}\n'],
                                synth=lambda t: (b"\x01\x02", 24000)))
+    # A reply just ended in c1: the wake turn continues it (no fresh-start row), in any test order.
+    overlay._last_reply["c1"] = (overlay.get_deps().clock(), False)
     assert client.post("/overlay/wake", json={"type": "wake", "score": 0.91},
                        headers=AUTH_HEADER).status_code == 200
     turn(client, "what is the capital of France", audio_ms=1800, stt_final_ms=120)

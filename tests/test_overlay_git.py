@@ -344,12 +344,12 @@ def test_hunks_between_commits(tmp_path):
         assert (r.kind, r.base, r.head) == ("merge_itself", f"{merge}^", merge)
 
     dirty = tmp_path / "d"
-    fx.build(dirty, mode="dirty")
+    dtruth = fx.build(dirty, mode="dirty")
     r = gitdiff.pick_range(dirty, "auto")
     assert r.kind == "uncommitted" and r.base == "HEAD" and r.head is None
     assert r.hunks == [{"file": "sample.py", "start": 20, "count": 1, "old": 1}]
     r = gitdiff.pick_range(dirty, "merge")
-    assert r.kind == "since_merge" and r.base == truth["merge"] and r.head is None
+    assert r.kind == "since_merge" and r.base == dtruth["merge"] and r.head is None
     assert len(r.hunks) == 4
 
     plain = tmp_path / "p"

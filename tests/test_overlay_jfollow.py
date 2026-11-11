@@ -37,13 +37,18 @@ GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
 
 @pytest.fixture(autouse=True)
 def more_state(monkeypatch):
-    for store in (overlay._card_sets, overlay._expired, overlay._inflight, overlay._resets,
-                  overlay._last_reply, overlay._card_text):
+    # Cleared for each test and put back after: other test files read these across tests.
+    stores = (overlay._card_sets, overlay._expired, overlay._inflight, overlay._resets,
+              overlay._last_reply, overlay._card_text)
+    saved = [dict(store) for store in stores]
+    for store in stores:
         store.clear()
     monkeypatch.setattr(overlay, "_off_view_said", None)
     monkeypatch.setattr(gitdiff, "editor_path", lambda editor: editor)  # the fake `run` gets "code"
     yield
-    overlay._inflight.clear()
+    for store, old in zip(stores, saved):
+        store.clear()
+        store.update(old)
 
 
 def _fixture():

@@ -433,7 +433,7 @@ def get_deps() -> OverlayDeps:
                 tools="",
             )),
             vlm_ask=_LazyVLM(),
-            agent_conversations=lean.Conversations(agent.AgentSession, max_sessions=4),
+            agent_conversations=lean.Conversations(agent.AgentSession, 4),  # up to 4 warm agent sessions
         )
     return _deps
 
