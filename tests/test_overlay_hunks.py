@@ -204,7 +204,7 @@ def test_why_refused_when_the_policy_says_no(client, repo, monkeypatch):
             threads.append(True)
         except RuntimeError:
             threads.append(False)
-        return overlay.agent_policy.Deny("that repository defines its own git filters")
+        return overlay.agent_policy.Deny("that repository's own git config names programs to run")
 
     monkeypatch.setattr(overlay.agent_policy, "decide", deny)
     blamed: list = []

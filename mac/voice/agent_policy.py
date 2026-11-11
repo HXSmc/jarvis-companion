@@ -110,7 +110,7 @@ _CONFIG_READ = "git config reads are not allowed; the GitHub origin is in your c
 _GIT_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Programs that run their arguments as a command: `env GIT_SSH=x git`, `sh -c "... git ..."`.
 _WRAPPERS = {"env", "command", "exec", "builtin", "eval", "time", "nice", "nohup", "timeout", "xargs", "sudo",
-             "doas", "stdbuf", "caffeinate", "sh", "bash", "zsh", "dash", "ksh", "fish"}
+             "doas", "stdbuf", "caffeinate", "busybox", "sh", "bash", "zsh", "dash", "ksh", "fish"}
 _GIT_WORD = re.compile(r"(?:^|[\s/])git(?:\s|$)")
 _GIT_ENV_BAD = ("GIT_SSH=", "GIT_SSH_COMMAND=", "GIT_EXTERNAL_DIFF=", "GIT_PAGER=", "GIT_EDITOR=", "GIT_ASKPASS=",
                 "GIT_EXEC_PATH=", "GIT_CONFIG")
@@ -294,7 +294,7 @@ def _git_dir(raw: str, ctx: Ctx) -> tuple[str, str] | Deny:
     if any(_under(r, top) for r in _deny_roots(ctx)) or _closed_dir(top, ctx.home) or _holds_closed(top, ctx, links=False):
         return Deny("that repository contains secret folders, or is too big to check")
     if ctx.has_filters(top):
-        return Deny("that repository defines its own git filters")
+        return Deny("that repository's own git config names programs to run")
     return d, top
 
 

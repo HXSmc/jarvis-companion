@@ -157,9 +157,9 @@ def test_git_argv_defuses_repo_config(repo, monkeypatch):
     assert gitdiff.last_merge(r) == "abc123"
     gitdiff.hunks(r, merge)
     gitdiff.diff_text(r, merge)
-    prefix = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-              "-c", "diff.external=", "-c", "core.pager=cat"]
-    assert all(argv[:9] == prefix for argv in calls)
+    prefix = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=", "-c", "core.pager=cat", "-c", "log.showSignature=false"]
+    assert all(argv[:12] == prefix for argv in calls)
     # The diff calls also refuse external diff drivers and textconv filters.
     for argv in calls[1:]:
         assert "--no-ext-diff" in argv and "--no-textconv" in argv
@@ -395,3 +395,79 @@ def test_since_merge_highlights_every_hunk_of_the_file_on_screen(overlay_client,
          screen={"app": "Code", "document": str(sample)})
     assert _wait(lambda: calls and calls[-1][0] == "code")
     assert all(c[0] != "open" for c in calls)
+
+
+def _sign_head(repo: Path) -> None:
+    """Rewrite HEAD with a fake gpgsig header: any signature check on it runs gpg.program."""
+    body = _git(repo, "cat-file", "commit", "HEAD")
+    head, msg = body.split("\n\n", 1)
+    sig = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEz\n -----END PGP SIGNATURE-----"
+    proc = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=repo, env=GIT_ENV,
+                          input=f"{head}\n{sig}\n\n{msg}\n", capture_output=True, text=True, check=True)
+    _git(repo, "update-ref", "HEAD", proc.stdout.strip())
+
+
+def test_repo_gpg_program_never_runs(tmp_path, monkeypatch):
+    """R2 security 1: a repo's own gpg.program (+ log.showSignature) runs on any signature check:
+    the gate refuses the repo, the prefix turns showSignature off, and the agent's log/show are denied."""
+    from mac.voice import agent_policy as ap
+
+    home = tmp_path / "home"
+    repo = home / "r"
+    _fixture().build(repo)
+    _sign_head(repo)
+    marker = tmp_path / "pwned"
+    script = tmp_path / "gpg.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    script.chmod(0o755)
+    _git(repo, "config", "log.showSignature", "true")
+    for key in ("gpg.program", "gpg.ssh.program", "gpg.x509.program"):
+        _git(repo, "config", key, str(script))
+        assert gitdiff.has_filters(repo), key
+        _git(repo, "config", "--unset", key)
+    _git(repo, "config", "gpg.program", str(script))
+    ctx = ap.Ctx(home=str(home), vault=None, cwd=str(tmp_path))
+    for cmd in ("log -1 --show-signature", "log --show-sig", "log --format=%G?", "show -s"):
+        assert isinstance(ap.decide("Bash", {"command": f"git -C {repo} {cmd}"}, ctx), ap.Deny), cmd
+    assert gitdiff.last_merge(repo)
+    assert gitdiff._git(repo, "log", "-1", "--format=%H")
+    assert not marker.exists()
+    # The owner's own (global) gpg.program with a repo-local log.showSignature: the prefix keeps it off.
+    _git(repo, "config", "--unset", "gpg.program")
+    glob = tmp_path / "global.gitconfig"
+    glob.write_text(f"[gpg]\n\tprogram = {script}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(glob))
+    assert not gitdiff.has_filters(repo)
+    assert gitdiff.last_merge(repo) and gitdiff._git(repo, "show", "-s", "HEAD")
+    assert not marker.exists()
+
+
+# Repo-local keys whose value is a program git (or git-lfs) runs; every one makes the repo refused.
+_PROGRAM_KEYS = ["gpg.program", "gpg.openpgp.program", "gpg.ssh.defaultKeyCommand", "core.sshCommand",
+                 "core.askPass", "core.editor", "sequence.editor", "core.gitProxy", "core.alternateRefsCommand",
+                 "credential.helper", "credential.https://x.example.helper", "remote.origin.uploadpack",
+                 "remote.origin.receivepack", "remote.origin.vcs", "alias.st", "submodule.m.update",
+                 "merge.evil.driver", "diff.evil.textconv", "diff.evil.command", "filter.evil.clean",
+                 "interactive.diffFilter", "pager.log", "core.pager", "difftool.x.cmd", "mergetool.x.path",
+                 "browser.x.cmd", "web.browser", "man.x.path", "man.viewer", "sendemail.smtpServer",
+                 "sendemail.toCmd", "imap.tunnel", "tar.tgz.command", "trailer.t.cmd", "trailer.t.command",
+                 "hook.pre.command", "gc.recentObjectsHook", "uploadpack.packObjectsHook", "http.proxy",
+                 "lfs.customtransfer.x.path", "lfs.extension.x.clean", "lfs.extension.x.smudge"]
+# Common repo-local keys that run nothing: they must not make a normal repo unusable.
+_SAFE_KEYS = {"remote.origin.url": "https://example.invalid/a.git", "remote.origin.partialclonefilter": "blob:none",
+              "branch.main.vscode-merge-base": "origin/main", "branch.main.remote": "origin",
+              "core.hooksPath": ".husky", "pull.rebase": "true", "user.name": "x", "core.autocrlf": "input"}
+
+
+@pytest.mark.parametrize("key", _PROGRAM_KEYS)
+def test_has_filters_refuses_every_repo_program_key(repo, key):
+    r, _ = repo
+    _git(r, "config", key, "/tmp/never-run")
+    assert gitdiff.has_filters(r) is True
+
+
+def test_has_filters_keeps_plain_repo_keys(repo):
+    r, _ = repo
+    for key, value in _SAFE_KEYS.items():
+        _git(r, "config", key, value)
+    assert gitdiff.has_filters(r) is False

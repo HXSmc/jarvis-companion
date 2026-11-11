@@ -20,10 +20,21 @@ from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
 _TIMEOUT = 10
 _EDITOR_TIMEOUT = 2  # the editor CLI returns at once when healthy
 # Every git call runs with repo config defused — the repo may come from an
-# archive, so no fsmonitor, no hooks, no external diff driver, no pager, no ext::/fd:: remote helper.
-_GIT_PREFIX = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-               "-c", "diff.external=", "-c", "core.pager=cat",
+# archive, so no fsmonitor, no hooks, no external diff driver, no pager, no ext::/fd:: remote helper,
+# no signature check (that runs gpg.program). Program keys the prefix can't defuse: has_filters.
+_GIT_PREFIX = ["git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               "-c", "diff.external=", "-c", "core.pager=cat", "-c", "log.showSignature=false",
                "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"]
+# Repo-scoped config keys whose value is a program git (or git-lfs) runs: gpg on a signature check,
+# ssh/askpass/credential/uploadpack on fetch and push, editors, aliases, drivers, tools, hooks. Git's
+# own names end in program/command/cmd/helper/editor/driver/askpass/proxy/hook; the rest are listed.
+# A repo that sets any of them is refused whole, so no git form (Allowed or Confirmed) can run one.
+_PROGRAM_KEY_RE = re.compile(
+    r"^(filter\..+|alias\..+|pager\..+|sendemail\..+|man\..+|browser\..+|web\.browser|imap\.tunnel"
+    r"|core\.pager|interactive\.difffilter|diff\..+\.textconv|submodule\..+\.update"
+    r"|remote\..+\.(uploadpack|receivepack|vcs)|(difftool|mergetool)\..+\.path"
+    r"|lfs\.customtransfer\..+\.path|lfs\.extension\..+\.(clean|smudge)"
+    r"|.*(program|command|cmd|helper|editor|driver|askpass|proxy|hook))$", re.I)
 # Hunk header: -<start>[,<count>] +<start>[,<count>]; a missing ,count means 1 on either side.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 # Overlay labels: only integers and fixed words ever reach the app from diff data.
@@ -57,18 +68,17 @@ def repo_for(document: str | None) -> Path | None:
 
 
 def has_filters(repo: Path) -> bool:
-    """True when a filter or diff driver program comes from repo-controlled config (local, worktree, includes).
+    """True when repo-controlled config (local, worktree, includes) names a program git would run.
 
-    Those run repo-chosen commands during `git diff`; the overlay refuses such repos.
-    Only global/system filters (the owner's own, e.g. git-lfs) are allowed. All scopes are read
-    (not just --local): .git/config.worktree would otherwise slip past.
+    Filters, diff drivers, gpg.program, core.sshCommand, aliases and the rest (_PROGRAM_KEY_RE):
+    the overlay and the agent's git calls refuse such repos. Only global/system values (the owner's
+    own, e.g. git-lfs or GPG Suite) are allowed. All scopes are read (not just --local):
+    .git/config.worktree would otherwise slip past.
     """
-    # filter.* runs on checkout/diff; diff.<x>.textconv / .command run on diff and blame.
-    out = _git(Path(repo), "config", "--includes", "--show-scope", "--get-regexp",
-               r"^(filter\.|diff\..+\.(textconv|command)$)")
+    out = _git(Path(repo), "config", "--includes", "--show-scope", "--list")
     for line in (out or "").splitlines():
-        scope = line.split("\t", 1)[0].strip()
-        if scope not in ("global", "system"):
+        scope, _, entry = line.partition("\t")
+        if scope.strip() not in ("global", "system", "command") and _PROGRAM_KEY_RE.match(entry.split("=", 1)[0]):
             return True
     return False
 
