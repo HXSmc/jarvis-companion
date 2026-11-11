@@ -28,6 +28,7 @@
   .v { word-break: break-word; }
   q { color: var(--quote); }
   .empty { color: var(--dim); padding: 32px 0; }
+  #setup { color: var(--bad); margin: 0 0 12px; }
 </style>
 </head>
 <body>
@@ -36,6 +37,7 @@
   <span id="listener">wake listener: …</span>
   <span id="status">connecting…</span>
 </header>
+<p id="setup" hidden></p>
 <main id="turns"><p class="empty">No turns yet. Say “Hey Jarvis …”.</p></main>
 <script>
 "use strict";
@@ -49,6 +51,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 no_speech: "no speech", app_error: "app error",
                 agent: "agent started", agent_tool: "agent tool", agent_confirm: "confirmation",
                 agent_progress: "progress line", lines: "line highlight", editor_scroll: "editor scroll",
+                repo_pick: "repo picked", hunk: "change list",
                 incomplete: "waiting for more", continued: "continued after a pause" };
 
 function el(tag, cls, text) {
@@ -94,6 +97,10 @@ function render(data) {
   const lis = document.getElementById("listener");
   lis.textContent = lt;
   lis.style.color = l.state === "listening" ? "var(--ok)" : "var(--bad)";
+  const setup = document.getElementById("setup");
+  const noCli = (data.setup || {}).code_cli === false;
+  setup.hidden = !noCli;
+  setup.textContent = noCli ? "VS Code `code` CLI missing: the editor will not scroll" : "";
 
   const root = document.getElementById("turns");
   root.replaceChildren();

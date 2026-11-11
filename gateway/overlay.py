@@ -461,10 +461,10 @@ def _owner_asked_to_open(text: str, want: list[str], apps: dict) -> bool:
     return False
 
 
-def _cmd(argv: list[str]) -> str:
+def _cmd(argv: list[str], timeout: float = 1) -> str:
     """stdout of a quick macOS query, "" on any failure (never blocks a turn for long)."""
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=1).stdout
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout).stdout
     except Exception:
         return ""
 
@@ -1220,53 +1220,92 @@ def _toplevel(path: Path) -> Path | None:
 _TERMINALS = {"Terminal": "Terminal", "iTerm2": "iTerm2", "Ghostty": "ghostty"}
 
 
-def _terminal_cwd(app: str, title: str = "") -> Path | None:
+def _terminal_cwd(app: str, title: str = "", info: dict | None = None) -> Path | None:
     """The front terminal's shell cwd via pgrep + lsof (no TCC grant); None elsewhere.
 
-    lsof cannot tell which window is in front, so with shells in several repos the one whose folder
-    name is in the front window's title (`title`, e.g. "jt-scratch32 — -zsh — 80×24") wins; no
-    single match -> None, and the agent asks which repo instead of guessing."""
+    lsof cannot tell which window is in front, so with shells in several repos the one the front
+    window's title names (`title`, e.g. "jt-scratch6 — ~/jt-scratch6 — -fish — 80×24") wins; no
+    single match -> None, and the agent asks which repo instead of guessing. `info` gets counts only."""
     proc = _TERMINALS.get(app)
     if sys.platform != "darwin" or not proc:
         return None
-    pids, every = _cmd(["pgrep", "-n", "-x", proc]).split(), []
+    # Every process of that name (not just the newest), and lsof gets longer than the 1 s default:
+    # with several windows and shells it can be slower, and a timeout reads as "no shells".
+    pids, every = _cmd(["pgrep", "-x", proc]).split(), []
     for _ in range(3):  # app -> login -> shell; every level, so a shell running a program still counts
         pids = _cmd(["pgrep", "-P", ",".join(pids)]).split() if pids else []
         every += pids
     if not every:
         return None
-    cwds = [Path(ln[1:]) for ln in _cmd(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(every)]).splitlines()
+    cwds = [Path(ln[1:]) for ln in _cmd(["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(every)],
+                                        timeout=3).splitlines()
             if ln.startswith("n/")]
-    return _pick_terminal_cwd(cwds, title)
+    return _pick_terminal_cwd(cwds, title, info)
 
 
-def _pick_terminal_cwd(cwds: list[Path], title: str) -> Path | None:
-    """One repo among the shells' cwds: the only one, else the one the front window's title names."""
+def _title_hit(d: Path, title: str) -> int:
+    """Length of the longest form of folder `d` the title names (absolute path, ~/path, or its name
+    as a whole word); 0 = not named."""
+    forms = [str(d)]
+    try:
+        forms.append("~/" + str(d.relative_to(Path.home())))
+    except ValueError:
+        pass
+    hits = [len(f) for f in forms if f in title and not re.match(r"[\w.-]", title[title.index(f) + len(f):][:1])]
+    if d.name and re.search(rf"(?<![\w.-]){re.escape(d.name)}(?![\w.-])", title):
+        hits.append(len(d.name))
+    return max(hits, default=0)
+
+
+def _pick_terminal_cwd(cwds: list[Path], title: str, info: dict | None = None) -> Path | None:
+    """One repo among the shells' cwds: the only one, else the one the front window's title names
+    best (longest match wins, a tie is no answer)."""
     repos: dict[Path, list[Path]] = {}
     for cwd in cwds:
         top = _toplevel(cwd) if cwd.is_dir() else None
         if top is not None:
             repos.setdefault(top, []).append(cwd)
+    score = {top: max(_title_hit(d, title) for d in dirs) for top, dirs in repos.items()}
+    best = max(score.values(), default=0)
+    named = [top for top, n in score.items() if n and n == best]
+    if info is not None:
+        info.update(shells=len(cwds), repos=len(repos), title_hits=sum(1 for n in score.values() if n))
     if len(repos) == 1:
         return next(iter(repos))
-    named = [top for top, dirs in repos.items()
-             if any(d.name and re.search(rf"(?<![\w.-]){re.escape(d.name)}(?![\w.-])", title) for d in dirs)]
     return named[0] if len(named) == 1 else None
 
 
-def _agent_repo(screen: ScreenBody | None) -> Path | None:
-    """Front document's repo, else the front terminal's cwd repo, else $OVERLAY_GIT_REPO, else None."""
+def _agent_repo(screen: ScreenBody | None, info: dict | None = None) -> Path | None:
+    """Front document's repo, else the front terminal's cwd repo, else $OVERLAY_GIT_REPO, else None.
+    `info["how"]` = doc | terminal | env | none (plus the terminal counts), for the debug page."""
+    info = {} if info is None else info
+    info["how"] = "none"
     doc = screen.document if screen is not None else None
     if doc:
         parent = Path(doc).expanduser().parent
         if parent.is_dir() and (top := _toplevel(parent)):
+            info["how"] = "doc"
             return top
-    front = next((w for w in screen.windows if w.get("app") == screen.app), {}) if screen is not None else {}
-    cwd = _terminal_cwd(screen.app, str(front.get("title") or "")) if screen is not None else None
+    front: dict = {}
+    if screen is not None:  # the app's own name first, else the first window of any known terminal
+        front = next((w for w in screen.windows if w.get("app") == screen.app), None) or next(
+            (w for w in screen.windows if w.get("app") in _TERMINALS), {})
+    app = screen.app if screen is not None and screen.app in _TERMINALS else str(front.get("app") or "")
+    cwd = _terminal_cwd(app, str(front.get("title") or ""), info) if screen is not None else None
     if cwd is not None and cwd.is_dir() and (top := _toplevel(cwd)):
+        info["how"] = "terminal"
         return top
     env = os.environ.get("OVERLAY_GIT_REPO")
+    if env:
+        info["how"] = "env"
     return Path(env).expanduser() if env else None
+
+
+def _repo_pick_detail(info: dict) -> str:
+    """Fixed words and numbers only: never a path or a title."""
+    how = info.get("how") if info.get("how") in ("doc", "terminal", "env", "none") else "none"
+    return (f"{how} shells={int(info.get('shells', 0))} repos={int(info.get('repos', 0))} "
+            f"title_hits={int(info.get('title_hits', 0))}")
 
 
 _GH_LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -1363,7 +1402,11 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
         return
     # The agent reads files, mail and PR text by design: this conversation stays off the web pool.
     _tainted.add(body.conv_id)
-    repo = await asyncio.to_thread(_agent_repo, body.screen)
+    pick: dict = {}
+    repo = await asyncio.to_thread(_agent_repo, body.screen, pick)
+    if on_step:
+        on_step("repo_pick", detail=_repo_pick_detail(pick))
+    origin = await asyncio.to_thread(_origin_repo, repo)
     parts = [text]
     history = _history.get(body.conv_id) or []
     if history:  # earlier replies may echo screen text: data, never instructions
@@ -1372,6 +1415,8 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     where = [f"repository: {repo}" if repo else "no repository resolved; ask which one if the request needs one"]
     if body.screen is not None and body.screen.document:
         where.append(f"file on screen: {body.screen.document}")
+    # The GitHub repo from the host, so the agent never needs remote URLs (they may hold tokens).
+    where.append(f"origin: {origin or 'none'}")
     parts.append(f'<context untrusted="true">\n{_scrub(chr(10).join(where))}\n</context>')
     vault = os.environ.get("OVERLAY_VAULT")
     if vault:
@@ -1391,7 +1436,6 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
                                read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools),
                                own_owners=await asyncio.to_thread(_own_owners))
         session.policy_ctx = ctx
-    origin = await asyncio.to_thread(_origin_repo, repo)
     if origin and not ctx.read_untrusted_remote:
         ctx.trusted_repos = ctx.trusted_repos | {origin}
     run = AgentRun(conv_id=body.conv_id, session=session, ctx=ctx, repo=repo, started=deps.clock(),
@@ -1677,7 +1721,9 @@ async def post_debug_note(body: DebugNote) -> dict:
 
 @router.get("/debug/turns", dependencies=_LOOP_DEPS)
 async def get_debug_turns() -> dict:
-    return debug_log.snapshot()
+    # Setup the owner must fix (booleans only, never a path): no `code` CLI = the editor never scrolls.
+    return {**debug_log.snapshot(), "setup": {"code_cli": shutil.which("code") is not None,
+                                              "vault": bool(os.environ.get("OVERLAY_VAULT"))}}
 
 
 # The page itself holds no data, so it needs no token (a browser cannot send a

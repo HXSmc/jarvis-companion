@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import math
+import re
 import subprocess
 import sys
 import threading
@@ -27,6 +28,8 @@ from conftest import AUTH_HEADER, TOKEN
 from gateway import overlay
 from mac.voice import agent, agent_policy
 from test_overlay_service import FakeConversations, make_app, make_deps, says, turn
+
+_REAL_TERMINAL_CWD = overlay._terminal_cwd  # the autouse fixture stubs it out
 
 
 class Clock:
@@ -137,7 +140,7 @@ def reset(monkeypatch, tmp_path):
     overlay.set_deps(None)
     monkeypatch.setattr(overlay, "CONFIRM_POLL_S", 0.01)
     monkeypatch.setattr(agent, "SUPPORT_DIR", tmp_path / "support")
-    monkeypatch.setattr(overlay, "_terminal_cwd", lambda app, title="": None)
+    monkeypatch.setattr(overlay, "_terminal_cwd", lambda app, title="", info=None: None)
     monkeypatch.setattr(overlay, "_own_owners", lambda: frozenset())  # never this box's gh login
     monkeypatch.delenv("OVERLAY_GIT_REPO", raising=False)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
@@ -1034,3 +1037,65 @@ def test_terminal_repo_is_the_front_windows_or_none(tmp_path):
     assert pick([a, b], "ali — -zsh — 80×24") is None
     assert pick([a, b], "jt-scratch32-old — -zsh") is None  # a longer name is not this folder
     assert pick([plain], "plain") is None
+
+
+# --- jtools2: repo from the front Terminal window (run 6 shape), origin in the prompt ---------
+
+
+def _run6(tmp_path, monkeypatch):
+    """Run 6 on the Mac: 4 Terminal windows (driver bash in ~, a new fish one in ~/jt-scratch6 in
+    front, one in the overlay clone, one more), shells found by pgrep + lsof."""
+    home = tmp_path / "home"
+    scratch, clone = git_repo(home / "jt-scratch6"), git_repo(home / "jarvis-companion-overlay")
+    (home / "Downloads").mkdir()
+    shells = {"101": home, "102": scratch, "103": clone, "104": home / "Downloads"}
+
+    def fake_cmd(argv, timeout=1):
+        if argv[:2] == ["pgrep", "-x"]:
+            return "50\n" if argv[2] == "Terminal" else ""
+        if argv[:2] == ["pgrep", "-P"]:
+            parents = set(argv[2].split(","))
+            return {frozenset({"50"}): "60\n61\n62\n63\n", frozenset({"60", "61", "62", "63"}):
+                    "101\n102\n103\n104\n", frozenset(shells): "201\n"}.get(frozenset(parents), "")
+        if argv[0] == "lsof":  # login (root) prints nothing; the driver's curl runs in ~
+            return "".join(f"p{pid}\nfcwd\nn{d}\n" for pid, d in shells.items()) + f"p201\nfcwd\nn{home}\n"
+        return ""
+
+    monkeypatch.setattr(overlay, "_cmd", fake_cmd)
+    monkeypatch.setattr(overlay, "_terminal_cwd", _REAL_TERMINAL_CWD)
+    monkeypatch.setattr(overlay.sys, "platform", "darwin")
+    windows = [{"app": "Terminal", "title": "jt-scratch6 — ~/jt-scratch6 — -fish — 80×24", "box": [0, 0, 600, 400]},
+               {"app": "Terminal", "title": "ali — -bash — 80×24", "box": [20, 20, 620, 420]},
+               {"app": "Terminal", "title": "jarvis-companion-overlay — -zsh — 120×40", "box": [40, 40, 900, 600]},
+               {"app": "Terminal", "title": "Downloads — -zsh — 80×24", "box": [60, 60, 660, 460]}]
+    return scratch, windows
+
+
+def test_terminal_repo_run6_shape(tmp_path, monkeypatch):
+    scratch, windows = _run6(tmp_path, monkeypatch)
+    info: dict = {}
+    found = overlay._agent_repo(overlay.ScreenBody(app="Terminal", windows=windows), info)
+    assert found is not None and found.resolve() == scratch.resolve()
+    detail = overlay._repo_pick_detail(info)
+    assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1", detail) and "/" not in detail
+    # The app name the screen reports may differ from the window owner's: the first terminal window counts.
+    found = overlay._agent_repo(overlay.ScreenBody(app="Terminal.app", windows=windows), {})
+    assert found is not None and found.resolve() == scratch.resolve()
+    # A ~/path in the title beats a shorter folder name that is also in it.
+    deep = git_repo(tmp_path / "home" / "jt-scratch6-x" / "jt-scratch6")
+    assert overlay._title_hit(deep, "jt-scratch6 — ~/jt-scratch6 — -fish") < overlay._title_hit(
+        scratch, "jt-scratch6 — ~/jt-scratch6 — -fish")
+
+
+def test_repo_pick_row_and_origin_line_reach_the_turn(client, tmp_path, monkeypatch):
+    """The debug row carries counts only; the prompt names the GitHub origin, never the remote URL."""
+    scratch, windows = _run6(tmp_path, monkeypatch)
+    subprocess.run(["git", "remote", "add", "origin", "https://u:ghp_FAKE@github.com/o/r.git"], cwd=scratch,
+                   check=True)
+    clock = Clock()
+    pool, _ = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "One commit."})]))
+    turn(client, "what changed in the last commit", conv_id="rp1", screen={"app": "Terminal", "windows": windows})
+    prompt = pool.made[0].prompts[0]
+    assert "origin: o/r" in prompt and "ghp_FAKE" not in prompt
+    steps = {s["step"]: s for s in overlay.debug_log.snapshot()["turns"][0]["steps"]}
+    assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1", steps["repo_pick"]["detail"])
