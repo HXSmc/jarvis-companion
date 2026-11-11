@@ -379,7 +379,8 @@ public enum ShapeTrack {
     }
 
     /// Leftmost column of >= 5 line-number observations (1-5 digits, centre inside `window`,
-    /// x-centres within 12 pt), as fit marks plus the column's right edge. nil = no gutter.
+    /// x-centres within 12 pt), as fit marks (its evenly spaced run, `LineBandMapper.evenRun`) plus
+    /// the column's right edge. nil = no gutter.
     public static func gutterMarks(digits: [(line: Int, centre: CGPoint, right: CGFloat)],
                                    window: CGRect) -> (marks: [(line: Int, midY: CGFloat)], right: CGFloat)? {
         let sorted = digits.filter { window.contains($0.centre) }.sorted { $0.centre.x < $1.centre.x }
@@ -391,7 +392,9 @@ public enum ShapeTrack {
             }
             if end - start + 1 >= 5 {
                 let column = sorted[start...end]
-                return (column.map { (line: $0.line, midY: $0.centre.y) }, column.map(\.right).max() ?? 0)
+                // Only the evenly spaced run: sticky-scroll header numbers are not on the line grid.
+                return (LineBandMapper.evenRun(column.map { (line: $0.line, midY: $0.centre.y) }),
+                        column.map(\.right).max() ?? 0)
             }
             start = end + 1
         }

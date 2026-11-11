@@ -24,6 +24,35 @@ public struct LineBandMapper: Equatable {
         b = (sy - a * sx) / n
     }
 
+    /// The longest chain of marks on one evenly spaced line grid, OCR outliers skipped. VS Code's
+    /// sticky-scroll headers show ancestor line numbers (587, 618, 678, 687, 689) on the gutter rows
+    /// above the scrolling lines (692...732): a fit through them drew line 710's band two rows low
+    /// (Mac run, 33a). Pitch = median step between consecutive line numbers. A chain of fewer than
+    /// 2 marks returns `marks` unchanged.
+    public static func evenRun(_ marks: [(line: Int, midY: CGFloat)]) -> [(line: Int, midY: CGFloat)] {
+        let sorted = marks.sorted { $0.line < $1.line }
+        let pairs = zip(sorted, sorted.dropFirst()).filter { $0.1.line > $0.0.line }
+        let unit = pairs.filter { $0.1.line - $0.0.line == 1 }.map { $0.1.midY - $0.0.midY }
+        let steps = (unit.isEmpty ? pairs.map { ($0.1.midY - $0.0.midY) / CGFloat($0.1.line - $0.0.line) } : unit).sorted()
+        guard !steps.isEmpty else { return marks }
+        let pitch = steps[steps.count / 2]
+        guard pitch != 0 else { return marks }
+        let tolerance = max(2, abs(pitch) * 0.25)
+        var best: [(line: Int, midY: CGFloat)] = []
+        for start in sorted.indices {
+            var chain = [sorted[start]]
+            for mark in sorted[(start + 1)...] {
+                let last = chain[chain.count - 1]
+                if mark.line > last.line,
+                   abs(mark.midY - last.midY - pitch * CGFloat(mark.line - last.line)) <= tolerance {
+                    chain.append(mark)
+                }
+            }
+            if chain.count > best.count { best = chain }
+        }
+        return best.count >= 2 ? best : marks
+    }
+
     /// Highlight band for `lines` spanning the text area from x to x+width:
     /// y from y(start) - h/2 to y(end) + h/2, h = |a| (one line height).
     public func band(for lines: ClosedRange<Int>, x: CGFloat, width: CGFloat) -> CGRect {

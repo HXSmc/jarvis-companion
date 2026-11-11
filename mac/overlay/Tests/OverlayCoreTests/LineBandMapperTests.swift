@@ -108,4 +108,46 @@ final class LineBandMapperTests: XCTestCase {
         XCTAssertEqual(BandRetry.rangeIndex(of: 140...146, in: [140...142, 145...150]), 0)
         XCTAssertEqual(BandRetry.rangeIndex(of: 141...146, in: [140...142, 145...150]), 0)  // tie: the first
     }
+
+    // MARK: R3 (Mac 33a): VS Code sticky-scroll headers above the scrolling gutter
+
+    /// Gutter rows read off the 33a frame (evidence mac-33/frame-08-14-hud.jpg, 1440 pt wide, y down):
+    /// sticky headers 587, 618, 678, 687, 689 on the top rows, 692 half hidden under them, then
+    /// 693...732 every 15 pt from y 204. Line 710 truly spans y 452-467.
+    private func stickyGutter() -> [(line: Int, centre: CGPoint, right: CGFloat)] {
+        let sticky: [(Int, CGFloat)] = [(587, 118), (618, 133), (678, 148), (687, 163), (689, 178), (692, 191)]
+        let rows = sticky + (693...732).map { ($0, 204 + CGFloat($0 - 693) * 15) }
+        return rows.map { (line: $0.0, centre: CGPoint(x: 215, y: $0.1), right: 225) }
+    }
+
+    func testStickyScrollHeadersDoNotShiftTheBand() throws {
+        let editor = CGRect(x: 0, y: 35, width: 1440, height: 790)
+        let pass = LineBandFit.fit(ranges: [710...710], digits: stickyGutter(), window: editor, partial: false)
+        XCTAssertEqual(pass.reason, "ok")
+        XCTAssertEqual(pass.seen, 692...732)
+        let band = try XCTUnwrap(pass.bands.first?.rect)
+        XCTAssertEqual(band.midY, 459.5, accuracy: 1.5)
+        XCTAssertEqual(band.height, 15, accuracy: 1)
+        let overlap = min(band.maxY, 467) - max(band.minY, 452)
+        XCTAssertGreaterThan(overlap / (max(band.maxY, 467) - min(band.minY, 452)), 0.8)  // IoU on y
+        // A changed line under a sticky header (689) is not a scrolling line on screen: no band there.
+        XCTAssertEqual(LineBandFit.fit(ranges: [689...689], digits: stickyGutter(), window: editor, partial: true).reason,
+                       "off_view")
+    }
+
+    func testEvenRunSkipsOutliersAndKeepsAFlatGutter() {
+        let flat = (120...170).map { (line: $0, midY: 100 + CGFloat($0 - 120) * 20) }
+        XCTAssertEqual(LineBandMapper.evenRun(flat).map(\.line), Array(120...170))
+        // One misread number in the middle (a 7 read as 1: 147 -> 141) is dropped, the rest kept.
+        var misread = flat
+        misread[27] = (line: 141, midY: misread[27].midY)
+        XCTAssertEqual(LineBandMapper.evenRun(misread).map(\.line), Array(120...170).filter { $0 != 147 })
+        // Missing rows (OCR skipped some) keep the grid: 120, 123, 124, 130 on a 20 pt pitch.
+        let gaps = [120, 123, 124, 130].map { (line: $0, midY: 100 + CGFloat($0 - 120) * 20) }
+        XCTAssertEqual(LineBandMapper.evenRun(gaps).map(\.line), [120, 123, 124, 130])
+        // Line numbers growing upward (negative pitch) work the same.
+        let up: [(line: Int, midY: CGFloat)] = (1...8).map { (line: $0, midY: 500 - CGFloat($0) * 18) } + [(line: 40, midY: 482)]
+        XCTAssertEqual(LineBandMapper.evenRun(up).map(\.line), Array(1...8))
+        XCTAssertEqual(LineBandMapper.evenRun([(line: 5, midY: 40)]).map(\.line), [5])
+    }
 }
