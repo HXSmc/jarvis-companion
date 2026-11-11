@@ -76,6 +76,7 @@ Reply ONLY as JSON Lines - one JSON object per line, nothing else:
   {"card": {...}}   an overlay card (schema below)
   {"shape": {...}}  rare: one highlight shape
   {"open": "<app name>"}  open an installed app (see below)
+  {"clear": true} or {"layout": "hide"|"show"|"aside"|"restore"|"left"|"right"|"up"|"down"|"top_left"|"top_right"|"bottom_left"|"bottom_right"|"other_side"}  clear, hide, show, park, restore or move the overlay cards
 
 Speak the first {"say"} line as soon as you have the first sentence of thought, then continue.
 
@@ -96,6 +97,8 @@ Pictures: when the owner asks to see a picture, photo or images of something, fi
 
 Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. To open an app, reply with ONLY {"open": "<app name as the owner said it>"} (one line, nothing else). Do this whenever the owner clearly asks to open, launch, pull up or bring up an app, in any wording, even if the name is rough ("a VS code"). Never ask the owner to rephrase or to say "open" plus a name. For a website, show a link card instead.
 
+When the owner asks to hide, show, move or clear the overlay in any wording, do it with one {"clear": true} or {"layout": ...} line after a short say line; never say you cannot, never say you are hiding, moving or clearing anything without that line, and never suggest keys, gestures or any other way to do it.
+
 If the request needs the owner's own files, the code on his screen, git history, GitHub, his notes, mail or calendar, reply with ONLY {"agent": true} and nothing else: a tool-using helper takes over. Never say you cannot reach them.
 
 If the request is clearly cut off mid-sentence (it trails off, for example "can you show me the last"), reply with ONLY {"incomplete": true} and nothing else: the mic stays open and the rest of the sentence comes in the next message. Never ask the user to repeat a cut-off request.
@@ -114,6 +117,23 @@ QUIET_PROMPT = re.sub(
     ANSWER_PROMPT.replace(" Use the WebSearch/WebFetch tools only when the question needs fresh facts.", ""),
     count=1, flags=re.MULTILINE,
 )
+# Overlay directives ({"layout": M} from the model, intent turns): exact, lower-case strings only.
+LAYOUT_MODES = frozenset({"hide", "show", "aside", "restore", "left", "right", "up", "down",
+                          "top_left", "top_right", "bottom_left", "bottom_right", "other_side"})
+MAX_DIRECTIVES = 4  # clear/layout events per reply; an injected reply cannot flicker the overlay
+# A model clear/layout line counts only when the owner's own words (never screen, web or history
+# text) hold a verb for that kind of action, like the open-verb check. Clear, hide and park need a
+# removal word of their own kind, so "show me the error on this page" can at most let injected text
+# show, restore or move the cards. Residual: an owner question such as "is this clear" opens clear.
+_OVERLAY_VERB_RE = re.compile(r"\b(?:hide|unhide|show|move|shift|clear|close|dismiss|park|put|away|back|rid|bring"
+                              r"|remove|minimi[sz]e|disappear|gone|off my screen)\b", re.IGNORECASE)
+_REMOVAL_VERB_RES = {
+    "clear": re.compile(r"\b(?:clear|dismiss|close|remove|wipe|rid)\b", re.IGNORECASE),
+    "hide": re.compile(r"\b(?:hide|away|disappear|gone|minimi[sz]e|rid|off my screen|out of my face"
+                       r"|out of my way|out of the way)\b", re.IGNORECASE),
+    "aside": re.compile(r"\b(?:park|aside|away|out of the way|out of my way)\b", re.IGNORECASE),
+}
+OVERLAY_UNCHANGED_LINE = "I haven't changed the overlay. Say hide, clear or move it."
 NO_PICTURE_LINE = "I couldn't find a picture of that."
 NO_VIDEO_LINES = {  # find_video reasons -> one plain line each; the card itself comes from the service
     "none": "I couldn't find a video of that.",
@@ -600,6 +620,12 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         if intent.kind == "clear":
             yield {"type": "clear"}
 
+        elif intent.kind in ("hide", "show", "aside", "restore", "move"):
+            mode = intent.arg if intent.kind == "move" else intent.kind  # parse yields allow-listed modes only
+            if on_step:
+                on_step("layout", mode=mode)
+            yield {"type": "layout", "mode": mode}
+
         elif intent.kind == "clock":
             line = _clock_line(intent.arg, deps.now())
             async for ev in _speak(line, deps):
@@ -744,7 +770,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         else:  # answer
             escalate: list[bool] = []
             async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                            escalate=escalate, failed=failed):
+                                            escalate=escalate, failed=failed, on_step=on_step):
                 yield event
             if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
                 if on_step:
@@ -887,7 +913,8 @@ def _look_miss_line(g: dict, conv_id: str, spoke: bool) -> str | None:
 async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        metrics: dict, said: list[str], start: float,
                        screen_ref: bool = False, escalate: list | None = None,
-                       failed: list | None = None, look: dict | None = None) -> AsyncIterator[dict]:
+                       failed: list | None = None, look: dict | None = None,
+                       on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
     produced = False  # the model's reply said or showed something (the ack never counts)
@@ -942,6 +969,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     video_lookup = False  # the slot holds a video_search lookup, not an image_search one
     media_seen = False  # one media lookup (or quiet media line) per turn; the first directive wins
     lookup_alone_at: int | None = None  # len(said) when a lookup started as the turn's first output
+    directives: list[str] = []  # clear/layout events sent this reply, capped at MAX_DIRECTIVES
+    cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
+    gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
 
     async def media_refused() -> AsyncIterator[dict]:
         nonlocal media_seen
@@ -1065,7 +1095,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             card = hud.validate_card(raw_card) if quiet else media_lookup.fast_tier_card(raw_card)
         if card:
             seen = _card_ids.setdefault(body.conv_id, set())
-            if card["id"] in seen:
+            if card["id"] in seen or card["id"] == _CONFIRM_CARD_ID:  # Confirm id: agent only
                 card["id"] = uuid.uuid4().hex[:8]
             seen.add(card["id"])
             _card_text.setdefault(body.conv_id, deque(maxlen=3)).append(_card_words(card).lower())
@@ -1085,6 +1115,28 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if shape:
             produced = True
             yield {"type": "shape", "shape": shape}
+        # Overlay directive: exact JSON true or an allow-listed mode string; anything else is dropped.
+        layout = obj.get("layout")
+        mode = ("clear" if obj.get("clear") is True
+                else layout if isinstance(layout, str) and layout in LAYOUT_MODES else None)
+        if mode in ("hide", "aside", "clear") and len(_card_ids.get(body.conv_id, ())) > cards_before:
+            mode = None  # a reply never hides, parks or wipes the card it just showed
+        if mode and not _REMOVAL_VERB_RES.get(mode, _OVERLAY_VERB_RE).search(text):
+            if on_step:
+                on_step("layout", mode=mode, state="dropped")
+            if not gate_dropped:  # the model may have promised it: say plainly that nothing changed
+                async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
+                    yield ev
+                said.append(OVERLAY_UNCHANGED_LINE)
+            gate_dropped.append(mode)
+            produced = True  # the honest line is the answer: not an empty reply
+            mode = None
+        if mode and len(directives) < MAX_DIRECTIVES:
+            directives.append(mode)
+            produced = True
+            if on_step:
+                on_step("layout", mode=mode)
+            yield {"type": "clear"} if mode == "clear" else {"type": "layout", "mode": mode}
 
     fail_reason: str | None = None
     fail_detail = ""
