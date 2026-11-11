@@ -73,7 +73,7 @@ function describe(s) {
     case "agent_tool": return `${s.tool} · ${s.decision}` + (s.kind ? ` · ${s.kind}` : "") +
                               (s.reason ? ` · ${s.reason}` : "") + (s.ms != null ? ` · ${s.ms} ms` : "");
     case "agent_confirm": return s.state;
-    case "done": return `${s.cards} cards, ${s.shapes} shapes` + (s.lines ? `, ${s.lines} line highlights` : "") +
+    case "done": return `${s.cards} cards` + (s.media ? ` (${s.media} media)` : "") + `, ${s.shapes} shapes` + (s.lines ? `, ${s.lines} line highlights` : "") +
                         (s.first_audio_ms != null ? `, first audio ${s.first_audio_ms} ms` : ", no audio") +
                         (s.total_s != null ? `, total ${s.total_s} s` : "") +
                         (s.error ? `, ERROR: ${s.error}` : "") +
