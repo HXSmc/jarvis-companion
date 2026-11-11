@@ -140,7 +140,7 @@ def test_youtube_link_becomes_video_and_bad_id_does_not():
 def test_odd_video_hosts_never_play(raw, want):
     """Rule (hub answer 4): fast-tier video cards are YouTube only; a file URL is at most a link."""
     deps = make_deps(chunks=lines({"card": raw}))
-    got = cards(run(deps))
+    got = [c for c in cards(run(deps)) if c["type"] != "info"]  # a dropped-only reply gets the failure card
     assert [c["type"] for c in got] == ([want] if want else [])
     assert all("youtube_id" not in c and c["type"] != "video" for c in got)
 
@@ -310,6 +310,82 @@ def test_lookup_is_cancelled_when_the_turn_ends_early(fake, how):
     gate.set()
     import gc
     gc.collect()
-    assert pending == [] and cards(events) == []
+    assert pending == [] and not [c for c in cards(events) if c["type"] == "image"]
     assert overlay.NO_PICTURE_LINE not in says(events)
     assert not any("never retrieved" in m for m in problems)
+
+
+# --- with f52-answerfail's failure handling (post-merge) ---------------------
+
+class ScriptedSession:
+    """Streams `chunks`, then optionally blocks (until closed) and/or raises, like a failing claude."""
+
+    def __init__(self, chunks=(), exc=None, block=None):
+        self.chunks, self.exc, self.block, self.prompts = list(chunks), exc, block, []
+
+    def ask(self, text, jpeg=None, on_text=None):
+        self.prompts.append(text)
+        for c in self.chunks:
+            on_text(c)
+        if self.block is not None:
+            self.block.wait(10)
+        if self.exc is not None:
+            raise self.exc
+        return overlay.lean.Reply(raw="", ttft_s=None, total_s=0.0)
+
+    def close(self):
+        if self.block is not None:
+            self.block.set()
+
+
+def run_and_check_pending(deps):
+    """Run one turn; return its events and any task still pending after it ended."""
+    async def go():
+        events = [ev async for ev in overlay.run_turn(
+            overlay.TurnBody(text="show me a picture of a dog", conv_id="c1"), deps)]
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+        return events, [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+    return asyncio.run(go())
+
+
+def scripted(session) -> FakeConversations:
+    convs = FakeConversations()
+    convs.sessions["c1"] = session
+    return convs
+
+
+def test_lookup_only_turn_is_not_an_empty_answer(fake):
+    fake(hits=[hit(1)])
+    events = run(make_deps(conversations=scripted(ScriptedSession(lines({"image_search": {"query": "dog"}})))))
+    assert [c["type"] for c in cards(events)] == ["image"]
+    assert not set(says(events)) & {line for line, _ in overlay.ANSWER_FAIL.values()}
+    assert events[-1]["type"] == "done" and events[-1]["error"] is None
+
+
+def test_failed_answer_speaks_the_failure_line_and_cancels_the_lookup(fake):
+    gate = threading.Event()
+    search = fake(hits=[hit(1)], gate=gate)
+    session = ScriptedSession(lines({"image_search": {"query": "dog", "count": 1}}), exc=RuntimeError("boom"))
+    try:
+        events, pending = run_and_check_pending(make_deps(conversations=scripted(session)))
+    finally:
+        gate.set()
+    assert pending == [] and [c["type"] for c in cards(events)] == ["info"]  # the failure card only
+    assert overlay.ANSWER_FAIL["error"][0] in says(events) and overlay.NO_PICTURE_LINE not in says(events)
+
+
+def test_timeout_with_a_lookup_in_flight_cancels_it(fake, monkeypatch):
+    monkeypatch.setenv("OVERLAY_ANSWER_WALL_S", "0.3")
+    gate, block = threading.Event(), threading.Event()
+    fake(hits=[hit(1)], gate=gate)
+    session = ScriptedSession(lines({"say": "Looking for a picture of a dog."},
+                                    {"image_search": {"query": "dog", "count": 1}}), block=block)
+    try:
+        events, pending = run_and_check_pending(make_deps(conversations=scripted(session)))
+    finally:
+        gate.set()
+        block.set()
+    assert pending == [] and cards(events) == []  # spoke first, so no failure card or second line
+    assert overlay.NO_PICTURE_LINE not in says(events) and overlay.ANSWER_FAIL["timeout"][0] not in says(events)
+    assert block.is_set()
