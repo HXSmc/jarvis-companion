@@ -371,10 +371,11 @@ def test_git_remote_list_is_read_only(env):
     jtools2 3b: -v/get-url print URLs that may hold tokens: Deny (the host puts the origin in the prompt)."""
     ctx, _, _, r = env
     assert isinstance(bash(ctx, f"git -C {r} remote"), ap.Allow)
-    for cmd in (f"git -C {r} remote -v", f"git -C {r} remote get-url origin"):
+    # jtools2 R1: show/update print URLs too (show lists them; prune prints "URL:"): Deny as well.
+    for cmd in (f"git -C {r} remote -v", f"git -C {r} remote get-url origin", f"git -C {r} remote show origin",
+                f"git -C {r} remote update"):
         assert isinstance(bash(ctx, cmd), ap.Deny), cmd
-    for cmd in (f"git -C {r} remote add x https://example.com/x", f"git -C {r} remote set-url origin y",
-                f"git -C {r} remote show origin", f"git -C {r} remote update"):
+    for cmd in (f"git -C {r} remote add x https://example.com/x", f"git -C {r} remote set-url origin y"):
         assert isinstance(bash(ctx, cmd), ap.Confirm), cmd
 
 
@@ -491,4 +492,92 @@ def test_git_glob_pathspec_env_variants_denied(env):
     for spec in ("'*.production'", "'[.]env.production'", "'secret?.yaml'", "'.env*'", "'*.prod'"):
         assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Deny), spec
     for spec in ("'*.py'", "'src/*.ts'"):
+        assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Allow), spec
+
+
+# --- jtools2 round 1 (security / code lens findings) ---
+
+
+def test_git_folder_is_closed_to_file_tools(env):
+    """R1 security 2: Grep/Glob/Read inside .git (config holds remote URLs with tokens) is denied, and a
+    directory Grep always excludes .git, so a token in .git/config never reaches the model."""
+    ctx, home = env[0], env[1]
+    repo = _repo(home / "code/clean")
+    (repo / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://u:ghp_FAKE@github.com/o/r.git"], check=True)
+    for d in (decide(ctx, "Grep", pattern="url", path=str(repo / ".git")),
+              decide(ctx, "Grep", pattern="url", path=str(repo / ".git/config")),
+              decide(ctx, "Glob", pattern="*", path=str(repo / ".git")),
+              decide(ctx, "Glob", pattern=".git/*", path=str(repo)),
+              decide(ctx, "Grep", pattern="url", path=str(repo), glob=".git/*"),
+              decide(ctx, "Read", file_path=str(repo / ".git/FETCH_HEAD")),
+              decide(ctx, "Read", file_path=str(repo / ".git/packed-refs")),
+              decide(ctx, "Read", file_path=str(repo / ".git/logs/HEAD"))):
+        assert isinstance(d, ap.Deny), d
+    d = decide(ctx, "Grep", pattern="ghp_FAKE", path=str(repo))
+    assert isinstance(d, ap.Allow) and ".git" in d.updated_input["glob"]
+    if shutil.which("rg"):
+        argv = ["rg", "--hidden", "-l", "ghp_FAKE"]
+        for g in _cli_grep_globs(d.updated_input["glob"]):
+            argv += ["--glob", g]
+        found = subprocess.run(argv + ["."], cwd=repo, capture_output=True, text=True).stdout.split()
+        assert found == [], found
+
+
+def test_git_config_writes_are_an_allowlist(env):
+    """R1 security 3 / code 2: only a few plain keys may be set (after a yes); every other key can name a
+    program (include.path pulls in any key from a file), so it is denied."""
+    ctx, _, _, r = env
+    for args in ("include.path /tmp/x.cfg", "includeIf.gitdir:/x/.path /tmp/x.cfg", "submodule.x.update '!sh'",
+                 "gpg.ssh.defaultKeyCommand x", "trailer.x.command x", "trailer.x.cmd x", "difftool.x.cmd sh",
+                 "mergetool.x.cmd sh", "core.alternateRefsCommand x", "remote.x.vcs y", "http.sslCommand x",
+                 "uploadpack.packObjectsHook x", "browser.x.cmd y", "web.browser y", "man.x.cmd y",
+                 "branch.main.remote https://evil.example/x", "-e", "--edit", "edit", "set core.editor x",
+                 "--file /tmp/x a.b c", "--global user.name x", "--add include.path x", "rename-section a b",
+                 "--type=path user.name x"):
+        assert isinstance(bash(ctx, f"git -C {r} config {args}"), ap.Deny), args
+    for args in ("user.name x", "user.email x@example.com", "set user.name x", "--unset user.name",
+                 "pull.rebase true", "--local init.defaultBranch main", "unset user.email"):
+        assert isinstance(bash(ctx, f"git -C {r} config {args}"), ap.Confirm), args
+    assert isinstance(bash(ctx, f"git -C {r} difftool HEAD"), ap.Deny)  # runs the configured tool
+
+
+def test_remote_url_read_forms_denied(env):
+    """R1 security 4 / code 1: every form that prints a remote URL (a token may sit in it) is denied."""
+    ctx, _, _, r = env
+    for args in ("config remote.origin.url", "config --local remote.origin.url", "config get remote.origin.url",
+                 "config list", "config remote.origin.pushurl", "config --show-origin user.name",
+                 "remote -vv", "remote --verb", "remote --v", "remote -v show", "remote show origin",
+                 "remote show", "remote prune origin", "remote update", "ls-remote --get-url",
+                 "ls-remote --get-url origin", "ls-remote --get origin", "ls-remote", "ls-remote -q",
+                 "var -l", "var GIT_EDITOR"):
+        assert isinstance(bash(ctx, f"git -C {r} {args}"), ap.Deny), args
+    for args in ("remote add x https://example.com/x", "remote set-url origin https://example.com/y",
+                 "remote rename x y", "remote remove x", "ls-remote origin"):
+        assert isinstance(bash(ctx, f"git -C {r} {args}"), ap.Confirm), args
+    assert isinstance(bash(ctx, f"git -C {r} remote"), ap.Allow)
+
+
+def test_wrapped_or_pathed_git_denied(env):
+    """R1 code 3 / security 7: env, command, exec, nice, a shell -c string or a path to git must not
+    carry a GIT_* program past the env check."""
+    ctx, _, _, r = env
+    for cmd in (f"/usr/bin/env git -C {r} log", f"command git -C {r} log", f"exec git -C {r} log",
+                f"time git -C {r} log", f"nice git -C {r} log", f"nohup git -C {r} log",
+                f"timeout 5 git -C {r} log", f"xargs git -C {r} log", f"sudo git -C {r} log",
+                f"sh -c 'GIT_SSH_COMMAND=x git -C {r} push'", f"bash -c \"GIT_PAGER=x git -C {r} log\"",
+                f"zsh -c 'git -C {r} log'", f"GIT_SSH_COMMAND=x /usr/bin/git -C {r} push",
+                f"/usr/bin/git -C {r} config core.sshCommand x", f"./git -C {r} log"):
+        assert isinstance(bash(ctx, cmd), ap.Deny), cmd
+    assert isinstance(bash(ctx, "ls -la"), ap.Confirm)
+    assert isinstance(bash(ctx, "echo hello"), ap.Confirm)
+
+
+def test_glob_pathspec_tails_that_reach_env_denied(env):
+    """R1 security 6: '*prod', '.e?v.prod' and '*.pro?' all match .env.prod."""
+    ctx, _, _, r = env
+    for spec in ("'*prod'", "'.e?v.prod'", "'*.pro?'", "'*.p[r]od'", "'*duction'"):
+        assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Deny), spec
+    for spec in ("'*.py'", "'src/*.ts'", "'*.min.js'", "'docs/*.md'"):
         assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Allow), spec
