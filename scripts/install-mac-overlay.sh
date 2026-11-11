@@ -236,7 +236,19 @@ SVC_PATH="$(sed -n '/<key>PATH<\/key>/{n;s|.*<string>\(.*\)</string>.*|\1|p;}' "
 if PATH="$SVC_PATH" command -v code >/dev/null 2>&1; then
   echo "VS Code CLI: found on the service PATH (the editor scrolls to changes)"
 else
-  echo "VS Code CLI: missing on the service PATH; in VS Code run Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\""
+  found=""
+  for c in \
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+    "$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+    "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders" \
+    "/Applications/VSCodium.app/Contents/Resources/app/bin/codium"; do
+    if [ -x "$c" ] && [ -f "$c" ]; then
+      echo "VS Code CLI: found (bundled in the VS Code app)"
+      found=1
+      break
+    fi
+  done
+  [ -n "$found" ] || echo "VS Code CLI: missing on the service PATH; in VS Code run Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\""
 fi
 if [ -n "${OVERLAY_VAULT:-}" ] || grep -qs '^OVERLAY_VAULT=' "$REPO/.env"; then
   echo "Notes vault: OVERLAY_VAULT is set"
