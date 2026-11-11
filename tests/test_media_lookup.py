@@ -172,3 +172,12 @@ def test_fast_tier_card_rules(caplog):
             assert out["type"] == "link" and "youtube_id" not in out  # never a playable file URL
         assert media_lookup.fast_tier_card({"type": "video", "title": "V", "url": "http://example.com/a.mp4"}) is None
     assert not any("http" in r.getMessage() for r in caplog.records)  # type and reason only
+
+
+def test_search_words_never_reach_any_log(commons, caplog):
+    with caplog.at_level(logging.DEBUG):
+        media_lookup.search("zebracornmarker fox", 3)
+        commons["reply"] = lambda req: httpx.Response(500)
+        media_lookup.search("zebracornmarker fox", 3)
+    assert commons["requests"] and not any("zebracornmarker" in r.getMessage() for r in caplog.records)
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING

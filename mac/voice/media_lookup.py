@@ -27,6 +27,9 @@ import httpx
 from common import hud
 
 logger = logging.getLogger(__name__)
+# httpx logs every request line (with the search words) at INFO, and the service log runs at INFO.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 API_ENDPOINT = "https://commons.wikimedia.org/w/api.php"
 # Wikimedia User-Agent policy: client name/version plus a contact (the public repo), no personal data.
