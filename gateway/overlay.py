@@ -457,6 +457,8 @@ _apps_cache: tuple[float, dict] | None = None
 # conv_id -> (cut-off text, clock): the user trailed off; the next follow-up utterance continues it.
 _pending: dict[str, tuple[str, float]] = {}
 PENDING_TTL_S = 30
+# conv_id -> (clock when its last reply ended, whether that reply showed a card).
+_last_reply: dict[str, tuple[float, bool]] = {}
 
 
 def _installed_apps(clock=time.monotonic) -> dict:
@@ -579,6 +581,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                      "ttft_s": None, "first_answer_audio_s": None, "total_s": None}
     error: str | None = None
     said: list[str] = []
+    cards_at_start = len(_card_ids.get(body.conv_id, ()))  # more at the end = this reply showed a card
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
     handled = False  # the preflight answered the whole turn (it ends with `done`)
@@ -669,7 +672,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
                     async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
                                                     screen_ref=True, failed=failed, look=g):
                         yield event
-                    line = _look_miss_line(g, body.conv_id, spoke=len(said) > before)
+                    line = _look_miss_line(g, body.conv_id, spoke=len(said) > before, text=body.text)
                     if line and not failed:  # a failed answer already spoke its one line
                         async for ev in _speak(line, deps):
                             yield ev
@@ -795,6 +798,8 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         _card_ids.pop(oldest, None)
         _card_text.pop(oldest, None)
         _pending.pop(oldest, None)
+        _last_reply.pop(oldest, None)
+    _last_reply[body.conv_id] = (deps.clock(), len(_card_ids.get(body.conv_id, ())) > cards_at_start)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}
@@ -802,6 +807,18 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
 
 _NO_SCREEN_GROUND = {"screen": "none", "image": "no", "candidates": 0, "history": 0, "pick": None,
                      "reason": "no_screen", "via": "none", "ms": 0, "offered": []}
+# Owner words that refer back to the conversation ("highlight it", "the second one").
+_REF_RE = re.compile(r"\b(?:it|that|this|these|those|them|there|one|ones|other|same|first|second|third"
+                     r"|last|next|previous|here)\b", re.IGNORECASE)
+# A look request with nothing in it but these and reference words names no target of its own.
+_LOOK_FILLER = frozenset("highlight circle underline point show find where where's which is are to at out me"
+                         " can could would you please for the a on my screen jarvis hey just again now".split())
+
+
+def _pure_reference(text: str) -> bool:
+    """True for a reference with no target named: "highlight it", "can you highlight it for me"."""
+    words = re.findall(r"[a-z']+", text.lower())
+    return bool(_REF_RE.search(text)) and all(w in _LOOK_FILLER or _REF_RE.fullmatch(w) for w in words)
 
 
 async def _ground(body: TurnBody, deps: OverlayDeps) -> dict:
@@ -810,7 +827,10 @@ async def _ground(body: TurnBody, deps: OverlayDeps) -> dict:
     "that" resolve, and their words rank OCR lines ahead before the candidate cut."""
     screen = body.screen
     # A hit turn ("highlight it" -> "Here.") names nothing: skip it so a third "highlight it" keeps the topic.
-    context = [t for t in (_history.get(body.conv_id) or []) if t[1] != "Here."][-2:]
+    # Only words that refer back get the history: a named target ("highlight the title") is found on
+    # the screen alone, so an earlier answer or card cannot pull the pick away from it.
+    turns = (_history.get(body.conv_id) or []) if _REF_RE.search(body.text) else []
+    context = [t for t in turns if t[1] != "Here."][-2:]
     focus = " ".join([body.text, *(f"{u} {s}" for u, s in context)])
     candidates = ground.for_question(body.text, ground.build_candidates(
         screen.ax, screen.ocr, scale=screen.scale, windows=screen.windows, focus=focus))
@@ -882,6 +902,24 @@ def _point_at(point, targets: list[dict]) -> tuple[dict, str] | None:
     return None
 
 
+def _label_inside(point, targets: list[dict]) -> tuple[dict, str] | None:
+    """The longest candidate label (5+ chars, as the model saw it) inside the point's text, lowest id
+    on a tie: "Motto of Saudi Arabia" (a card's title) -> the page title "Saudi Arabia"."""
+    want = " ".join(point.lower().split()) if isinstance(point, str) else ""
+    inside = [(-len(label), c["id"], c) for c in targets
+              if len(label := ground._safe_label(c["label"]).lower()) >= 5 and label in want]
+    return (min(inside, key=lambda t: t[:2])[2], "point_text") if inside else None
+
+
+def _own_card(point, conv_id: str, text: str) -> bool:
+    """A point that missed the screen is on Jarvis's own card (the capture leaves it out): its text
+    (5+ chars, so a short word cannot match a card's type or id) is on a recent card, or the owner
+    only referred back ("highlight it") right after a reply that showed a card."""
+    want = " ".join(point.lower().split()) if isinstance(point, str) else ""
+    return ((len(want) >= 5 and any(want in t for t in _card_text.get(conv_id, ())))
+            or (_pure_reference(text) and _last_reply.get(conv_id, (0.0, False))[1]))
+
+
 def _card_words(node) -> str:
     if isinstance(node, dict):
         return " ".join(_card_words(v) for v in node.values())
@@ -890,7 +928,7 @@ def _card_words(node) -> str:
     return str(node)
 
 
-def _look_miss_line(g: dict, conv_id: str, spoke: bool) -> str | None:
+def _look_miss_line(g: dict, conv_id: str, spoke: bool, text: str) -> str | None:
     """The line after a look fallback: "Here." for a silent hit, else why nothing was drawn."""
     if not g["offered"]:  # nothing on screen to point at: the model's own reply stands
         return None
@@ -899,10 +937,8 @@ def _look_miss_line(g: dict, conv_id: str, spoke: bool) -> str | None:
     if "missed" not in g:  # no point: the reply stands as it is (a cut-off, an action, a spoken answer)
         return None
     missed = g["missed"]
-    want = missed.strip().lower() if isinstance(missed, str) else ""
-    # The one line that says why no box came: the text is only on Jarvis's own (uncaptured) card.
-    # 5+ chars so a short word cannot match a card's type or id.
-    if len(want) >= 5 and any(want in t for t in _card_text.get(conv_id, ())):
+    # The one line that says why no box came. Nothing on screen matched, also the looser way.
+    if _own_card(missed, conv_id, text):
         return OWN_CARD_LINE
     if spoke:  # the model already answered in words: never stack a second line on it
         return None
@@ -1103,6 +1139,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if targets and "point" in obj and look["pick"] is None:  # the first point wins
             produced = True  # a point is an answer, hit or miss: the turn ends on its own line
             hit = _point_at(obj["point"], targets)
+            if hit is None and _own_card(obj["point"], body.conv_id, body.text):
+                hit = _label_inside(obj["point"], targets)  # what is on screen beats Jarvis's own card
             if hit:
                 look.update(pick=hit[0], via=hit[1])
                 for ev in _ground_events(hit[0]):
