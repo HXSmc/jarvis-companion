@@ -3,9 +3,10 @@
 The agent tier is a `claude -p` process with `--setting-sources "" --strict-mcp-config`,
 so it sees NO MCP servers unless we pass `--mcp-config <file>`. This module copies the
 owner's mail/calendar MCP entries into two local 0600 files (never committed):
-agent-mcp.json (entries verbatim) and agent-tools.json (tool names the agent may call
-without asking). It only ever prints fixed lines: never server names, entry contents,
-env values or tokens.
+agent-mcp.json (entries verbatim) and agent-tools.json (three lists of tool names:
+read_only the agent may call without asking, confirm it may call after one ask,
+hidden never offered to it). It only ever prints fixed lines: never server names,
+entry contents, env values or tokens.
 """
 
 from __future__ import annotations
@@ -26,6 +27,9 @@ READ_PREFIX = ("search", "list", "get", "read", "find", "fetch", "query", "check
 WRITE_HINT = ("send", "reply", "forward", "draft", "delete", "remove", "trash", "archive",
               "label", "move", "modify", "update", "create", "write", "set", "add", "mark",
               "accept", "decline", "respond")
+# Tool words that act (not just read) but stay usable after one owner confirm.
+CONFIRM_MAIL = ("send", "reply", "forward", "draft")
+CONFIRM_CALENDAR = ("create", "update", "respond")
 
 
 def select_servers(claude_cfg: dict, home: str) -> dict:
@@ -47,6 +51,26 @@ def read_only_tools(tool_names: list[str], servers: dict) -> list[str]:
         if tool.startswith(READ_PREFIX) and not any(hint in tool for hint in WRITE_HINT):
             keep.add(name)
     return sorted(keep)
+
+
+def split_tools(tool_names: list[str], servers: dict) -> dict:
+    """The servers' tools as three sorted, deduped lists: read_only, confirm, hidden."""
+    read_only = set(read_only_tools(tool_names, servers))
+    confirm: set[str] = set()
+    hidden: set[str] = set()
+    for name in tool_names:
+        parts = name.split("__")
+        if len(parts) != 3 or parts[0] != "mcp" or parts[1] not in servers:
+            continue
+        if name in read_only:
+            continue
+        server, tool = parts[1].casefold(), parts[2].casefold()
+        if ("mail" in server and any(w in tool for w in CONFIRM_MAIL)) or \
+                ("calendar" in server and any(w in tool for w in CONFIRM_CALENDAR)):
+            confirm.add(name)
+        else:
+            hidden.add(name)
+    return {"read_only": sorted(read_only), "confirm": sorted(confirm), "hidden": sorted(hidden)}
 
 
 def tool_names_from_init(lines: Iterable[str]) -> list[str]:
@@ -73,6 +97,26 @@ def write_private(path: Path, data: dict) -> None:
     os.chmod(path, 0o600)
 
 
+def list_tools(mcp_path: Path) -> list[str] | None:
+    """The tool names `claude -p` reports for mcp_path; None when the listing failed."""
+    try:
+        stdin_line = json.dumps({"type": "user", "message": {"role": "user",
+                                "content": [{"type": "text", "text": "Reply with OK."}]}}) + "\n"
+        # Empty scratch cwd: no project CLAUDE.md / .mcp.json / hooks get picked up (same as lean.py).
+        proc = subprocess.run(
+            ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+             "--verbose", "--model", "haiku", "--tools", "", "--setting-sources", "",
+             "--strict-mcp-config", "--mcp-config", str(mcp_path),
+             "--permission-mode", "default", "--no-session-persistence"],
+            input=stdin_line, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            cwd=tempfile.mkdtemp(prefix="jov-agent-"),
+            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
+            timeout=90)
+        return tool_names_from_init(proc.stdout.splitlines())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="seed the overlay agent tier's MCP config")
     parser.add_argument("--dry-run", action="store_true")
@@ -84,6 +128,25 @@ def main(argv: list[str] | None = None) -> int:
     mcp_path = support / "agent-mcp.json"
     if mcp_path.exists() and not args.force:
         print("agent MCP: kept your existing agent-mcp.json")  # never clobber owner edits
+        if args.dry_run:
+            print("would: refresh agent-tools.json from your existing agent-mcp.json")
+            return 0
+        try:
+            cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+            servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
+        except (OSError, ValueError):
+            servers = None
+        if not isinstance(servers, dict):
+            print("agent MCP: could not read agent-mcp.json; agent-tools.json left as it was")
+            return 0
+        tool_names = list_tools(mcp_path)
+        if tool_names is None:  # keep the last good lists: an empty file would let every tool ask
+            print("agent MCP: could not list tools; agent-tools.json left as it was")
+            return 0
+        buckets = split_tools(tool_names, servers)
+        write_private(support / "agent-tools.json", buckets)
+        print(f"agent MCP: refreshed agent-tools.json: {len(buckets['read_only'])} read-only, "
+              f"{len(buckets['confirm'])} ask first, {len(buckets['hidden'])} hidden")
         return 0
     if args.dry_run:  # never even read ~/.claude.json in a dry run (CI, other machines)
         print("would: copy mail/calendar MCP servers from ~/.claude.json into agent-mcp.json (0600)")
@@ -100,28 +163,15 @@ def main(argv: list[str] | None = None) -> int:
         print("agent MCP: no mail or calendar MCP servers found; the agent gets git, GitHub and files only")
         return 0
     write_private(mcp_path, {"mcpServers": servers})
-    try:
-        stdin_line = json.dumps({"type": "user", "message": {"role": "user",
-                                "content": [{"type": "text", "text": "Reply with OK."}]}}) + "\n"
-        # Empty scratch cwd: no project CLAUDE.md / .mcp.json / hooks get picked up (same as lean.py).
-        proc = subprocess.run(
-            ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-             "--verbose", "--model", "haiku", "--tools", "", "--setting-sources", "",
-             "--strict-mcp-config", "--mcp-config", str(mcp_path),
-             "--permission-mode", "default", "--no-session-persistence"],
-            input=stdin_line, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            cwd=tempfile.mkdtemp(prefix="jov-agent-"),
-            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
-            timeout=90)
-        tool_names = tool_names_from_init(proc.stdout.splitlines())
-    except (OSError, subprocess.SubprocessError):
+    tool_names = list_tools(mcp_path)
+    if tool_names is None:
         write_private(support / "agent-tools.json", {"read_only": []})
         print("agent MCP: could not list tools; every mail/calendar tool will ask you first")
         return 0
-    read_only = read_only_tools(tool_names, servers)
-    write_private(support / "agent-tools.json", {"read_only": read_only})
-    print(f"agent MCP: {len(servers)} server(s), {len(read_only)} read-only tool(s); "
-          "every other mail/calendar tool asks you first")
+    buckets = split_tools(tool_names, servers)
+    write_private(support / "agent-tools.json", buckets)
+    print(f"agent MCP: {len(servers)} server(s), {len(buckets['read_only'])} read-only tool(s), "
+          f"{len(buckets['confirm'])} ask first, {len(buckets['hidden'])} hidden")
     return 0
 
 

@@ -82,6 +82,7 @@ def test_main_keeps_existing_agent_mcp(tmp_path, monkeypatch, capsys):
     _claude_json(home, {"mailbox": {"command": "x"}})
     mine = {"mcpServers": {"my-own": {"command": "y"}}}
     (support / "agent-mcp.json").write_text(json.dumps(mine))
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run(INIT))
     assert agent_setup.main([]) == 0
     assert "kept your existing agent-mcp.json" in capsys.readouterr().out
     assert json.loads((support / "agent-mcp.json").read_text()) == mine
@@ -126,11 +127,68 @@ def test_main_writes_both_files_and_hides_canary(tmp_path, monkeypatch, capsys):
     assert agent_setup.main([]) == 0
     captured = capsys.readouterr()
     assert "CANARY-XYZ" not in captured.out + captured.err
-    assert "1 server(s), 1 read-only tool(s)" in captured.out
+    assert "1 server(s), 1 read-only tool(s), 1 ask first, 0 hidden" in captured.out
     mcp = json.loads((support / "agent-mcp.json").read_text())
     assert mcp == {"mcpServers": {"mailbox": {"command": "x", "env": {"TOKEN": "CANARY-XYZ"}}}}
     tools = json.loads((support / "agent-tools.json").read_text())
-    assert tools == {"read_only": ["mcp__mailbox__search_messages"]}
+    assert tools == {"read_only": ["mcp__mailbox__search_messages"],
+                     "confirm": ["mcp__mailbox__send_message"], "hidden": []}
+    for name in ("agent-mcp.json", "agent-tools.json"):
+        assert (support / name).stat().st_mode & 0o777 == 0o600
+
+
+def test_main_dry_run_with_existing_mcp_calls_no_claude(tmp_path, monkeypatch, capsys):
+    home, support = _main_env(tmp_path, monkeypatch)
+    (support / "agent-mcp.json").write_text(json.dumps({"mcpServers": {"my-own": {"command": "y"}}}))
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run(AssertionError("claude ran")))
+    assert agent_setup.main(["--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would: refresh agent-tools.json from your existing agent-mcp.json" in out
+    assert not (support / "agent-tools.json").exists()
+
+
+MAIL_TOOLS = ["search_emails", "get_email", "list_accounts", "list_labels", "read_thread",
+              "get_attachment", "find_contacts", "fetch_profile", "query_inbox", "send_email",
+              "create_draft", "reply_email", "forward_email", "delete_email", "remove_account",
+              "add_account", "modify_labels", "trash_email", "archive_email"]
+CAL_TOOLS = ["list_events", "get_event", "create_event", "update_event", "respond_to_event",
+             "delete_event"]
+
+
+def _names(server: str, tools: list[str]) -> list[str]:
+    return [f"mcp__{server}__{t}" for t in tools]
+
+
+def test_tools_split_and_refreshed(tmp_path, monkeypatch, capsys):
+    servers = {"multi-gmail": {}, "calendar": {}}
+    names = _names("multi-gmail", MAIL_TOOLS) + _names("calendar", CAL_TOOLS)
+    split = agent_setup.split_tools(names, servers)
+    assert split["read_only"] == sorted(
+        _names("multi-gmail", ["search_emails", "get_email", "list_accounts", "read_thread",
+                               "get_attachment", "find_contacts", "fetch_profile", "query_inbox"])
+        + _names("calendar", ["list_events", "get_event"]))
+    assert split["confirm"] == sorted(
+        _names("multi-gmail", ["send_email", "create_draft", "reply_email", "forward_email"])
+        + _names("calendar", ["create_event", "update_event", "respond_to_event"]))
+    # list_labels lands here too: "label" is a WRITE_HINT, so criterion 2's read_only excludes it.
+    assert split["hidden"] == sorted(
+        _names("multi-gmail", ["remove_account", "delete_email", "modify_labels", "add_account",
+                               "trash_email", "archive_email", "list_labels"])
+        + _names("calendar", ["delete_event"]))
+    home, support = _main_env(tmp_path, monkeypatch)
+    mcp = support / "agent-mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"multi-gmail": {"command": "x"},
+                                              "calendar": {"command": "y"}}}))
+    mcp.chmod(0o600)
+    before = mcp.read_bytes()
+    init = '{"type":"system","subtype":"init","tools":' + json.dumps(names) + '}\n'
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run(init))
+    assert agent_setup.main([]) == 0
+    out = capsys.readouterr().out
+    assert "kept your existing agent-mcp.json" in out
+    assert "refreshed agent-tools.json: 10 read-only, 7 ask first, 8 hidden" in out
+    assert mcp.read_bytes() == before
+    assert json.loads((support / "agent-tools.json").read_text()) == split
     for name in ("agent-mcp.json", "agent-tools.json"):
         assert (support / name).stat().st_mode & 0o777 == 0o600
 
@@ -143,3 +201,15 @@ def test_main_subprocess_failure_writes_empty_allowlist(tmp_path, monkeypatch, c
     assert "could not list tools; every mail/calendar tool will ask you first" in capsys.readouterr().out
     assert json.loads((support / "agent-tools.json").read_text()) == {"read_only": []}
     assert (support / "agent-tools.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_refresh_failure_keeps_the_last_tool_lists(tmp_path, monkeypatch, capsys):
+    """A failed listing must not replace good lists with an empty one (every tool would ask again)."""
+    home, support = _main_env(tmp_path, monkeypatch)
+    (support / "agent-mcp.json").write_text(json.dumps({"mcpServers": {"mailbox": {"command": "x"}}}))
+    good = {"read_only": ["mcp__mailbox__search_messages"], "confirm": [], "hidden": ["mcp__mailbox__delete"]}
+    (support / "agent-tools.json").write_text(json.dumps(good))
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run(OSError("boom")))
+    assert agent_setup.main([]) == 0
+    assert "agent-tools.json left as it was" in capsys.readouterr().out
+    assert json.loads((support / "agent-tools.json").read_text()) == good

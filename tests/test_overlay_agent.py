@@ -1099,3 +1099,34 @@ def test_repo_pick_row_and_origin_line_reach_the_turn(client, tmp_path, monkeypa
     assert "origin: o/r" in prompt and "ghp_FAKE" not in prompt
     steps = {s["step"]: s for s in overlay.debug_log.snapshot()["turns"][0]["steps"]}
     assert re.fullmatch(r"terminal shells=\d+ repos=\d+ title_hits=1", steps["repo_pick"]["detail"])
+
+
+def test_agent_argv_hides_mcp_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "SUPPORT_DIR", tmp_path / "support")  # as the reset fixture does
+    tools = agent.SUPPORT_DIR / "agent-tools.json"
+    tools.parent.mkdir(parents=True)
+    tools.write_text(json.dumps({"read_only": ["mcp__m__search"], "confirm": ["mcp__m__send"],
+                                 "hidden": ["mcp__m__delete", "mcp__m__remove_account"]}))
+    argv = agent.agent_argv()
+    i = argv.index("--disallowedTools")
+    assert argv[i + 1:i + 3] == ["mcp__m__delete", "mcp__m__remove_account"]
+    assert argv[i + 3].startswith("--")
+    assert agent.confirm_mcp_tools() == frozenset({"mcp__m__send"})
+    with pytest.raises(ValueError):
+        agent.agent_argv(hidden=("bad name",))
+    tools.write_text(json.dumps({"read_only": []}))
+    assert "--disallowedTools" not in agent.agent_argv()
+    assert agent.confirm_mcp_tools() is None
+
+
+def test_confirm_list_reaches_the_policy(client):
+    """2c: the gateway loads the confirm list into the session's policy, so an unlisted tool is denied."""
+    (agent.SUPPORT_DIR).mkdir(parents=True, exist_ok=True)
+    (agent.SUPPORT_DIR / "agent-tools.json").write_text(json.dumps(
+        {"read_only": ["mcp__m__search"], "confirm": ["mcp__m__send"], "hidden": ["mcp__m__delete"]}))
+    clock = Clock()
+    pool, _ = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Done."})]))
+    turn(client, "check my email", conv_id="cm1")
+    ctx = pool.made[0].policy_ctx
+    assert ctx.confirm_mcp == frozenset({"mcp__m__send"})
+    assert isinstance(agent_policy.decide("mcp__m__delete", {}, ctx), agent_policy.Deny)

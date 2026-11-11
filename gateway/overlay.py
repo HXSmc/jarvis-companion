@@ -1434,6 +1434,7 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     if ctx is None:
         ctx = agent_policy.Ctx(home=str(Path.home()), vault=vault or None, cwd=getattr(session, "cwd", ""),
                                read_only_mcp=await asyncio.to_thread(agent.read_only_mcp_tools),
+                               confirm_mcp=await asyncio.to_thread(agent.confirm_mcp_tools),
                                own_owners=await asyncio.to_thread(_own_owners))
         session.policy_ctx = ctx
     if origin and not ctx.read_untrusted_remote:
