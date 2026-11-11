@@ -204,29 +204,6 @@ def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000,
     return max(before, key=lambda st: st[0])[1][:limit] if before else ""
 
 
-def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tuple[list[str], bool]:
-    """Subjects of the commits behind lines a..b of `rel`; second item True when a line is uncommitted."""
-    # blame applies a repo's textconv by default: --no-textconv, as in the policy's own blame
-    out = _git(Path(repo), "blame", "--no-textconv", "-L", f"{a},{b}", "--porcelain", "--", rel)
-    if not out:
-        return [], False
-    shas: list[str] = []
-    uncommitted = False
-    for line in out.splitlines():
-        m = re.match(r"^([0-9a-f]{40}) \d+ \d+", line)
-        if not m:
-            continue
-        if m[1] == "0" * 40:  # the all-zero sha marks not-committed-yet lines
-            uncommitted = True
-        elif m[1] not in shas:
-            shas.append(m[1])
-    subjects = []
-    for sha in shas[:max_n]:
-        log = _git(Path(repo), "log", "-1", "--no-show-signature", "--format=%s", sha)
-        subjects.append(log.splitlines()[0].strip()[:120] if log else "")
-    return subjects, uncommitted
-
-
 def blame_commits(repo: Path, rel: str, a: int, b: int, head: str | None = None,
                   max_n: int = 3) -> tuple[list[dict], bool]:
     """Up to `max_n` commits behind lines a..b of `rel`, newest committer time first, as

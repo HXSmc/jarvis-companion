@@ -207,7 +207,7 @@ def test_why_refused_when_the_policy_says_no(client, repo, monkeypatch):
 
     monkeypatch.setattr(overlay.agent_policy, "decide", deny)
     blamed: list = []
-    monkeypatch.setattr(gitdiff, "blame_subjects", lambda *a: blamed.append(a) or ([], False))
+    monkeypatch.setattr(gitdiff, "blame_commits", lambda *a, **k: blamed.append(a) or ([], False))
     events = turn(client, "why did this change", conv_id="h1")
     assert acks.PHRASES["hunk_refused"] in says(events)
     assert not quiet.sessions and not blamed

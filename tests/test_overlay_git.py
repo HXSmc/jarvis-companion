@@ -296,15 +296,16 @@ def test_hunks_carry_old_count_and_labels(tmp_path):
     assert all(gitdiff.LABEL_RE.match(l) for l in labels)
 
 
-def test_blame_subjects_and_hunk_diff(tmp_path):
+def test_blame_commits_subjects_and_hunk_diff(tmp_path):
     repo = tmp_path / "r"
     truth = _fixture().build(repo)
-    assert gitdiff.blame_subjects(repo, "sample.py", 149, 149) == (["Rename the timeout flag"], False)
-    assert gitdiff.blame_subjects(repo, "sample.py", 140, 142)[0] == ["Add the retry counter"]
+    commits, uncommitted = gitdiff.blame_commits(repo, "sample.py", 149, 149)
+    assert [c["subject"] for c in commits] == ["Rename the timeout flag"] and not uncommitted
+    assert [c["subject"] for c in gitdiff.blame_commits(repo, "sample.py", 140, 142)[0]] == ["Add the retry counter"]
     lines = (repo / "sample.py").read_text().splitlines()
     lines[9] = 'L010 = 10  # touched'  # uncommitted working-tree edit
     (repo / "sample.py").write_text("\n".join(lines) + "\n")
-    assert gitdiff.blame_subjects(repo, "sample.py", 10, 10) == ([], True)
+    assert gitdiff.blame_commits(repo, "sample.py", 10, 10) == ([], True)
     text = gitdiff.hunk_diff(repo, truth["merge"], "sample.py", 149)
     assert text.startswith("@@") and "+L904 = 146" in text
 
@@ -320,9 +321,9 @@ def test_blame_never_runs_a_repo_textconv(tmp_path):
     script.chmod(0o755)
     _git(repo, "config", "diff.evil.textconv", str(script))
     (repo / ".gitattributes").write_text("*.py diff=evil\n")
-    subjects, _ = gitdiff.blame_subjects(repo, "sample.py", 149, 149)
+    commits, _ = gitdiff.blame_commits(repo, "sample.py", 149, 149)
     assert not marker.exists()
-    assert subjects == ["Rename the timeout flag"]
+    assert [c["subject"] for c in commits] == ["Rename the timeout flag"]
     assert gitdiff.has_filters(repo)  # the overlay refuses such a repo before any diff
     _git(repo, "config", "--unset", "diff.evil.textconv")
     _git(repo, "config", "diff.evil.command", str(script))
