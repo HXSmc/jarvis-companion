@@ -197,7 +197,8 @@ def test_ack_cache_fallback():
     cache = acks.AckCache(synth)
     cache.prerender()
     assert cache.get("open") == ("Of course.", b"pcm:Of course.", 24000)
-    assert sorted(calls) == sorted(acks.PHRASES.values())
+    # PHRASES with a template ({n}) are spoken at turn time, never prerendered.
+    assert sorted(calls) == sorted(t for t in acks.PHRASES.values() if "{" not in t)
 
     def broken(text):
         raise RuntimeError("tts down")

@@ -24,6 +24,7 @@ from mac.voice import media_lookup  # noqa: E402
 __all__ = ["reset_overlay_state"]  # pytest fixture re-exported
 
 YT = "dQw4w9WgXcQ"
+VAGUE = "can you get me something nice to look at"  # media_request() -> None: no owner-words ask
 VIDEO = {"type": "video", "title": "Rocket Launch", "youtube_id": YT}
 IMG = {"type": "image", "title": "Dog", "alt": "Dog 1",
        "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a1/Dog1.jpg/960px-Dog1.jpg"}
@@ -137,7 +138,7 @@ def test_quiet_pool_never_runs_find_video(monkeypatch):
                                     {"video_search": {"query": "cat"}}))
     deps = make_deps(quiet_conversations=quiet)
     overlay._tainted.add("c1")
-    events = run(deps, text="show me a video of a cat")
+    events = run(deps, text=VAGUE)
     assert fake.calls == [] and cards(events) == []
     assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1
 
