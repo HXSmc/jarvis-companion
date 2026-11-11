@@ -62,8 +62,8 @@ final class LineBandMapperTests: XCTestCase {
     }
 
     func testGuardReasons() {
-        XCTAssertEqual(LineBandFit.fit(ranges: [1...2], digits: gutter(1, 3), window: window, partial: true).reason,
-                       "no_gutter")  // a column needs 5 numbers
+        XCTAssertEqual(LineBandFit.fit(ranges: [1...2], digits: gutter(1, 1), window: window, partial: true).reason,
+                       "no_gutter")  // a 1-line file has no gutter to fit (B4)
         XCTAssertEqual(LineBandFit.fit(ranges: [1...2], digits: [], window: window, partial: true).reason, "no_gutter")
         let same = (0..<6).map { (line: 7, centre: CGPoint(x: 40, y: 100 + CGFloat($0) * 20), right: CGFloat(52)) }
         XCTAssertEqual(LineBandFit.fit(ranges: [7...7], digits: same, window: window, partial: true).reason, "no_fit")
@@ -133,6 +133,44 @@ final class LineBandMapperTests: XCTestCase {
         // A changed line under a sticky header (689) is not a scrolling line on screen: no band there.
         XCTAssertEqual(LineBandFit.fit(ranges: [689...689], digits: stickyGutter(), window: editor, partial: true).reason,
                        "off_view")
+    }
+
+    // MARK: B4/B5: short files, folded ranges, wrapped lines
+
+    func testShortFileGutterGetsABand() throws {
+        // B4: 2-4 evenly spaced digits numbered from 1 are a gutter even without a 5-digit column.
+        let pass = LineBandFit.fit(ranges: [3...3], digits: gutter(1, 3), window: window, partial: true)
+        XCTAssertEqual(pass.reason, "ok")
+        let band = try XCTUnwrap(pass.bands.first)
+        XCTAssertEqual(band.lines, 3...3)
+        XCTAssertEqual(band.rect.midY, 100 + 2 * 20, accuracy: 2)  // line 3's centre row
+        XCTAssertEqual(LineBandFit.fit(ranges: [1...1], digits: gutter(1, 1), window: window, partial: true).reason,
+                       "no_gutter")  // a single digit is not a gutter
+        XCTAssertEqual(LineBandFit.fit(ranges: [2...2], digits: gutter(2, 4), window: window, partial: true).reason,
+                       "no_gutter")  // not numbered from 1
+    }
+
+    func testFoldedRangeIsNotBoxed() {
+        // B5a: the editor folded lines 10-29 away, so line 30 sits one row below line 9.
+        let folded = (1...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: 52) }
+            + (30...40).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 21) * 20), right: 52) }
+        let pass = LineBandFit.fit(ranges: [12...12], digits: folded, window: window, partial: true)
+        XCTAssertEqual(pass.reason, "folded")
+        XCTAssertTrue(pass.bands.isEmpty)
+    }
+
+    func testWrappedLineBandCoversItsRows() throws {
+        // B5b: line 5 wraps over 3 rows (line 6 starts 3 rows below line 5's centre). Lines 6-9
+        // only after the wrap: with 6-11 evenRun would pick that longer run and the pass would
+        // say off_view for line 5.
+        let wrapped = (1...5).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: 52) }
+            + (6...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 + 1) * 20), right: 52) }
+        let pass = LineBandFit.fit(ranges: [5...5], digits: wrapped, window: window, partial: true)
+        XCTAssertEqual(pass.reason, "ok")
+        let band = try XCTUnwrap(pass.bands.first)
+        XCTAssertEqual(band.lines, 5...5)
+        XCTAssertGreaterThanOrEqual(band.rect.height, 2.4 * 20)  // the wrapped rows, not one line
+        XCTAssertEqual(band.rect.minY, 100 + 4 * 20 - 10, accuracy: 0.5)  // line 5 centre minus half a row
     }
 
     func testEvenRunSkipsOutliersAndKeepsAFlatGutter() {

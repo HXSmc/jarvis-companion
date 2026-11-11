@@ -23,6 +23,14 @@ class Intent:
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
 
+@dataclass
+class MediaAsk:
+    kind: str      # "image" | "video"
+    subject: str   # cleaned search words; "" = asked, but no clear subject
+    count: int     # 0 when subject == ""
+    article: str = ""  # the leading article cut from the subject ("a"/"an"/"the"/"some"/""), for the spoken line only
+
+
 APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities", "~/Applications")
 
 # Host: ordinary DNS labels only. Path (after the first /): a fixed safe
@@ -137,6 +145,24 @@ _RESTORE_RE = re.compile(_WRAP_LEAD + r"put (?:it|them|the cards) back" + _WRAP_
 _MOVE_RE = re.compile(_WRAP_LEAD + r"(?:move|shift)(?: " + _OBJECT + r")?"
                       + r"(?: to the)? (left|right|up|down|top left|top right|top"
                       r"|bottom left|bottom right|bottom|other side)(?: side| corner)?" + _WRAP_TRAIL)
+# Owner-spoken picture/video requests for the privacy path (media_request): the query is
+# built only from the transcript, never by a model. Whole sentences, fullmatch.
+_MEDIA_VERBS = r"(?:show|pull|pull up|find|get|fetch|bring up|give|display|search for|look up)"
+_MEDIA_AMOUNT = r"(?: (?P<amt>a|an|one|some|a few|\d+|two|three|four|five|six))?"
+_MEDIA_NOUN = r" (?P<noun>picture|photo|image|pic|video|clip|diagram)(?P<plural>s?)"
+_MEDIA_REQUEST_RE = re.compile(r"(?:(?:can|could|would|will) you |please |jarvis,? )*"
+                               + _MEDIA_VERBS + r"(?: me)?" + _MEDIA_AMOUNT + _MEDIA_NOUN
+                               + r"(?: of (?P<subject>.+))?")
+_MEDIA_OF_RE = re.compile(r"(?:a |an )?" + _MEDIA_NOUN + r" of (?P<subject>.+)")
+# Subject tails that are politeness/timing, not search words.
+_MEDIA_TAILS = ("as a test", "please", "for me", "right now", "now", "again",
+                "jarvis", "sir", "thanks", "thank you")
+_MEDIA_ARTICLE_RE = re.compile(r"(a|an|the|some)(?:\s+|$)")
+_MEDIA_AMOUNTS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+# Words that point at the here-and-now: a subject made only of these never searches.
+_MEDIA_PRIVATE_WORDS = frozenset(
+    "this that it these those here there my our screen file files code repo commit"
+    " email mail note notes window tab page".split())
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
@@ -217,6 +243,62 @@ def _clean(text: str) -> str:
     """Same transcript cleanup as parse: wake words and trailing punctuation off."""
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
     return _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
+
+
+def _media_count(amt: str, plural: str, max_count: int) -> int:
+    """Image count from the spoken amount: a number (1-6) capped, plural/"some" -> 4, else 1."""
+    if amt.isdigit():
+        return max(1, min(max_count, int(amt)))
+    if amt in _MEDIA_AMOUNTS:
+        return max(1, min(max_count, _MEDIA_AMOUNTS[amt]))
+    if amt in ("some", "a few") or plural:
+        return min(4, max_count)
+    return 1
+
+
+def media_request(text: str) -> MediaAsk | None:
+    """The owner's spoken picture/video request, or None. Fixed code, never a model.
+
+    Privacy path: when the conversation holds private text, the service may not let a
+    model write a search query, so the subject is built only from this transcript — it
+    can never contain words the owner didn't say. subject "" (count 0) = a clear ask
+    with no searchable subject (deixis, screen words).
+    """
+    if len(text) > 300:
+        return None
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().lower()
+    sentences = [s.rstrip(",").strip() for s in re.split(r"[.?!]+", t) if s.strip()][:3]
+    from mac.voice import media_lookup  # lazy: importing intents must not pull httpx
+
+    for sent in sentences:
+        m = _MEDIA_REQUEST_RE.fullmatch(sent) or _MEDIA_OF_RE.fullmatch(sent)
+        if not m:
+            continue
+        kind = "video" if m["noun"] in ("video", "clip") else "image"
+        if not m["subject"]:
+            return MediaAsk(kind, "", 0)
+        count = 1 if kind == "video" else _media_count(m.groupdict().get("amt") or "",
+                                                       m["plural"], media_lookup.MAX_COUNT)
+        s = m["subject"]
+        while True:  # trailing qualifiers ("as a test", "please") and commas/spaces off
+            s = s.strip(" ,")
+            tail = next((q for q in _MEDIA_TAILS if s == q or s.endswith(" " + q)), "")
+            if not tail:
+                break
+            s = s[:-len(tail)].rstrip(" ,")
+        article = ""
+        lead = _MEDIA_ARTICLE_RE.match(s)
+        if lead:
+            article, s = lead[1], s[lead.end():]
+        s = media_lookup.clean_query(s)
+        if kind == "image" and m["noun"] == "diagram" and s:
+            s += " diagram"  # the cap below counts it
+        s = " ".join(s.split()[:6])[:media_lookup.MAX_QUERY].strip()
+        if s and not s.isdigit() and not all(w in _MEDIA_PRIVATE_WORDS for w in s.split()):
+            return MediaAsk(kind, s, count, article)
+        return MediaAsk(kind, "", 0)
+    return None
 
 
 def _answer(text: str) -> str:
