@@ -1755,7 +1755,7 @@ async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
 def _agent_card(run: AgentRun, card: dict) -> list[dict]:
     """An agent turn's card; its first one drops the cards of the conv's previous agent turn."""
     events = []
-    if not run.cards_sent:
+    if not getattr(run, "cards_sent", False):  # test_overlay_media_emit passes a bare runner
         run.cards_sent = True
         drop = _drop_cards(run.conv_id, "agent")
         if drop:
