@@ -101,6 +101,28 @@ _CANCEL_RE = re.compile(r"(?:stop(?: it)?|cancel(?: it| that)?|never ?mind|forge
 _NO_RE = re.compile(r"(?:(?:no|nope)(?: (?:don't|do not|thanks|thank you|stop|cancel(?: it)?|leave it))?"
                     r"|don't(?: do it)?|do not(?: do it)?)" + _POLITE)
 
+# Overlay hide/show/aside/restore/move and the widened clear: whole-utterance
+# phrases with an optional politeness wrapper ("can you hide it, please").
+# "get rid of it for now" is explicit hide and checked before clear ("for now"
+# makes it temporary; the wrapper alone must not eat the trailing "now").
+_WRAP_LEAD = r"(?:(?:can|could|would) you |please |jarvis )*"
+_WRAP_TRAIL = r"(?:,? (?:please|for me|now|jarvis))*"
+_OBJECT = r"(?:it|them|that|this|everything|all of it|all|the overlay|the cards?|the screen)"
+_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:hide " + _OBJECT + r"|get rid of it for now|put it away)"
+                      + _WRAP_TRAIL)
+_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show (?:it|everything) again|show the overlay"
+                      r"|bring (?:it|them) back|unhide(?: everything)?)" + _WRAP_TRAIL)
+_CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: everything| the screen)?|dismiss(?: it)?"
+                       r"|close (?:that|everything)|remove the cards|get rid of the cards)"
+                       + _WRAP_TRAIL)
+_ASIDE_RE = re.compile(_WRAP_LEAD + r"(?:move (?:it|them) (?:out of the way|aside)"
+                       r"|park (?:it|the cards))" + _WRAP_TRAIL)
+_RESTORE_RE = re.compile(_WRAP_LEAD + r"put (?:it|them|the cards) back" + _WRAP_TRAIL)
+# Direction last ("move it to the top left"); "top"->up, "bottom"->down at the match site.
+_MOVE_RE = re.compile(_WRAP_LEAD + r"(?:move|shift) " + _OBJECT
+                      + r"(?: to the)? (left|right|up|down|top left|top right|top"
+                      r"|bottom left|bottom right|bottom|other side)" + _WRAP_TRAIL)
+
 
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
@@ -111,8 +133,15 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
     t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
     low = t.lower()
-    if low in ("clear", "clear the screen"):
-        return Intent("clear")
+    # Hide first: "get rid of it for now" is temporary, not the final clear.
+    for rx, kind in ((_HIDE_RE, "hide"), (_CLEAR_RE, "clear"), (_SHOW_RE, "show"),
+                     (_ASIDE_RE, "aside"), (_RESTORE_RE, "restore")):
+        if rx.fullmatch(low):
+            return Intent(kind)
+    m = _MOVE_RE.fullmatch(low)
+    if m:
+        arg = m.group(1).replace(" ", "_")
+        return Intent("move", {"top": "up", "bottom": "down"}.get(arg, arg))
     if _TIME_RE.match(low):
         return Intent("clock", "time")
     if _DATE_RE.match(low):
