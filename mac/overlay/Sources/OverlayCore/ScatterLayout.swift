@@ -213,42 +213,192 @@ public enum ScatterLayout {
         frames.reduce(nil as CGRect?) { $0?.union($1) ?? $1 }
     }
 
-    /// A group move shorter than this would not read as a move: squeeze instead.
+    /// A group already this close to its spot counts as moved: no motion.
     public static let visibleShift: CGFloat = 24
-    /// Each squeezed card keeps at least this much of itself uncovered along the move axis (its
-    /// title row, one touch target).
+    /// When cards must overlap (stage 2), each keeps at least this much of its top-left corner
+    /// (where the title starts) uncovered on both axes: its title start, one touch target.
     public static let minStrip: CGFloat = 44
 
-    /// New starts along one axis, anchored at `to` (atEnd) or `from`. A plain shift to the anchor
-    /// edge comes first and keeps the layout, when the group fits `limit` (the inset span) and the
-    /// shift is at least `visibleShift` (or the group already fits `from...to`). Otherwise the group
-    /// is squeezed toward `from...to`, order kept, and every card stays at least `minStrip` past the
-    /// cards before it that share its `across` span (the other axis: cards in another row or
-    /// column cannot cover it), so it runs on past `to` (toward the far end of `limit`) when the
-    /// strips need it.
-    static func packed(_ starts: [CGFloat], lengths: [CGFloat], across: [ClosedRange<CGFloat>],
-                       from: CGFloat, to: CGFloat, atEnd: Bool, limit: ClosedRange<CGFloat>) -> [CGFloat] {
-        let ends = zip(starts, lengths).map { $0 + $1 }
-        guard let low = starts.min(), let high = ends.max(), let longest = lengths.max() else { return starts }
-        let span = high - low, room = to - from
-        let shift = atEnd ? to - high : from - low
-        if span <= limit.upperBound - limit.lowerBound, span <= room || abs(shift) >= visibleShift {
-            return starts.map { $0 + shift }
+    /// Kept free for a macOS notification banner (344 pt wide plus margins), top right of the
+    /// visible frame. Reserved for voice moves only (the caller passes it as a keep-out).
+    public static func notificationZone(visible: CGRect) -> CGRect {
+        CGRect(x: visible.maxX - 380, y: visible.minY, width: 380, height: 130)
+    }
+
+    /// A voice move of the group `old` toward `direction`, inside the inset area and off every
+    /// keep-out. Frames come back in `old`'s order with the stage that placed them; nil = no room.
+    /// - Stage 0: the whole group shifts to touch the named edge(s) of its first region (the
+    ///   quarter for a corner, the half for a side; a group on one side mirrors for otherSide),
+    ///   taking the shortest shared shift off a keep-out. Layout and overlaps stay as they were.
+    ///   A shift under `visibleShift` counts as done and moves nothing.
+    /// - Stage 1: cards in reading order (top to bottom, then left to right) fill rows from the
+    ///   anchor corner, `minGap` apart, no overlap, jumping past keep-outs; regions are tried from
+    ///   the quarter or half out to the whole area.
+    /// - Stage 2: only when stage 1 cannot fit them: an overlapping grid in reading order (later
+    ///   cards in front), each card's top-left `minStrip` square uncovered, largest steps first.
+    /// The anchor corner: the named side(s); an unnamed axis takes the side the group's centre is
+    /// on. otherSide goes toward the half away from the group's centre.
+    public static func reflow(old: [CGRect], direction: LayoutMode, visible: CGRect,
+                              keepOut: [CGRect]) -> (frames: [CGRect], stage: Int)? {
+        let area = insetArea(visible)
+        guard let group = bounds(old), area.width > 0, area.height > 0 else { return nil }
+        var direction = direction
+        var mirror = false
+        if direction == .otherSide {
+            mirror = group.maxX <= visible.midX || group.minX >= visible.midX
+            direction = group.midX <= visible.midX ? .right : .left
         }
-        let scale = span <= longest ? 1 : max(0, room - longest) / (span - longest)
-        var out = zip(starts, ends).map { start, end in
-            atEnd ? to - (high - end) * scale - (end - start) : from + (start - low) * scale
+        let named: (right: Bool?, bottom: Bool?)
+        switch direction {
+        case .left: named = (false, nil)
+        case .right: named = (true, nil)
+        case .up: named = (nil, false)
+        case .down: named = (nil, true)
+        case .topLeft: named = (false, false)
+        case .topRight: named = (true, false)
+        case .bottomLeft: named = (false, true)
+        case .bottomRight: named = (true, true)
+        case .aside, .restore, .hide, .show, .otherSide: return nil
         }
-        // Walk away from the anchor edge: each card starts at least minStrip past the previous one.
-        let walk = out.indices.sorted {
-            atEnd ? (out[$0], starts[$0]) > (out[$1], starts[$1]) : (out[$0], starts[$0]) < (out[$1], starts[$1])
+        let right = named.right ?? (group.midX > area.midX)
+        let bottom = named.bottom ?? (group.midY > area.midY)
+        let column = CGRect(x: right ? area.midX : area.minX, y: area.minY, width: area.width / 2, height: area.height)
+        let band = CGRect(x: area.minX, y: bottom ? area.midY : area.minY, width: area.width, height: area.height / 2)
+        let regions: [CGRect]
+        if named.right != nil, named.bottom != nil {
+            regions = [column.intersection(band), column, area]
+        } else {
+            regions = [named.right != nil ? column : band, area]
         }
-        for (step, index) in walk.enumerated() {
-            for before in walk[..<step] where across.indices.contains(before) && across[before].overlaps(across[index]) {
-                out[index] = atEnd ? min(out[index], out[before] - minStrip) : max(out[index], out[before] + minStrip)
+
+        // Stage 0: one shared shift keeps the owner's layout.
+        let first = regions[0]
+        var dx: CGFloat = 0, dy: CGFloat = 0
+        if mirror {
+            dx = 2 * visible.midX - group.maxX - group.minX
+        } else if let toRight = named.right {
+            dx = toRight ? first.maxX - group.maxX : first.minX - group.minX
+        }
+        if let toBottom = named.bottom { dy = toBottom ? first.maxY - group.maxY : first.minY - group.minY }
+        let room = mirror ? area : first
+        let clear = { (frames: [CGRect]) -> Bool in !frames.contains { frame in keepOut.contains { overlapArea($0, frame) > 0 } } }
+        if room.insetBy(dx: -0.5, dy: -0.5).contains(group.offsetBy(dx: dx, dy: dy)) {
+            if hypot(dx, dy) < visibleShift, clear(old) { return (old, 0) }
+            if let placed = clearOf(keepOut, old.map { $0.offsetBy(dx: dx, dy: dy) }, area: room) { return (placed, 0) }
+        }
+
+        let reading = old.indices.sorted { (old[$0].minY, old[$0].minX, $0) < (old[$1].minY, old[$1].minX, $1) }
+        let sizes = reading.map { old[$0].size }
+        func inOldOrder(_ slots: [CGRect]) -> [CGRect] {
+            var frames = old
+            for (slot, index) in reading.enumerated() { frames[index] = slots[slot] }
+            return frames
+        }
+        // Stage 1: rows without overlap, smallest region first.
+        for region in regions {
+            if let slots = rows(sizes, in: region, right: right, bottom: bottom, keepOut: keepOut) {
+                return (inOldOrder(slots), 1)
             }
         }
-        return out
+        // Stage 2: the overlapping grid with the largest steps in any room clear of the keep-outs.
+        var best: (frames: [CGRect], step: CGFloat)?
+        for space in rooms(area, keepOut: keepOut) {
+            if let found = grid(sizes, in: space, right: right, bottom: bottom, keepOut: keepOut),
+               found.step > best?.step ?? 0 {
+                best = found
+            }
+        }
+        guard let best else { return nil }
+        return (inOldOrder(best.frames), 2)
+    }
+
+    /// Cards of `sizes` (in order) in rows from the (`right`, `bottom`) corner of `region`, each row
+    /// `minGap` past the tallest card of the one before, each card `minGap` past the one before.
+    /// A card that would cover a keep-out jumps past it; a card past the region's far side starts
+    /// the next row. Nil when a row would pass the region's far edge.
+    static func rows(_ sizes: [CGSize], in region: CGRect, right: Bool, bottom: Bool, keepOut: [CGRect]) -> [CGRect]? {
+        let eps: CGFloat = 0.001
+        var slots: [CGRect] = []
+        var line = bottom ? region.maxY : region.minY  // the row's edge nearest the anchor
+        while slots.count < sizes.count {
+            var edge = right ? region.maxX : region.minX  // the next card's side nearest the anchor
+            var tallest: CGFloat = 0
+            while slots.count < sizes.count {
+                let size = sizes[slots.count]
+                let frame = CGRect(x: right ? edge - size.width : edge, y: bottom ? line - size.height : line,
+                                   width: size.width, height: size.height)
+                if frame.minY < region.minY - eps || frame.maxY > region.maxY + eps { return nil }
+                if frame.minX < region.minX - eps || frame.maxX > region.maxX + eps {
+                    if tallest == 0 { tallest = size.height }  // nothing fit in this row: try the next
+                    break
+                }
+                let hits = keepOut.filter { overlapArea($0, frame) > 0 }
+                if !hits.isEmpty {
+                    edge = right ? hits.map(\.minX).min()! - minGap : hits.map(\.maxX).max()! + minGap
+                    continue
+                }
+                slots.append(frame)
+                tallest = max(tallest, size.height)
+                edge = right ? frame.minX - minGap : frame.maxX + minGap
+            }
+            line += bottom ? -(tallest + minGap) : tallest + minGap
+        }
+        return slots
+    }
+
+    /// Cards of `sizes` (in order) on a grid filled row by row, left to right, so each later card
+    /// lies right of or below the ones before: with later cards in front, every card keeps its
+    /// top-left step x step corner uncovered. The column count with the largest step wins (steps
+    /// stop growing at a card plus `minGap`); the block sits in the (`right`, `bottom`) corner of
+    /// `region`. Nil when no grid keeps `minStrip` steps clear of the keep-outs.
+    static func grid(_ sizes: [CGSize], in region: CGRect, right: Bool, bottom: Bool,
+                     keepOut: [CGRect]) -> (frames: [CGRect], step: CGFloat)? {
+        guard let widest = sizes.map(\.width).max(), let tallest = sizes.map(\.height).max(),
+              widest <= region.width, tallest <= region.height else { return nil }
+        var best: (frames: [CGRect], step: CGFloat)?
+        for columns in 1...sizes.count {
+            let rowCount = (sizes.count + columns - 1) / columns
+            let stepX = columns == 1 ? 0 : min(widest + minGap, (region.width - widest) / CGFloat(columns - 1))
+            let stepY = rowCount == 1 ? 0 : min(tallest + minGap, (region.height - tallest) / CGFloat(rowCount - 1))
+            let step = min(columns == 1 ? .infinity : stepX, rowCount == 1 ? .infinity : stepY)
+            guard step >= minStrip, step > best?.step ?? 0 else { continue }
+            let width = widest + CGFloat(columns - 1) * stepX, height = tallest + CGFloat(rowCount - 1) * stepY
+            let originX = right ? region.maxX - width : region.minX
+            let originY = bottom ? region.maxY - height : region.minY
+            let frames = sizes.indices.map { index in
+                CGRect(origin: CGPoint(x: originX + CGFloat(index % columns) * stepX,
+                                       y: originY + CGFloat(index / columns) * stepY), size: sizes[index])
+            }
+            if frames.contains(where: { frame in keepOut.contains { overlapArea($0, frame) > 0 } }) { continue }
+            best = (frames, step)
+        }
+        return best
+    }
+
+    /// Rooms for the stage-2 grid: the whole area, the band between the upper and lower keep-outs,
+    /// the strip between the left and right ones, and the parts left of, right of, above and below
+    /// all of them (each `minGap` clear). Empty rooms are dropped.
+    static func rooms(_ area: CGRect, keepOut: [CGRect]) -> [CGRect] {
+        let inside = keepOut.filter { overlapArea($0, area) > 0 }
+        guard !inside.isEmpty else { return [area] }
+        func room(minX: CGFloat = -.infinity, minY: CGFloat = -.infinity,
+                  maxX: CGFloat = .infinity, maxY: CGFloat = .infinity) -> CGRect? {
+            let x0 = max(minX, area.minX), y0 = max(minY, area.minY)
+            let x1 = min(maxX, area.maxX), y1 = min(maxY, area.maxY)
+            return x1 > x0 && y1 > y0 ? CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0) : nil
+        }
+        let upper = inside.filter { $0.midY < area.midY }, lower = inside.filter { $0.midY >= area.midY }
+        let leftSide = inside.filter { $0.midX < area.midX }, rightSide = inside.filter { $0.midX >= area.midX }
+        let candidates: [CGRect?] = [
+            area,
+            room(minY: (upper.map(\.maxY).max() ?? -.infinity) + minGap, maxY: (lower.map(\.minY).min() ?? .infinity) - minGap),
+            room(minX: (leftSide.map(\.maxX).max() ?? -.infinity) + minGap, maxX: (rightSide.map(\.minX).min() ?? .infinity) - minGap),
+            room(maxX: inside.map(\.minX).min()! - minGap),
+            room(minX: inside.map(\.maxX).max()! + minGap),
+            room(maxY: inside.map(\.minY).min()! - minGap),
+            room(minY: inside.map(\.maxY).max()! + minGap),
+        ]
+        return candidates.compactMap { $0 }
     }
 
     /// `frames` moved off every keep-out (orb, permission card) by the shortest shared shift (up,
@@ -276,7 +426,7 @@ public enum ScatterLayout {
     }
 
     /// Duration of a fade or a short overlay transition.
-    public static let motionShort: TimeInterval = 0.2
+    public static let motionShort: TimeInterval = Theme.motionShort
     /// Longest voice-move slide: a move across the whole visible width.
     public static let moveMaxDuration: TimeInterval = 0.45
     /// Length of the refused-move nudge (out and back).
@@ -429,76 +579,28 @@ public enum ScatterLayout {
         public mutating func hide() { hidden = true }
         public mutating func show() { hidden = false }
 
-        /// Moves every placed card as one group toward the named side of the inset area. Only the
-        /// named axes change. A plain shift to the named edge comes first and keeps the layout; when
-        /// that would not show (under `visibleShift`) or not fit, the group is squeezed into the named
-        /// half (edges) or quarter (corners), order kept, each card keeping a `minStrip`, running past
-        /// the half only as far as the strips need. otherSide mirrors a group that lies on one side of
-        /// the centre line and sends a straddling one to the half away from its centre. A group that
-        /// would cover a keep-out (orb, permission card) takes the shortest shared shift that clears
-        /// it and stays inside. Returns false, changing nothing (still hidden or parked), when no
-        /// shift clears the keep-outs, there is nothing to move, or the mode is not a move.
-        /// Otherwise shows, restores, moves and pins the cards.
+        /// Moves every placed card as one group toward the named side of the inset area (`reflow`:
+        /// shift, then rows without overlap, then an overlapping grid), off every keep-out (orb,
+        /// permission card, notification zone). Returns false, changing nothing (still hidden or
+        /// parked), when there is no room, nothing to move, or the mode is not a move. Otherwise
+        /// shows, restores, moves and pins the cards; after a grid, `order` follows reading order
+        /// so later cards lie in front and every card's corner stays uncovered.
         @discardableResult
         public mutating func moveAll(_ direction: LayoutMode, visible: CGRect, keepOut: [CGRect] = []) -> Bool {
-            let area = ScatterLayout.insetArea(visible)
             let keys = order.filter { frames[$0] != nil }
-            let old = keys.compactMap { frames[$0] }
-            guard let group = ScatterLayout.bounds(old), area.width > 0, area.height > 0 else { return false }
-            let halfX = area.width / 2, halfY = area.height / 2
-            let spanX = area.minX...area.maxX, spanY = area.minY...area.maxY
-            var xs = old.map(\.minX), ys = old.map(\.minY)
-            let widths = old.map(\.width), heights = old.map(\.height)
-            // Strips are kept between cards that shared a row (x squeeze) or a column (y squeeze) before
-            // the move; a corner squeeze on both axes does not stack the two.
-            let rows = old.map { $0.minY...$0.maxY }, columns = old.map { $0.minX...$0.maxX }
-            let toLeft = {
-                xs = ScatterLayout.packed(xs, lengths: widths, across: rows, from: area.minX, to: area.minX + halfX, atEnd: false, limit: spanX)
-            }
-            let toRight = {
-                xs = ScatterLayout.packed(xs, lengths: widths, across: rows, from: area.maxX - halfX, to: area.maxX, atEnd: true, limit: spanX)
-            }
-            let toTop = {
-                ys = ScatterLayout.packed(ys, lengths: heights, across: columns, from: area.minY, to: area.minY + halfY, atEnd: false, limit: spanY)
-            }
-            let toBottom = {
-                ys = ScatterLayout.packed(ys, lengths: heights, across: columns, from: area.maxY - halfY, to: area.maxY, atEnd: true, limit: spanY)
-            }
-            switch direction {
-            case .left: toLeft()
-            case .right: toRight()
-            case .up: toTop()
-            case .down: toBottom()
-            case .topLeft: toLeft(); toTop()
-            case .topRight: toRight(); toTop()
-            case .bottomLeft: toLeft(); toBottom()
-            case .bottomRight: toRight(); toBottom()
-            case .otherSide:
-                if group.maxX <= visible.midX || group.minX >= visible.midX {
-                    let mirroredMin = 2 * visible.midX - group.maxX
-                    xs = xs.map { mirroredMin + $0 - group.minX }
-                } else if group.midX <= visible.midX {
-                    toRight()
-                } else {
-                    toLeft()
-                }
-            case .aside, .restore, .hide, .show: return false
-            }
-            var moved = old.indices.map { CGRect(x: xs[$0], y: ys[$0], width: widths[$0], height: heights[$0]) }
-            // One shared offset keeps the group inside the inset area on the axis it did not move.
-            if let box = ScatterLayout.bounds(moved) {
-                let inside = ScatterLayout.clamp(box, into: area)
-                if inside.size == box.size {
-                    moved = moved.map { $0.offsetBy(dx: inside.minX - box.minX, dy: inside.minY - box.minY) }
-                }
-            }
-            moved = moved.map { ScatterLayout.clamp($0, into: area) }  // only a card past the area edge moves here
-            guard let placed = ScatterLayout.clearOf(keepOut, moved, area: area) else { return false }
+            guard let result = ScatterLayout.reflow(old: keys.compactMap { frames[$0] }, direction: direction,
+                                                    visible: visible, keepOut: keepOut) else { return false }
             hidden = false
             mode = .normal
             for (index, key) in keys.enumerated() {
-                frames[key] = placed[index]
+                frames[key] = result.frames[index]
                 pinned.insert(key)
+            }
+            if result.stage == 2 {
+                let front = keys.indices.sorted {
+                    (result.frames[$0].minY, result.frames[$0].minX) < (result.frames[$1].minY, result.frames[$1].minX)
+                }
+                order = front.map { keys[$0] } + order.filter { frames[$0] == nil }
             }
             moveCount &+= 1
             return true
