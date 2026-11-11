@@ -350,6 +350,8 @@ final class AppController {
                        linesFile: file)
         case .clear:
             clearAll()
+        case .dropCards(let ids):
+            model.remove(cardIDs: ids)
         case .layout(let mode):
             model.setLayout(mode)
         case .done:

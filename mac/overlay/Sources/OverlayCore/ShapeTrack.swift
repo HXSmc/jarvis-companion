@@ -438,7 +438,7 @@ public enum ShapeTrack {
     public static func extendsIdle(_ event: OverlayEvent) -> Bool {
         switch event {
         case .say, .audio, .shape, .card, .lines: return true
-        case .clear, .layout, .done, .unknown: return false
+        case .clear, .layout, .dropCards, .done, .unknown: return false
         }
     }
 

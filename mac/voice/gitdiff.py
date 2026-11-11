@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.hud import MAX_BODY_LINES, MAX_ITEMS, MAX_LABEL, validate_card
@@ -105,8 +108,16 @@ def hunks(repo: Path, base: str) -> list[dict]:
     count 0 so the app can still highlight the old line.
     """
     out = _git(Path(repo), "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
-    if not out:
-        return []
+    return _parse_hunks(out) if out else []
+
+
+def hunks_between(repo: Path, a: str, b: str) -> list[dict]:
+    """Same shape, for the commit-to-commit diff `a` -> `b` (e.g. a merge vs its first parent)."""
+    out = _git(Path(repo), "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", a, b)
+    return _parse_hunks(out) if out else []
+
+
+def _parse_hunks(out: str) -> list[dict]:
     result: list[dict] = []
     file: str | None = None
     for line in out.splitlines():
@@ -121,6 +132,36 @@ def hunks(repo: Path, base: str) -> list[dict]:
     return result
 
 
+@dataclass
+class Range:
+    """What a "what changed" ask resolved to: kind uncommitted|since_merge|merge_itself|none,
+    the diff base (and head, for commit-to-commit ranges), and its hunks."""
+    kind: str
+    base: str | None
+    head: str | None
+    hunks: list[dict]
+
+
+def pick_range(repo: Path, sub: str) -> Range:
+    """Pick what to show for `sub`: "auto" prefers uncommitted edits, then the last merge's
+    own new-side work (merge_itself) or what landed since it (since_merge); "merge" skips
+    the uncommitted check. Nothing to show -> kind "none" (base still says what was checked)."""
+    if sub == "auto":
+        h = hunks(repo, "HEAD")
+        if h:
+            return Range("uncommitted", "HEAD", None, h)
+    m = last_merge(repo)
+    if m is None:
+        return Range("none", None, None, [])
+    h = hunks(repo, m)
+    if h:
+        return Range("since_merge", m, None, h)
+    h = hunks_between(repo, f"{m}^", m)
+    if h:
+        return Range("merge_itself", f"{m}^", m, h)
+    return Range("none", m, None, [])
+
+
 def hunk_label(h: dict, i: int, n: int) -> str:
     """Short overlay label for hunk `i` of `n`: "+k" added, "changed", or "removed here"."""
     if h["old"] == 0:
@@ -130,14 +171,16 @@ def hunk_label(h: dict, i: int, n: int) -> str:
     return f"{i}/{n} changed"
 
 
-def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000) -> str:
+def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000,
+              head: str | None = None) -> str:
     """Unified=3 hunk (header + body) covering new-side line `start` of `rel`; "" when nothing matches.
 
     Exact hunk first; else the last hunk starting at or before `start` (the user's line
-    sits in its context or the removal just after it).
+    sits in its context or the removal just after it). With `head`, diff base -> head
+    (commit-to-commit) instead of the working tree.
     """
     out = _git(Path(repo), "diff", "--unified=3", "--no-color", "--no-ext-diff", "--no-textconv",
-               base, "--", rel)
+               *([base, head] if head else [base]), "--", rel)
     if not out:
         return ""
     parsed: list[tuple[int, int, str]] = []  # (new start, new count, hunk text)
@@ -161,10 +204,15 @@ def hunk_diff(repo: Path, base: str, rel: str, start: int, limit: int = 3000) ->
     return max(before, key=lambda st: st[0])[1][:limit] if before else ""
 
 
-def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tuple[list[str], bool]:
-    """Subjects of the commits behind lines a..b of `rel`; second item True when a line is uncommitted."""
-    # blame applies a repo's textconv by default: --no-textconv, as in the policy's own blame
-    out = _git(Path(repo), "blame", "--no-textconv", "-L", f"{a},{b}", "--porcelain", "--", rel)
+def blame_commits(repo: Path, rel: str, a: int, b: int, head: str | None = None,
+                  max_n: int = 3) -> tuple[list[dict], bool]:
+    """Up to `max_n` commits behind lines a..b of `rel`, newest committer time first, as
+    display-clean {subject, date, sentence} dicts; True when a blamed line is uncommitted.
+    With `head`, blame that commit's version of the file instead of the working tree."""
+    args = ["blame", "--no-textconv", "-L", f"{a},{b}", "--porcelain"]
+    if head:
+        args.append(head)
+    out = _git(Path(repo), *args, "--", rel)
     if not out:
         return [], False
     shas: list[str] = []
@@ -177,17 +225,71 @@ def blame_subjects(repo: Path, rel: str, a: int, b: int, max_n: int = 3) -> tupl
             uncommitted = True
         elif m[1] not in shas:
             shas.append(m[1])
-    subjects = []
-    for sha in shas[:max_n]:
-        log = _git(Path(repo), "log", "-1", "--no-show-signature", "--format=%s", sha)
-        subjects.append(log.splitlines()[0].strip()[:120] if log else "")
-    return subjects, uncommitted
+    rows: list[tuple[int, str, str, str]] = []  # (committer time, subject, date, body)
+    for sha in shas:
+        log = _git(Path(repo), "log", "-1", "--no-show-signature",
+                   "--format=%ct%x00%s%x00%as%x00%b", sha)
+        if not log:
+            continue
+        ct, subject, date, body = log.split("\x00", 3)
+        rows.append((int(ct), subject, date, body))
+    rows.sort(key=lambda r: -r[0])  # newest first; ties keep blame (line) order
+    return [{"subject": _clean_text(subject)[:120], "date": date,
+             "sentence": first_sentence(body)} for _, subject, date, body in rows[:max_n]], uncommitted
 
 
-def diff_text(repo: Path, base: str, limit: int = 12000) -> str:
-    """First `limit` chars of the plain working-tree diff against `base`; "" on failure."""
-    out = _git(Path(repo), "diff", "--no-color", "--no-ext-diff", "--no-textconv", base)
+def _clean_text(s: str) -> str:
+    """Commit text made display-safe: no tags, angle brackets, control chars or run-on spaces."""
+    s = re.sub(r"<[^>]*>", "", s)
+    s = s.replace("<", "").replace(">", "")
+    s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    s = "".join(ch for ch in s if not unicodedata.category(ch).startswith("C"))
+    return " ".join(s.split())
+
+
+def first_sentence(body: str) -> str:
+    """Cleaned body up to and including its first . ! or ?; first 160 chars when it has none."""
+    b = _clean_text(body)
+    if not b:
+        return ""
+    head = b[:160]
+    for i, ch in enumerate(head):
+        if ch in ".!?":
+            return head[:i + 1]
+    return head
+
+
+def diff_text(repo: Path, base: str, limit: int = 12000, head: str | None = None) -> str:
+    """First `limit` chars of the plain diff against `base` (commit-to-commit with `head`);
+    "" on failure."""
+    out = _git(Path(repo), "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+               *([base, head] if head else [base]))
     return (out or "")[:limit]
+
+
+# Editor CLIs live off PATH inside the macOS app bundles: tried in order when `which` misses.
+EDITOR_CANDIDATES = {
+    "code": ("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+             "~/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+             "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+             "/Applications/VSCodium.app/Contents/Resources/app/bin/codium"),
+    "cursor": ("/Applications/Cursor.app/Contents/Resources/app/bin/cursor",),
+}
+
+
+def editor_path(editor: str) -> str | None:
+    """CLI of `editor`: on PATH, else the first bundled app binary that exists and runs;
+    None for an unknown editor or when nothing is found."""
+    if editor not in EDITOR_CANDIDATES:
+        return None
+    found = shutil.which(editor)
+    if found:
+        return found
+    for cand in EDITOR_CANDIDATES[editor]:
+        path = os.path.expanduser(cand)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run,
@@ -205,16 +307,18 @@ def open_in_editor(repo: Path, file: str, line: int, *, run=subprocess.run,
     target = (root / file).resolve()
     if not target.is_relative_to(root):
         raise ValueError(f"path escapes the repo: {file!r}")
-    try:
-        if ":" not in target.name:  # --goto reads a trailing :N[:M] as line/column: `a:9` would open `a`
-            proc = run([editor, "--goto", f"{target}:{int(line)}"], check=False, capture_output=True,
-                       timeout=_EDITOR_TIMEOUT)
-            if proc is not None and proc.returncode == 0:
-                return "code"
-    except FileNotFoundError:
-        pass
-    except subprocess.SubprocessError:  # a hung CLI (stuck IPC): don't open a second editor too
-        return "none"
+    exe = editor_path(editor)
+    if exe is not None:
+        try:
+            if ":" not in target.name:  # --goto reads a trailing :N[:M] as line/column: `a:9` would open `a`
+                proc = run([exe, "--goto", f"{target}:{int(line)}"], check=False, capture_output=True,
+                           timeout=_EDITOR_TIMEOUT)
+                if proc is not None and proc.returncode == 0:
+                    return "code"
+        except FileNotFoundError:
+            pass
+        except subprocess.SubprocessError:  # a hung CLI (stuck IPC): don't open a second editor too
+            return "none"
     if not fallback:
         return "none"
     try:
@@ -229,16 +333,17 @@ def files_phrase(n: int) -> str:
     return f"{n} file" if n == 1 else f"{n} files"
 
 
-def diff_cards(hunks: list[dict], base: str) -> list[dict]:
+def diff_cards(hunks: list[dict], base: str, title: str = "Changed since last merge",
+               empty: str = "No changes since the last merge") -> list[dict]:
     """Stat + bar + "where it changed" info cards summarizing `hunks()` output, validated by common.hud.
 
+    The stat (and the empty-case info card) carry `title`, the empty card says `empty`.
     Empty hunks (or a failed git call upstream) yield one info card instead.
     """
     short = base[:8]
     if not hunks:
         card = validate_card(
-            {"type": "info", "title": "Changed since last merge",
-             "body": ["No changes since the last merge"]}
+            {"type": "info", "id": "gd-stat", "title": title, "body": [empty]}
         )
         return [card] if card else []
     per_file: dict[str, int] = {}
@@ -246,11 +351,11 @@ def diff_cards(hunks: list[dict], base: str) -> list[dict]:
         per_file[h["file"]] = per_file.get(h["file"], 0) + h["count"]
     cards = [
         validate_card(
-            {"type": "stat", "title": "Changed since last merge",
+            {"type": "stat", "id": "gd-stat", "title": title,
              "value": files_phrase(len(per_file)), "label": short}
         ),
         validate_card(
-            {"type": "bar", "title": "Changed lines by file",
+            {"type": "bar", "id": "gd-bar", "title": "Changed lines by file",
              "items": [
                  {"label": Path(f).name[:MAX_LABEL], "value": n}
                  for f, n in sorted(per_file.items(), key=lambda kv: -kv[1])[:MAX_ITEMS]
@@ -259,7 +364,7 @@ def diff_cards(hunks: list[dict], base: str) -> list[dict]:
         ),
         # Where exactly: one line per file with its changed line ranges (top 6 files).
         validate_card(
-            {"type": "info", "title": "Where it changed",
+            {"type": "info", "id": "gd-where", "title": "Where it changed",
              "body": [
                  f"{f}: " + ", ".join(_span(h) for h in hunks if h["file"] == f)
                  for f, _ in sorted(per_file.items(), key=lambda kv: -kv[1])[:MAX_BODY_LINES]

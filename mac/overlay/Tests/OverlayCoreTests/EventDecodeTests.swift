@@ -105,4 +105,16 @@ final class EventDecodeTests: XCTestCase {
         XCTAssertEqual(decode(#"{"type":"layout","mode":"tidy"}"#), .unknown)
         XCTAssertEqual(decode(#"{"type":"layout","mode":1}"#), .unknown)
     }
+
+    func testDropCards() {
+        XCTAssertEqual(decode(#"{"type":"drop_cards","ids":["gd-stat","x"]}"#), .dropCards(ids: ["gd-stat", "x"]))
+        let long = String(repeating: "a", count: 65)
+        XCTAssertEqual(decode(#"{"type":"drop_cards","ids":["a",3,null,"\#(long)","b"]}"#), .dropCards(ids: ["a", "b"]))
+        let many = (0..<30).map { "\"c\($0)\"" }.joined(separator: ",")
+        XCTAssertEqual(decode(#"{"type":"drop_cards","ids":[\#(many)]}"#), .dropCards(ids: (0..<24).map { "c\($0)" }))
+        XCTAssertEqual(decode(#"{"type":"drop_cards"}"#), .unknown)
+        XCTAssertEqual(decode(#"{"type":"drop_cards","ids":"gd-stat"}"#), .unknown)
+        // Pushed outside a turn it is ignored: only turn streams replace cards.
+        XCTAssertNil(OverlayEvent.dropCards(ids: ["gd-stat"]).pushed(idle: true))
+    }
 }

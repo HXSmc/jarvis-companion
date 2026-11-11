@@ -20,7 +20,7 @@ from pathlib import Path
 class Intent:
     kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer
     arg: str = ""
-    sub: str = ""  # agent only: mail | calendar | notes | gh | git | code
+    sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
 
 APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities", "~/Applications")
@@ -42,6 +42,10 @@ UI_NOUNS = ("button", "menu", "icon", "tab", "field", "toggle", "switch", "check
 _DIFF_RE = re.compile(r"\bdiffs?\b|\bwhat changed\b")
 _CHANGES_RE = re.compile(r"\bchang(e|es|ed)\b")
 _MERGE_RE = re.compile(r"\bmerge[sd]?\b")
+# Plain change requests ("highlight the changes") are a diff, not a look at the
+# screen; whole-utterance anchors keep "highlight the URL" a look.
+_CHANGES_ASK_RE = re.compile(r"^(?:(?:can|could) you )?(?:highlight|show(?: me)?|box|mark|point (?:to|at|out))(?: (?:the|my|all the|all my))?(?: (?:exact|latest|recent|new))? changes(?: (?:please|for me))?$")
+_WHAT_CHANGED_RE = re.compile(r"^what(?:'s| is| has)? changed$")
 _GROUND_LEAD_RE = re.compile(r"\b(" + "|".join(_GROUND_LEADS) + r")\b")
 _UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
 # "open the clock app" -> "clock"; "notes.app" is a bundle, not a domain.
@@ -73,6 +77,8 @@ _HUNK_MOVE_RE = re.compile(r"^(?:(?:go to|show me|jump to) )?(?:the )?(next|prev
 _HUNK_NEXT_RE = re.compile(r"^next(?: please)?$")
 _HUNK_WHY_RE = re.compile(r"^(?:why did (?:this|that) change|why was (?:this|that) changed"
                           r"|explain (?:this|that) change)(?: please)?$")
+# "go back" in the hunk walk; the service applies it only when a change list exists.
+HUNK_BACK_RE = re.compile(r"^(?:go back(?: one)?|back|previous(?: one)?)(?: please)?$")
 # Owner-data agent work, first match in priority order picks the sub.
 _AGENT_SUBS = (
     ("mail", re.compile(r"\b(?:inbox|unread|my e-?mails?|(?:any|new|latest|recent) (?:new )?e-?mails?"
@@ -168,10 +174,14 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         sub = _agent_sub(low)
         if sub:
             return Intent("agent", t, sub)
+    # Plain change requests and "what changed" before ground/look, whose leads
+    # ("highlight ...") would otherwise swallow them.
+    if _CHANGES_ASK_RE.fullmatch(low) or _WHAT_CHANGED_RE.fullmatch(low):
+        return Intent("git_diff", t, "auto")
     # "the changes since the last merge", "show the diff" — before ground,
     # whose leads ("highlight ...") would otherwise swallow these.
     if _DIFF_RE.search(low) or (_CHANGES_RE.search(low) and _MERGE_RE.search(low)):
-        return Intent("git_diff", t)
+        return Intent("git_diff", t, "merge" if _MERGE_RE.search(low) else "auto")
     # Ground only for a UI thing on screen: a lead followed by a UI noun,
     # else "where is Paris" would ask the screen instead of the model.
     lead = _GROUND_LEAD_RE.search(low)
@@ -228,6 +238,43 @@ def is_cancel(text: str) -> bool:
 def is_no(text: str) -> bool:
     """Whole utterance says no to the agent's confirmation question."""
     return bool(_NO_RE.fullmatch(_answer(text)))
+
+
+def is_hunk_back(text: str) -> bool:
+    """Whole utterance is a hunk-walk "go back" (applied only with a change list)."""
+    return bool(HUNK_BACK_RE.fullmatch(_clean(text).lower()))
+
+
+def tail_hunk(text: str) -> str | None:
+    """\"next\"/\"prev\" when the transcript ENDS with a whole hunk phrase, else None.
+
+    The phrase may trail a dictation sentence ("... Next change"); a hunk phrase
+    buried in a longer sentence ("the next change in the law") is not a command.
+    """
+    sentences = re.split(r"[.!?]\s+", _clean(text).lower())
+    s = sentences[-1].strip().rstrip(".?!").strip()
+    words = s.split()
+    for k in range(2, 6):
+        if k > len(words):
+            break
+        m = _HUNK_MOVE_RE.fullmatch(" ".join(words[-k:]))
+        if m and (len(words) - k <= 3 or (len(sentences) > 1 and len(words) == k)):
+            return "next" if m[1] == "next" else "prev"
+    return None
+
+
+QUESTION_WORDS_RE = re.compile(r"\b(?:what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did)\b")
+
+
+def noise_words(text: str) -> int | None:
+    """Word count for a 1-3 word utterance that is not a question or a reply, else None."""
+    t = _clean(text)
+    words = re.findall(r"[A-Za-z0-9']+", t)
+    if not 1 <= len(words) <= 3 or "?" in text:
+        return None
+    if QUESTION_WORDS_RE.search(t.lower()) or is_confirm(text) or is_no(text) or is_cancel(text):
+        return None
+    return len(words)
 
 
 def looks_incomplete(text: str) -> bool:

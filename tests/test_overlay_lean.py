@@ -69,3 +69,16 @@ def test_ask_is_serialized_per_session(monkeypatch):
         [("w", "A"), ("r", "A"), ("w", "B"), ("r", "B")],
         [("w", "B"), ("r", "B"), ("w", "A"), ("r", "A")],
     )
+
+
+def test_conversations_contains():
+    """jfollow 7b: `conv in pool` peeks without starting a session (the overlay's agent-state check)."""
+    made = []
+    pool = lean.Conversations(lambda: made.append(1) or type("S", (), {"close": lambda self: None})())
+    assert "c1" not in pool and made == []
+    pool.get("c1")
+    count = len(made)
+    assert "c1" in pool and "c2" not in pool
+    assert len(made) == count
+    pool.drop("c1")
+    assert "c1" not in pool and len(made) == count

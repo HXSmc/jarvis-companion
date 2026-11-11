@@ -203,6 +203,11 @@ class Conversations:
         self._close_later(evicted)
         return session
 
+    def __contains__(self, conv_id: object) -> bool:
+        """True while conv_id has a live session; never starts one."""
+        with self._lock:
+            return conv_id in self._sessions
+
     def drop(self, conv_id: str) -> None:
         """Forget (and close) a conversation's session, e.g. after its process died."""
         with self._lock:

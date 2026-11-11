@@ -31,7 +31,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -433,7 +433,7 @@ def get_deps() -> OverlayDeps:
                 tools="",
             )),
             vlm_ask=_LazyVLM(),
-            agent_conversations=lean.Conversations(agent.AgentSession, max_sessions=4),
+            agent_conversations=lean.Conversations(agent.AgentSession, 4),  # up to 4 warm agent sessions
         )
     return _deps
 
@@ -453,6 +453,11 @@ _tainted: set[str] = set()
 # conv_id -> card ids already sent: a model-supplied id that repeats would silently replace
 # an earlier card in the app (and could overwrite a card the service itself sent).
 _card_ids: dict[str, set] = {}
+# conv_id -> {"git"|"agent": card ids the service sent for that group's newest turn}: the next turn
+# of the group drops them (`drop_cards`), so cards replace instead of stacking. Ids only, never text;
+# never the Confirm card's id.
+_card_sets: dict[str, dict[str, list[str]]] = {}
+MAX_DROP_IDS = 24  # the app keeps at most this many ids of one drop_cards event
 # conv_id -> lower-case text of the last cards sent: a look target found only there is on
 # Jarvis's own card, which the capture leaves out.
 _card_text: dict[str, deque] = {}
@@ -474,9 +479,27 @@ except ValueError:
 def _forget(conv_id: str) -> None:
     """Drop every in-process store that can hold conv_id's text (owner, screen, diff, web or model
     words), and its taint with them. Card ids are not text and stay."""
-    for store in (_history, _notes, _card_text, _pending, _last_reply):
+    for store in (_history, _notes, _card_text, _pending, _last_reply, _card_sets):
         store.pop(conv_id, None)
     _tainted.discard(conv_id)
+
+
+def _drop_cards(conv_id: str, group: str, keep: tuple[str, ...] = ()) -> dict | None:
+    """`drop_cards` for the ids conv_id's last `group` turn sent (except `keep`); forgets them."""
+    sets = _card_sets.get(conv_id, {})
+    ids = [i for i in sets.get(group, []) if i not in keep]
+    sets[group] = [i for i in sets.get(group, []) if i in keep]
+    assert _CONFIRM_CARD_ID not in ids  # the Confirm card is settled by its own flow, never dropped
+    return {"type": "drop_cards", "ids": ids[-MAX_DROP_IDS:]} if ids else None
+
+
+def _keep_card(conv_id: str, group: str, card: dict) -> dict:
+    """Record a card the service sends for `group`; returns its `card` event."""
+    assert card["id"] != _CONFIRM_CARD_ID
+    ids = _card_sets.setdefault(conv_id, {}).setdefault(group, [])
+    if card["id"] not in ids:
+        ids.append(card["id"])
+    return {"type": "card", "card": card}
 
 
 def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
@@ -512,10 +535,11 @@ def _holds_agent_state(conv_id: str, deps: OverlayDeps, cursor: bool = True) -> 
     pool = deps.agent_conversations
     if pool is None:
         return False
-    # shortcut: lean.Conversations has no public peek (get() would start a session), so this reads
-    # its session map; an unknown pool type counts as holding state. Upgrade: a Conversations.__contains__.
-    sessions = getattr(pool, "_sessions", None)
-    return sessions is None or conv_id in sessions
+    # `in` peeks without starting a session; a pool type that cannot answer counts as holding state.
+    try:
+        return conv_id in pool
+    except TypeError:
+        return True
 
 
 @dataclass
@@ -529,8 +553,12 @@ class HunkNav:
     index: int
     editor: str | None
     ctx: agent_policy.Ctx
+    head: str | None = None  # set when the list is commit-to-commit (what the last merge changed)
 
 
+# The stat card's title names the range the owner sees (gitdiff.pick_range kinds).
+_RANGE_TITLES = {"uncommitted": "Not committed yet", "since_merge": "Changed since last merge",
+                 "merge_itself": "Changed in the last merge"}
 # conv_id -> HunkNav: a new highlight for a conversation replaces its cursor.
 _hunks: dict[str, HunkNav] = {}
 
@@ -546,20 +574,51 @@ def _hunk_line(k: int, n: int, h: dict) -> str:
     return f"Change {k} of {n}, line {a}." if a == b else f"Change {k} of {n}, lines {a} to {b}."
 
 
-def _hunk_card(rel: str, hunks: list[dict]) -> dict | None:
-    """The change-list card of both paths (since the merge, and "what changed in this file").
-    Six body lines at most (hud.MAX_BODY_LINES): past five hunks, four plus "+N more"."""
+def _hunk_card(rel: str, hunks: list[dict], current: int | None = None) -> dict | None:
+    """The change-list card of both paths (since the merge, and "what changed in this file"), id
+    `gd-list`. `current` marks the cursor row with "Now: ". Six body lines at most
+    (hud.MAX_BODY_LINES): past five hunks, four rows (a window that holds the cursor) plus "+N more"."""
     n = len(hunks)
     rows = []
     for i, h in enumerate(hunks):
         a, b = _hunk_span(h)
         word = "added" if h["old"] == 0 else "removed here" if h["count"] == 0 else "changed"
-        rows.append(f"{i + 1}/{n} line {a} {word}" if a == b else f"{i + 1}/{n} lines {a}-{b} {word}")
+        row = f"{i + 1}/{n} line {a} {word}" if a == b else f"{i + 1}/{n} lines {a}-{b} {word}"
+        rows.append(f"Now: {row}" if i == current else row)
     if n > 5:
-        rows = rows[:4] + [f"+{n - 4} more"]
+        first = min(max(0, (current or 0) - 3), n - 4)
+        rows = rows[first:first + 4] + [f"+{n - 4} more"]
     if n > 1:
         rows.append('Say "next change" to jump.')
-    return hud.validate_card({"type": "info", "title": f"Changes in {Path(rel).name}", "body": rows})
+    return hud.validate_card({"id": "gd-list", "type": "info", "title": f"Changes in {Path(rel).name}",
+                              "body": rows})
+
+
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September",
+           "October", "November", "December")
+
+
+def _why_line(k: int, n: int, commits: list[dict], uncommitted: bool) -> str:
+    """The spoken answer to "why did this change?": the newest commit's own words, no model."""
+    if not commits:
+        if uncommitted:
+            return f"Change {k} of {n} is not committed yet, so there is no commit message."
+        return f"I couldn't trace change {k} of {n} to a commit."
+    top = commits[0]
+    subject = _scrub(top["subject"])[:120]
+    when = ""
+    try:
+        d = date.fromisoformat(top["date"])
+        when = f", committed {d.day} {_MONTHS[d.month - 1]} {d.year}"
+    except (TypeError, ValueError):
+        pass
+    line = f'Change {k} of {n} came from "{subject}"{when}.'
+    if top.get("sentence"):
+        line += f" The commit says: {_scrub(top['sentence'])[:160]}"
+    more = len(commits) - 1
+    if more:
+        line += f" {more} more commit{'s' if more > 1 else ''} touched it."
+    return line
 
 
 def _installed_apps(clock=time.monotonic) -> dict:
@@ -704,6 +763,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     # starts the conversation afresh, even once the preflight has answered that state.
     # The change-list cursor is left to the check at the reset itself: "clear" drops it first.
     agent_state = _holds_agent_state(body.conv_id, deps, cursor=False)
+    # A yes/no the agent tier waits for (or a turn it runs) is never stray speech: read before the
+    # preflight settles it.
+    owner_answer_due = body.conv_id in _confirm or body.conv_id in _expired or body.conv_id in _agent_busy
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
@@ -714,7 +776,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     if handled:
         return
     pending = _pending.pop(body.conv_id, None)
+    joined = False
     if pending and body.followup and deps.clock() - pending[1] < PENDING_TTL_S:
+        joined = True
         body = body.model_copy(update={"text": intents.join_continuation(pending[0], body.text)[:500]})
         if on_step:
             on_step("continued", text=body.text)
@@ -736,12 +800,24 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         metrics["total_s"] = round(deps.clock() - start, 3)
         yield {"type": "done", "metrics": metrics, "error": None}
         return
+    if body.followup and not joined and not owner_answer_due:
+        words = intents.noise_words(body.text)
+        if words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
+                                               body.conv_id, None).kind == "answer":
+            # The room, not the owner: a short follow-up with no question in it (STT heard "Jew").
+            # Nothing is said, shown or stored.
+            if on_step:
+                on_step("followup_dropped", detail=f"words={words}")
+            metrics["total_s"] = round(deps.clock() - start, 3)
+            yield {"type": "done", "metrics": metrics, "error": None}
+            return
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         intent = intents.parse(body.text, apps=apps)
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
+        intent = _hunk_rewrite(intent, body.text, body.conv_id, on_step)
         if on_step:
             on_step("intent", kind=intent.kind, arg=intent.arg)
         ack_text, ack_pcm, ack_rate = deps.acks.get(acks.pick_key(intent.kind, intent.sub))
@@ -756,7 +832,14 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
 
         if intent.kind == "clear":
             _hunks.pop(body.conv_id, None)
+            _card_sets.pop(body.conv_id, None)  # the app clears every card
             yield {"type": "clear"}
+            # "clear" ends the agent tier's work too (a running turn was stopped in the preflight): its
+            # session and an expired yes go, so nothing of the agent tier outlives the clear.
+            _expired.pop(body.conv_id, None)
+            if deps.agent_conversations is not None and body.conv_id not in _confirm:
+                await asyncio.to_thread(deps.agent_conversations.drop, body.conv_id)
+            # Agent state when the turn began still blocks it (fail closed): the next "clear" starts fresh.
             if fresh is None and _may_start_fresh(body.conv_id, deps, agent_state):  # the owner's "clear" too
                 resets, fresh = _fresh_conversation(body.conv_id, deps), "clear"
                 if on_step:
@@ -870,65 +953,74 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield {"type": "card", "card": card}
                 said.append("refused: repo filters")
             else:
-                base = await asyncio.to_thread(gitdiff.last_merge, repo)
-                if base is None:
-                    async for ev in _speak("This repository has no merge commits yet.", deps):
+                # A spoken range wins; with none named, uncommitted work first, then since the last merge.
+                rng = await asyncio.to_thread(gitdiff.pick_range, repo, intent.sub or "auto")
+                drop = _drop_cards(body.conv_id, "git")
+                if drop:
+                    yield drop
+                title = _RANGE_TITLES.get(rng.kind, "Changed since last merge")
+                hunks = rng.hunks
+                if rng.kind != "none" or rng.base is not None:  # no merge at all: nothing to put on a card
+                    for card in gitdiff.diff_cards(hunks, rng.base or "", title=title):
+                        yield _keep_card(body.conv_id, "git", card)
+                per_file: dict[str, int] = {}
+                for h in hunks:
+                    per_file[h["file"]] = per_file.get(h["file"], 0) + h["count"]
+                if hunks:
+                    # The file on screen wins when it has changes; else the most-changed file.
+                    chosen = max(per_file, key=lambda f: per_file[f])
+                    editor = _EDITOR_CLI.get(body.screen.app if body.screen else "")
+                    root = Path(repo).resolve()
+                    document = body.screen.document if body.screen else None
+                    if document:
+                        target = Path(document).expanduser().resolve()
+                        if target.is_relative_to(root) and target.is_file():
+                            rel = str(target.relative_to(root))
+                            if per_file.get(rel):
+                                chosen = rel
+                    of_file = [h for h in hunks if h["file"] == chosen][:20]
+                    n = len(of_file)
+                    # The cursor first: a barge-in during the summary must not lose "next change".
+                    ctx = agent_policy.Ctx(home=str(Path.home()),
+                                           vault=os.environ.get("OVERLAY_VAULT") or None,
+                                           cwd=str(repo))
+                    _hunks[body.conv_id] = HunkNav(repo=repo, rel=chosen, base=rng.base, hunks=of_file,
+                                                   index=0, editor=editor, ctx=ctx, head=rng.head)
+                    if editor:  # scroll off the turn's stream: a hung CLI never holds it
+                        threading.Thread(target=_scroll_to, daemon=True,
+                                         args=(repo, chosen, _hunk_span(of_file[0])[0], editor,
+                                               deps, on_step)).start()
+                    ranges = [list(_hunk_span(h)) for h in of_file]
+                    labels = [gitdiff.hunk_label(h, i + 1, n) for i, h in enumerate(of_file)]
+                    yield _lines_event(str(Path(repo) / chosen), ranges, labels)
+                    card = _hunk_card(chosen, of_file, current=0)
+                    if card:
+                        yield _keep_card(body.conv_id, "git", card)
+                    tail = (f"I've opened {Path(chosen).name}." if editor
+                            else f"Showing the changes in {Path(chosen).name}.")
+                    files = gitdiff.files_phrase(len(per_file))
+                    summary = {"uncommitted": f"{files} with changes not committed yet. {tail}",
+                               "merge_itself": f"Nothing since the last merge. Here is what that merge changed. {tail}",
+                               }.get(rng.kind, f"{files} changed since the last merge. {tail}")
+                    async for ev in _speak(summary, deps):
                         yield ev
-                    said.append("no merge commits")
+                    said.append("opened the diff")
                 else:
-                    hunks = await asyncio.to_thread(gitdiff.hunks, repo, base)
-                    for card in gitdiff.diff_cards(hunks, base):
-                        yield {"type": "card", "card": card}
-                    per_file: dict[str, int] = {}
-                    for h in hunks:
-                        per_file[h["file"]] = per_file.get(h["file"], 0) + h["count"]
-                    if hunks:
-                        # The file on screen wins when it has changes; else the most-changed file.
-                        chosen = max(per_file, key=lambda f: per_file[f])
-                        editor = _EDITOR_CLI.get(body.screen.app if body.screen else "")
-                        root = Path(repo).resolve()
-                        document = body.screen.document if body.screen else None
-                        if document:
-                            target = Path(document).expanduser().resolve()
-                            if target.is_relative_to(root) and target.is_file():
-                                rel = str(target.relative_to(root))
-                                if per_file.get(rel):
-                                    chosen = rel
-                        of_file = [h for h in hunks if h["file"] == chosen][:20]
-                        n = len(of_file)
-                        # The cursor first: a barge-in during the summary must not lose "next change".
-                        ctx = agent_policy.Ctx(home=str(Path.home()),
-                                               vault=os.environ.get("OVERLAY_VAULT") or None,
-                                               cwd=str(repo))
-                        _hunks[body.conv_id] = HunkNav(repo=repo, rel=chosen, base=base,
-                                                       hunks=of_file, index=0, editor=editor, ctx=ctx)
-                        if editor:  # scroll off the turn's stream: a hung CLI never holds it
-                            threading.Thread(target=_scroll_to, daemon=True,
-                                             args=(repo, chosen, _hunk_span(of_file[0])[0], editor,
-                                                   deps, on_step)).start()
-                        ranges = [list(_hunk_span(h)) for h in of_file]
-                        labels = [gitdiff.hunk_label(h, i + 1, n) for i, h in enumerate(of_file)]
-                        yield _lines_event(str(Path(repo) / chosen), ranges, labels)
-                        card = _hunk_card(chosen, of_file)
-                        if card:
-                            yield {"type": "card", "card": card}
-                        tail = (f"I've opened {Path(chosen).name}." if editor
-                                else f"Showing the changes in {Path(chosen).name}.")
-                        summary = f"{gitdiff.files_phrase(len(per_file))} changed since the last merge. {tail}"
-                        async for ev in _speak(summary, deps):
-                            yield ev
-                        said.append("opened the diff")
-                    else:
-                        async for ev in _speak("No changes since the last merge.", deps):
-                            yield ev
-                        said.append("no changes")
+                    key = ("diff_none_merge" if rng.base is not None
+                           else "diff_none_auto" if (intent.sub or "auto") == "auto" else "diff_no_merge")
+                    async for ev in _line(key, deps):
+                        yield ev
+                    said.append("no changes")
+                if rng.base is not None:
                     try:
-                        diff_text = await asyncio.to_thread(gitdiff.diff_text, repo, base)
+                        diff_text = await asyncio.to_thread(gitdiff.diff_text, repo, rng.base,
+                                                            **({"head": rng.head} if rng.head else {}))
                     except Exception:
                         diff_text = ""
                     if diff_text:
+                        span = f"{rng.base} {rng.head}" if rng.head else rng.base
                         _notes.setdefault(body.conv_id, deque(maxlen=3)).append(
-                            f"git diff {base}:\n{diff_text}")
+                            f"git diff {span}:\n{diff_text}")
 
         elif intent.kind == "hunk":
             nav = _hunks.get(body.conv_id)
@@ -954,6 +1046,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                          args=(nav.repo, nav.rel, a, nav.editor, deps, on_step)).start()
                     yield _lines_event(str(nav.repo / nav.rel), [[a, b]],
                                        [gitdiff.hunk_label(h, k, n)])
+                    # Only the change list stays from the highlight, its cursor row on this change.
+                    drop = _drop_cards(body.conv_id, "git", keep=("gd-list",))
+                    if drop:
+                        yield drop
+                    card = _hunk_card(nav.rel, nav.hunks, current=index)
+                    if card:
+                        yield _keep_card(body.conv_id, "git", card)
                     line = _hunk_line(k, n, h)
                     async for ev in _speak(line, deps):
                         yield ev
@@ -969,29 +1068,31 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     async for ev in _line("why_removed", deps):
                         yield ev
                 else:
-                    probe = shlex.join(["git", "-C", str(nav.repo), "diff", nav.base, "--", nav.rel])
+                    probe = shlex.join(["git", "-C", str(nav.repo), "diff", nav.base,
+                                        *([nav.head] if nav.head else []), "--", nav.rel])
                     verdict = await asyncio.to_thread(agent_policy.decide, "Bash", {"command": probe}, nav.ctx)
                     if not isinstance(verdict, agent_policy.Allow):
                         async for ev in _line("hunk_refused", deps):
                             yield ev
                     else:
-                        subjects, uncommitted = await asyncio.to_thread(
-                            gitdiff.blame_subjects, nav.repo, nav.rel, a, b)
+                        commits, uncommitted = await asyncio.to_thread(
+                            gitdiff.blame_commits, nav.repo, nav.rel, a, b, nav.head, 10)
                         text = await asyncio.to_thread(gitdiff.hunk_diff, nav.repo, nav.base,
-                                                       nav.rel, a)
+                                                       nav.rel, a, head=nav.head)
+                        # Commit text is untrusted: kept as a note for a later free question (so the
+                        # conversation stays on the tool-less pool), spoken only through the template.
+                        _tainted.add(body.conv_id)
                         _notes.setdefault(body.conv_id, deque(maxlen=3)).append(
                             f"Change {k} of {n} in {nav.rel}, lines {a} to {b}.\n"
-                            f"Commit subjects: {'; '.join(subjects) or 'none'}"
+                            f"Commit subjects: {'; '.join(c['subject'] for c in commits) or 'none'}"
                             + ("\nPart of it is not committed yet." if uncommitted else "")
                             + f"\n{text}")
-                        question = (f"Why did change {k} of {n} in {Path(nav.rel).name}, "
-                                    f"lines {a} to {b}, change? Two short sentences; "
-                                    f"name the commit subject.")
-                        async for event in _answer_turn(body, question, deps, metrics, said, start,
-                                                        failed=failed):
-                            yield event
+                        line = _why_line(k, n, commits, uncommitted)
+                        async for ev in _speak(line, deps):
+                            yield ev
+                        said.append(line)
                         if on_step:
-                            on_step("hunk", detail=f"why {k}/{n} lines={a}-{b}")
+                            on_step("hunk", detail=f"why {k}/{n} lines={a}-{b} commits={len(commits)}")
 
         elif intent.kind == "agent":
             async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step,
@@ -1020,15 +1121,36 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     logger.info("overlay turn %s", json.dumps({**metrics, "error": error}))
     if _resets.get(body.conv_id, 0) != resets:  # another turn started it afresh while this one ran:
         _tainted.add(body.conv_id)  # what this turn stores may predate that, so it stays tool-less
-    while len(_history) >= 32 and body.conv_id not in _history:  # conv ids rotate: keep memory bounded
-        oldest = next(iter(_history))
-        _forget(oldest)
-        _card_ids.pop(oldest, None)  # _resets stays: a running turn compares against it (ints only)
-        _hunks.pop(oldest, None)
+    if body.conv_id not in _history:  # conv ids rotate: keep memory bounded
+        # Oldest first, skipping a conversation with a turn running or agent state: dropping it would
+        # drop its taint while that turn still writes history. All busy: the map grows by those only.
+        for oldest in [c for c in _history if c != body.conv_id]:
+            if len(_history) < 32:
+                break
+            if _inflight.get(oldest, 0) > 0 or _holds_agent_state(oldest, deps, cursor=False):
+                continue
+            _forget(oldest)
+            _card_ids.pop(oldest, None)  # _resets stays: a running turn compares against it (ints only)
+            _hunks.pop(oldest, None)
     _last_reply[body.conv_id] = (deps.clock(), len(_card_ids.get(body.conv_id, ())) > cards_at_start)
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}
+
+
+def _hunk_rewrite(intent: intents.Intent, text: str, conv_id: str, on_step) -> intents.Intent:
+    """With a change list open: "go back" / "previous" is the previous change, and a sentence that
+    ends in "next change" (room noise before it, or STT's "Page of his next change") is that move."""
+    if intent.kind not in ("answer", "agent") or conv_id not in _hunks:
+        return intent
+    if intent.kind == "answer" and intents.is_hunk_back(text):
+        return intents.Intent("hunk", "prev", "prev")
+    tail = intents.tail_hunk(text)
+    if tail is None:
+        return intent
+    if on_step:
+        on_step("tail_intent", detail=f"hunk {tail}")
+    return intents.Intent("hunk", tail, tail)
 
 
 _NO_SCREEN_GROUND = {"screen": "none", "image": "no", "candidates": 0, "history": 0, "pick": None,
@@ -1367,7 +1489,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             card = hud.validate_card(raw_card) if quiet else media_lookup.fast_tier_card(raw_card)
         if card:
             seen = _card_ids.setdefault(body.conv_id, set())
-            if card["id"] in seen or card["id"] == _CONFIRM_CARD_ID:  # Confirm id: agent only
+            if card["id"] in seen or _host_card_id(card["id"]):
                 card["id"] = uuid.uuid4().hex[:8]
             seen.add(card["id"])
             _card_text.setdefault(body.conv_id, deque(maxlen=3)).append(_card_words(card).lower())
@@ -1505,6 +1627,12 @@ EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told i
 _CONFIRM_CARD_ID = "agentconfirm"  # one id per conv, so the HUD replaces the card once settled
 
 
+def _host_card_id(card_id: str) -> bool:
+    """Ids only the host issues (Confirm, git cards): a model card claiming one gets a new id, so it
+    can neither replace the host's card nor have it dropped with the model's group."""
+    return card_id == _CONFIRM_CARD_ID or card_id.startswith("gd-")
+
+
 @dataclass
 class AgentRun:
     """One agent turn's state; it outlives the HTTP response while a confirmation is pending."""
@@ -1526,6 +1654,7 @@ class AgentRun:
     screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
     editor: str | None = None  # VS Code/Cursor CLI that scrolls that file to its first change
     model_lines: dict | None = None  # the model's validated lines, held while the host's may replace them
+    cards_sent: bool = False  # the previous agent turn's cards were dropped at this run's first card
 
 
 # conv_id -> run waiting for the owner's spoken yes (one per conv); conv_id -> run streaming now.
@@ -1569,7 +1698,9 @@ def _confirm_watchdog(run: AgentRun, deps: OverlayDeps) -> None:
             if now - when >= EXPIRED_TELL_S:
                 _expired.pop(conv, None)
         _expired[run.conv_id] = (now, run.confirm_summary)
-        debug_log.add(debug_log.for_utterance(), "agent_confirm", state="expired")
+        rec = debug_log.for_utterance()
+        debug_log.add(rec, "agent_confirm", state="expired")
+        debug_log.add(rec, "spoke", text=acks.PHRASES.get("expired", ""), ms=None, audio_ms=None)
         # The turn that asked has ended: the app hears of it on its /events stream, as `hud` events
         # it handles like turn events (the Confirm card is replaced, the line is spoken when idle).
         # Under the lock: a new Confirm registers under it before its card goes out, so a pending one
@@ -1619,6 +1750,18 @@ def _line_events(key: str, deps: OverlayDeps) -> list[dict]:
 async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
     for ev in _line_events(key, deps):
         yield ev
+
+
+def _agent_card(run: AgentRun, card: dict) -> list[dict]:
+    """An agent turn's card; its first one drops the cards of the conv's previous agent turn."""
+    events = []
+    if not getattr(run, "cards_sent", False):  # test_overlay_media_emit passes a bare runner
+        run.cards_sent = True
+        drop = _drop_cards(run.conv_id, "agent")
+        if drop:
+            events.append(drop)
+    events.append(_keep_card(run.conv_id, "agent", card))
+    return events
 
 
 def _settled_card(summary: str, outcome: str) -> dict:
@@ -1680,13 +1823,16 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         return  # anything else: told it was dropped, then handled as a normal utterance (no `done`)
     busy = _agent_busy.get(body.conv_id)
     if busy is not None:
-        if intents.is_cancel(body.text):
+        clearing = intents.parse(body.text, apps={}).kind == "clear"
+        if intents.is_cancel(body.text) or clearing:
             busy.cancelled = True
             if deps.agent_conversations is not None:
                 await asyncio.to_thread(deps.agent_conversations.drop, body.conv_id)
             _agent_busy.pop(body.conv_id, None)
             if on_step:
                 on_step("agent_confirm", state="stopped")
+            if clearing:  # stopped like a cancel; the clear itself runs in the normal pipeline
+                return
             key = "stopped"
         else:
             key = "busy"
@@ -1889,7 +2035,7 @@ def _last_change(run: AgentRun) -> tuple[dict | None, dict | None, HunkNav | Non
     if not hunks:
         return None, None, None
     shown = hunks[:20]
-    card = _hunk_card(rel, shown)  # the same card as "since the last merge"
+    card = _hunk_card(rel, shown, current=0)  # the same card as "since the last merge"
     labels = [gitdiff.hunk_label(h, i + 1, len(shown)) for i, h in enumerate(shown)]
     lines = _agent_lines({"file": rel, "ranges": [list(_hunk_span(h)) for h in shown]}, run)  # in-repo + Read
     if lines:
@@ -1973,7 +2119,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 card = hud.validate_card({"type": "info", "title": "Stopped",
                                           "body": [acks.PHRASES.get("timeout", "")]})
                 if card:
-                    yield {"type": "card", "card": card}
+                    for out in _agent_card(run, card):
+                        yield out
                 finished = True
                 return
             wait = AGENT_TICK_S
@@ -2082,8 +2229,11 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         yield out
                 if run.screen_file:  # "what changed" in the file on screen: the host's card and lines
                     card, lines, nav = await asyncio.to_thread(_last_change, run)
-                    if card:
-                        yield {"type": "card", "card": card}
+                    if card:  # the change list (gd-list): it replaces the conv's earlier git cards
+                        drop = _drop_cards(run.conv_id, "git")
+                        if drop:
+                            yield drop
+                        yield _keep_card(run.conv_id, "git", card)
                     if lines:
                         if nav:  # the cursor for a later "next change" / "why", stored before the yield
                             _hunks[run.conv_id] = nav
@@ -2100,7 +2250,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     card = hud.validate_card({"type": "info", "title": "No answer",
                                               "body": ["I couldn't get an answer for that."]})
                     if card:
-                        yield {"type": "card", "card": card}
+                        for out in _agent_card(run, card):
+                            yield out
                 finished = True
                 return
     finally:
@@ -2137,10 +2288,11 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         card = None
     if card:
         seen = _card_ids.setdefault(run.conv_id, set())
-        if card["id"] in seen:
+        if card["id"] in seen or _host_card_id(card["id"]):
             card["id"] = uuid.uuid4().hex[:8]
         seen.add(card["id"])
-        yield {"type": "card", "card": card}
+        for ev in _agent_card(run, card):
+            yield ev
     shape = hud.validate_shape(obj.get("shape")) if "shape" in obj else None
     if shape:
         yield {"type": "shape", "shape": shape}
@@ -2226,13 +2378,27 @@ async def post_wake(body: WakeBody | None = None) -> dict:
 @router.post("/debug/note", dependencies=_LOOP_DEPS)
 async def post_debug_note(body: DebugNote) -> dict:
     debug_log.note(body.step, body.detail)
+    global _off_view_said
+    if body.step == "lines" and body.detail.startswith("off_view") and _OFF_VIEW_FINAL_RE.search(body.detail):
+        now = time.monotonic()
+        if _off_view_said is None or now - _off_view_said >= OFF_VIEW_GAP_S:
+            # The app's last try found no band: say why there is no box (fixed line, never the detail).
+            _off_view_said = now
+            for ev in _line_events("lines_off_view", get_deps()):
+                bus.publish("hud", ev)
     return {"ok": True}
+
+
+# The app's final `lines` reason when the change sits in a fold or a wrapped line (ElementTrack try=3).
+_OFF_VIEW_FINAL_RE = re.compile(r"(?:^|\s)try=3(?:\s|$)")
+OFF_VIEW_GAP_S = 10
+_off_view_said: float | None = None
 
 
 @router.get("/debug/turns", dependencies=_LOOP_DEPS)
 async def get_debug_turns() -> dict:
     # Setup the owner must fix (booleans only, never a path): no `code` CLI = the editor never scrolls.
-    return {**debug_log.snapshot(), "setup": {"code_cli": shutil.which("code") is not None,
+    return {**debug_log.snapshot(), "setup": {"code_cli": gitdiff.editor_path("code") is not None,
                                               "vault": bool(os.environ.get("OVERLAY_VAULT"))}}
 
 

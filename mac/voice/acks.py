@@ -45,6 +45,10 @@ PHRASES = {
     "first_hunk": "That's the first change.",
     "why_removed": "Blame can't trace removed lines. Say next change to move on.",
     "hunk_refused": "I won't run git in that repository, I'm afraid.",
+    "diff_none_merge": "No changes since the last merge, and that merge changed nothing here.",
+    "diff_none_auto": "No uncommitted changes, and this repository has no merge commits yet.",
+    "diff_no_merge": "This repository has no merge commits yet.",
+    "lines_off_view": "That change is folded or wrapped; I can't box it.",
 }
 
 _ACK_KEYS = {

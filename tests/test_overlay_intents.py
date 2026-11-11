@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from mac.voice import acks
-from mac.voice.intents import Intent, is_cancel, is_confirm, is_no, list_apps, open_app, open_site, parse
+from mac.voice.intents import (Intent, is_cancel, is_confirm, is_hunk_back, is_no,
+                               list_apps, noise_words, open_app, open_site, parse, tail_hunk)
 from mac.voice.lean import Conversations, lean_argv
 
 
@@ -335,3 +336,37 @@ def test_agent_routing_ignores_ordinary_talk():
     for text in ("is the CI green on jarvis-companion", "read my latest emails", "any new email from Sara",
                  "list the releases of jarvis-companion"):
         assert parse(text).kind == "agent", text
+
+
+def test_plain_changes_go_to_git_diff():
+    apps: dict[str, str] = {}
+    for text in ("highlight the changes", "Hey Jarvis, highlight the changes.",
+                 "show the changes", "show me the changes", "what changed",
+                 "highlight the exact changes", "highlight my changes"):
+        intent = parse(text, apps=apps)
+        assert (intent.kind, intent.sub) == ("git_diff", "auto"), text
+    intent = parse("highlight the changes since the last merge", apps=apps)
+    assert (intent.kind, intent.sub) == ("git_diff", "merge"), intent
+    for text in ("highlight the URL", "highlight it", "highlight the last debugging session"):
+        assert parse(text, apps=apps).kind == "look", text
+    assert parse("what changed in the last commit", apps=apps) == Intent(
+        "agent", "what changed in the last commit", "git")
+
+
+def test_hunk_back_and_tail_and_noise():
+    assert is_hunk_back("go back")
+    assert is_hunk_back("previous")
+    assert is_hunk_back("Go back one.")
+    assert not is_hunk_back("go back to the menu")
+    assert tail_hunk("put a short note on the word. They work in a card. Next change") == "next"
+    assert tail_hunk("Page of his next change") == "next"
+    assert tail_hunk("go to the next change") == "next"
+    for text in ("what is the next change in the law", "tell me about the weather",
+                 "next", ""):
+        assert tail_hunk(text) is None, text
+    assert noise_words("Jew") == 1
+    assert noise_words("the word") == 2
+    assert noise_words("uh huh okay") == 3
+    for text in ("why?", "what about tomorrow", "yes", "no", "stop",
+                 "and the second one is what", ""):
+        assert noise_words(text) is None, text

@@ -1,6 +1,10 @@
 """Builds a temp git repo whose diff against the last merge has one added, one changed
 and one removed hunk in sample.py, each from its own named commit.
 
+Modes: default (clean tree), "dirty" (line 20 of sample.py edited but uncommitted) and
+"merged-clean" (a fresh two-parent merge whose only new-side change is line 30 of
+sample.py, from one feature commit).
+
 Used by tests/test_overlay_git.py (hunk counts, labels, blame, hunk_diff) and by the
 live Mac check: open sample.py in VS Code and ask to highlight the changes since the
 last merge.
@@ -25,8 +29,14 @@ def _git(root: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def build(root: Path, extra: bool = False) -> dict:
-    """Create the repo in `root` (empty or missing folder); returns the ground-truth dict."""
+def build(root: Path, extra: bool = False, mode: str = "") -> dict:
+    """Create the repo in `root` (empty or missing folder); returns the ground-truth dict.
+
+    mode "dirty": after the normal build, line 20 of sample.py is edited in the working
+    tree only (truth["dirty"]). mode "merged-clean": a second feature branch tunes line 30,
+    main gains notes.txt, and a --no-ff merge lands it on a clean tree (truth["last_merge"],
+    truth["merge_hunk"]).
+    """
     root = Path(root)
     if root.exists() and any(root.iterdir()):
         raise SystemExit(f"refusing: {root} is not empty")
@@ -49,7 +59,7 @@ def build(root: Path, extra: bool = False) -> dict:
     _commit(root, "sample.py", sample, "Drop the unused cache lines")
     if extra:  # a file with more changed lines than sample.py
         _commit(root, "other.py", [f"O{i:02d} = {i}" for i in range(1, 13)], "Add other module")
-    return {
+    truth = {
         "repo": str(root), "file": "sample.py", "merge": merge,
         "hunks": [
             {"start": 140, "end": 142, "kind": "added", "subject": "Add the retry counter",
@@ -60,6 +70,21 @@ def build(root: Path, extra: bool = False) -> dict:
              "tokens": ["L152"]},
         ],
     }
+    if mode == "dirty":
+        sample[19] = "L020 = 20  # not committed"  # line 20 was L020 = 20; left uncommitted
+        (root / "sample.py").write_text("\n".join(sample) + "\n")
+        truth["dirty"] = {"start": 20, "end": 20, "kind": "changed"}
+    elif mode == "merged-clean":
+        _git(root, "checkout", "-qb", "feature")
+        sample[29] = "L030 = 31  # retry delay"  # line 30 was L030 = 30
+        _commit(root, "sample.py", sample, "Tune the retry delay")
+        _git(root, "checkout", "-q", "main")
+        _commit(root, "notes.txt", ["notes"], "Add notes")  # two-parent merge, not fast-forwardable
+        _git(root, "merge", "--no-ff", "-m", "Merge feature", "feature")
+        truth["last_merge"] = _git(root, "rev-parse", "HEAD")
+        truth["merge_hunk"] = {"start": 30, "end": 30, "kind": "changed",
+                               "subject": "Tune the retry delay"}
+    return truth
 
 
 def _commit(root: Path, name: str, lines: list[str], subject: str) -> None:
@@ -69,11 +94,13 @@ def _commit(root: Path, name: str, lines: list[str], subject: str) -> None:
 
 
 def main(argv: list[str]) -> None:
-    extra = "--extra" in argv[1:]
-    dirs = [a for a in argv[1:] if a != "--extra"]
-    if len(dirs) != 1:
-        raise SystemExit("usage: hunk_fixture.py <dir> [--extra]")
-    print(json.dumps(build(Path(dirs[0]), extra), indent=2))
+    rest = argv[1:]
+    modes = [f for f in ("--dirty", "--merged-clean") if f in rest]
+    dirs = [a for a in rest if a not in ("--extra", "--dirty", "--merged-clean")]
+    if len(modes) > 1 or len(dirs) != 1:
+        raise SystemExit("usage: hunk_fixture.py <dir> [--extra] [--dirty|--merged-clean]")
+    print(json.dumps(build(Path(dirs[0]), "--extra" in rest,
+                           mode=modes[0][2:] if modes else ""), indent=2))
 
 
 if __name__ == "__main__":

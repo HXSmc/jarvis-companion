@@ -253,11 +253,11 @@ def test_git_diff_turn(client, monkeypatch, tmp_path):
     # diff_text lands with a parallel task; stub it (raising=False: not in this tree yet).
     monkeypatch.setattr(gitdiff, "diff_text", lambda repo, base: "diff --git MARKER", raising=False)
 
-    events = turn(client, "show the diff", conv_id="d1")
+    events = turn(client, "show the diff since the last merge", conv_id="d1")  # jfollow: a named range
     cards = [e["card"] for e in events if e["type"] == "card"]
     assert len(cards) == 4  # stat + bar + where, then the file's own hunk list
     assert cards[3]["title"] == "Changes in a.py"
-    assert cards[3]["body"] == ["1/2 lines 10-21 changed", "2/2 line 40 removed here",
+    assert cards[3]["body"] == ["Now: 1/2 lines 10-21 changed", "2/2 line 40 removed here",
                                 'Say "next change" to jump.']
     lines = next(e for e in events if e["type"] == "lines")
     assert lines["file"] == str(repo / "a.py")
