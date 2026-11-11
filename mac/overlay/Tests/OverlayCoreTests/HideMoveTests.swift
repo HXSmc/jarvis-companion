@@ -152,8 +152,8 @@ final class HideMoveTests: XCTestCase {
         }
     }
 
-    /// Twelve cards spread edge to edge (a 4x3 grid): a plain shift would not show, so every move
-    /// squeezes the group into the named part, order kept.
+    /// Twelve cards spread edge to edge (a 4x3 grid): no shift fits, so every move re-flows the
+    /// group into rows against the named edge(s) with no card covering another.
     func testScatteredGroupStillMovesVisibly() {
         var scattered = ScatterLayout.LayoutState()
         let columns: [CGFloat] = [16, 382, 748, 1124], rows: [CGFloat] = [41, 407.5, 774]  // edge to edge both ways
@@ -169,32 +169,20 @@ final class HideMoveTests: XCTestCase {
         XCTAssertEqual(scattered.order.count, 12)
         XCTAssertEqual(group(scattered).width, area.width, accuracy: 0.001)
         XCTAssertEqual(group(scattered).height, area.height, accuracy: 0.001)
-        for direction in moves where direction != .otherSide {
+        for direction in moves {
             var state = scattered
-            state.moveAll(direction, visible: visible)
+            XCTAssertTrue(state.moveAll(direction, visible: visible), "\(direction)")
             let box = group(state)
-            assertInNamedPart(box, direction)
-            let horizontal: Set<LayoutMode> = [.left, .right, .topLeft, .topRight, .bottomLeft, .bottomRight]
-            let vertical: Set<LayoutMode> = [.up, .down, .topLeft, .topRight, .bottomLeft, .bottomRight]
-            let byX = scattered.order.sorted { scattered.frames[$0]!.minX < scattered.frames[$1]!.minX }
-            let byY = scattered.order.sorted { scattered.frames[$0]!.minY < scattered.frames[$1]!.minY }
-            for (a, b) in zip(byX, byX.dropFirst()) {
-                XCTAssertLessThanOrEqual(state.frames[a]!.minX, state.frames[b]!.minX + 0.001, "\(direction)")
+            let frames = state.order.map { state.frames[$0]! }
+            for (index, frame) in frames.enumerated() {
+                XCTAssertTrue(area.insetBy(dx: -0.001, dy: -0.001).contains(frame), "\(direction)")
+                for other in frames[(index + 1)...] { XCTAssertFalse(frame.intersects(other), "\(direction)") }
             }
-            for (a, b) in zip(byY, byY.dropFirst()) {
-                XCTAssertLessThanOrEqual(state.frames[a]!.minY, state.frames[b]!.minY + 0.001, "\(direction)")
-            }
-            for key in scattered.order {
-                let old = scattered.frames[key]!, new = state.frames[key]!
-                XCTAssertEqual(new.size, old.size)
-                XCTAssertTrue(visible.contains(new), "\(direction) \(key)")
-                if !horizontal.contains(direction) { XCTAssertEqual(new.minX, old.minX, accuracy: 0.001) }
-                if !vertical.contains(direction) { XCTAssertEqual(new.minY, old.minY, accuracy: 0.001) }
-            }
-            if horizontal.contains(direction) {
-                let edge = [.left, .topLeft, .bottomLeft].contains(direction) ? box.minX - area.minX : area.maxX - box.maxX
-                XCTAssertEqual(edge, 0, accuracy: 0.001, "\(direction)")
-            }
+            for key in scattered.order { XCTAssertEqual(state.frames[key]!.size, scattered.frames[key]!.size) }
+            if [.left, .topLeft, .bottomLeft].contains(direction) { XCTAssertEqual(box.minX, area.minX, accuracy: 0.001) }
+            if [.right, .topRight, .bottomRight, .otherSide].contains(direction) { XCTAssertEqual(box.maxX, area.maxX, accuracy: 0.001) }
+            if [.up, .topLeft, .topRight].contains(direction) { XCTAssertEqual(box.minY, area.minY, accuracy: 0.001) }
+            if [.down, .bottomLeft, .bottomRight].contains(direction) { XCTAssertEqual(box.maxY, area.maxY, accuracy: 0.001) }
         }
     }
 
@@ -214,44 +202,36 @@ final class HideMoveTests: XCTestCase {
         XCTAssertEqual(group(state).minX, area.minX, accuracy: 0.001)
     }
 
-    func testPackedSqueezesInOrderAndTouchesTheEdge() {
-        let starts: [CGFloat] = [0, 300, 900], lengths: [CGFloat] = [200, 200, 300]
-        let row = [CGFloat(0)...100, 0...100, 0...100], limit = CGFloat(0)...1000
-        let left = ScatterLayout.packed(starts, lengths: lengths, across: row, from: 10, to: 610, atEnd: false, limit: limit)
-        XCTAssertEqual(left[0], 10, accuracy: 0.001)
-        XCTAssertEqual(left[2] + 300, 610, accuracy: 0.001)
-        XCTAssertLessThan(left[0], left[1]); XCTAssertLessThan(left[1], left[2])
-        let right = ScatterLayout.packed(starts, lengths: lengths, across: row, from: 10, to: 610, atEnd: true, limit: limit)
-        XCTAssertEqual(right[2] + 300, 610, accuracy: 0.001)
-        XCTAssertGreaterThanOrEqual(right[0], 10 - 0.001)
-        // A group that fits keeps its spacing: one shared offset.
-        let fits = ScatterLayout.packed([100, 250], lengths: [100, 100], across: [0...100, 0...100],
-                                        from: 0, to: 600, atEnd: true, limit: 0...600)
-        XCTAssertEqual(fits, [350, 500])
-        // Longer than the half but a shift of 24 pt or more shows: plain shift, spacing kept.
-        let shifted = ScatterLayout.packed([400, 1000], lengths: [300, 300], across: [0...100, 0...100],
-                                           from: 16, to: 720, atEnd: false, limit: 16...1424)
-        XCTAssertEqual(shifted, [16, 616])
+    func testRowsFillFromTheAnchorAndJumpAKeepOut() {
+        let zone = ScatterLayout.notificationZone(visible: visible)
+        let size = CGSize(width: 320, height: 160)
+        let slots = ScatterLayout.rows(Array(repeating: size, count: 3), in: area, right: true, bottom: false, keepOut: [zone])
+        // x 1104 would sit under the banner zone (x from 1060): the row jumps to end 20 pt left of it.
+        XCTAssertEqual(slots?.map(\.origin), [CGPoint(x: 720, y: 41), CGPoint(x: 380, y: 41), CGPoint(x: 40, y: 41)])
+        let left = ScatterLayout.rows(Array(repeating: size, count: 3), in: area, right: false, bottom: true, keepOut: [])
+        XCTAssertEqual(left?.map(\.origin), [CGPoint(x: 16, y: 724), CGPoint(x: 356, y: 724), CGPoint(x: 696, y: 724)])
+        // Too many for a small region: nil, never an overlap.
+        XCTAssertNil(ScatterLayout.rows(Array(repeating: size, count: 3), in: CGRect(x: 0, y: 0, width: 700, height: 200),
+                                        right: false, bottom: false, keepOut: []))
     }
 
-    /// Squeezed cards keep a 44 pt strip each, never scale 0, and run past the half when needed.
-    func testSqueezeKeepsAMinimumStripPerCard() {
-        let starts: [CGFloat] = [0, 10, 20, 900]
-        let row = Array(repeating: CGFloat(0)...100, count: 4)
-        let out = ScatterLayout.packed(starts, lengths: [100, 100, 100, 100], across: row,
-                                       from: 0, to: 200, atEnd: false, limit: 0...1000)
-        XCTAssertEqual(out, [0, 44, 88, 132])
-        let fromEnd = ScatterLayout.packed(starts, lengths: [100, 100, 100, 100], across: row,
-                                           from: 800, to: 1000, atEnd: true, limit: 0...1000)
-        XCTAssertEqual(fromEnd[3], 900, accuracy: 0.001)
-        for (a, b) in zip(fromEnd.sorted(), fromEnd.sorted().dropFirst()) { XCTAssertGreaterThanOrEqual(b - a, 44 - 0.001) }
-        // Cards in different rows cannot cover each other: no strip is forced between them.
-        let rows = [CGFloat(0)...100, 200...300]
-        XCTAssertEqual(ScatterLayout.packed([0, 0, ], lengths: [100, 100], across: rows, from: 0, to: 50,
-                                            atEnd: false, limit: 0...40), [0, 0])
+    /// Overlapping grid: later cards right of or below earlier ones, steps of at least 44 pt.
+    func testGridKeepsEveryCornerUncovered() {
+        let size = CGSize(width: 100, height: 100)
+        let roomFits = ScatterLayout.grid(Array(repeating: size, count: 4), in: CGRect(x: 0, y: 0, width: 150, height: 150),
+                                          right: false, bottom: false, keepOut: [])
+        XCTAssertEqual(roomFits?.step, 50)
+        XCTAssertEqual(roomFits?.frames.map(\.origin), [CGPoint(x: 0, y: 0), CGPoint(x: 50, y: 0), CGPoint(x: 0, y: 50), CGPoint(x: 50, y: 50)])
+        // Steps of 40 pt would hide the corners: refused.
+        XCTAssertNil(ScatterLayout.grid(Array(repeating: size, count: 4), in: CGRect(x: 0, y: 0, width: 140, height: 140),
+                                        right: false, bottom: false, keepOut: []))
+        // A grid that would cover a keep-out is not used.
+        XCTAssertNil(ScatterLayout.grid([size], in: CGRect(x: 0, y: 0, width: 100, height: 100), right: false, bottom: false,
+                                        keepOut: [CGRect(x: 90, y: 90, width: 20, height: 20)]))
     }
 
-    /// A tall column on a 1440x900 screen moved up and down: each card keeps its strip.
+    /// A tall column on a 1440x900 screen moved up and down: it re-flows into rows, no card
+    /// covers another, all on screen.
     func testTallColumnKeepsItsStrips() {
         for (count, height, step) in [(5, CGFloat(250), CGFloat(148)), (13, 100, 60)] {
             var state = ScatterLayout.LayoutState()
@@ -263,11 +243,13 @@ final class HideMoveTests: XCTestCase {
             for direction in [LayoutMode.up, .down] {
                 var moved = state
                 XCTAssertTrue(moved.moveAll(direction, visible: visible))
-                let ys = (0..<count).map { moved.frames["k\($0)"]!.minY }
-                for (a, b) in zip(ys, ys.dropFirst()) {
-                    XCTAssertGreaterThanOrEqual(b - a, ScatterLayout.minStrip - 0.001, "\(count) \(direction)")
+                let frames = (0..<count).map { moved.frames["k\($0)"]! }
+                for (index, frame) in frames.enumerated() {
+                    XCTAssertTrue(visible.contains(frame), "\(count) \(direction)")
+                    for other in frames[(index + 1)...] { XCTAssertFalse(frame.intersects(other), "\(count) \(direction)") }
                 }
-                for key in moved.order { XCTAssertTrue(visible.contains(moved.frames[key]!), "\(count) \(direction)") }
+                let box = group(moved)
+                if direction == .up { XCTAssertEqual(box.minY, area.minY, accuracy: 0.001) } else { XCTAssertEqual(box.maxY, area.maxY, accuracy: 0.001) }
             }
         }
     }
