@@ -150,6 +150,56 @@ final class LineBandMapperTests: XCTestCase {
                        "no_gutter")  // not numbered from 1
     }
 
+    func testShortFileGutterSkipsStrayDigitsLeftOfIt() throws {
+        // Mac run 2, B4: a 3-line file (gutter 1-4 with the trailing newline) said no_gutter on every
+        // try: VS Code's account badge "1" and the status bar's "0" sit left of the gutter column.
+        let strays: [(line: Int, centre: CGPoint, right: CGFloat)] = [
+            (line: 1, centre: CGPoint(x: 4, y: 700), right: 8), (line: 0, centre: CGPoint(x: 18, y: 770), right: 22)]
+        let pass = LineBandFit.fit(ranges: [3...3], digits: strays + gutter(1, 4), window: window, partial: false)
+        XCTAssertEqual(pass.reason, "ok")
+        let band = try XCTUnwrap(pass.bands.first)
+        XCTAssertEqual(band.rect.midY, 100 + 2 * 20, accuracy: 2)  // line 3's row
+        XCTAssertEqual(band.rect.minX, 56, accuracy: 0.001)  // right of the real gutter, not the badge
+        XCTAssertEqual(LineBandFit.fit(ranges: [1...1], digits: strays + gutter(1, 1), window: window,
+                                       partial: true).reason, "no_gutter")  // still no 1-line gutter
+    }
+
+    func testSameBandsComparesTheBoxes() {
+        let early = LineBandFit.fit(ranges: [12...12], digits: gutter(1, 30), window: window, partial: false)
+        let shifted = gutter(1, 30).map { (line: $0.line, centre: CGPoint(x: 40, y: $0.centre.y - 9 * 20), right: $0.right) }
+        let late = LineBandFit.fit(ranges: [12...12], digits: shifted, window: window, partial: false)
+        XCTAssertEqual(early.reason, "ok")
+        XCTAssertEqual(late.reason, "ok")
+        XCTAssertTrue(LineBandFit.sameBands(early, early))
+        XCTAssertFalse(LineBandFit.sameBands(early, late))  // the editor scrolled 9 rows in between
+        let edgeMiss = LineBandFit.fit(ranges: [12...12], digits: Array(gutter(1, 30).dropFirst()), window: window,
+                                       partial: false)  // OCR missed line 1: `seen` moves, the box does not
+        XCTAssertNotEqual(edgeMiss.seen, early.seen)
+        XCTAssertTrue(LineBandFit.sameBands(early, edgeMiss))
+    }
+
+    func testBandRetryDrawsOnlyASettledPass() async {
+        // Mac run 2, B5: try 1 read line 149 where it sat before `code -g` centred it (y 627) and the
+        // box stayed there; try 2 read it after the scroll (y 465). 0 = a pass with no bands.
+        func run(_ ys: [Int], tries: Int = 3) async -> (pass: Int, attempt: Int)? {
+            await BandRetry.run(tries: tries, pause: { _ in }, pass: { ys[$0 - 1] }, done: { $0 > 0 },
+                                same: { $0 == $1 })
+        }
+        var result = await run([627, 465, 465])
+        XCTAssertEqual(result?.pass, 465)
+        XCTAssertEqual(result?.attempt, 3)
+        result = await run([465, 465, 999])
+        XCTAssertEqual(result?.attempt, 2)  // two passes agree: drawn, no third pass
+        result = await run([627, 465], tries: 2)
+        XCTAssertEqual(result?.pass, 465)  // the last try is taken as it is
+        result = await run([0, 0, 465])
+        XCTAssertEqual(result?.pass, 465)
+        result = await run([627, 0, 0])
+        XCTAssertEqual(result?.pass, 0)  // the early pass was never confirmed: nothing drawn
+        let plain = await BandRetry.run(tries: 3, pause: { _ in }, pass: { [627, 465, 465][$0 - 1] }, done: { $0 > 0 })
+        XCTAssertEqual(plain?.attempt, 1)  // without `same`: the first good pass, as before
+    }
+
     func testFoldedRangeIsNotBoxed() {
         // B5a: the editor folded lines 10-29 away, so line 30 sits one row below line 9.
         let folded = (1...9).map { (line: $0, centre: CGPoint(x: 40, y: 100 + CGFloat($0 - 1) * 20), right: CGFloat(52)) }

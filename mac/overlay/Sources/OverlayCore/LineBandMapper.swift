@@ -145,18 +145,37 @@ public enum LineBandFit {
         return Pass(bands: bands, reason: bands.isEmpty ? "off_clip" : "ok", seen: seen)
     }
 
-    /// B4: the whole gutter of a 2-4 line file — every in-window digit of the left-most column,
-    /// accepted only when its lines are 1...n (consecutive from 1, no repeats) and evenly spaced.
+    /// B4: the whole gutter of a 2-4 line file — the left-most column (digits within 12 pt in x)
+    /// whose lines are 1...n (consecutive from 1, no repeats) and evenly spaced. Columns that fail
+    /// are skipped, as gutterMarks does: VS Code's account badge "1" and the status bar's "0 0" sit
+    /// left of the gutter (Mac run 2, B4: a 3-line file said no_gutter on every try).
     private static func shortGutter(digits: [(line: Int, centre: CGPoint, right: CGFloat)],
                                     window: CGRect) -> (marks: [(line: Int, midY: CGFloat)], right: CGFloat)? {
         let sorted = digits.filter { window.contains($0.centre) }.sorted { $0.centre.x < $1.centre.x }
-        guard let first = sorted.first else { return nil }
-        let group = sorted.filter { $0.centre.x - first.centre.x <= 12 }
-        let marks = group.map { (line: $0.line, midY: $0.centre.y) }
-        let lineNumbers = marks.map(\.line).sorted()
-        guard (2...4).contains(group.count), lineNumbers == Array(1...group.count),
-              LineBandMapper.evenRun(marks).count == group.count else { return nil }
-        return (LineBandMapper.evenRun(marks), group.map(\.right).max() ?? 0)
+        var start = 0
+        while start < sorted.count {
+            var end = start
+            while end + 1 < sorted.count, sorted[end + 1].centre.x - sorted[start].centre.x <= 12 { end += 1 }
+            let group = sorted[start...end]
+            let marks = group.map { (line: $0.line, midY: $0.centre.y) }
+            if (2...4).contains(group.count), marks.map(\.line).sorted() == Array(1...group.count),
+               LineBandMapper.evenRun(marks).count == group.count {
+                return (LineBandMapper.evenRun(marks), group.map(\.right).max() ?? 0)
+            }
+            start = end + 1
+        }
+        return nil
+    }
+
+    /// Two passes show the same boxes: the same ranges, every band edge within 2 pt (an OCR miss at
+    /// the gutter's edge may change `seen` without moving a box, so `seen` is not compared).
+    /// A pass taken before the editor's scroll landed differs from the one after it (Mac run 2, B5:
+    /// the box for line 149 was drawn where 149 sat before `code -g` centred it, 9 rows low).
+    public static func sameBands(_ a: Pass, _ b: Pass) -> Bool {
+        a.bands.count == b.bands.count
+            && zip(a.bands, b.bands).allSatisfy { x, y in
+                x.lines == y.lines && abs(x.rect.minY - y.rect.minY) <= 2 && abs(x.rect.maxY - y.rect.maxY) <= 2
+            }
     }
 
     /// B5a: the range is folded away — no raw mark inside it, and the raw marks just below and
@@ -213,15 +232,19 @@ public enum LineBandFit {
 /// times, until `done` accepts a pass. A cancelled task (the owner cleared the screen) stops before
 /// the next pass and returns nil, so nothing is drawn or reported after the clear.
 public enum BandRetry {
+    /// `same` (optional): an accepted pass also needs the next pass to agree with it (the screen
+    /// settled); a pass that differs becomes the new candidate. The last try is taken as it is.
     public static func run<P>(tries: Int, pause: (Int) async -> Void, pass: (Int) async -> P,
-                              done: (P) -> Bool) async -> (pass: P, attempt: Int)? {
+                              done: (P) -> Bool, same: ((P, P) -> Bool)? = nil) async -> (pass: P, attempt: Int)? {
         var last: (pass: P, attempt: Int)?
-        for attempt in 1...max(tries, 1) {
+        let tries = max(tries, 1)
+        for attempt in 1...tries {
             await pause(attempt)
             if Task.isCancelled { return nil }
             let result = await pass(attempt)
+            let settled = same.map { same in last.map { done($0.pass) && same($0.pass, result) } ?? false } ?? true
             last = (result, attempt)
-            if done(result) { break }
+            if done(result) && (settled || attempt == tries) { break }
         }
         return Task.isCancelled ? nil : last
     }

@@ -271,7 +271,9 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
     /// Line bands for a `.lines` event, each anchored to its window with the scroll signal.
     /// The service scrolls the editor to the change while this runs, so a pass that finds the
     /// wanted lines off view (or no gutter yet) is tried again: at 0.9 s, 1.9 s and 2.9 s plus OCR
-    /// time. `report` gets one reason code for the debug page (codes and line numbers only).
+    /// time. Bands are drawn when two passes in a row agree (`sameBands`) or on the last try, so a
+    /// pass taken before the editor's scroll landed is not drawn. `report` gets one reason code for
+    /// the debug page (codes and line numbers only).
     /// Cancelled (a clear): no further pass, nothing drawn, nothing reported here (the add reports
     /// `cleared`). `labels`: one per range, or empty.
     static func resolveBands(_ ranges: [ClosedRange<Int>], labels: [String] = [], file: String,
@@ -280,7 +282,8 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
             tries: bandTries,
             pause: { attempt in try? await Task.sleep(nanoseconds: attempt == 1 ? 900_000_000 : 1_000_000_000) },
             pass: { attempt in await ScreenContext.lineBands(ranges: ranges, file: file, partial: attempt == bandTries) },
-            done: { !$0.pass.bands.isEmpty || $0.pass.reason == "no_permission" || $0.pass.reason == "no_ranges" })
+            done: { !$0.pass.bands.isEmpty || $0.pass.reason == "no_permission" || $0.pass.reason == "no_ranges" },
+            same: { LineBandFit.sameBands($0.pass, $1.pass) })
         else { return [] }
         let pass = run.pass.pass
         let detail = run.pass.detail + " try=\(run.attempt)"
@@ -306,7 +309,7 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
         }
     }
 
-    private static let bandTries = 3
+    private static let bandTries = 3  // the service speaks its off-view line on try=3 (the last)
 
     /// Tier C (or static) placement; `scrollBar`: look up the scroll bar under the box so a
     /// keyboard or scroll-bar scroll hides it too (not for whole-window boxes).
