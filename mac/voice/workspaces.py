@@ -70,8 +70,8 @@ def safe_page(url: object) -> bool:
         return False
     if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7f for c in url):
         return False
-    parts = urllib.parse.urlsplit(url)
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    u = urllib.parse.urlsplit(url)
+    return u.scheme in ("http", "https") and bool(u.netloc)
 
 
 def list_all() -> list[dict]:
