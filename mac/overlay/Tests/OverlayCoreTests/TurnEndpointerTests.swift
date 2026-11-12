@@ -165,6 +165,30 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertNil(req.cut(text: "Highlight the changes. Don't.", now: t0.addingTimeInterval(3.05)))
     }
 
+    // Round 9 (security): a kept part that alone reads as a Confirm answer is never the cut.
+    private func answerThenRoom(_ answer: String, _ room: String) -> String? {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.10, from: t0, seconds: 0.6)                          // the answer
+        gate.partial(answer, at: t0.addingTimeInterval(0.8))
+        feed(&gate, 0.03, from: t0.addingTimeInterval(0.6), seconds: 2.5)  // quieter, 1.5 s+ later
+        let full = answer + " " + room
+        gate.partial(full, at: t0.addingTimeInterval(2.4))
+        XCTAssertEqual(gate.kept, answer)
+        return gate.cut(text: full, now: t0.addingTimeInterval(2.6))
+    }
+
+    func testAPoliteYesIsNeverCut() {
+        XCTAssertNil(answerThenRoom("Yes, thank you.", "actually only the docs"))
+        XCTAssertNil(answerThenRoom("Confirmed, thanks.", "But just the readme"))
+        XCTAssertNil(answerThenRoom("Jarvis, yes, thank you.", "actually only on the test branch"))
+        XCTAssertNil(answerThenRoom("Hey, John Pierce. Yes, thanks.", "only the docs"))  // misheard wake
+        XCTAssertNil(answerThenRoom("No thanks.", "well maybe the readme"))
+        XCTAssertNil(answerThenRoom("Never mind, sir.", "just the docs then"))
+        // A real request still gets its room words cut.
+        XCTAssertEqual(answerThenRoom("Highlight the changes.", "What are you people"), "Highlight the changes.")
+    }
+
     func testAnIncompleteRequestIsNeverCut() {
         let t0 = Date()
         var gate = TailGate()

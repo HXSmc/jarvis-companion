@@ -559,3 +559,39 @@ def test_speech_gate_is_tunable_and_shown(client, monkeypatch, tmp_path):
         assert name in page, name
     for bad in ({"text": "x", "levels": [0.1] * 401}, {"text": "x", "conf": 1.5}):
         assert client.post("/overlay/utterance", json=bad, headers=AUTH_HEADER).status_code == 422
+
+
+# Round 9 (security): the app's TailGate must never cut a wake turn down to a yes/no/cancel the
+# whole utterance was not. Its answer vocabulary has to cover every word the service accepts.
+def _answer_vocabulary() -> set[str]:
+    pats = (intents._POLITE, intents._CONFIRM_RE.pattern, intents._CANCEL_RE.pattern, intents._NO_RE.pattern)
+    words: set[str] = set()
+    for p in pats:
+        # A glued optional suffix ("confirm(?:ed)?") gives the stem and the long word, never "ed".
+        words |= {a + b for a, b in re.findall(r"([a-z]+)\(\?:([a-z]+)\)\?", p)}
+        p = re.sub(r"(?<=[a-z])\(\?:[a-z]+\)\?", "", p)
+        words |= {w.replace("'", "") for w in re.findall(r"[a-z']+", p)}
+    return words | {"nevermind"}  # "never ?mind" also matches as one word
+
+
+def _swift_tail_gate() -> str:
+    return (ROOT / "mac/overlay/Sources/OverlayCore/TurnEndpointer.swift").read_text()
+
+
+def test_tail_gate_answer_words_cover_the_service_vocabulary():
+    src = _swift_tail_gate()
+    m = re.search(r"static let answerWords: Set<String> = \[(.*?)\]", src, re.S)
+    assert m, "TailGate.answerWords not found"
+    swift = set(re.findall(r'"([a-z]+)"', m.group(1)))
+    missing = _answer_vocabulary() - swift
+    assert not missing, f"words the service accepts as an answer but TailGate would cut: {sorted(missing)}"
+    for phrase in ("yes thank you", "confirmed thanks", "no thanks", "never mind please", "that's enough sir"):
+        assert intents.is_confirm(phrase) or intents.is_no(phrase) or intents.is_cancel(phrase)
+        assert {w.replace("'", "") for w in phrase.split()} <= swift
+
+
+def test_tail_gate_strips_the_same_misheard_wake():
+    # "Hey, John Pierce. Yes, thanks." is a yes to the service (_MISHEARD_WAKE_RE drops the first
+    # sentence), so the app must drop it the same way before its answer check.
+    assert intents.is_confirm("Hey, John Pierce. Yes, thanks.")
+    assert intents._MISHEARD_WAKE_RE.pattern in _swift_tail_gate()

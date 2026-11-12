@@ -199,22 +199,40 @@ public struct TailGate {
 
     /// The request to end the turn with: it is complete, the owner has been quiet for
     /// `TurnEndpointer.completeHold`, and the words since then came from the room. Else nil.
-    /// Never cuts an answer: a bare yes, or cut-off words that take it back ("Yes. No, wait."),
-    /// go to the service whole so its whole-utterance Confirm check still sees them.
+    /// Never cuts an answer: a kept part that alone reads as a yes, no or cancel ("Yes, thank you."),
+    /// or cut-off words that take it back ("Yes. No, wait."), go to the service whole so its
+    /// whole-utterance Confirm check still sees them.
     public func cut(text: String, now: Date) -> String? {
         let full = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let kept, let ownerAt, kept != full,
               now.timeIntervalSince(ownerAt) >= TurnEndpointer.completeHold
         else { return nil }
         let dropped = full.hasPrefix(kept) ? String(full.dropFirst(kept.count)) : full
-        if Self.words(kept).isSubset(of: Self.yesWords) || !Self.words(dropped).isDisjoint(with: Self.retractWords) {
+        if Self.isAnswer(kept) || !Self.words(dropped).isDisjoint(with: Self.retractWords) {
             return nil
         }
         return kept
     }
 
-    static let yesWords: Set<String> = ["hey", "jarvis", "yes", "yeah", "yep", "ok", "okay", "sure", "please",
-                                        "sir", "do", "it", "go", "ahead", "confirm", "confirmed"]
+    /// `s` alone could read as a Confirm answer to the service: after its wake strips, every word is
+    /// in `answerWords`. tests/test_overlay_jfollow2.py fails if this lags mac/voice/intents.py.
+    static func isAnswer(_ s: String) -> Bool {
+        var t = TurnEndpointer.stripWake(s)
+        // intents._MISHEARD_WAKE_RE: STT's version of "Hey Jarvis." ("Hey, John Pierce.") is dropped too.
+        if let r = t.range(of: #"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+"#,
+                           options: [.regularExpression, .caseInsensitive]) {
+            t.removeSubrange(r)
+        }
+        return words(t).isSubset(of: answerWords)
+    }
+
+    /// Every word of intents._CONFIRM_RE, _CANCEL_RE, _NO_RE and _POLITE (apostrophes removed), plus
+    /// wake and plain-yes words.
+    static let answerWords: Set<String> = [
+        "hey", "jarvis", "yes", "yeah", "yep", "ok", "okay", "sure", "please", "sir", "do", "it", "go",
+        "ahead", "confirm", "confirmed", "thanks", "thank", "you", "no", "nope", "not", "dont", "stop",
+        "cancel", "that", "thats", "never", "mind", "nevermind", "forget", "enough", "abort", "leave",
+    ]
     static let retractWords: Set<String> = ["no", "nope", "not", "dont", "stop", "cancel", "wait",
                                             "hold", "abort", "never", "nevermind"]
 
