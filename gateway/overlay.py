@@ -220,6 +220,10 @@ class TurnBody(BaseModel):
     audio_ms: float | None = None  # speech heard after the wake, for the debug page
     stt: str | None = Field(None, max_length=500)  # how the app heard it (debug page only)
     followup: bool = False  # heard in the open-mic window after a reply, no wake word
+    # Mic level per LEVEL_BLOCK_MS block (RMS, 0..1) over the turn's audio, and the recogniser's mean
+    # confidence when it reports one: the follow-up gate reads them (_followup_gate).
+    levels: list[float] | None = Field(None, max_length=400)
+    conf: float | None = Field(None, ge=0, le=1)
     screen: ScreenBody | None = None
 
 
@@ -483,6 +487,79 @@ try:  # a spoken wake word starts the conversation afresh only after this long w
     FRESH_AFTER_S = float(os.environ.get("OVERLAY_FRESH_AFTER_S", "90"))
 except ValueError:
     FRESH_AFTER_S = 90.0
+
+
+_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"  # repo .env; tests point it at tmp_path
+
+
+def _tunable(name: str, default: float) -> float:
+    """A speech-gate number: env var `name`, else that one line of the repo .env, else default.
+    Only that key is read; the rest of .env (tokens) never enters this process."""
+    raw = os.environ.get(name)
+    if raw is None:
+        try:
+            for line in _ENV_PATH.read_text().splitlines():
+                key, _, value = line.strip().partition("=")
+                if key.strip() == name:
+                    raw = value.strip().strip("'\"")
+        except OSError:
+            pass
+    try:
+        return float(raw) if raw is not None else default
+    except ValueError:
+        return default
+
+
+# Follow-up gate (no wake word): room talk must not count as the owner. Mac run 3 room fragments
+# ("Right", "What are you people") reached the model. Tune in the repo .env (or the env), then restart
+# the service. Levels are 100 ms mic RMS blocks from the app; the owner's own level is the 90th
+# percentile block of his last wake turn in the conversation (it carries the mic gain and distance).
+LEVEL_BLOCK_MS = 100  # the app's block width (LevelBlocks.width)
+# A follow-up block counts as near-field voice at this share of the owner's wake level (0.5 = -6 dB).
+FOLLOWUP_LEVEL_RATIO = _tunable("OVERLAY_FOLLOWUP_LEVEL_RATIO", 0.5)
+# ...and never below this absolute RMS (quiet room peaks in the runs: 0.002-0.03 peak sample).
+FOLLOWUP_MIN_LEVEL = _tunable("OVERLAY_FOLLOWUP_MIN_LEVEL", 0.01)
+# Near-field voice needed in a follow-up: shorter is a cough, a door or a far voice.
+FOLLOWUP_MIN_VOICED_MS = _tunable("OVERLAY_FOLLOWUP_MIN_VOICED_MS", 300)
+# Recogniser confidence below this drops a follow-up (only when the recogniser reports one).
+FOLLOWUP_MIN_CONF = _tunable("OVERLAY_FOLLOWUP_MIN_CONF", 0.35)
+# App side (sent on /health): after a complete wake request, new words quieter than this share of
+# the turn's own loudest voice are the room, and the turn ends with the request as it was.
+TAIL_LEVEL_RATIO = _tunable("OVERLAY_TAIL_LEVEL_RATIO", 0.5)
+_owner_level: dict[str, float] = {}  # conv_id -> 90th percentile block of the last wake turn
+
+
+def _p90(levels: list[float]) -> float:
+    ordered = sorted(levels)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))]
+
+
+def _followup_gate(body: TurnBody) -> tuple[str | None, float | None]:
+    """('level' | 'confidence' | None, the level shown) for a follow-up that parses as a plain answer."""
+    level = _p90(body.levels) if body.levels else None
+    if body.levels:
+        ref = _owner_level.get(body.conv_id)
+        floor = max(FOLLOWUP_MIN_LEVEL, FOLLOWUP_LEVEL_RATIO * ref if ref else 0.0)
+        if LEVEL_BLOCK_MS * sum(v >= floor for v in body.levels) < FOLLOWUP_MIN_VOICED_MS:
+            return "level", level
+    if body.conf is not None and body.conf < FOLLOWUP_MIN_CONF:
+        return "confidence", level
+    return None, level
+
+
+def _followup_dropped(body: TurnBody, reason: str, level: float | None, words: int,
+                      on_step: Callable[..., None] | None) -> None:
+    """The one debug row of a dropped follow-up; nothing is said, shown or stored."""
+    if on_step:
+        on_step("followup_dropped", detail=f"words={words}", reason=reason,
+                level=None if level is None else round(level, 3),
+                conf=None if body.conf is None else round(body.conf, 2))
+
+
+def _gate_setup() -> dict:
+    return {"followup_level_ratio": FOLLOWUP_LEVEL_RATIO, "followup_min_level": FOLLOWUP_MIN_LEVEL,
+            "followup_min_voiced_ms": FOLLOWUP_MIN_VOICED_MS, "followup_min_conf": FOLLOWUP_MIN_CONF,
+            "tail_level_ratio": TAIL_LEVEL_RATIO}
 
 
 def _forget(conv_id: str) -> None:
@@ -785,6 +862,22 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         yield ev
     if handled:
         return
+    if body.followup and not owner_answer_due:
+        # Room talk is not the owner: a quiet or unsure follow-up is dropped before it can join a
+        # pending head or reach a model. A known command ("next change", "clear", "stop") never is.
+        if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind == "answer"
+                and not (intents.is_cancel(body.text) or intents.is_confirm(body.text) or intents.is_no(body.text))):
+            reason, level = _followup_gate(body)
+            if reason:
+                _followup_dropped(body, reason, level, len(re.findall(r"[A-Za-z0-9']+", body.text)), on_step)
+                metrics["total_s"] = round(deps.clock() - start, 3)
+                yield {"type": "done", "metrics": metrics, "error": None}
+                return
+    elif not body.followup and body.levels:
+        _owner_level.pop(body.conv_id, None)
+        _owner_level[body.conv_id] = _p90(body.levels)  # the owner's level, for this conversation's follow-ups
+        while len(_owner_level) > 32:
+            _owner_level.pop(next(iter(_owner_level)))
     raw_text = body.text  # this turn's own transcript, before any continuation join (owner-words media)
     pending = _pending.pop(body.conv_id, None)
     joined = False
@@ -817,8 +910,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                                body.conv_id, None).kind == "answer":
             # The room, not the owner: a short follow-up with no question in it (STT heard "Jew").
             # Nothing is said, shown or stored.
-            if on_step:
-                on_step("followup_dropped", detail=f"words={words}")
+            _followup_dropped(body, "short", _followup_gate(body)[1], words, on_step)
             metrics["total_s"] = round(deps.clock() - start, 3)
             yield {"type": "done", "metrics": metrics, "error": None}
             return
@@ -2407,7 +2499,8 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
     async def stream() -> AsyncIterator[str]:
         rec = debug_log.for_utterance()
         debug_log.add(rec, "voice", audio_ms=body.audio_ms, stt_final_ms=body.stt_final_ms,
-                      stt=body.stt, followup=body.followup)
+                      stt=body.stt, followup=body.followup,
+                      level=_p90(body.levels) if body.levels else None, conf=body.conf)
         debug_log.add(rec, "transcribed", text=body.text)
         start = time.monotonic()
         cards = shapes = lines = media = 0
@@ -2507,7 +2600,8 @@ _off_view_said: float | None = None
 async def get_debug_turns() -> dict:
     # Setup the owner must fix (booleans only, never a path): no `code` CLI = the editor never scrolls.
     return {**debug_log.snapshot(), "setup": {"code_cli": gitdiff.editor_path("code") is not None,
-                                              "vault": bool(os.environ.get("OVERLAY_VAULT"))}}
+                                              "vault": bool(os.environ.get("OVERLAY_VAULT"))},
+            "speech_gate": _gate_setup()}  # numbers the owner can tune, shown under the setup rows
 
 
 # The page itself holds no data, so it needs no token (a browser cannot send a
@@ -2528,4 +2622,5 @@ DEBUG_PAGE = (Path(__file__).with_name("overlay_debug.html")).read_text()
 async def get_health() -> dict:
     return {"ok": True,
             "voice": "bm_daniel" if get_deps().synth else None,
-            "brain": shutil.which("claude") is not None}
+            "brain": shutil.which("claude") is not None,
+            "tail_level_ratio": TAIL_LEVEL_RATIO}

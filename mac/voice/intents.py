@@ -349,10 +349,17 @@ def tail_hunk(text: str) -> str | None:
 QUESTION_WORDS_RE = re.compile(r"\b(?:what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did)\b")
 
 
+# Talk to a group is never to Jarvis ("What are you people", Mac run 3 room speech).
+_OTHERS_RE = re.compile(r"\b(?:you (?:people|guys|all)|y'all)\b")
+
+
 def noise_words(text: str) -> int | None:
-    """Word count for a 1-3 word utterance that is not a question or a reply, else None."""
+    """Word count for a 1-3 word utterance that is not a question or a reply, or a short one (6 words
+    or fewer) that talks to a group, else None."""
     t = _clean(text)
     words = re.findall(r"[A-Za-z0-9']+", t)
+    if 1 <= len(words) <= 6 and _OTHERS_RE.search(t.lower()):
+        return len(words)
     if not 1 <= len(words) <= 3 or "?" in text:
         return None
     if QUESTION_WORDS_RE.search(t.lower()) or is_confirm(text) or is_no(text) or is_cancel(text):
