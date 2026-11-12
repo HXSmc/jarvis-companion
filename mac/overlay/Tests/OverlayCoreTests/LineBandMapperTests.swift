@@ -293,32 +293,43 @@ final class GutterOCRDiagTests: XCTestCase {
         return ctx.makeImage()!
     }
 
+    static func ocrDigits(_ img: CGImage, _ level: VNRequestTextRecognitionLevel) -> String {
+        Self.ocr(img, level: level, minHeight: nil).joined(separator: " ")
+    }
+
+    static func compose(_ cells: [CGImage], gap: Int, bg: CGFloat = 0.12, pad: Int = 40) -> CGImage {
+        let h = (cells.map(\.height).max() ?? 1) + 2 * pad
+        let w = cells.reduce(2 * pad) { $0 + $1.width + gap }
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: bg, green: bg, blue: bg, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        var x = pad
+        for c in cells { ctx.draw(c, in: CGRect(x: x, y: pad, width: c.width, height: c.height)); x += c.width + gap }
+        return ctx.makeImage()!
+    }
+
     func testDiag() throws {
         var out = ""
-        for lines in [3, 37] {
-            let image = Self.render(lines: lines)
-            let strip = image.cropping(to: CGRect(x: 600, y: 0, width: 220, height: image.height))!
-            let variants: [(String, CGImage, VNRequestTextRecognitionLevel, Float?)] = [
-                ("A full accurate 0.008", image, .accurate, 0.008),
-                ("B full fast 0.008", image, .fast, 0.008),
-                ("C full accurate default", image, .accurate, nil),
-                ("D strip accurate", strip, .accurate, nil),
-                ("E strip fast", strip, .fast, nil),
-                ("F strip x2 accurate", Self.scaled(strip, 2), .accurate, nil),
-            ]
-            for (name, img, level, minH) in variants {
-                let found = Self.ocr(img, level: level, minHeight: minH)
-                let nums = found.compactMap { ShapeTrack.lineNumber(String($0.split(separator: "@")[0])) }.sorted()
-                out += "lines=\(lines) \(name): nums=\(nums)\n   raw=\(found.prefix(60))\n"
-            }
-            let dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SNAPSHOT_DIR"] ?? NSTemporaryDirectory())
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            if let dest = CGImageDestinationCreateWithURL(dir.appendingPathComponent("gutter-diag-\(lines).png") as CFURL,
-                                                          UTType.png.identifier as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, image, nil); CGImageDestinationFinalize(dest)
-            }
-            try? out.write(to: dir.appendingPathComponent("gutter-diag.txt"), atomically: true, encoding: .utf8)
+        let image = Self.render(lines: 37)
+        // cell of line n: digits right-aligned at x=800, baseline top = 250 + 36n (font 24 px)
+        func cell(_ n: Int, left: Int, right: Int = 802) -> CGImage {
+            image.cropping(to: CGRect(x: left, y: 250 + 36 * n - 26, width: right - left, height: 34))!
         }
+        let tight = (1...12).map { n in cell(n, left: 800 - (n < 10 ? 16 : 31)) }
+        out += "G1 one cell 6 tight acc: \(Self.ocrDigits(Self.compose([tight[5]], gap: 0), .accurate))\n"
+        out += "G2 one cell 6 tight fast: \(Self.ocrDigits(Self.compose([tight[5]], gap: 0), .fast))\n"
+        out += "G3 one cell 6 x4 acc: \(Self.ocrDigits(Self.scaled(Self.compose([tight[5]], gap: 0), 4), .accurate))\n"
+        for gap in [6, 12, 20] {
+            out += "H gap\(gap) acc: \(Self.ocrDigits(Self.compose(tight, gap: gap), .accurate))\n"
+            out += "H gap\(gap) fast: \(Self.ocrDigits(Self.compose(tight, gap: gap), .fast))\n"
+        }
+        let doubled = (1...12).map { n in Self.compose([tight[n - 1], tight[n - 1]], gap: 2, pad: 0) }
+        out += "J doubled cells gap 30 acc: \(Self.ocrDigits(Self.compose(doubled, gap: 30), .accurate))\n"
+        // K: rows stacked as the editor shows them, but each cell followed by a tight copy of itself
+        let rect = VNDetectTextRectanglesRequest(); rect.reportCharacterBoxes = true
+        try? VNImageRequestHandler(cgImage: image).perform([rect])
+        let boxes = (rect.results ?? []).map { o in "x\(Int(o.boundingBox.minX * 2880))y\(Int((1 - o.boundingBox.maxY) * 1800))w\(Int(o.boundingBox.width * 2880))c\(o.characterBoxes?.count ?? 0)" }
+        out += "K rects: \(boxes.prefix(50))\n"
         print("GUTTER-DIAG-BEGIN\n" + out + "GUTTER-DIAG-END")
     }
 }
