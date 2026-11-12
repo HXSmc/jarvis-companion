@@ -202,7 +202,7 @@ final class AppController {
     }
 
     /// The default device or its data source changed: re-read the route, re-gate, re-note.
-    private func outputRouteChanged() {
+    fileprivate func outputRouteChanged() {
         guard refreshOutputRoute() else { return }
         updateBargeInEnabled()
         noteBargeMode()
