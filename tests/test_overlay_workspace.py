@@ -7,6 +7,7 @@ Every test points OVERLAY_WORKSPACE_DIR at a tmp_path dir; the real
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -233,7 +234,7 @@ def test_open_is_ambiguous_or_missing(client, ws_dir):
     workspaces.save("battery research", [], [], None)
     workspaces.save("battery notes", [], [], None)
     events = turn(client, "open the battery")
-    assert says(events) == ["Which one: battery notes or battery research?"]  # by slug order
+    assert says(events) == ["Which one: battery notes or battery research? Ask again with its name."]  # by slug order
     assert not [e for e in events if e["type"] in ("card", "card_size")]
     assert _rows()[-1]["detail"] == "open ambiguous count=2"
     events = turn(client, "open the holiday research")
@@ -293,3 +294,21 @@ def test_snapshot_route_guards(client):
     assert resp.status_code == 200 and resp.json() == {"ok": True}
     assert event.is_set() and slot["body"]["cards"][0]["card"]["id"] == "c1"
     assert nonce not in overlay._ws_nonces  # one shot only
+
+
+def test_stale_tmp_is_an_io_error(ws_dir):
+    """Code R1-5: a crashed save's tmp file makes the next save fail as `io`, not crash the turn."""
+    ws_dir.mkdir(mode=0o700)
+    (ws_dir / f".battery.json.{os.getpid()}.tmp").write_text("{}")
+    with pytest.raises(workspaces.WorkspaceError) as err:
+        workspaces.save("battery research",
+                        [{"id": "c1", "type": "info", "title": "Gate", "body": ["x"]}], [], None)
+    assert err.value.reason == "io"
+
+
+def test_slow_snapshot_speaks_first(client, ws_dir, monkeypatch):
+    """UX R1-2: a snapshot slower than FEEDBACK_S gets a short line, then the timeout line."""
+    _deps()
+    monkeypatch.setattr(overlay, "WORKSPACE_SNAPSHOT_WAIT_S", overlay.FEEDBACK_S + 0.3)
+    events = turn(client, "save this as battery research")
+    assert says(events) == [acks.PHRASES["generic"], acks.PHRASES["workspace_failed"]]

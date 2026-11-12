@@ -193,14 +193,17 @@ def _check_mode(path: Path) -> None:
 
 def _write(d: Path, s: str, body: str) -> None:
     """Atomic owner-only write of <slug>.json, exactly like the memory store."""
-    os.makedirs(d, mode=0o700, exist_ok=True)
     path = d / f"{s}.json"
-    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(d):
-        raise WorkspaceError("name")
-    if path.exists():
-        _check_mode(path)
     tmp = d / f".{s}.json.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:  # a stale tmp from a crashed save, or a dir we cannot make, is an "io" error, not a crash
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        if os.path.dirname(os.path.realpath(path)) != os.path.realpath(d):
+            raise WorkspaceError("name")
+        if path.exists():
+            _check_mode(path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise WorkspaceError("io") from exc
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(body.encode("utf-8"))

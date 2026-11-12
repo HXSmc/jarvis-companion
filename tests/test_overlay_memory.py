@@ -240,3 +240,14 @@ def test_memory_cannot_be_planted_by_model_or_file_text(client, mem_file):
     assert memory.load() == []
     turn(client, "remember that tea comes without sugar")
     assert [e["text"] for e in memory.load()] == ["tea comes without sugar"]
+
+
+def test_memory_forget_all_wording_for_none_and_one(client, mem_file):
+    """UX R1-1: no Confirm for an empty store; one memory is "the one thing", not "1 things"."""
+    _deps()
+    events = turn(client, "forget everything", conv_id="f0")
+    assert says(events) == [acks.PHRASES["memory_empty"]]
+    assert "f0" not in overlay._host_ask
+    turn(client, "remember that coffee is at nine", conv_id="f1")
+    events = turn(client, "forget everything", conv_id="f1")
+    assert says(events) == ["Forget the one thing I remember?"]

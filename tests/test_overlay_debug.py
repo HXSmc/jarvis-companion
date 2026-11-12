@@ -153,6 +153,10 @@ def test_debug_setup_vault_row_names_only(client, monkeypatch, tmp_path):
     page = client.get("/overlay/debug").text
     assert "Notes vault set; excluded:" in page
     assert "run the installer" in page  # sessions access not set: the page says how to fix it
+    # design R1-1: a healthy row is dim, only a missing setup is red; no "set" row without a vault flag
+    assert "#setup .ok { color: var(--dim); }" in page
+    assert '`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`, true]' in page
+    assert "else if (ok.vault) rows.push" in page
 
 
 def test_setup_rows_have_page_padding(client):

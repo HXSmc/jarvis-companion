@@ -29,7 +29,9 @@
   q { color: var(--quote); }
   .empty { color: var(--dim); padding: 32px 0; }
   #gate { color: var(--dim); max-width: 980px; margin: 8px auto 0; padding: 0 20px; font-size: 12px; }
-  #setup { color: var(--bad); max-width: 980px; margin: 12px auto 0; padding: 0 20px; white-space: pre-line; }
+  #setup { color: var(--bad); max-width: 980px; margin: 12px auto 0; padding: 0 20px; }
+  #setup span { display: block; }
+  #setup .ok { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -115,16 +117,21 @@ function render(data) {
   lis.style.color = l.state === "listening" ? "var(--ok)" : "var(--bad)";
   const setup = document.getElementById("setup");
   const ok = data.setup || {};
-  const rows = [];
-  if (ok.code_cli === false) rows.push("VS Code command line tool (code) missing: the editor will not scroll");
-  if (ok.vault === false) rows.push("Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes");
-  else rows.push(`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`);
-  if (ok.barge_in === false) rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)");
-  else if (ok.barge_mode === "aec") rows.push("barge-in: on (echo canceller)");
-  else rows.push("barge-in: on with headphones, off on speakers");
-  if (ok.sessions_access === false) rows.push("Sessions access: not set (run the installer)");
+  const rows = [];  // [text, healthy]: a working setup is dim, only a missing one is red
+  if (ok.code_cli === false) rows.push(["VS Code command line tool (code) missing: the editor will not scroll", false]);
+  if (ok.vault === false) rows.push(["Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes", false]);
+  else if (ok.vault) rows.push([`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`, true]);
+  if (ok.barge_in === false) rows.push(["barge-in: off (set OVERLAY_BARGE_IN=1 to try it)", false]);
+  else if (ok.barge_mode === "aec") rows.push(["barge-in: on (echo canceller)", true]);
+  else if (ok.barge_in) rows.push(["barge-in: on with headphones, off on speakers", true]);
+  if (ok.sessions_access === false) rows.push(["Sessions access: not set (run the installer)", false]);
   setup.hidden = rows.length === 0;
-  setup.textContent = rows.join("\n");
+  setup.replaceChildren(...rows.map(([text, healthy]) => {
+    const line = document.createElement("span");
+    line.textContent = text;
+    if (healthy) line.className = "ok";
+    return line;
+  }));
   const g = data.speech_gate;
   const gate = document.getElementById("gate");
   gate.hidden = !g;

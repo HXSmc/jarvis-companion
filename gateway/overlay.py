@@ -539,7 +539,7 @@ FOLLOWUP_MIN_VOICED_MS = _tunable("OVERLAY_FOLLOWUP_MIN_VOICED_MS", 300)
 FOLLOWUP_MIN_CONF = _tunable("OVERLAY_FOLLOWUP_MIN_CONF", 0.35)
 # App side (sent on /health): after a complete wake request, new words quieter than this share of
 # the turn's own loudest voice are the room, and the turn ends with the request as it was.
-TAIL_LEVEL_RATIO = _tunable("OVERLAY_TAIL_LEVEL_RATIO", 0.5)
+TAIL_LEVEL_RATIO = _tunable("OVERLAY_TAIL_LEVEL_RATIO", 0.6)  # = TailGate.defaultRatio (app uses this)
 _owner_level: dict[str, float] = {}  # conv_id -> 90th percentile block of the last wake turn
 
 
@@ -1017,6 +1017,30 @@ def _cut40(text: str) -> str:
     return cut[:cut.rfind(" ")].rstrip() if " " in cut.rstrip() else cut.rstrip()
 
 
+FEEDBACK_S = 0.4  # UX: a wait longer than this gets a spoken line, never silence
+
+
+async def _say_if_slow(task: asyncio.Future, key: str, deps: OverlayDeps,
+                       said: list[str]) -> AsyncIterator[dict]:
+    """Speak PHRASES[key] only when `task` is still running after FEEDBACK_S."""
+    done, _pending = await asyncio.wait({task}, timeout=FEEDBACK_S)
+    if not done:
+        async for ev in _line(key, deps):
+            yield ev
+        said.append(acks.PHRASES[key])
+
+
+_NAME_FILLER = frozenset({"the", "session", "my"})
+
+
+def _name_words(text: str) -> set[str]:
+    """A2: lower case, punctuation off ("voice-test" -> voice test), filler words dropped."""
+    return set(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split()) - _NAME_FILLER
+
+
+ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line: no pending pick
+
+
 def session_prompt(words: str, ref_row: dict | None = None) -> str:
     """The new session's first message: owner words plus, with a ref, a fixed fix-it line."""
     prompt = f'Started by voice from the Mac overlay. The owner said: "{words}"'
@@ -1109,15 +1133,14 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
             on_step("session_start", detail=f"confirmed id={new_id}")
     elif on_step:
         on_step("session_start", detail="confirmed")
+    _tainted.add(body.conv_id)  # the host's title is untrusted text going into _history
     title = " ".join(str(out.get("title") or "").split())[:60]
     line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
     async for ev in _speak(line, deps):
         yield ev
     said.append(line)
-    detail = " ".join(str(out.get("action") or out.get("state") or "").split())[:40]
     card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
-                              "title": title or "Session",
-                              "body": ["Mini PC"] + ([detail] if detail else [])})
+                              "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
     if card:
         seen = _card_ids.setdefault(body.conv_id, set())
         if card["id"] in seen or _host_card_id(card["id"]):
@@ -1188,7 +1211,7 @@ async def _session_answer_action(payload: dict, body: TurnBody, deps: OverlayDep
                      {"msg_id": uuid.uuid4().hex, "need_id": need["id"], "answer": button})
     else:
         path, req = f"/central/sessions/{sid}/message", {"msg_id": uuid.uuid4().hex,
-                                                         "text": words[:300]}
+                                                         "text": (words or answer)[:300]}
     status, _out = await asyncio.to_thread(_companion_call, "POST", path, req)
     if status is not None:
         _session_rate_sent("answer", now)
@@ -1275,9 +1298,15 @@ async def _memory_turn(body: TurnBody, ask: intents.MemoryAsk, deps: OverlayDeps
                 on_step("memory", detail=f"forget id={entry['id'] if entry else 'none'}")
         else:  # forget_all: the only destructive one, host Confirm first
             count = len(await asyncio.to_thread(memory.load))
+            if count == 0:  # nothing to forget: no Confirm for a no-op
+                async for ev in _line("memory_empty", deps):
+                    yield ev
+                said.append(acks.PHRASES["memory_empty"])
+                return
+            question = ("Forget the one thing I remember?" if count == 1
+                        else f"Forget all {count} things I remember?")
             async for ev in _ask_host(body.conv_id, "memory_forget_all",
-                                      "Forget everything I remember",
-                                      f"Forget all {count} things I remember?", {}, deps):
+                                      "Forget everything I remember", question, {}, deps):
                 yield ev
     except memory.MemoryModeError:
         async for ev in _line("memory_failed", deps):
@@ -1358,7 +1387,7 @@ async def _ws_which(slugs: list[str], word: str, deps: OverlayDeps, said: list[s
     by_slug = {i["slug"]: i["name"] for i in await asyncio.to_thread(workspaces.list_all)}
     names = [by_slug.get(s, s) for s in slugs[:3]]
     which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
-    line = f"Which one: {which}?"
+    line = f"Which one: {which}? {ASK_AGAIN}"
     async for ev in _speak(line, deps):
         yield ev
     said.append(line)
@@ -1403,7 +1432,10 @@ async def _workspace_save_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: 
     """Save the current cards and pages as a named workspace; the app POSTs the snapshot."""
     nonce, event, slot = await asyncio.to_thread(_register_ws_nonce, body.conv_id)
     yield {"type": "workspace_save", "nonce": nonce}
-    if not await asyncio.to_thread(event.wait, WORKSPACE_SNAPSHOT_WAIT_S):
+    waited = asyncio.ensure_future(asyncio.to_thread(event.wait, WORKSPACE_SNAPSHOT_WAIT_S))
+    async for ev in _say_if_slow(waited, "generic", deps, said):
+        yield ev
+    if not await waited:
         async for ev in _line("workspace_failed", deps):
             yield ev
         said.append(acks.PHRASES["workspace_failed"])
@@ -1610,16 +1642,21 @@ async def _ask_host(conv_id: str, kind: str, summary: str, question: str,
         yield {"type": "card", "card": card}
 
 
-async def _session_rows(action: str, deps: OverlayDeps, said: list[str],
+async def _session_rows(action: str, conv_id: str, deps: OverlayDeps, said: list[str],
                         on_step, held: dict) -> AsyncIterator[dict]:
     """The session list for resolving a name or "this"; rows land in held["rows"],
     None -> the failed line was already said."""
     access = _sessions_access()
     rows, reason = None, "no_access"
     if access is not None:
-        rows, st = await asyncio.to_thread(_fetch_sessions, *access)
+        task = asyncio.ensure_future(asyncio.to_thread(_fetch_sessions, *access))
+        async for ev in _say_if_slow(task, "sessions", deps, said):
+            yield ev
+        rows, st = await task
         if rows is None:
             reason = "unreachable" if st == 0 else f"http_{st}"
+        else:  # host titles reach speech and _history from here: the conv leaves the tool pool
+            _tainted.add(conv_id)
     if rows is None:
         async for ev in _session_failed(action, reason, deps, said, on_step):
             yield ev
@@ -1657,26 +1694,29 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
     if action == "start":
         if ask.ref == "this":
             held: dict = {}
-            async for ev in _session_rows(action, deps, said, on_step, held):
+            async for ev in _session_rows(action, body.conv_id, deps, said, on_step, held):
                 yield ev
             if held["rows"] is None:
                 return
             hits = [r for r in held["rows"] if r["id"] in (_session_ref.get(body.conv_id) or [])]
             if len(hits) != 1:
-                async for ev in _speak("Which session, sir? Say its name.", deps):
+                line = f"Which session, sir? {ASK_AGAIN}"
+                async for ev in _speak(line, deps):
                     yield ev
+                said.append(line)
                 refused("ambiguous")
                 return
             ref_row = hits[0]
     else:  # stop / answer need a target row
         held = {}
-        async for ev in _session_rows(action, deps, said, on_step, held):
+        async for ev in _session_rows(action, body.conv_id, deps, said, on_step, held):
             yield ev
         if held["rows"] is None:
             return
         rows = held["rows"]
         if ask.ref == "name" and ask.name:
-            hits = [r for r in rows if ask.name.lower() in r["title"].lower()]
+            want = _name_words(ask.name)
+            hits = [r for r in rows if want and want <= _name_words(r["title"])]
             if not hits:
                 async for ev in _line("session_none_named", deps):
                     yield ev
@@ -1685,16 +1725,20 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
                 return
             if len(hits) > 1:
                 titles = [_cut40(r["title"]) or r["id"] for r in hits[:3]]
-                async for ev in _speak(f"Which one: {', '.join(titles[:-1])} or {titles[-1]}?", deps):
+                line = f"Which one: {', '.join(titles[:-1])} or {titles[-1]}? {ASK_AGAIN}"
+                async for ev in _speak(line, deps):
                     yield ev
+                said.append(line)
                 refused("ambiguous")
                 return
             ref_row = hits[0]
         else:  # "this" (or nothing): the session this conv last touched
             hits = [r for r in rows if r["id"] in (_session_ref.get(body.conv_id) or [])]
             if len(hits) != 1:
-                async for ev in _speak("Which session, sir? Say its name.", deps):
+                line = f"Which session, sir? {ASK_AGAIN}"
+                async for ev in _speak(line, deps):
                     yield ev
+                said.append(line)
                 refused("ambiguous")
                 return
             ref_row = hits[0]

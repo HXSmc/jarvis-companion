@@ -476,7 +476,7 @@ def test_sessions_intent():
     assert parse("what's the status of the order", apps={}).kind != "sessions"
 
 
-def test_session_request():
+def test_session_request_parent_cases():
     ask = session_request("start a new session and fix why this session has been going quiet")
     assert (ask.action, ask.ref, ask.words) == ("start", "this",
                                                 "fix why this session has been going quiet")
@@ -512,7 +512,7 @@ def test_session_request():
     assert (intent.kind, intent.arg, intent.sub) == ("sessions", "", "ref")
 
 
-def test_memory_request():
+def test_memory_request_parent_cases():
     ask = memory_request("remember that the side gate is locked")
     assert (ask.action, ask.text) == ("add", "the side gate is locked")
     ask = memory_request("remember this: the wifi password is on the router")
@@ -537,7 +537,7 @@ def test_memory_request():
         assert parse(s, apps={}).kind != "memory", s
 
 
-def test_workspace_request():
+def test_workspace_request_parent_cases():
     ask = workspace_request("save these pages and overlays as our battery research")
     assert (ask.action, ask.name) == ("save", "battery research")
     ask = workspace_request("open the battery research")

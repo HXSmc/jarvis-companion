@@ -436,7 +436,7 @@ def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
     start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
     assert "guard bargeInEnabled," in start
     assert ctl.count("bargeIn(reason:") == 3  # the def, the gated wake and the run's onConfirmed
-    assert 'rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)")' in overlay.DEBUG_PAGE
+    assert 'rows.push(["barge-in: off (set OVERLAY_BARGE_IN=1 to try it)", false])' in overlay.DEBUG_PAGE
     assert "ok.barge_in === false" in overlay.DEBUG_PAGE
     overlay.set_deps(make_deps())
     monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
