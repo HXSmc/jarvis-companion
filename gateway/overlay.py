@@ -1805,12 +1805,15 @@ CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
 CONFIRM_POLL_S = 0.5
 EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told it came too late
 _CONFIRM_CARD_ID = "agentconfirm"  # one id per conv, so the HUD replaces the card once settled
+# Every card id prefix the host issues: Confirm, the git/hunk cards (gitdiff + _hunk_card "gd-..."),
+# the owner-words media card ("ow" + sha256). A new host-issued id must get its prefix here.
+_HOST_CARD_PREFIXES = (_CONFIRM_CARD_ID, "gd-", "ow")
 
 
 def _host_card_id(card_id: str) -> bool:
-    """Ids only the host issues (Confirm, git cards): a model card claiming one gets a new id, so it
-    can neither replace the host's card nor have it dropped with the model's group."""
-    return card_id == _CONFIRM_CARD_ID or card_id.startswith("gd-")
+    """Ids only the host issues: a model card claiming one gets a new id, so it can neither replace
+    the host's card nor have it dropped with the model's group."""
+    return card_id.startswith(_HOST_CARD_PREFIXES)
 
 
 @dataclass

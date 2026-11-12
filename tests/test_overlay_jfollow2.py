@@ -595,3 +595,32 @@ def test_tail_gate_strips_the_same_misheard_wake():
     # sentence), so the app must drop it the same way before its answer check.
     assert intents.is_confirm("Hey, John Pierce. Yes, thanks.")
     assert intents._MISHEARD_WAKE_RE.pattern in _swift_tail_gate()
+
+
+# --- round 10: every host-issued card id is reserved -----------------------------------------
+
+# One real id per host prefix: the Confirm card, the git cards, the owner-words media card
+# (sha256(b"image|1|dog")[:10], the id the dog picture gets).
+HOST_IDS = ["agentconfirm", "gd-stat", "gd-bar", "gd-where", "gd-list",
+            "ow" + hashlib.sha256(b"image|1|dog").hexdigest()[:10]]
+
+
+def test_host_card_ids_are_reserved_for_both_tiers(client):
+    prefixes = overlay._HOST_CARD_PREFIXES
+    assert all(any(i.startswith(p) for i in HOST_IDS) for p in prefixes)  # every prefix is exercised
+    for n, host_id in enumerate(HOST_IDS):
+        assert overlay._host_card_id(host_id), host_id
+        forged = {"id": host_id, "type": "info", "title": "Dog", "body": ["attacker text"]}
+        # Fast tier (quiet pool): the model's card gets a fresh id.
+        _deps(conversations=FakeConversations(['{"say": "Here.", "card": ' + json.dumps(forged) + '}\n']))
+        (card,) = _cards(turn(client, "what is the population of Japan", conv_id=f"hf{n}"))
+        assert not any(card["id"].startswith(p) for p in prefixes), host_id
+        # Agent tier: fresh id, and the host id never joins the model's drop group.
+        clock = Clock()
+        setup(clock, lambda: FakeAgent(clock, script=[result({"say": "x"}, {"card": dict(forged)})]))
+        (card,) = _cards(turn(client, "check my inbox", conv_id=f"ha{n}"))
+        assert not any(card["id"].startswith(p) for p in prefixes), host_id
+        assert host_id not in overlay._card_sets[f"ha{n}"]["agent"]
+        for e in turn(client, "check my inbox", conv_id=f"ha{n}"):
+            if e["type"] == "drop_cards":
+                assert host_id not in e["ids"]
