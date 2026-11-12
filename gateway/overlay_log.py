@@ -47,10 +47,24 @@ def _cap(value):
     return value[:MAX_STR] if isinstance(value, str) else value
 
 
+def _scalar(value):
+    """A capped string or a number; anything nested (or odd) becomes None."""
+    return _cap(value) if isinstance(value, NUMBERS + (str,)) else None
+
+
+def _shape(value, kind: type):
+    """Fail closed on a payload that is not the expected shape (a skewed or hostile sender)."""
+    if not isinstance(value, kind):
+        raise ValueError("unexpected overlay-log shape")
+    return value
+
+
 def _row(step: dict) -> dict:
-    name = step.get("step")
+    name = _shape(step, dict).get("step")
+    if name is not None:
+        _shape(name, str)
     if name not in KEEP_STEPS:
-        return {"step": name, "at": step.get("at")}
+        return {"step": name, "at": _scalar(step.get("at"))}
     row = {}
     for key, value in step.items():
         if name == "agent_tool":
@@ -67,19 +81,20 @@ def _row(step: dict) -> dict:
 
 def _flat(mapping: dict) -> dict:
     """Scalar-only view (listener/setup/speech_gate): strings capped, the rest kept."""
-    return {k: _cap(v) for k, v in mapping.items() if isinstance(v, NUMBERS + (str,))}
+    return {k: _cap(v) for k, v in _shape(mapping, dict).items() if isinstance(v, NUMBERS + (str,))}
 
 
 def redact(payload: dict, since: int | None = None) -> dict:
-    """Allow-list one /overlay-log payload; pure — applied on the Mac and again after forwarding."""
+    """Allow-list one /overlay-log payload; pure — applied on the Mac and again after forwarding.
+    Raises ValueError on a payload of the wrong shape (callers answer 503)."""
     cutoff = time.time() - since if since else None
     turns = []
-    for turn in payload.get("turns") or []:
-        steps = turn.get("steps") or []
-        start = steps[0].get("at") if steps else None
+    for turn in _shape(_shape(payload, dict).get("turns") or [], list):
+        steps = _shape(_shape(turn, dict).get("steps") or [], list)
+        start = _shape(steps[0], dict).get("at") if steps else None
         if cutoff is not None and (not isinstance(start, NUMBERS) or start < cutoff):
             continue  # a turn with no start time is unfilterable -> dropped when since is given
-        turns.append({"id": _cap(turn.get("id")), "steps": [_row(s) for s in steps]})
+        turns.append({"id": _scalar(turn.get("id")), "steps": [_row(s) for s in steps]})
         if len(turns) >= MAX_TURNS:
             break
     out: dict = {"listener": _flat(payload.get("listener") or {}), "turns": turns}
@@ -87,7 +102,7 @@ def redact(payload: dict, since: int | None = None) -> dict:
         if isinstance(payload.get(key), dict):
             out[key] = _flat(payload[key])
     if "commit" in payload:
-        out["commit"] = _cap(payload.get("commit"))
+        out["commit"] = _scalar(payload.get("commit"))
     return out
 
 
@@ -126,15 +141,19 @@ async def fetch(since: int | None = None) -> dict:
     if resp.status_code != 200:
         raise HTTPException(status_code=503, detail=OVERLAY_OFFLINE_DETAIL)
     try:
-        turns = resp.json()
-    except ValueError:
+        turns = _shape(resp.json(), dict)
+    except ValueError:  # not JSON, or not an object
         raise HTTPException(status_code=503, detail=OVERLAY_OFFLINE_DETAIL) from None
     commit = None
     try:  # the installed overlay commit; the service may predate the field or be down
-        commit = (await _overlay_client().get(f"{base}/overlay/health", headers=headers)).json().get("commit")
+        health = (await _overlay_client().get(f"{base}/overlay/health", headers=headers)).json()
+        commit = health.get("commit") if isinstance(health, dict) else None
     except (httpx.HTTPError, ValueError):
         pass
-    return redact({**turns, "commit": commit}, since)
+    try:
+        return redact({**turns, "commit": commit}, since)
+    except ValueError:
+        raise HTTPException(status_code=503, detail=OVERLAY_OFFLINE_DETAIL) from None
 
 
 async def _forward(since: int | None) -> dict:
@@ -152,12 +171,13 @@ async def _forward(since: int | None) -> dict:
         try:
             return redact(resp.json(), since)
         except ValueError:
-            pass  # not JSON from the Mac -> offline below
+            pass  # not JSON, or the wrong shape, from the Mac -> offline below
     elif resp.status_code == 422:  # version skew: the Mac's validation detail passes through
         try:
-            detail = resp.json().get("detail")
+            body = resp.json()
         except ValueError:
-            detail = None
+            body = None
+        detail = _scalar(body.get("detail")) if isinstance(body, dict) else None
         raise HTTPException(status_code=422, detail=detail or "invalid since")
     raise HTTPException(status_code=503, detail=screen.MAC_OFFLINE_DETAIL)
 

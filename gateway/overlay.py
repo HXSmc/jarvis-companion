@@ -595,6 +595,12 @@ def _drop_cards(conv_id: str, group: str, keep: tuple[str, ...] = ()) -> dict | 
     return {"type": "drop_cards", "ids": ids[-MAX_DROP_IDS:]} if ids else None
 
 
+def _forget_cards(conv_id: str) -> None:
+    """After a `clear` the app holds no cards: none can be named or restored by a card_size ask."""
+    _card_index.pop(conv_id, None)
+    _enlarged.pop(conv_id, None)
+
+
 def _index_card(conv_id: str, card: dict) -> None:
     """Record a sent card for a later `card_size` ask: (id, type, title words), newest last."""
     _card_index.setdefault(conv_id, deque(maxlen=12)).append(
@@ -1058,6 +1064,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         elif intent.kind == "clear":
             _hunks.pop(body.conv_id, None)
             _card_sets.pop(body.conv_id, None)  # the app clears every card
+            _forget_cards(body.conv_id)
             yield {"type": "clear"}
             # "clear" ends the agent tier's work too (a running turn was stopped in the preflight): its
             # session and an expired yes go, so nothing of the agent tier outlives the clear.
@@ -1904,6 +1911,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             produced = True
             if on_step:
                 on_step("layout", mode=mode)
+            if mode == "clear":
+                _forget_cards(body.conv_id)
             yield {"type": "clear"} if mode == "clear" else {"type": "layout", "mode": mode}
 
     fail_reason: str | None = None

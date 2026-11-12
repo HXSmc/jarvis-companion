@@ -188,7 +188,7 @@ def test_stream_order_ack_first(client):
     # no voice: the ack degrades to text, still first, and the turn still ends done
     overlay.set_deps(make_deps(chunks=['{"say": "Hi."}\n']))
     events = turn(client, "what is the capital of France", conv_id="c2")
-    assert events[0]["type"] == "say" and events[0]["text"] in POOL_TEXTS
+    assert events[0] == {"type": "say", "text": events[0]["text"]} and events[0]["text"] in POOL_TEXTS
     assert events[-1]["type"] == "done"
 
 

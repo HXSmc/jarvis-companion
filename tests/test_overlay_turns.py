@@ -81,7 +81,7 @@ def test_brain_judges_incomplete_and_keeps_listening(client):
     assert says(events) == []
     events = turn(client, "could you compare", conv_id="a4")  # only the brain can tell
     spoken = says(events)
-    assert spoken and spoken[0] in POOL_TEXTS  # the pool ack only, never "you were cut off"
+    assert len(spoken) == 1 and spoken[0] in POOL_TEXTS  # the pool ack only, never "you were cut off"
     pool.chunks = ['{"say": "Sure."}\n']
     pool.sessions.clear()
     turn(client, "Python and Swift", conv_id="a4", followup=True)

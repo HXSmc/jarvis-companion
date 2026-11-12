@@ -311,3 +311,74 @@ def test_ground_row_drops_the_screen_label():
     row = overlay_log.redact(snap)["turns"][0]["steps"][0]
     assert "SCREEN-PIXELS" not in row["detail"] and "label" not in row["detail"]
     assert row["detail"] == "screen=1 image=0 candidates=12 history=0 pick=3 reason=ok via=ax ms=41"
+
+
+MALFORMED = [
+    [],  # not an object
+    {"turns": {"t0": {}}},  # turns not a list
+    {"turns": ["t0"]},  # a turn not an object
+    {"turns": [{"id": "t0", "steps": {"step": "wake"}}]},  # steps not a list
+    {"turns": [{"id": "t0", "steps": ["wake"]}]},  # a step not an object
+    {"turns": [{"id": "t0", "steps": [{"step": ["wake"], "at": 1}]}]},  # unhashable step name
+    {"turns": [{"id": "t0", "steps": [{"step": {"x": 1}, "at": 1}]}]},
+    {"turns": [], "listener": ["awake"]},  # listener not an object
+]
+
+
+@pytest.mark.parametrize("body", MALFORMED)
+def test_malformed_mac_payload_is_503(monkeypatch, body):
+    """A skewed or hostile Mac answer is 'mac offline', never a 500 (forward) ..."""
+    monkeypatch.setenv(screen.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": "tok")
+    monkeypatch.setattr(overlay_log, "_mac_client", lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(overlay_log._forward(None))
+    assert (exc.value.status_code, exc.value.detail) == (503, screen.MAC_OFFLINE_DETAIL)
+
+
+@pytest.mark.parametrize("body", MALFORMED)
+def test_malformed_overlay_payload_is_503(monkeypatch, tmp_path, body):
+    """... and the same on the Mac side reading its own overlay service (health may be odd too)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body if request.url.path.endswith("/turns") else ["x"])
+
+    monkeypatch.setattr(overlay_log, "_overlay_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(overlay, "TOKEN_FILE", tmp_path / "overlay-token")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(overlay_log.fetch(None))
+    assert (exc.value.status_code, exc.value.detail) == (503, overlay_log.OVERLAY_OFFLINE_DETAIL)
+
+
+def test_odd_health_keeps_commit_null(overlay_service, monkeypatch):
+    """A health answer that is not an object only loses the commit field."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/overlay/debug/turns":
+            return httpx.Response(200, json={"turns": []})
+        return httpx.Response(200, json=["not", "an", "object"])
+
+    monkeypatch.setattr(overlay_log, "_overlay_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert asyncio.run(overlay_log.fetch(None))["commit"] is None
+
+
+def test_forwarding_mac_422_with_odd_body(monkeypatch):
+    monkeypatch.setenv(screen.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(config, "get_token", lambda path=None, name="token": "tok")
+    monkeypatch.setattr(overlay_log, "_mac_client", lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(422, json=["bad"]))))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(overlay_log._forward(None))
+    assert (exc.value.status_code, exc.value.detail) == (422, "invalid since")
+
+
+def test_nested_values_in_id_at_commit_are_dropped():
+    """The allow-list holds for the row/turn frame too: no nested value rides on id, at or commit."""
+    payload = {"turns": [{"id": {"x": SECRET_OUTPUT}, "steps": [
+        {"step": "foo", "at": {"x": SECRET_OUTPUT}},
+        {"step": "wake", "at": [SECRET_OUTPUT]}]}], "commit": {"x": SECRET_OUTPUT}}
+    body = overlay_log.redact(payload)
+    assert SECRET_OUTPUT not in json.dumps(body)
+    assert body["turns"][0]["steps"] == [{"step": "foo", "at": None}, {"step": "wake"}]
+    assert body["turns"][0]["id"] is None and body["commit"] is None
