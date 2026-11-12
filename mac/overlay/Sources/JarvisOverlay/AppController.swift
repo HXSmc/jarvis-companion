@@ -910,7 +910,7 @@ final class AppController {
 
 /// CoreAudio listener (runs off the main thread): just re-reads the route on the main actor.
 private func outputRouteChangedProc(_ object: AudioObjectID, _ count: UInt32,
-                                    _ addresses: UnsafePointer<AudioObjectPropertyAddress>?,
+                                    _ addresses: UnsafePointer<AudioObjectPropertyAddress>,
                                     _ clientData: UnsafeMutableRawPointer?) -> OSStatus {
     guard let clientData else { return noErr }
     let controller = Unmanaged<AppController>.fromOpaque(clientData).takeUnretainedValue()
