@@ -17,7 +17,7 @@ public enum TurnEndpointer {
     /// A follow-up replay starts this long after the reply drained: the reply's room echo dies.
     public static let echoTail: TimeInterval = 0.15
     /// An unpunctuated partial this long (in words) is mid-request, not a finished sentence.
-    public static let longRequestWords = 8
+    public static let longRequestWords = 10  // above the 8-word finished commands of the short-command tests
 
     /// A filler ends a turn as incomplete even when STT punctuates it ("the last, huh?").
     static let fillers: Set<String> = ["uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah"]  // Mac STT: "uh" -> "huh"

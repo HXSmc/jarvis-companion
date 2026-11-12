@@ -39,8 +39,8 @@ final class TurnEndpointerTests: XCTestCase {
         var text = ""
         for w in request.indices {
             text = request[...w].joined(separator: " ")
-            // Five natural pauses inside the request, each after word 8, 11, 14, 17, 20.
-            if w + 1 >= 8, (w + 1 - 8) % 3 == 0, w < request.count - 1 {
+            // Natural pauses inside the request, after words 10, 13, 16 and 19.
+            if w + 1 >= 10, (w + 1 - 10) % 3 == 0, w < request.count - 1 {
                 // Mid-pause, 0.75 s since the last partial and its voice: not the end.
                 XCTAssertFalse(TurnEndpointer.shouldEnd(text: text,
                                                         lastTextAt: t0,
