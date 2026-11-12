@@ -8,9 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from mac.voice import acks
+from mac.voice import acks, media_lookup
 from mac.voice.intents import (Intent, is_cancel, is_confirm, is_hunk_back, is_no,
-                               list_apps, noise_words, open_app, open_site, parse, tail_hunk)
+                               list_apps, media_request, noise_words, open_app, open_site,
+                               parse, tail_hunk)
 from mac.voice.lean import Conversations, lean_argv
 
 
@@ -196,7 +197,8 @@ def test_ack_cache_fallback():
     cache = acks.AckCache(synth)
     cache.prerender()
     assert cache.get("open") == ("Of course.", b"pcm:Of course.", 24000)
-    assert sorted(calls) == sorted(acks.PHRASES.values())
+    # PHRASES with a template ({n}) are spoken at turn time, never prerendered.
+    assert sorted(calls) == sorted(t for t in acks.PHRASES.values() if "{" not in t)
 
     def broken(text):
         raise RuntimeError("tts down")
@@ -370,3 +372,44 @@ def test_hunk_back_and_tail_and_noise():
     for text in ("why?", "what about tomorrow", "yes", "no", "stop",
                  "and the second one is what", ""):
         assert noise_words(text) is None, text
+
+
+def test_media_request_extraction():
+    m = media_request("show me a picture of a dog")
+    assert (m.kind, m.subject, m.count, m.article) == ("image", "dog", 1, "a")
+    m = media_request("Hey Jarvis, show me a picture of a dog.")
+    assert (m.kind, m.subject, m.count, m.article) == ("image", "dog", 1, "a")
+    m = media_request("Can you not pull images in general? "
+                      "Pull me an image of a dog as a test. Let's see if you can")
+    assert (m.kind, m.subject, m.count) == ("image", "dog", 1)
+    m = media_request("show me pictures of red foxes please")
+    assert (m.kind, m.subject, m.count) == ("image", "red foxes", min(4, media_lookup.MAX_COUNT))
+    m = media_request("show me 3 photos of the eiffel tower")
+    assert (m.kind, m.subject, m.count) == ("image", "eiffel tower", 3)
+    m = media_request("find a video of a rocket launch")
+    assert (m.kind, m.subject, m.count) == ("video", "rocket launch", 1)
+    # Bare form (D-A1): "a picture of a dog" with no verb.
+    for text in ("a picture of a dog", "picture of a dog", "hey jarvis, a picture of a dog"):
+        m = media_request(text)
+        assert (m.kind, m.subject, m.count) == ("image", "dog", 1), text
+    m = media_request("pictures of foxes")
+    assert (m.kind, m.subject, m.count) == ("image", "foxes", min(4, media_lookup.MAX_COUNT))
+    m = media_request("an image of a cat")
+    assert (m.kind, m.subject, m.count) == ("image", "cat", 1)
+    m = media_request("show me a diagram of a heart")
+    assert (m.kind, m.subject, m.count) == ("image", "heart diagram", 1)
+    for text in ("show me a picture of this", "show me a picture of my screen",
+                 "show me a picture"):
+        m = media_request(text)
+        assert (m.kind, m.subject, m.count) == ("image", "", 0), text
+    assert media_request("what's the weather") is None
+    assert media_request("x" * 301) is None
+    # Untrusted transcript junk never reaches the query.
+    m = media_request('show me a picture of <b>cat</b> "insource:x" \x07dog')
+    for bad in ("<", ">", '"', "insource:", "\x07"):
+        assert bad not in m.subject, m.subject
+    m = media_request("show me a picture of one two three four five six seven eight nine ten")
+    assert len(m.subject.split()) <= 6 and len(m.subject) <= media_lookup.MAX_QUERY
+    # A deixis subject ("this page") never searches; the look tier owns the turn.
+    assert parse("show me a picture of this page").kind == "look"
+    assert media_request("show me a picture of this page").subject == ""

@@ -64,6 +64,10 @@ class FakeMac:
         self.keys_released = 0
         self.front_errors: list = []  # AX error codes the next AXFocusedApplication reads return
         self.cold = False  # True = a fresh process: focus reads fail until one hit-test succeeded
+        self.windows: list = []  # window-server list, front to back: {"pid", "layer"}
+        self.apps: dict = {}  # pid -> app title, for AXUIElementCreateApplication
+        self.frontmost_pid = None  # the app whose AXFrontmost reads true
+        self.frontmost_error = None  # AX error code every AXFrontmost read returns
 
     @property
     def posted(self) -> list:
@@ -92,6 +96,10 @@ class FakeMac:
                 return -25204  # kAXErrorCannotComplete
         if kind == "system" and name == "AXFocusedApplication" and self.front:
             value = self._new("app", self.front)
+        elif kind == "app" and name == "AXFrontmost":
+            if self.frontmost_error is not None:
+                return self.frontmost_error
+            value = self._new("bool", self.frontmost_pid == data[1])
         elif kind == "app" and name == "AXTitle":
             value = self._new("str", data[0])
         elif kind == "app" and name == "AXFocusedWindow" and self.front_window is not None:
@@ -104,6 +112,9 @@ class FakeMac:
             return -25212  # kAXErrorNoValue
         out._obj.value = value
         return 0
+
+    def create_application(self, pid):
+        return self._new("app", (self.apps.get(pid), pid))
 
     def get_pid(self, el, out):
         kind, data = self.handles[el]
@@ -173,6 +184,7 @@ def load(monkeypatch):
         window.CGPoint, window.CGRect = CGPoint, CGRect
         window._cfstr = lambda s: s.encode()
         window._cfstr_value = lambda v: None
+        window._enum_windows = lambda: []
         pkg = types.ModuleType("mac.mirroring")
         pkg.driver, pkg.window = mirroring, window
         for name, mod in (("mac.mirroring", pkg), ("mac.mirroring.driver", mirroring),
@@ -191,6 +203,9 @@ def load(monkeypatch):
         mod.AX.AXUIElementCreateSystemWide = mac.create_system_wide
         mod.AX.AXUIElementCopyAttributeValue = mac.copy_attribute
         mod.AX.AXUIElementGetPid = mac.get_pid
+        mod.AX.AXUIElementCreateApplication = mac.create_application
+        mod._enum_windows = lambda: list(mac.windows)
+        mod._is_true = lambda v: mac.handles[v] == ("bool", True)
         mod.AX.AXUIElementCopyElementAtPosition = mac.element_at_position
         mod.CF.CFRelease = mac.cf_release
         mod.AX.CGEventCreateMouseEvent = mac.mouse
@@ -741,3 +756,64 @@ def test_refusal_body_never_carries_a_window_title(load, break_it):
     body = json.dumps(screen._refusal_detail(exc.value))
     assert "SECRET-TITLE" not in body and "WANTED" not in body
     assert json.loads(body)["error"] == "focus_mismatch"
+
+
+# round 4 (live): VS Code (Electron) fails the system-wide focused-app read
+# even with Accessibility trusted; the window server + AXFrontmost fallback
+CODE = ("Code", 500)
+CODE_LOCK = {"type": "key", "key": "down", "mods": [], "require_app": "Code"}
+
+
+def electron_front(mac, *, top_pid=CODE[1], frontmost_pid=CODE[1]) -> None:
+    mac.front = None  # system-wide AXFocusedApplication -> kAXErrorNoValue
+    mac.apps = {CODE[1]: CODE[0], TERMINAL[1]: TERMINAL[0]}
+    mac.windows = [{"pid": 900, "layer": 25}, {"pid": top_pid, "layer": 0},
+                   {"pid": TERMINAL[1], "layer": 0}]
+    mac.frontmost_pid = frontmost_pid
+
+
+def test_electron_front_app_read_falls_back_and_posts(load):
+    mod, mac = load()
+    electron_front(mac)
+    mod.send_events([CODE_LOCK])
+    assert mac.posted == [("key", 125, True), ("key", 125, False)]
+    assert sorted(mac.created) == sorted(mac.released) and mac.keys_made == mac.keys_released
+
+
+def test_electron_fallback_window_and_point_checks_still_run(load):
+    mod, mac = load()
+    electron_front(mac)
+    mac.front_window = "scratch.txt - jf2"
+    mac.element_at = lambda x, y: (CODE[1], "scratch.txt - jf2")
+    mod.send_events([tap(require_app="Code", require_window="scratch.txt")])
+    assert mac.posted == tap_posts(50.0, 50.0)
+    mac.element_at = lambda x, y: (TERMINAL[1], "scratch.txt - jf2")
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([tap(require_app="Code", require_window="scratch.txt")])
+    assert exc.value.reason == "point"
+    assert sorted(mac.created) == sorted(mac.released)
+
+
+@pytest.mark.parametrize("case", ["not_frontmost", "frontmost_error", "no_layer0_window",
+                                  "pid_mismatch", "wrong_app"])
+def test_electron_fallback_fails_closed(load, case):
+    mod, mac = load()
+    electron_front(mac)
+    reason = "probe_failed"
+    if case == "not_frontmost":  # a stale or lying window order: the app says it is not frontmost
+        mac.frontmost_pid = TERMINAL[1]
+    elif case == "frontmost_error":
+        mac.frontmost_error = CANNOT_COMPLETE
+    elif case == "no_layer0_window":
+        mac.windows = [{"pid": 900, "layer": 25}]
+    elif case == "pid_mismatch":
+        real = mac.get_pid
+        mac.get_pid = lambda el, out: (real(el, out), setattr(out._obj, "value", 1))[0]
+        mod.AX.AXUIElementGetPid = mac.get_pid
+    else:  # Terminal really is front: the fallback answers, the lock refuses
+        electron_front(mac, top_pid=TERMINAL[1], frontmost_pid=TERMINAL[1])
+        reason = "app"
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([CODE_LOCK])
+    assert exc.value.reason == reason and mac.posted == []
+    assert sorted(mac.created) == sorted(mac.released)

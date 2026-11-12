@@ -28,6 +28,7 @@
   .v { word-break: break-word; }
   q { color: var(--quote); }
   .empty { color: var(--dim); padding: 32px 0; }
+  #gate { color: var(--dim); max-width: 980px; margin: 8px auto 0; padding: 0 20px; font-size: 12px; }
   #setup { color: var(--bad); max-width: 980px; margin: 12px auto 0; padding: 0 20px; white-space: pre-line; }
 </style>
 </head>
@@ -38,6 +39,7 @@
   <span id="status">connecting…</span>
 </header>
 <p id="setup" hidden></p>
+<p id="gate" hidden></p>
 <main id="turns"><p class="empty">No turns yet. Say “Hey Jarvis …”.</p></main>
 <script>
 "use strict";
@@ -51,8 +53,9 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 no_speech: "no speech", app_error: "app error",
                 agent: "agent started", agent_tool: "agent tool", agent_confirm: "confirmation",
                 agent_progress: "progress line", lines: "line highlight", editor_scroll: "editor scroll",
-                repo_pick: "repo picked", hunk: "change list",
-                incomplete: "waiting for more", continued: "continued after a pause" };
+                repo_pick: "repo picked", hunk: "change list", media: "media",
+                incomplete: "waiting for more", continued: "continued after a pause",
+                followup_dropped: "follow-up dropped" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -66,7 +69,9 @@ function describe(s) {
     case "wake": return `score ${s.score ?? "?"} (${s.source})`;
     case "voice": return (s.followup ? "follow-up, no wake word · " : "") + `${s.audio_ms != null ? (s.audio_ms / 1000).toFixed(1) + " s of audio" : "audio length unknown"}`
                        + (s.stt_final_ms != null ? `, STT final ${Math.round(s.stt_final_ms)} ms` : "")
+                       + (s.level != null ? ` · level ${s.level}` : "") + (s.conf != null ? ` · confidence ${s.conf}` : "")
                        + (s.stt ? ` · ${s.stt}` : "");
+    case "followup_dropped": return `reason=${s.reason ?? "short"} level=${s.level ?? "-"} conf=${s.conf ?? "-"} ${s.detail || ""}`;
     case "transcribed": return null;  // rendered as a quote
     case "continued": return `as one request: "${s.text}"`;
     case "intent": return s.kind + (s.arg ? ` → ${s.arg}` : "");
@@ -104,6 +109,12 @@ function render(data) {
   if (ok.vault === false) rows.push("Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes");
   setup.hidden = rows.length === 0;
   setup.textContent = rows.join("\n");
+  const g = data.speech_gate;
+  const gate = document.getElementById("gate");
+  gate.hidden = !g;
+  if (g) gate.textContent = `speech gate: follow-up voice at ${g.followup_level_ratio} of your wake level (at least ${g.followup_min_level}) for ${g.followup_min_voiced_ms} ms`
+    + ` (OVERLAY_FOLLOWUP_LEVEL_RATIO, OVERLAY_FOLLOWUP_MIN_LEVEL, OVERLAY_FOLLOWUP_MIN_VOICED_MS), confidence ${g.followup_min_conf} (OVERLAY_FOLLOWUP_MIN_CONF),`
+    + ` room tail after a request at ${g.tail_level_ratio} of its loudest voice (OVERLAY_TAIL_LEVEL_RATIO). Set in the repo .env, then restart the service.`;
 
   const root = document.getElementById("turns");
   root.replaceChildren();
@@ -128,7 +139,7 @@ function render(data) {
       const d = describe(s);
       if (d !== null) v.textContent = d;
       if (s.step === "transcribed" || s.step === "agent_progress") v.append(el("q", "", s.text));
-      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : ` · text at ${s.ms} ms, no audio`); }
+      if (s.step === "spoke") { v.append(el("q", "", s.text)); v.append(s.audio_ms != null ? ` · audio at ${s.audio_ms} ms` : s.ms == null ? ` · ${s.note || "not spoken in a turn"}` : ` · text at ${s.ms} ms, no audio`); }
       li.append(v);
       ol.append(li);
     }

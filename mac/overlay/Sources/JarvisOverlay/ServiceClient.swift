@@ -10,6 +10,11 @@ struct Health: Decodable {
     var ok: Bool
     /// Voice name when the service synthesizes audio itself; nil = speak locally.
     var voice: String?
+    /// TailGate ratio (OVERLAY_TAIL_LEVEL_RATIO); nil from an older service.
+    var tailLevelRatio: Double?
+    private enum CodingKeys: String, CodingKey {
+        case ok, voice, tailLevelRatio = "tail_level_ratio"
+    }
 }
 
 final class ServiceClient {
@@ -52,6 +57,7 @@ final class ServiceClient {
     /// NDJSON utterance stream; one decoded event per line.
     func utterance(text: String, convId: String, sttFinalMs: Double, audioMs: Double,
                    stt: String, followUp: Bool = false,
+                   heard: SpeechInput.Heard? = nil,
                    screen: ScreenPayload?) -> AsyncThrowingStream<OverlayEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -66,6 +72,8 @@ final class ServiceClient {
                              audioMs: audioMs,
                              stt: String(stt.prefix(500)),
                              followup: followUp,
+                             levels: heard?.levels,
+                             conf: heard?.conf,
                              screen: screen))
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response)
@@ -130,9 +138,12 @@ final class ServiceClient {
         var audioMs: Double
         var stt: String
         var followup: Bool
+        var levels: [Double]?
+        var conf: Double?
         var screen: ScreenPayload?
         private enum CodingKeys: String, CodingKey {
-            case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", stt, followup, screen
+            case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", stt, followup,
+                 levels, conf, screen
         }
     }
 }

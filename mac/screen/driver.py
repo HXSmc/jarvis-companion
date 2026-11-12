@@ -15,7 +15,9 @@ AXFocusedApplication read returns kAXErrorCannotComplete until that process
 has run one AX hit-test, so the first focus probe runs a read-only
 AXUIElementCopyElementAtPosition first (`_warm_ax`, once per process); the
 focused-app read then still retries kAXErrorCannotComplete, at most 3 tries,
-and never posts in between. A refusal raises FocusMismatch, which carries app names and booleans only, never a window title. Events
+and never posts in between. If that read still fails (Electron apps such as
+VS Code), `_frontmost_app` asks the window server for the top layer-0 window's
+owner and accepts it only if that app itself reports AXFrontmost true. A refusal raises FocusMismatch, which carries app names and booleans only, never a window title. Events
 without `require_app` post exactly as before and never probe AX.
 `send_events(..., locked=True)` refuses the whole batch before anything posts
 unless every event carries `require_app`. The guarantee is
@@ -45,7 +47,7 @@ from mac.mirroring.driver import (UNICODE_CHUNK, kCGEventLeftMouseDown,
                                   kCGEventLeftMouseUp, kCGEventMouseMoved,
                                   kCGHIDEventTap)
 from mac.mirroring.window import (AX, CF, CG, CGPoint, CGRect, _cfstr,
-                                  _cfstr_value)
+                                  _cfstr_value, _enum_windows)
 
 # CG is not re-entrant-safe from multiple threads: one lock guards every
 # capture and every event batch (gateway calls run in a threadpool).
@@ -121,6 +123,8 @@ AX.AXUIElementCopyElementAtPosition.argtypes = [ctypes.c_void_p, ctypes.c_float,
                                                 ctypes.POINTER(ctypes.c_void_p)]
 AX.AXUIElementGetPid.restype = ctypes.c_int
 AX.AXUIElementGetPid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+AX.AXUIElementCreateApplication.restype = ctypes.c_void_p
+AX.AXUIElementCreateApplication.argtypes = [ctypes.c_int]
 
 # mirroring/driver.py declares only the left-button constants
 kCGEventRightMouseDown, kCGEventRightMouseUp = 3, 4
@@ -350,12 +354,41 @@ def _warm_ax(system) -> None:
         CF.CFRelease(el.value)
 
 
+def _is_true(v) -> bool:
+    """AX booleans are the kCFBooleanTrue / kCFBooleanFalse singletons."""
+    return bool(v) and v == ctypes.c_void_p.in_dll(CF, "kCFBooleanTrue").value
+
+
+def _frontmost_app():
+    """App element of the frontmost app when the system-wide read fails, or
+    None. Measured on a Mac: with VS Code (Electron) in front the system-wide
+    AXFocusedApplication read fails while Accessibility is trusted. Two
+    independent sources must agree, else None (fail closed): the window
+    server's top on-screen layer-0 window owner (live, front-to-back order),
+    and that app's own AXFrontmost == true. Caller releases the element."""
+    pid = next((w["pid"] for w in _enum_windows() if w["layer"] == 0), None)
+    if pid is None:
+        return None
+    app = AX.AXUIElementCreateApplication(pid)
+    if not app:
+        return None
+    front = _ax_copy(app, "AXFrontmost", tries=_AX_TRIES)
+    try:
+        if _ax_pid(app) == pid and front and _is_true(front):
+            return app
+    finally:
+        if front:
+            CF.CFRelease(front)
+    CF.CFRelease(app)
+    return None
+
+
 def _focus_probe(system, want_window: bool):
     """(focused app title, its pid, focused window title or None). The pid is
     read while the app element is still valid, so nothing outlives its release."""
     if not _ax_warm:
         _warm_ax(system)
-    app = _ax_copy(system, "AXFocusedApplication", tries=_AX_TRIES)
+    app = _ax_copy(system, "AXFocusedApplication", tries=_AX_TRIES) or _frontmost_app()
     if not app:
         return (None, None, None)
     try:

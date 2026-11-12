@@ -49,6 +49,11 @@ PHRASES = {
     "diff_none_auto": "No uncommitted changes, and this repository has no merge commits yet.",
     "diff_no_merge": "This repository has no merge commits yet.",
     "lines_off_view": "That change is folded or wrapped; I can't box it.",
+    "no_repo": "I can't tell which repo. Open a file or Terminal in it.",
+    # A template ({n} = the wanted line number only): spoken through the synth, never prerendered.
+    "lines_short": "I see no line numbers here. The change is on line {n}.",
+    # A template ({name} = the changed file's name): a Terminal-picked repo gets cards, no boxes.
+    "cards_only": "Cards only. Open {name} in your editor to see the boxes.",
 }
 
 _ACK_KEYS = {
@@ -93,6 +98,8 @@ class AckCache:
         if self._synth is None:
             return
         for key, text in PHRASES.items():
+            if "{" in text:  # a template, filled in per use
+                continue
             try:
                 self._clips[key] = self._synth(text)
             except Exception:

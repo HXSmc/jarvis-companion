@@ -187,6 +187,7 @@ else
 PLIST
 fi
 run bash "$REPO/scripts/mac-overlay-sign.sh" "$APP"
+run touch "$APP"  # Finder and the Dock re-read the bundle icon after the new AppIcon.icns
 
 # (g) token: none written here — the service mints its own dedicated overlay
 # token (0600) on first start; the installer never touches token files.

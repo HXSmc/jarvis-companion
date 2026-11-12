@@ -17,6 +17,14 @@ final class SpeechInput {
     /// How the last finished turn was heard (STT path, counters, what ended it): debug page only.
     private(set) var lastDiagnosis = ""
     private let log = Logger(subsystem: "JarvisOverlay", category: "SpeechInput")
+    /// TailGate's ratio; the service sends it on /overlay/health (OVERLAY_TAIL_LEVEL_RATIO).
+    var tailRatio = TailGate.defaultRatio
+
+    /// What the service's follow-up gate reads with the words: 100 ms mic levels, STT confidence.
+    struct Heard {
+        var levels: [Double]
+        var conf: Double?
+    }
 
     init() {}
 
@@ -44,18 +52,24 @@ final class SpeechInput {
     /// audio. Ends per TurnEndpointer (0.7 s quiet, 2.7 s when the words trail off);
     /// 5 s with no speech, an empty final, or 30 s hard cap -> onNothing(why), why = a short
     /// diagnosis for the debug page (STT path, buffers fed, results, errors).
-    /// followUp: the open-mic window after a reply. No ring replay (it holds Jarvis's own
-    /// voice) and 8 s to start speaking.
+    /// followUp: the open-mic window after a reply. Replays only ring audio stamped after
+    /// replayFrom (the reply's drain + echo tail); nil replays nothing. 8 s to start speaking.
     func listenAfterWake(
         followUp: Bool = false,
+        replayFrom: Date? = nil,
         onPartial: @escaping (String) -> Void,
-        onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void,
+        onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date, _ heard: Heard) -> Void,
         onNothing: @escaping (_ why: String) -> Void
     ) {
         guard isRunning else { onNothing("mic engine not running"); return }
         cancel()
         let turn = Turn()
         turn.followUp = followUp
+        turn.replayFrom = replayFrom
+        turn.tail = TailGate(ratio: tailRatio)
+        // Levels cover the audio the recogniser hears: the replayed ring (wake) or post-reply audio.
+        turn.levelFrom = followUp ? (replayFrom.map { max($0, turn.startedAt.addingTimeInterval(-2)) } ?? turn.startedAt)
+                                  : turn.startedAt.addingTimeInterval(-2)
         turn.onPartial = onPartial
         turn.onFinal = onFinal
         turn.onNothing = onNothing
@@ -108,12 +122,18 @@ final class SpeechInput {
         var cancelled = false
         var cancelHandler: (() -> Void)?
         var onPartial: ((String) -> Void)?
-        var onFinal: ((_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date) -> Void)?
+        var onFinal: ((_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date, _ heard: Heard) -> Void)?
         var onNothing: ((String) -> Void)?
         var followUp = false
+        var replayFrom: Date?  // follow-up turns replay only ring chunks at/after the reply drain + echo tail
         var path = ""  // STT path + why it was taken, for the debug page
         var endNote = ""  // how long the end-of-turn silence was, for the debug page
         let stats = FeedStats()
+        var tail = TailGate()
+        var levelFrom = Date()
+        var fedBlocks = 0  // finished level blocks already given to `tail`
+        var keptText: String?  // set when room words after a complete request were cut
+        let confidence = ConfidenceBox()
 
         var diagnosis: String { "\(path)\(endNote); \(stats.summary)" }
     }
@@ -125,6 +145,7 @@ final class SpeechInput {
         turn.lastText = text
         turn.hasSpeech = true
         turn.endOfSpeech = Date()
+        turn.tail.partial(text, at: Date())
         turn.onPartial?(text)
     }
 
@@ -139,28 +160,20 @@ final class SpeechInput {
         let cancel = turn.cancelHandler
         turn.cancelHandler = nil
         cancel?()
-        guard !nothing, let end = turn.endOfSpeech, let raw = rawText else {
+        guard !nothing, let end = turn.endOfSpeech, let raw = turn.keptText ?? rawText else {
             turn.onNothing?(turn.diagnosis)
             return
         }
         let text = Self.stripWake(raw)
         guard !text.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
         log.debug("final \(text, privacy: .private)")
-        turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end)
+        let levels = LevelBlocks.blocks(tap.levelSamples(), from: turn.levelFrom, to: end.addingTimeInterval(0.3))
+        turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end,
+                      Heard(levels: Array(levels.suffix(LevelBlocks.maxSent)), conf: turn.confidence.mean))
     }
 
     /// Drops everything up to a "jarvis" near the start, and stray punctuation.
-    static func stripWake(_ raw: String) -> String {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The 2 s ring buffer can hold words said before the wake word: drop through it.
-        if let range = text.range(of: "jarvis", options: [.caseInsensitive]),
-           text.distance(from: text.startIndex, to: range.lowerBound) < 40 {
-            text = String(text[range.upperBound...])
-        }
-        return text
-            .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?;:-"))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    static func stripWake(_ raw: String) -> String { TurnEndpointer.stripWake(raw) }
 
     // MARK: watchdog
 
@@ -172,8 +185,15 @@ final class SpeechInput {
             if turn.cancelled || turn.finished { return .cancelled }
             let now = Date()
             if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
+            feedTail(turn, now: now)
             if !turn.hasSpeech {
                 if now.timeIntervalSince(turn.startedAt) >= (turn.followUp ? 8 : 5) { return .nothing }
+            } else if !turn.followUp, let kept = turn.tail.cut(text: turn.lastText, now: now) {
+                // Wake turns only (round-6 item 2): a follow-up may answer a pending Confirm.
+                // A complete request, then quieter room words: end with the request as it was.
+                turn.keptText = kept
+                turn.endNote = " (room words after the request dropped)"
+                return .endOfSpeech
             } else if let end = turn.endOfSpeech,
                       TurnEndpointer.shouldEnd(text: turn.lastText, lastTextAt: end,
                                                lastVoiceAt: tap.lastVoicedAt, now: now) {
@@ -185,6 +205,17 @@ final class SpeechInput {
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
+    }
+
+    /// Gives the tail gate each finished 100 ms block since the last poll.
+    private func feedTail(_ turn: Turn, now: Date) {
+        let blocks = LevelBlocks.blocks(tap.levelSamples(since: turn.levelFrom), from: turn.levelFrom, to: now)
+        let done = max(0, blocks.count - 1)  // the newest block is still filling
+        guard done > turn.fedBlocks else { return }
+        for i in turn.fedBlocks..<done {
+            turn.tail.level(blocks[i], at: turn.levelFrom.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
+        }
+        turn.fedBlocks = done
     }
 
     // MARK: macOS 26 SpeechAnalyzer
@@ -204,7 +235,7 @@ final class SpeechInput {
             locale: Locale(identifier: "en-US"),
             transcriptionOptions: [],
             reportingOptions: [.volatileResults],
-            attributeOptions: []
+            attributeOptions: [.transcriptionConfidence]
         )
         do {
             if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
@@ -231,11 +262,19 @@ final class SpeechInput {
         }
         let collected = TranscriptBox()
         let stats = turn.stats
+        let confidence = turn.confidence
         let resultsTask = Task {
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
                     collected.update(text, isFinal: result.isFinal)
+                    if result.isFinal {
+                        for run in result.text.runs {
+                            if let c = run[AttributeScopes.SpeechAttributes.ConfidenceAttribute.self] {
+                                confidence.add(c, weight: result.text[run.range].characters.count)
+                            }
+                        }
+                    }
                     stats.result()
                     partial(collected.text)
                 }
@@ -259,6 +298,13 @@ final class SpeechInput {
         }
         if !turn.followUp {
             for chunk in tap.ringSnapshot() { feed(chunk.buffer, chunk.at) }
+        } else {
+            // Follow-up: replay only chunks stamped at/after replayStart; replayStart >= the
+            // drain time already guarantees no chunk recorded while audio was busy is replayed.
+            let snapshot = tap.ringSnapshot()
+            let playable = TurnEndpointer.replayable(stamps: snapshot.map { $0.at },
+                                                     drainedAt: turn.replayFrom)
+            for (chunk, ok) in zip(snapshot, playable) where ok { feed(chunk.buffer, chunk.at) }
         }
         tap.setSink(feed)
         let verdict = await watch(turn: turn)
@@ -299,6 +345,7 @@ final class SpeechInput {
             return
         }
         let stats = turn.stats
+        let confidence = turn.confidence
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
@@ -307,7 +354,13 @@ final class SpeechInput {
                 stats.result()
                 let text = result.bestTranscription.formattedString
                 partial(text)
-                if result.isFinal { finalize(text) }
+                if result.isFinal {
+                    // Segment confidence is 0 until final; 0 everywhere means "not reported".
+                    for seg in result.bestTranscription.segments where seg.confidence > 0 {
+                        confidence.add(Double(seg.confidence), weight: seg.substring.count)
+                    }
+                    finalize(text)
+                }
             } else if let error {
                 stats.fail(error.localizedDescription)
                 nothing()
@@ -316,6 +369,14 @@ final class SpeechInput {
         turn.cancelHandler = { task.cancel() }
         for chunk in tap.ringSnapshot() where !turn.followUp {
             request.append(chunk.buffer)
+        }
+        if turn.followUp {
+            // Follow-up: replay only chunks stamped at/after replayStart; replayStart >= the
+            // drain time already guarantees no chunk recorded while audio was busy is replayed.
+            let snapshot = tap.ringSnapshot()
+            let playable = TurnEndpointer.replayable(stamps: snapshot.map { $0.at },
+                                                     drainedAt: turn.replayFrom)
+            for (chunk, ok) in zip(snapshot, playable) where ok { request.append(chunk.buffer) }
         }
         tap.setSink { [weak request] buffer, _ in
             stats.fed(converted: Int(buffer.frameLength))
@@ -396,6 +457,27 @@ private final class FeedStats: @unchecked Sendable {
     }
 }
 
+// MARK: - recogniser confidence
+
+/// Mean confidence of the final words, weighted by characters; nil when the recogniser gave none.
+private final class ConfidenceBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sum = 0.0
+    private var weight = 0
+
+    func add(_ value: Double, weight w: Int) {
+        guard w > 0, value.isFinite else { return }
+        lock.lock(); defer { lock.unlock() }
+        sum += min(1, max(0, value)) * Double(w)
+        weight += w
+    }
+
+    var mean: Double? {
+        lock.lock(); defer { lock.unlock() }
+        return weight > 0 ? sum / Double(weight) : nil
+    }
+}
+
 // MARK: - transcript accumulator
 
 /// SpeechTranscriber reports finalized segments plus a changing volatile tail.
@@ -431,6 +513,7 @@ private final class MicTap: @unchecked Sendable {
     private var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
     private var vad = VoiceActivity()
     private var voicedAt: Date?
+    private var levels: [LevelSample] = []  // the last 40 s of buffer levels (turn gates read them)
 
     /// Last mic buffer clearly above the noise floor (the user is still talking).
     var lastVoicedAt: Date? {
@@ -448,6 +531,10 @@ private final class MicTap: @unchecked Sendable {
             let rms = Self.rms(copy)
             lock.lock()
             if vad.isVoiced(rms: rms) { voicedAt = now }
+            levels.append(LevelSample(at: now, rms: rms, frames: Int(copy.frameLength)))
+            if let first = levels.first, now.timeIntervalSince(first.at) > 41 {
+                levels.removeAll { now.timeIntervalSince($0.at) > 40 }
+            }
             ring.append((copy, now))
             ring.removeAll { now.timeIntervalSince($0.at) > 2 }
             sink = self.sink
@@ -460,6 +547,13 @@ private final class MicTap: @unchecked Sendable {
         lock.lock()
         sink = newSink
         lock.unlock()
+    }
+
+    func levelSamples(since: Date = .distantPast) -> [LevelSample] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let i = levels.firstIndex(where: { $0.at >= since }) else { return [] }
+        return Array(levels[i...])
     }
 
     func ringSnapshot() -> [(buffer: AVAudioPCMBuffer, at: Date)] {

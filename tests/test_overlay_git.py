@@ -221,6 +221,19 @@ def test_diff_cards_empty_hunks_give_info_card(repo):
     assert validate_card(cards[0]) is not None
 
 
+def test_merge_fallback_caption_names_the_range(repo):
+    """B2: with head, the stat label and bar caption name the base..head range; the base's
+    trailing ^ survives (`9ca3ed4a^..9ca3ed4a`). Without head the caption is unchanged."""
+    _, m = repo
+    cards = gitdiff.diff_cards(EXPECTED_HUNKS, m + "^", head=m)
+    stat, bar, _ = cards
+    assert stat["label"] == f"{m[:8]}^..{m[:8]}"
+    assert bar["caption"] == f"git diff {m[:8]}^..{m[:8]}"
+    assert validate_card(stat) is not None  # 19-char label is under MAX_LABEL: not dropped
+    cards = gitdiff.diff_cards(EXPECTED_HUNKS, m)
+    assert cards[1]["caption"] == f"git diff {m[:8]}"
+
+
 def test_has_filters_only_for_repo_local_filters(repo):
     r, _ = repo
     assert gitdiff.has_filters(r) is False

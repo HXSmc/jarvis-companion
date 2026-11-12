@@ -184,6 +184,7 @@ def test_named_target_after_card_is_not_own_card(client):
 # --- D4-D5: a spoken wake word after 90 s or "clear" starts the conversation afresh -------------
 
 DOG = "show me a picture of a dog"
+VAGUE = "can you get me something nice to look at"  # media_request() -> None: no owner-words ask
 OCR_WORDS = ("Motto: There is no god but God", "Capital: Riyadh", "Shahada")
 HIT = {"url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a1/Dog1.jpg/960px-Dog1.jpg",
        "title": "Dog 1", "source_page": "https://commons.wikimedia.org/wiki/File:Dog1.jpg",
@@ -220,7 +221,7 @@ class Pool(ReplyConversations):
 
 
 def answers(prompt, media='{"image_search": {"query": "dog", "count": 1}}'):
-    if prompt.startswith("show me a"):
+    if prompt.startswith(("show me a", "can you get me")):  # harness: VAGUE turns still get a media ask
         return [media]
     if prompt.startswith("what is the capital"):
         return ['{"say": "Paris."}']
@@ -275,7 +276,7 @@ def test_fresh_wake_kept(client, monkeypatch):
     screen_question(client, "w2", **SPOKEN)
     overlay.debug_log.clear()
     deps.clock.t += 89
-    events = turn(client, DOG, conv_id="w2", **SPOKEN)
+    events = turn(client, VAGUE, conv_id="w2", **SPOKEN)
     assert media_cards(events) == [] and says(events).count(overlay.QUIET_MEDIA_LINE) == 1
     assert web.sessions == {} and "Earlier in this conversation" in quiet.prompts()[-1]
     assert "w2" in overlay._tainted and steps_named(client, "conversation") == []
@@ -296,8 +297,7 @@ def test_fresh_clear(client, monkeypatch):
 def test_followup_keeps(client, monkeypatch, media):
     _deps, web, quiet, _log = life(monkeypatch, quiet_media=media)
     screen_question(client, "k1", **SPOKEN)
-    events = turn(client, DOG.replace("picture", "video") if "video" in media else DOG, conv_id="k1",
-                  followup=True, audio_ms=900)
+    events = turn(client, VAGUE, conv_id="k1", followup=True, audio_ms=900)
     assert media_cards(events) == [] and says(events).count(overlay.QUIET_MEDIA_LINE) == 1
     assert "Something went wrong on my side." not in says(events)  # a directive-only reply is an answer
     assert web.sessions == {} and ASK_MOTTO in quiet.prompts()[-1]
@@ -308,7 +308,7 @@ def test_typed(client, monkeypatch):
     deps, _web, quiet, _log = life(monkeypatch)
     screen_question(client, "t1")
     deps.clock.t += 1000
-    turn(client, DOG, conv_id="t1")  # followup False, no audio_ms: the debug page or a test
+    turn(client, VAGUE, conv_id="t1")  # followup False, no audio_ms: the debug page or a test
     assert "Earlier in this conversation" in quiet.prompts()[-1] and "t1" in overlay._tainted
 
 
@@ -361,7 +361,7 @@ GUARDS = {
 
 
 @pytest.mark.parametrize("guard", sorted(GUARDS))
-@pytest.mark.parametrize("ask", [DOG, "clear"])
+@pytest.mark.parametrize("ask", [VAGUE, "clear"])
 def test_clearing_guarded(client, monkeypatch, guard, ask):
     """Agent-tier state for the conversation: no fresh start on a wake word or "clear", taint kept."""
     deps, _web, quiet, log = life(monkeypatch)
@@ -375,7 +375,7 @@ def test_clearing_guarded(client, monkeypatch, guard, ask):
     assert ("quiet", "drop", "g1") not in log and "g1" in overlay._tainted
     assert any(u == ASK_MOTTO for u, _ in overlay._history["g1"])
     assert media_cards(events) == []
-    if ask == DOG and guard != "busy":  # busy: the preflight says the agent is busy and ends the turn
+    if ask == VAGUE and guard != "busy":  # busy: the preflight says the agent is busy and ends the turn
         # An agent session survives the turn, so "clear" would not help: the line without that way out.
         line = overlay.AGENT_MEDIA_LINE if guard == "session" else overlay.QUIET_MEDIA_LINE
         assert says(events).count(line) == 1
@@ -420,7 +420,7 @@ def test_reset_mid_turn_keeps_taint(client, monkeypatch):
     quiet.reply = lambda prompt: [line + "\n" for line in reply(prompt)]
     turn(client, ASK_MOTTO, conv_id="r1", screen=screen(PAGE))
     assert "r1" in overlay._tainted
-    events = turn(client, DOG, conv_id="r1", followup=True)
+    events = turn(client, VAGUE, conv_id="r1", followup=True)
     assert media_cards(events) == [] and says(events).count(overlay.QUIET_MEDIA_LINE) == 1
 
 
@@ -429,10 +429,9 @@ def test_quiet_prompt():
     assert not any(w in overlay.QUIET_PROMPT for w in ("WebSearch", "WebFetch"))
     for line in (overlay.QUIET_MEDIA_LINE, overlay.AGENT_MEDIA_LINE):
         assert len(line) <= 80 and line.count(".") == 2
-    # Heard back by the mic, the normal line may only name "clear" (the way out it offers); the
-    # agent-tier line names no overlay action at all.
-    assert [m.lower() for m in overlay._OVERLAY_VERB_RE.findall(overlay.QUIET_MEDIA_LINE)] == ["clear"]
-    assert overlay._OVERLAY_VERB_RE.findall(overlay.AGENT_MEDIA_LINE) == []
+        # The follow-up mic opens only after the reply drained and its echo tail passed, so the
+        # "show" these lines say can only ever show or restore cards.
+        assert overlay._OVERLAY_VERB_RE.findall(line) == ["show"]
 
 
 # --- D6: the dropped-directive line and the look-miss line are both spoken ---------------------
@@ -497,7 +496,7 @@ def test_no_fresh_start_while_another_turn_runs(client, monkeypatch):
     log.clear()
     overlay._inflight["i1"] = 1  # the other turn
     deps.clock.t += 91
-    events = turn(client, DOG, conv_id="i1", **SPOKEN)
+    events = turn(client, VAGUE, conv_id="i1", **SPOKEN)
     assert ("quiet", "drop", "i1") not in log and "i1" in overlay._tainted and web.sessions == {}
     assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1
     assert overlay._inflight == {"i1": 1}  # this turn's own count came and went
@@ -535,7 +534,7 @@ def test_agent_media_line(client, monkeypatch, media):
     deps.agent_conversations = lean.Conversations(lambda: SimpleNamespace(close=lambda: None))
     screen_question(client, "u1")
     deps.agent_conversations.get("u1")
-    events = turn(client, DOG, conv_id="u1", followup=True)
+    events = turn(client, VAGUE, conv_id="u1", followup=True)
     spoken = says(events)
     assert spoken.count(overlay.AGENT_MEDIA_LINE) == 1 and overlay.QUIET_MEDIA_LINE not in spoken
     assert media_cards(events) == []
@@ -556,7 +555,7 @@ def test_change_cursor_blocks_wake_reset_but_clear_drops_it(client, monkeypatch)
     log.clear()
     overlay._hunks["h1"] = object()
     deps.clock.t += 91
-    events = turn(client, DOG, conv_id="h1", **SPOKEN)
+    events = turn(client, VAGUE, conv_id="h1", **SPOKEN)
     assert ("quiet", "drop", "h1") not in log and "h1" in overlay._tainted
     assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1  # "clear" does work here, so it says so
     turn(client, "clear", conv_id="h1", followup=True)

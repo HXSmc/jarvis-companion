@@ -144,10 +144,12 @@ enum ScreenContext {
             found = walkFrontApp(pid: pid).windowFrame
         }
         guard let window = found else { return (LineBandFit.Pass(reason: "no_window"), "") }
-        // 1-5 digit observations, converted to points (fit keeps those inside the window).
+        // Line numbers (pass 1 plus the 1-digit cells it drops), converted to points (fit keeps those inside the window).
         var digits: [(line: Int, centre: CGPoint, right: CGFloat)] = []
-        for pair in ocrText(in: shot.image) {
-            guard let line = ShapeTrack.lineNumber(pair.text) else { continue }
+        let pixelWindow = CGRect(x: window.minX * shot.scale, y: window.minY * shot.scale,
+                                 width: window.width * shot.scale, height: window.height * shot.scale)
+        for pair in GutterOCR.lineDigits(in: shot.image, observations: ocrText(in: shot.image), window: pixelWindow) {
+            let line = pair.line
             let centre = CGPoint(x: (pair.box[0] + pair.box[2]) / 2 / shot.scale,
                                  y: (pair.box[1] + pair.box[3]) / 2 / shot.scale)
             digits.append((line, centre, pair.box[2] / shot.scale))
@@ -226,23 +228,7 @@ enum ScreenContext {
 
     /// Text observations as top-left pixel boxes [x0, y0, x1, y1].
     static func ocrText(in image: CGImage) -> [(text: String, box: [Double])] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.008
-        let handler = VNImageRequestHandler(cgImage: image)
-        try? handler.perform([request])
-        let w = Double(image.width), h = Double(image.height)
-        var out: [(String, [Double])] = []
-        for observation in request.results ?? [] {
-            guard let candidate = observation.topCandidates(1).first else { continue }
-            let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { continue }
-            let bb = observation.boundingBox
-            let x0 = bb.minX * w, y0 = (1 - bb.maxY) * h
-            out.append((text, [x0, y0, x0 + bb.width * w, y0 + bb.height * h]))
-        }
-        return out
+        GutterOCR.text(in: image)
     }
 
     // MARK: accessibility walk

@@ -8,6 +8,9 @@ Only the editor CLI is stubbed: `run` records argv, so the scroll target is asse
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -274,3 +277,23 @@ def test_one_file_is_singular_and_backticks_are_not_spoken():
     audio = asyncio.run(overlay._audio(line, deps))
     assert heard == ["Line 149 changed because the old L146 = 146 became L904 = 146."]
     assert audio["text"] == line
+
+
+def test_fixture_wrap_and_fold_modes(tmp_path):
+    """The live-Mac fixture modes: each builds a repo whose .vscode setting stands for the
+    editor case and whose last commit is the diff the case needs (a >300-char line / an
+    import line gaining a second name)."""
+    fixture = Path(__file__).parent / "fixtures/overlay/hunk_fixture.py"
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+    for directory, mode, setting, want in (
+            (tmp_path / "x", "--wrap", {"editor.wordWrap": "on"},
+             lambda diff: any(l.startswith("+") and len(l) > 300 for l in diff.splitlines())),
+            (tmp_path / "y", "--fold", {"editor.foldingImportsByDefault": True},
+             lambda diff: "a06, b06" in diff)):
+        proc = subprocess.run([sys.executable, str(fixture), str(directory), mode],
+                              capture_output=True, text=True, env=env, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads((directory / ".vscode/settings.json").read_text()) == setting
+        diff = subprocess.run(["git", "-C", str(directory), "diff", "-U0", "HEAD~1"],
+                              capture_output=True, text=True, env=env, check=True).stdout
+        assert want(diff), f"{mode}: {diff[:400]}"

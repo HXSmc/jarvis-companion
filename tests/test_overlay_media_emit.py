@@ -27,6 +27,7 @@ from mac.voice import media_lookup  # noqa: E402
 __all__ = ["reset_overlay_state"]  # pytest fixture re-exported
 
 YT = "dQw4w9WgXcQ"
+VAGUE = "can you get me something nice to look at"  # media_request() -> None: no owner-words ask
 
 
 def hit(n: int, **over) -> dict:
@@ -177,7 +178,7 @@ def test_quiet_pool_never_fetches(fake):
                                     {"card": {"type": "video", "title": "V", "youtube_id": YT}}))
     deps = make_deps(quiet_conversations=quiet)
     overlay._tainted.add("c1")
-    events = run(deps, text="show me a picture of a cat")
+    events = run(deps, text=VAGUE)
     assert search.calls == [] and cards(events) == []
     assert says(events).count(overlay.QUIET_MEDIA_LINE) == 1
 
