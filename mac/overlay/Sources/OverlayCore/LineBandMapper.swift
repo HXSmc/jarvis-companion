@@ -375,8 +375,25 @@ public enum GutterOCR {
     /// One read of all cells, each drawn twice side by side ("6" -> "66"), on a grid of 8 per line
     /// with gaps of 3 cell heights, so two cells never read as one text.
     private static func readDoubled(_ cells: [CGRect], in image: CGImage) -> [(line: Int, box: [Double])] {
+        guard let (composite, slots, crops) = composite(cells, in: image) else { return [] }
+        var perCell: [Int: [String]] = [:]
+        for o in text(in: composite) {
+            let mid = CGPoint(x: (o.box[0] + o.box[2]) / 2, y: (o.box[1] + o.box[3]) / 2)
+            guard let index = slots.firstIndex(where: { $0.contains(mid) }) else { continue }
+            perCell[index, default: []].append(o.text)
+        }
+        // Exactly one text per cell, and it must be two equal halves.
+        return perCell.compactMap { index, texts in
+            guard texts.count == 1, let line = doubled(texts[0]) else { return nil }
+            let c = crops[index].cell
+            return (line: line, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
+        }.sorted { $0.box[1] < $1.box[1] }
+    }
+
+    static func composite(_ cells: [CGRect], in image: CGImage)
+        -> (image: CGImage, slots: [CGRect], crops: [(cell: CGRect, crop: CGImage)])? {
         let crops = cells.compactMap { cell in image.cropping(to: cell.integral).map { (cell: cell, crop: $0) } }
-        guard !crops.isEmpty else { return [] }
+        guard !crops.isEmpty else { return nil }
         let cellH = crops.map(\.crop.height).max() ?? 1
         let slotW = 2 * (crops.map(\.crop.width).max() ?? 1) + 2 + 3 * cellH
         let slotH = 4 * cellH
@@ -385,7 +402,7 @@ public enum GutterOCR {
         let width = perLine * slotW + 2 * cellH, height = lines * slotH + 2 * cellH
         guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return [] }
+        else { return nil }
         // The first cell's corner colour is the gutter background.
         if let corner = Pixels(crops[0].crop)?.rgb(0, 0) {
             ctx.setFillColor(CGColor(red: corner.0, green: corner.1, blue: corner.2, alpha: 1))
@@ -401,19 +418,7 @@ public enum GutterOCR {
             ctx.draw(item.crop, in: CGRect(x: Int(slot.minX), y: y, width: w, height: h))
             ctx.draw(item.crop, in: CGRect(x: Int(slot.minX) + w + 2, y: y, width: w, height: h))
         }
-        guard let composite = ctx.makeImage() else { return [] }
-        var perCell: [Int: [String]] = [:]
-        for o in text(in: composite) {
-            let mid = CGPoint(x: (o.box[0] + o.box[2]) / 2, y: (o.box[1] + o.box[3]) / 2)
-            guard let index = slots.firstIndex(where: { $0.contains(mid) }) else { continue }
-            perCell[index, default: []].append(o.text)
-        }
-        // Exactly one text per cell, and it must be two equal halves.
-        return perCell.compactMap { index, texts in
-            guard texts.count == 1, let line = doubled(texts[0]) else { return nil }
-            let c = crops[index].cell
-            return (line: line, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
-        }.sorted { $0.box[1] < $1.box[1] }
+        return ctx.makeImage().map { ($0, slots, crops) }
     }
 }
 
