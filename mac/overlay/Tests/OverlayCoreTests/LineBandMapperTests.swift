@@ -270,12 +270,12 @@ final class GutterOCRTests: XCTestCase {
         for (i, item) in ["EXPLORER", "> .vscode", "imports.ts", "sample.py", "side.txt"].enumerated() {
             draw(item, x: 120, top: 160 + CGFloat(i) * 44, grey: 0.8)
         }
-        ctx.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 1))
         for n in 1...lines {
             let top = CGFloat(250 + 36 * n)
             draw("\(n)", x: 800, top: top, grey: changed.contains(n) ? 0.85 : 0.45, right: true)
             draw(code(n), x: 840, top: top, grey: 0.8)
             if changed.contains(n) {
+                ctx.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 1))  // CTLineDraw changes the fill colour
                 ctx.fill(CGRect(x: 812, y: CGFloat(height) - top - 8, width: 6, height: 36))            // git bar
                 ctx.fillEllipse(in: CGRect(x: 732, y: CGFloat(height) - top - 2, width: 20, height: 20))  // gutter icon
             }
