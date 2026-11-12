@@ -57,6 +57,8 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 incomplete: "waiting for more", continued: "continued after a pause",
                 followup_dropped: "follow-up dropped", followup_closed: "follow-up window closed",
                 card_size: "card size", sessions: "sessions",
+                session_start: "session start", session_stop: "session stop", session_answer: "session answered",
+                memory: "memory", workspace: "workspace",
                 barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate" };
 
 function el(tag, cls, text) {
@@ -81,6 +83,8 @@ function describe(s) {
     case "followup_closed": return s.detail || "no follow-up window left open";
     case "card_size": return `action=${s.action ?? "?"} card=${s.card ?? "none"} match=${s.match ?? "none"}`;
     case "sessions": return s.detail || "";
+    case "session_start": case "session_stop": case "session_answer": case "memory": case "workspace":
+      return s.detail || "";
     case "barge_in": case "barge_aec": case "barge_gate": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
@@ -114,7 +118,11 @@ function render(data) {
   const rows = [];
   if (ok.code_cli === false) rows.push("VS Code command line tool (code) missing: the editor will not scroll");
   if (ok.vault === false) rows.push("Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes");
+  else rows.push(`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`);
   if (ok.barge_in === false) rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)");
+  else if (ok.barge_mode === "aec") rows.push("barge-in: on (echo canceller)");
+  else rows.push("barge-in: on with headphones, off on speakers");
+  if (ok.sessions_access === false) rows.push("Sessions access: not set (run the installer)");
   setup.hidden = rows.length === 0;
   setup.textContent = rows.join("\n");
   const g = data.speech_gate;

@@ -602,7 +602,7 @@ def test_tail_gate_strips_the_same_misheard_wake():
 # One real id per host prefix: the Confirm card, the git cards, the owner-words media card
 # (sha256(b"image|1|dog")[:10], the id the dog picture gets).
 HOST_IDS = ["agentconfirm", "gd-stat", "gd-bar", "gd-where", "gd-list",
-            "ow" + hashlib.sha256(b"image|1|dog").hexdigest()[:10]]
+            "ow" + hashlib.sha256(b"image|1|dog").hexdigest()[:10], "ws1a2b3c"]  # ws: jfollow4 reopened cards
 
 
 def test_host_card_ids_are_reserved_for_both_tiers(client):

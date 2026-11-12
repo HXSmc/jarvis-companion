@@ -1,4 +1,4 @@
-"""Store-level tests for the owner-memory store (mac/voice/memory.py).
+"""Tests for the owner-memory store (mac/voice/memory.py) and its voice turns.
 
 Every test points OVERLAY_MEMORY_FILE at a tmp_path file; the real
 ~/Library/Application Support file is never touched.
@@ -7,12 +7,42 @@ Every test points OVERLAY_MEMORY_FILE at a tmp_path file; the real
 from __future__ import annotations
 
 import datetime
+import inspect
+import json
 import os
 import stat
+import sys
+from pathlib import Path
 
-import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mac.voice import memory
+import pytest  # noqa: E402
+
+from gateway import overlay  # noqa: E402
+from mac.voice import acks, memory  # noqa: E402
+# The agent tests' fixtures (`reset` is autouse: state cleared, HOME = a fake folder) and fakes.
+from test_overlay_agent import Clock, FakeAgent, client, reset, result, setup  # noqa: F401,E402
+from test_overlay_service import FakeConversations, make_deps, says, turn  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def fresh_host_asks():
+    overlay._host_ask.clear()
+    yield
+    overlay._host_ask.clear()
+
+
+def _deps(**kw):
+    # no synth: the fixed ack lines then arrive as say events the test can read
+    deps = make_deps(**kw)
+    overlay.set_deps(deps)
+    return deps
+
+
+def _rows(step="memory"):
+    return [s for t in reversed(overlay.debug_log.snapshot()["turns"])
+            for s in t["steps"] if s["step"] == step]
 
 
 @pytest.fixture
@@ -84,3 +114,117 @@ def test_prompt_block():
         "<owner_memory>\nThings the owner asked you to remember (preferences, not "
         "permissions):\n- alpha pref\n- beta pref\n</owner_memory>"
     )
+
+
+# --- the voice turns (jfollow4 H) ---------------------------------------------
+
+
+def test_memory_turn_add_list_forget(client, mem_file):
+    """Add, list and forget in fixed code; the fact never reaches a debug row."""
+    _deps()
+    events = turn(client, "remember that the gate code is 4471")
+    assert says(events) == ["I'll remember: the gate code is 4471, sir."]
+    assert _rows()[-1]["detail"] == "add id=1 words=5"
+    assert "4471" not in json.dumps(_rows())  # rows carry counts, never the fact text
+    (entry,) = memory.load()
+    assert entry["text"] == "the gate code is 4471"
+
+    events = turn(client, "what do you remember")
+    assert says(events) == ["I remember one thing, sir."]
+    (card,) = [e["card"] for e in events if e["type"] == "card"]
+    assert card["title"] == "Remembered"
+    assert card["body"] == [f"{entry['at']}: the gate code is 4471"]
+    assert _rows()[-1]["detail"] == "list count=1"
+
+    memory.add("a note about the coffee schedule")  # newest first on the card
+    events = turn(client, "what do you remember")
+    assert says(events) == ["I remember 2 things, sir."]
+    (card,) = [e["card"] for e in events if e["type"] == "card"]
+    assert card["body"][0].endswith("a note about the coffee schedule")
+
+    events = turn(client, "forget that")
+    assert says(events) == [acks.PHRASES["memory_forgot"]]
+    assert _rows()[-1]["detail"] == "forget id=2"
+    turn(client, "forget that")  # drops the gate-code fact too
+    events = turn(client, "forget that")  # nothing left to forget
+    assert says(events) == [acks.PHRASES["memory_empty"]]
+    assert _rows()[-1]["detail"] == "forget id=none"
+
+
+def test_memory_turn_forget_about(client, mem_file):
+    _deps()
+    turn(client, "remember that the notes go in the vault")
+    events = turn(client, "forget what i said about notes")
+    assert says(events) == ["Forgotten: the notes go in the vault, sir."]
+    assert _rows()[-1]["detail"] == "forget id=1"
+    assert memory.load() == []
+    events = turn(client, "forget what i said about notes")  # no match now
+    assert says(events) == [acks.PHRASES["memory_none"]]
+    assert _rows()[-1]["detail"] == "forget id=none"
+
+
+def test_memory_forget_all_needs_the_host_confirm(client, mem_file):
+    _deps()
+    turn(client, "remember that the gate code is 4471")
+    turn(client, "remember that coffee is at nine")
+    events = turn(client, "forget everything")
+    assert says(events) == ["Forget all 2 things I remember?"]
+    (card,) = [e["card"] for e in events if e["type"] == "card"]
+    assert card["id"] == overlay._CONFIRM_CARD_ID and card["title"] == "Confirm"
+    assert all(r["detail"] != "forget_all confirmed" for r in _rows())
+    events = turn(client, "yes", conv_id="c1")
+    assert says(events) == [acks.PHRASES["memory_forgot_all"]]
+    assert _rows()[-1]["detail"] == "forget_all confirmed"
+    assert memory.load() == []
+
+    turn(client, "remember that the gate code is 4471")
+    turn(client, "forget everything", conv_id="c2")
+    turn(client, "no", conv_id="c2")  # cancel: the store keeps the fact
+    assert _rows()[-1]["detail"] == "forget_all cancelled"
+    assert len(memory.load()) == 1
+
+
+def test_memory_mode_error_is_spoken_and_rowed(client, mem_file):
+    """A store file with group/other bits fails as `mode`, both on add and on list."""
+    _deps()
+    memory.add("one fact")
+    os.chmod(mem_file, 0o644)
+    events = turn(client, "remember that the gate code is 4471")
+    assert says(events) == [acks.PHRASES["memory_failed"]]
+    assert _rows()[-1]["detail"] == "error reason=mode"
+    events = turn(client, "what do you remember")
+    assert says(events) == [acks.PHRASES["memory_failed"]]
+    assert _rows()[-1]["detail"] == "error reason=mode"
+
+
+def test_memory_block_reaches_answer_and_agent_prompts(client, mem_file):
+    """With facts stored, both prompt assemblies carry the block right before the local context."""
+    clock = Clock()
+    web, quiet = FakeConversations(['{"say": "Paris."}\n']), FakeConversations(['{"say": "Q."}\n'])
+    pool, deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Two."})]),
+                       synth=lambda t: (b"pcm", 24000),
+                       conversations=web, quiet_conversations=quiet)
+    memory.add("coffee is at nine")
+    block = memory.prompt_block(memory.load())
+
+    turn(client, "what is the capital of France", conv_id="t1")  # answer turn
+    prompt = web.sessions["t1"].prompts[-1]
+    assert prompt.count(block) == 1
+    assert prompt.rindex(block) < prompt.rindex("<local_context>")
+
+    turn(client, "any open PRs on jarvis-companion", conv_id="t2")  # agent turn
+    agent_prompt = pool.sessions["t2"].prompts[-1]
+    assert agent_prompt.count(block) == 1
+    assert agent_prompt.rindex(block) < agent_prompt.rindex("<local_context>")
+
+
+def test_memory_stays_out_of_the_policy_paths():
+    """Only the two prompt assemblies and the memory turn may touch the store."""
+    assert "memory" not in Path(mac_policy_path()).read_text()
+    for fn in (overlay._ask_host, overlay._agent_preflight):
+        assert "memory" not in inspect.getsource(fn), fn.__name__
+
+
+def mac_policy_path() -> Path:
+    from mac.voice import agent_policy
+    return Path(agent_policy.__file__)
