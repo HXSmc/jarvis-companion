@@ -281,17 +281,17 @@ struct FlowBody: View {
     var body: some View {
         GeometryReader { geo in
             let rects = Self.rects(card: card, size: geo.size, scale: scale)
+            let labels = Self.labels(card: card, rects: rects, scale: scale)
             ZStack(alignment: .topLeading) {
                 Canvas { ctx, _ in
                     for edge in card.edges {
                         guard let f = rects[edge.from], let t = rects[edge.to] else { continue }
                         drawArrow(&ctx, from: f, to: t)
-                        if let label = edge.label, !label.isEmpty {
-                            let mid = CGPoint(x: (f.midX + t.midX) / 2 + 6 * scale, y: (f.midY + t.midY) / 2)
-                            ctx.draw(Text(label)
-                                .font(ScaledType.micro(scale))
-                                .foregroundColor(.white.opacity(0.72)), at: mid, anchor: .leading)
-                        }
+                    }
+                    for (label, spot) in labels {
+                        ctx.draw(Text(label)
+                            .font(ScaledType.micro(scale))
+                            .foregroundColor(.white.opacity(0.72)), at: spot, anchor: .leading)
                     }
                 }
                 ForEach(Array(card.nodes.enumerated()), id: \.offset) { _, node in
@@ -315,6 +315,17 @@ struct FlowBody: View {
         let unscaled = FlowLayout.layout(nodes: card.nodes, edges: card.edges,
                                          size: CGSize(width: size.width / s, height: size.height / s))
         return unscaled.mapValues { CGRect(x: $0.minX * s, y: $0.minY * s, width: $0.width * s, height: $0.height * s) }
+    }
+
+    /// Edge labels with a free spot (FlowEdgeLabels): never over each other or a node.
+    static func labels(card: FlowCard, rects: [String: CGRect], scale: CGFloat) -> [(String, CGPoint)] {
+        let edges = card.edges.compactMap { e -> (String, CGRect, CGRect)? in
+            guard let label = e.label, !label.isEmpty, let f = rects[e.from], let t = rects[e.to] else { return nil }
+            return (label, f, t)
+        }
+        let spots = FlowEdgeLabels.place(edges.map { ($0.1, $0.2, FlowEdgeLabels.size($0.0, scale: scale)) },
+                                         nodes: Array(rects.values), gap: 6 * scale)
+        return zip(edges, spots).compactMap { e, spot in spot.map { (e.0, $0) } }
     }
 
     /// Rows of 34 pt nodes with 22 pt gaps (FlowLayout's numbers), so short flows stay compact.

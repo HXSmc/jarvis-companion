@@ -147,7 +147,8 @@ _HIDE_RE = re.compile(_WRAP_LEAD + r"(?:(?:hide|hyde)(?: " + _OBJECT + r")?|get 
                       r"|get (?:it|that|this|them) off my screen|go away"
                       r"|get (?:it|this|that|them|everything) out of (?:my face|here)"
                       r"|make (?:it|that|them|everything) (?:disappear|go away))" + _WRAP_TRAIL)
-_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show (?:it|them|everything|the overlay|the cards?)(?: again)?"
+# A bare "show" (whole utterance) is show too: Mac live run 2 sent it to the model.
+_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show(?: (?:it|them|everything|the overlay|the cards?))?(?: again)?"
                       r"|bring (?:it|them|everything) back|unhide(?: " + _OBJECT + r")?|come back)" + _WRAP_TRAIL)
 _CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: it| them| all| everything| the (?:screen|overlay|cards?))?"
                        r"|dismiss(?: it| them| that| all| everything)?"

@@ -182,7 +182,11 @@ final class SpeechInput {
             return
         }
         let candidate = barge.gate.candidate(at: now)
-        if candidate { barge.checked += 1 }
+        if candidate {
+            barge.checked += 1
+            barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: barge.reply,
+                                                                      freshFrom: barge.freshFrom))
+        }
         guard let reason = BargeDecision.decide(gateCandidate: candidate, partial: partial,
                                                 reply: barge.reply, wake: false,
                                                 enabled: barge.enabled, aec: barge.aec,
@@ -605,6 +609,8 @@ final class BargeRun {
     var freshFrom = 0
     /// Partials seen, and word checks made while the gate was a candidate (debug note only).
     var partials = 0, checked = 0
+    /// Most new (not-in-the-reply) words any checked partial held; the word check needs 2.
+    var maxNew = 0
     /// Told once when the run ends (confirmed, cancelled at the drain, or the recogniser ended):
     /// the gate's numbers for the one-shot `barge_gate` debug note.
     var onEnded: ((String) -> Void)?
@@ -613,7 +619,7 @@ final class BargeRun {
     func end() {
         guard !ended else { return }
         ended = true
-        onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) confirmed=\(confirmed ? 1 : 0)")
+        onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) max_new=\(maxNew) confirmed=\(confirmed ? 1 : 0)")
     }
 
     init(enabled: Bool, aec: Bool, outLevels: @escaping () -> [LevelSample]) {

@@ -66,4 +66,61 @@ final class CardSizeTests: XCTestCase {
         state.restore()
         XCTAssertFalse(state.holdsIdle)
     }
+    // MARK: Round 5 (Mac live run 2)
+
+    /// The enlarged window is the content's own size, centred: scaled up it was wider than the card
+    /// and the card sat left of centre (live: centre x 603 of 1440).
+    func testWindowFrameIsTheContentCentred() {
+        let visible = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let frame = CardSize.windowFrame(content: CGSize(width: 724, height: 482), visible: visible)
+        XCTAssertEqual(frame.width, 724, accuracy: 0.5)
+        XCTAssertEqual(frame.height, 482, accuracy: 0.5)
+        XCTAssertEqual(frame.midX, 720, accuracy: 0.5)
+        XCTAssertEqual(frame.midY, visible.midY, accuracy: 0.5)
+        let tall = CardSize.windowFrame(content: CGSize(width: 800, height: 1400), visible: visible)
+        XCTAssertLessThanOrEqual(tall.height, 700.001)
+        XCTAssertEqual(tall.width / tall.height, 800.0 / 1400.0, accuracy: 0.005)
+        XCTAssertEqual(tall.midX, 720, accuracy: 0.5)
+    }
+
+    /// The live phone diagram: six labels fan out of "Processor (SoC)". Placed labels never overlap
+    /// each other or a node, at the tile and at the enlarged scale; most of them stay.
+    func testFlowEdgeLabelsNeverOverlap() {
+        let names = ["Battery", "Power management", "Processor (SoC)", "RAM and storage", "Display and touch",
+                     "Cameras", "Sensors", "Modem and radios", "Mic and speaker", "Antennas"]
+        let nodes = names.enumerated().map { FlowNode(id: "n\($0.offset)", text: $0.element) }
+        let edges = [FlowEdge(from: "n0", to: "n1", label: "power"), FlowEdge(from: "n1", to: "n2", label: "power"),
+                     FlowEdge(from: "n2", to: "n3", label: "data"), FlowEdge(from: "n2", to: "n4", label: "image"),
+                     FlowEdge(from: "n2", to: "n5", label: "image"), FlowEdge(from: "n2", to: "n6", label: "readings"),
+                     FlowEdge(from: "n2", to: "n7", label: "data"), FlowEdge(from: "n2", to: "n8", label: "sound"),
+                     FlowEdge(from: "n7", to: "n9", label: "signal")]
+        // The tile, the live enlarged card (724 pt wide: about 700 for the flow) and a wide one.
+        for (width, scale) in [(CGFloat(330), CGFloat(1)), (CGFloat(700), CardSize.flowFontScaleCap),
+                               (CGFloat(1120), CardSize.flowFontScaleCap)] {
+            let unscaled = FlowLayout.layout(nodes: nodes, edges: edges,
+                                             size: CGSize(width: width / scale, height: 300))
+            let rects = unscaled.mapValues { CGRect(x: $0.minX * scale, y: $0.minY * scale,
+                                                    width: $0.width * scale, height: $0.height * scale) }
+            let input = edges.map { e in
+                (from: rects[e.from]!, to: rects[e.to]!, size: FlowEdgeLabels.size(e.label!, scale: scale))
+            }
+            let spots = FlowEdgeLabels.place(input, nodes: Array(rects.values), gap: 6 * scale)
+            var boxes: [CGRect] = []
+            for (e, spot) in zip(input, spots) {
+                guard let spot else { continue }
+                let box = CGRect(x: spot.x, y: spot.y - e.size.height / 2, width: e.size.width, height: e.size.height)
+                XCTAssertFalse(boxes.contains { $0.intersects(box) }, "labels overlap at scale \(scale)")
+                XCTAssertFalse(rects.values.contains { $0.intersects(box) }, "label on a node at scale \(scale)")
+                boxes.append(box)
+            }
+            XCTAssertGreaterThanOrEqual(boxes.count, 5, "scale \(scale): \(boxes.count) of 9 labels kept")
+            // Before round 5 every label sat at its edge's middle: the fan-out labels overlapped.
+            guard width < 1000 else { continue }
+            let middles = input.map { e in
+                CGRect(x: (e.from.midX + e.to.midX) / 2 + 6 * scale, y: (e.from.midY + e.to.midY) / 2 - e.size.height / 2,
+                       width: e.size.width, height: e.size.height)
+            }
+            XCTAssertTrue(middles.indices.contains { i in middles.indices.contains { j in i < j && middles[i].intersects(middles[j]) } })
+        }
+    }
 }

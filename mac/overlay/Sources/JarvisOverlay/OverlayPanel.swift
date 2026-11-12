@@ -459,8 +459,8 @@ final class CardPanel: NSObject {
         }
         guard let host = enlargedHost else { return }
         // Measure, then fit: a single image with its height cap lifted can be taller than the
-        // uniform tile scale, so the frame comes from the content's own measured size.
-        let target = CardSize.enlargedFrame(natural: host.fittingSize, visible: visible)
+        // uniform tile scale, so the frame is the content's own measured size, never scaled up.
+        let target = CardSize.windowFrame(content: host.fittingSize, visible: visible)
         if !enlargedWindow.isVisible {
             enlargedWindow.alphaValue = 0
             enlargedWindow.setFrame(Self.flip(tileFrame), display: false)

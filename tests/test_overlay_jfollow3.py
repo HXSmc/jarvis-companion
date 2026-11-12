@@ -479,6 +479,9 @@ def test_barge_gate_note_and_debug_label():
     assert "barge.end()" in _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
     assert "barge.end(); return" in _swift_func(APP_SRC / "SpeechInput.swift", "completeTurn")
     assert "func end()" in speech and "guard !ended else { return }" in speech
+    # Live run 2 (32): checked=6 confirmed=0 could not say whether STT heard the owner's words.
+    assert "checked=\\(checked) max_new=\\(maxNew) confirmed=" in speech
+    assert "BargeWords.newWordCount(partial: partial" in _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
     assert "barge_gate" in overlay.DEBUG_PAGE
     assert 'case "barge_gate": return s.detail' in overlay.DEBUG_PAGE.replace('case "barge_in": case "barge_aec": ', "")
 
@@ -542,3 +545,12 @@ def test_enlarged_card_holds_the_idle_clear():
     control = _swift_func(APP_SRC / "AppController.swift", "handleControl")
     assert "model.activity()" in control
 
+
+
+def test_bare_show_is_the_show_intent():
+    """Live run 2 (41): 'Hey Jarvis, show' went to the model (intent answer, about 3 s) instead of
+    the show intent. A whole-utterance 'show' (or 'show again') is show; 'show me X' is not."""
+    for text in ("show", "Show.", "show again", "Jarvis show", "show, please"):
+        assert parse(text, apps={}).kind == "show", text
+    for text in ("show me a picture of a dog", "show the weather", "what's on the show tonight"):
+        assert parse(text, apps={}).kind != "show", text

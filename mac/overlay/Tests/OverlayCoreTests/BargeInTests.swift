@@ -226,4 +226,49 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(BargeWords.dropEchoAnswer("Yes.", reply: []), "Yes.")
         XCTAssertEqual(BargeWords.dropEchoAnswer("", reply: confirmQuestion), "")
     }
+    // MARK: Round 5 (Mac live run 2): misheard echo words confirmed 5 self-interrupts
+
+    /// Each pair = the reply Jarvis was speaking and the barge text STT heard from its own echo
+    /// (nobody spoke). Before round 5 every one confirmed (>= 2 "new" words: "1" "000", "500"
+    /// "years" "b" "c", "dacletian" "restook", "air" "20").
+    func testMisheardEchoNeverConfirms() {
+        let cases: [([String], String)] = [
+            (["A big subject, sir, so I'll give you the full arc on cards and a short spoken summary.",
+              "In short: Rome grew from a city to a Mediterranean republic, became an empire under Augustus, peaked under Trajan, and fractured in the third and fifth centuries. The East lasted until 1453, a thousand years longer than the West."],
+             "1,000"),
+            (["Rome began as a small city on the Tiber, traditionally founded in 753 BC, and became a republic in 509 BC after expelling its kings.",
+              "It conquered Italy, then defeated Carthage in the Punic Wars and came to dominate the Mediterranean."],
+             "in 500 years. B.C. after expelling its kings. It conquered Italy"),
+            (["The third century brought civil war, plague and inflation, until Diocletian restored order."],
+             "Dacletian restook"),
+            (["His heir Octavian prevailed, and in 27 BC became Augustus, the first emperor."],
+             "air Octavian prevailed, and in 20"),
+            (["Instead, his heir Octavian became Augustus in 27 BC, the first emperor."],
+             "Air Octavian became Augustus in 20"),
+            (["It became a republic in 509 BC after expelling its kings, and slowly conquered Italy."],
+             "it became a republic in 500 BC after expelled its kings"),
+        ]
+        for (reply, heard) in cases {
+            XCTAssertFalse(BargeWords.confirms(partial: heard, reply: reply), heard)
+            XCTAssertNil(BargeDecision.decide(gateCandidate: true, partial: heard, reply: reply,
+                                              wake: false, enabled: true, aec: false), heard)
+            XCTAssertLessThan(BargeWords.newWordCount(partial: heard, reply: reply), 2, heard)
+        }
+        // The owner's words over the same replies still confirm.
+        for (reply, _) in cases {
+            XCTAssertTrue(BargeWords.confirms(partial: "what time is it", reply: reply))
+            XCTAssertTrue(BargeWords.confirms(partial: "stop", reply: reply))
+            XCTAssertTrue(BargeWords.confirms(partial: "Augustus in 20 what time is it", reply: reply))
+        }
+    }
+
+    /// Numbers are one token; acronym letters join; near spellings snap only from 5 letters.
+    func testEchoTokenRules() {
+        XCTAssertEqual(BargeWords.tokens("1,000 years B.C. a thousand 3.5"), ["#", "years", "bc", "a", "#", "#"])
+        XCTAssertEqual(BargeWords.snapped(["dacletian", "expelling", "air", "what", "time"],
+                                          to: BargeWords.tokens("Diocletian expelled their kings at that time")),
+                       ["diocletian", "expelled", "air", "what", "time"])
+        XCTAssertEqual(BargeWords.snapped(["weather"], to: ["rome"]), ["weather"])
+        XCTAssertEqual(BargeWords.newWordCount(partial: "um uh what", reply: []), 1)
+    }
 }

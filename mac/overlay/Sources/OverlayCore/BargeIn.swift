@@ -120,19 +120,83 @@ public enum StopPhrase {
 /// words the reply itself contains.
 public enum BargeWords {
     /// Ordered words, lower case, apostrophes removed, split on non-letters/digits.
-    /// Number words as digits: the reply text says "Change 1 of 3", the recogniser hears "change
-    /// one of three" (Mac live run 1: the echo confirmed itself on "one" and "three").
-    private static let numbers: [String: String] = [
-        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
-        "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12",
-        "thirteen": "13", "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
-        "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
-        "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+    /// Every number is one token "#": the reply text says "Change 1 of 3" or "a thousand years",
+    /// the recogniser hears "one of three" or "1,000", and it mishears digits of its own echo
+    /// ("500" for "509", "20" for "27"; Mac live runs 1 and 2: each confirmed a self-interrupt).
+    /// A dotted acronym is one token ("B.C." = "bc").
+    private static let numberWords: Set<String> = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+        "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+        "hundred", "thousand", "million", "billion",
     ]
 
-    private static func tokens(_ s: String) -> [String] {
-        let plain = s.lowercased().filter { $0 != "'" && $0 != "\u{2019}" }
-        return plain.split { !($0.isLetter || $0.isNumber) }.map { numbers[String($0)] ?? String($0) }
+    static func tokens(_ s: String) -> [String] {
+        var plain = ""
+        let chars = Array(s.lowercased())
+        var acronymDot = -2
+        for (i, c) in chars.enumerated() {
+            if c == "'" || c == "\u{2019}" { continue }
+            let between = i > 0 && i + 1 < chars.count
+            // "1,000" and "3.5" are one number.
+            if c == "," || c == ".", between, chars[i - 1].isNumber, chars[i + 1].isNumber { continue }
+            // "B.C." is "bc": a dot after a lone letter (start of word or after such a dot).
+            if c == ".", between, chars[i - 1].isLetter, chars[i + 1].isLetter,
+               i < 2 || !chars[i - 2].isLetter || acronymDot == i - 2 {
+                acronymDot = i
+                continue
+            }
+            plain.append(c)
+        }
+        return plain.split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
+            .map { $0.allSatisfy(\.isNumber) || numberWords.contains($0) ? "#" : $0 }
+    }
+
+    /// Recogniser noise words: never counted as the owner's new words.
+    private static let fillers: Set<String> = ["um", "umm", "uh", "uhh", "hmm", "mm", "mhm", "ah", "er", "erm", "oh"]
+
+    /// A heard word the recogniser misspelled from the reply's echo ("dacletian" for "diocletian",
+    /// "expelling" for "expelled", Mac live run 2) is the reply's word: a heard token of >= 5
+    /// letters within 1 edit (2 from 8 letters) of a reply token, or with the same stem, becomes that
+    /// token. Shorter words must match exactly, so the owner's "what"/"time" never vanish into
+    /// "that"/"tim". When unsure the word is the reply's: the gate does not interrupt.
+    static func snapped(_ heard: [String], to reply: [String]) -> [String] {
+        let known = Set(reply)
+        let candidates = known.filter { $0.count >= 4 && $0.allSatisfy(\.isLetter) }
+        return heard.map { h in
+            guard !known.contains(h), h.count >= 5, h.allSatisfy(\.isLetter) else { return h }
+            let allowance = h.count >= 8 ? 2 : 1
+            let hs = stem(h)
+            var best: (String, Int)?
+            for r in candidates where abs(r.count - h.count) <= max(allowance, 3) {
+                let d = stem(r) == hs ? 0 : editDistance(h, r, limit: allowance)
+                if d <= allowance, best.map({ d < $0.1 || (d == $0.1 && r < $0.0) }) ?? true { best = (r, d) }
+            }
+            return best?.0 ?? h
+        }
+    }
+
+    private static func stem(_ w: String) -> String {
+        for suffix in ["ing", "ed", "es", "ly", "s"] where w.hasSuffix(suffix) && w.count - suffix.count >= 4 {
+            return String(w.dropLast(suffix.count))
+        }
+        return w
+    }
+
+    /// Levenshtein distance, or `limit + 1` as soon as it must exceed `limit`.
+    private static func editDistance(_ a: String, _ b: String, limit: Int) -> Int {
+        let x = Array(a), y = Array(b)
+        if abs(x.count - y.count) > limit { return limit + 1 }
+        var prev = Array(0...y.count)
+        for i in 1...max(x.count, 1) where !x.isEmpty {
+            var cur = [i] + Array(repeating: 0, count: y.count)
+            for j in stride(from: 1, through: y.count, by: 1) {
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i - 1] == y[j - 1] ? 0 : 1))
+            }
+            if (cur.min() ?? 0) > limit { return limit + 1 }
+            prev = cur
+        }
+        return prev[y.count]
     }
 
     /// Whitespace words of a partial: `confirms(freshFrom:)` counts in these.
@@ -140,9 +204,6 @@ public enum BargeWords {
         s.split(whereSeparator: { $0.isWhitespace }).count
     }
 
-    private static func normToken(_ s: String) -> String {
-        tokens(s).joined()
-    }
 
     /// Only the partial's words from word `freshFrom` on count (the words heard since the gate last
     /// went over the echo; the whole barge transcript holds every misheard echo word of the reply
@@ -153,14 +214,27 @@ public enum BargeWords {
         let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
         let owned = ownerWords(partial: fresh, reply: reply)
-        let p = tokens(owned)
         let r = reply.flatMap(tokens)
+        let p = snapped(tokens(owned), to: r)
         let rs = Set(r)
         if StopPhrase.matches(owned) {
             return !p.isEmpty && p.allSatisfy { !rs.contains($0) }
         }
-        guard p.filter({ !rs.contains($0) }).count >= 2 else { return false }
+        guard newWords(p, replySet: rs) >= 2 else { return false }
         return !isContiguous(p, in: r)
+    }
+
+    /// How many of the partial's fresh words (from `freshFrom`, echo lead dropped) the reply does
+    /// not hold: the number the word check needs >= 2 of. For the `barge_gate` note (`max_new`).
+    public static func newWordCount(partial: String, reply: [String], freshFrom: Int = 0) -> Int {
+        let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
+        let r = reply.flatMap(tokens)
+        return newWords(snapped(tokens(ownerWords(partial: fresh, reply: reply)), to: r), replySet: Set(r))
+    }
+
+    private static func newWords(_ p: [String], replySet: Set<String>) -> Int {
+        p.filter { !replySet.contains($0) && !fillers.contains($0) }.count
     }
 
     /// The owner's own words from a partial whose lead echoes the reply: drop the longest
@@ -170,7 +244,8 @@ public enum BargeWords {
         let parts = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let replyTokens = reply.flatMap(tokens)
         var words = parts
-        while words.count >= 2, let drop = echoLead(words.map(normToken), in: replyTokens) {
+        while words.count >= 2,
+              let drop = echoLead(words.map { snapped(tokens($0), to: replyTokens).joined() }, in: replyTokens) {
             words.removeFirst(drop)
         }
         return words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
@@ -194,9 +269,10 @@ public enum BargeWords {
     /// it: wake barge (`wakeTurnText`), level barge and a stop said over the reply (`turnText`),
     /// follow-up replay (AppController.handleWake).
     public static func dropEchoAnswer(_ text: String, reply: [String]) -> String {
-        let heard = tokens(TurnEndpointer.dropMisheardWake(TurnEndpointer.stripWake(text)))
+        let replyTokens = reply.flatMap(tokens)
+        let heard = snapped(tokens(TurnEndpointer.dropMisheardWake(TurnEndpointer.stripWake(text))), to: replyTokens)
         guard !heard.isEmpty, TailGate.isAnswer(text) else { return text }
-        let replyWords = Set(reply.flatMap(tokens))
+        let replyWords = Set(replyTokens)
         return heard.allSatisfy(replyWords.contains) ? "" : text
     }
 
