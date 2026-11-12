@@ -39,6 +39,9 @@ final class AppController {
     private var bargeInEnabled = true
     /// The barge listening run of the current turn, nil while its audio is not playing.
     private var bargeRun: BargeRun?
+    /// Every .audio/.say text of the current turn so far, also the ones before the barge run
+    /// exists (the first clip starts it): the run's reply is seeded from this.
+    private var replyTexts: [String] = []
     /// When the current turn's first .audio arrived (the barge-in debug "at").
     private var bargeFirstAudioAt: Date?
     /// .audio events that arrived after their turn was cut (the barge-in dropped_sentences).
@@ -362,7 +365,8 @@ final class AppController {
                                  token: Int) async {
         heldLine.drop()  // a new turn: an older pushed line is out of date
         model.orb = .thinking
-        bargeRun = nil  // the new turn's reply texts collect from scratch
+        bargeRun = nil
+        replyTexts = []  // the new turn's reply texts collect from scratch
         bargeFirstAudioAt = nil
         lateAudioCount = 0
         noFollowUp = false
@@ -443,6 +447,7 @@ final class AppController {
         let audioOut = audio
         let run = BargeRun(enabled: true, aec: speech.aecActive, outLevels: { audioOut.outputLevels })
         run.onConfirmed = { [weak self] reason in self?.bargeIn(reason: reason) }
+        run.reply = replyTexts
         bargeRun = run
         // Screen capture starts when the barge turn starts; only awaited when its utterance lands.
         let screenTask = Task { await ScreenContext.capture() }
@@ -454,10 +459,11 @@ final class AppController {
             onFinal: { [weak self] text, sttFinalMs, endOfSpeech, heard in
                 Task { @MainActor in
                     guard let self else { return }
-                    // The recogniser also heard the reply's lead: strip it, the rest is the owner's.
-                    let owned = BargeWords.ownerWords(partial: text, reply: run.reply)
-                    guard !owned.isEmpty else {
-                        self.model.orb = .idle  // nothing the word check can call the owner's
+                    // Unconfirmed: never a turn (the reply plays on). Confirmed: the recogniser
+                    // also heard the reply's lead; strip it, the rest is the owner's.
+                    guard let owned = BargeWords.turnText(final: text, reply: run.reply,
+                                                          confirmed: run.confirmed) else {
+                        if run.confirmed { self.model.orb = .idle }  // nothing left to call the owner's
                         return
                     }
                     self.lastHeardUntil = Date()
@@ -490,15 +496,17 @@ final class AppController {
         switch event {
         case .say(let text):
             guard token == turnToken else { return }
-            bargeRun?.reply.append(text)
+            replyTexts.append(text)
+            bargeRun?.reply = replyTexts
             if serviceVoice == nil { audio.speakLocally(text) }
         case .audio(let text, let rate, let pcm):
             guard token == turnToken else { lateAudioCount += 1; return }
             if bargeFirstAudioAt == nil { bargeFirstAudioAt = Date() }
-            bargeRun?.reply.append(text)
+            replyTexts.append(text)
+            bargeRun?.reply = replyTexts
             model.orb = .speaking
             audio.enqueue(pcm: pcm, rate: rate)
-            startBargeListeningIfNeeded()
+            startBargeListeningIfNeeded()  // seeded with replyTexts, this clip included
         case .shape(let shape, let check):
             // The capture is seconds old: re-resolve once, off the main actor, before drawing.
             let stale = shape.rect, label = shape.label ?? ""

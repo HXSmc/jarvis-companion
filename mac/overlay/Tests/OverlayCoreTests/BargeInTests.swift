@@ -87,4 +87,16 @@ final class BargeInTests: XCTestCase {
             XCTAssertFalse(StopPhrase.matches(text), text)
         }
     }
+
+    /// Security R1: the legacy recogniser's time-cap final while the gate is unsure (Jarvis's own
+    /// echo, misheard) must never become a wake-less turn.
+    func testUnconfirmedFinalIsNeverATurn() {
+        let reply = ["The emperor Augustus ruled Rome for forty years."]
+        let echo = "the emperor augustus a gust us ruled rome"
+        XCTAssertNil(BargeWords.turnText(final: echo, reply: reply, confirmed: false))
+        XCTAssertNil(BargeWords.turnText(final: "what time is it", reply: reply, confirmed: false))
+        XCTAssertEqual(BargeWords.turnText(final: "the emperor augustus what time is it", reply: reply,
+                                           confirmed: true), "what time is it")
+        XCTAssertNil(BargeWords.turnText(final: "the emperor augustus", reply: reply, confirmed: true))
+    }
 }

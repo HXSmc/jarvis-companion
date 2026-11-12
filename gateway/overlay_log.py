@@ -12,6 +12,7 @@ timings only; never screen contents, tool output or card bodies.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import httpx
@@ -35,6 +36,9 @@ MAX_STR = 200
 MAX_TURNS = 50
 NUMBERS = (bool, int, float)
 
+# D1 "no screen": the ground row's picked on-screen label (a JSON string) never leaves the Mac.
+GROUND_LABEL_RE = re.compile(r'\s*label="(?:[^"\\]|\\.)*"?')
+
 OVERLAY_OFFLINE_DETAIL = "overlay offline"
 OVERLAY_PORT_DEFAULT = 8791  # mac/voice/service.py binds OVERLAY_PORT, default 8791
 
@@ -53,6 +57,8 @@ def _row(step: dict) -> dict:
             if key in ("step", "at", "tool", "decision") and isinstance(value, NUMBERS + (str, type(None))):
                 row[key] = _cap(value)
         elif key in KEEP_FIELDS and isinstance(value, NUMBERS + (str, type(None))):
+            if name == "ground" and key == "detail" and isinstance(value, str):
+                value = GROUND_LABEL_RE.sub("", value)
             row[key] = _cap(value)  # scalars only: a nested dict/list under a kept name is dropped
         elif isinstance(value, NUMBERS):  # ms/audio_ms/score-style counters
             row[key] = value

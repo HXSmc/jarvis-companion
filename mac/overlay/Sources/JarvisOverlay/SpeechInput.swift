@@ -191,6 +191,9 @@ final class SpeechInput {
         let cancel = turn.cancelHandler
         turn.cancelHandler = nil
         cancel?()
+        // A2: an unconfirmed barge turn never calls onFinal/onNothing (the legacy recogniser's
+        // time-cap final holds Jarvis's own echo); it just ends and the reply plays on.
+        if let barge = turn.barge, !barge.confirmed { return }
         guard !nothing, let end = turn.endOfSpeech, let raw = turn.keptText ?? rawText else {
             turn.onNothing?(turn.diagnosis)
             return

@@ -63,6 +63,8 @@ PHRASES = {
     "no_card": "I don't see a card called that.",
     "no_sessions_access": "I can't reach your sessions from here.",
     "sessions": "Checking your sessions.",
+    "no_sessions": "No sessions to report.",
+    "no_session_named": "I don't see a session called that.",
 }
 
 # Thinking lines said while the model works: (key, text, tag). "look" = an answer/lookup is

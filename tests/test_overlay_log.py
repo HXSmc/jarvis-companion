@@ -300,3 +300,14 @@ def test_redaction_drops_nested_values_under_kept_names():
     out = overlay_log.redact(snap)
     assert "SECRET-BODY" not in repr(out)
     assert out["turns"][0]["steps"][0] == {"step": "intent", "at": 1.0}
+
+
+def test_ground_row_drops_the_screen_label():
+    """D1 'no screen': the picked element's label (escaped quotes included) never leaves the Mac."""
+    from gateway import overlay_log
+    detail = ('screen=1 image=0 candidates=12 history=0 pick=3 reason=ok via=ax '
+              'label="SCREEN-PIXELS \\"Pay\\" now" ms=41')
+    snap = {"turns": [{"id": "t1", "steps": [{"step": "ground", "at": 1.0, "detail": detail}]}]}
+    row = overlay_log.redact(snap)["turns"][0]["steps"][0]
+    assert "SCREEN-PIXELS" not in row["detail"] and "label" not in row["detail"]
+    assert row["detail"] == "screen=1 image=0 candidates=12 history=0 pick=3 reason=ok via=ax ms=41"

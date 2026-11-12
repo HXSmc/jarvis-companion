@@ -113,6 +113,14 @@ public enum BargeWords {
         return words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
     }
 
+    /// The barge turn's text for the service: nil until a barge-in was confirmed (an unsure gate
+    /// never starts a turn, A2), else the owner's words, nil when nothing of them is left.
+    public static func turnText(final: String, reply: [String], confirmed: Bool) -> String? {
+        guard confirmed else { return nil }
+        let owned = ownerWords(partial: final, reply: reply)
+        return owned.isEmpty ? nil : owned
+    }
+
     /// The longest leading run of >= 2 non-empty normalized tokens contiguous in the reply,
     /// as the number of leading elements to drop.
     private static func echoLead(_ norms: [String], in reply: [String]) -> Int? {

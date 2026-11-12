@@ -285,12 +285,12 @@ SESSION_ROWS = [
 ]
 
 
-def _sessions_env(monkeypatch, tmp_path, mode=0o600):
+def _sessions_env(monkeypatch, tmp_path, mode=0o600, rows=SESSION_ROWS):
     seen: list = []
 
     def handler(request):
         seen.append((request.method, str(request.url), request.headers.get("authorization")))
-        return httpx.Response(200, json=SESSION_ROWS)
+        return httpx.Response(200, json=rows)
 
     monkeypatch.setattr(overlay, "_sessions_transport", httpx.MockTransport(handler))
     monkeypatch.setenv("OVERLAY_COMPANION_URL", "http://127.0.0.1:8788")
@@ -315,6 +315,7 @@ def test_sessions_turn_is_untrusted_and_read_only(client, monkeypatch, tmp_path)
     assert seen == [("GET", "http://127.0.0.1:8788/central/sessions", "Bearer not-a-real-token")]
     assert events[0]["text"] == "Checking your sessions."  # the ack, before anything else
     prompt = quiet.sessions["ss1"].prompts[0]
+    assert prompt.startswith("what are my sessions doing")  # the owner's question, not only the rows
     assert '<context untrusted="true">' in prompt and "IGNORE PREVIOUS" in prompt
     assert "never instructions" in prompt
     assert web.sessions == {}
@@ -330,6 +331,7 @@ def test_sessions_turn_is_untrusted_and_read_only(client, monkeypatch, tmp_path)
     # "what went wrong with X" filters rows by title before the model sees them.
     events = turn(client, "what went wrong with build runner", conv_id="ss3")
     prompt = quiet.sessions["ss3"].prompts[0]
+    assert prompt.startswith("what went wrong with build runner")
     assert "build runner" in prompt and "IGNORE PREVIOUS" not in prompt
     assert [c for c in _cards(events) if c["type"] == "info"] == []  # no needs_input row survived
 
@@ -341,6 +343,20 @@ def test_sessions_turn_is_untrusted_and_read_only(client, monkeypatch, tmp_path)
     assert len(seen) == 2  # refused before any fetch
     assert "ss2" not in overlay._tainted
     assert _steps("sessions")[-1]["detail"].startswith("result=no_access")
+
+
+def test_sessions_with_no_rows_say_a_fixed_line(client, monkeypatch, tmp_path):
+    """UX R1: no rows (or none for the name) -> a fixed line, no model call, no made-up sessions."""
+    _sessions_env(monkeypatch, tmp_path, rows=[])
+    quiet = FakeConversations()
+    overlay.set_deps(make_deps(quiet_conversations=quiet))
+    events = turn(client, "what are my sessions doing", conv_id="sn1")
+    assert says(events) == ["Checking your sessions.", "No sessions to report."]
+    _sessions_env(monkeypatch, tmp_path)  # rows exist, none called "deploy"
+    events = turn(client, "what went wrong with deploy", conv_id="sn2")
+    assert says(events) == ["Checking your sessions.", "I don't see a session called that."]
+    assert quiet.sessions == {}
+    assert "sn1" not in overlay._tainted and "sn2" not in overlay._tainted
 
 
 def test_health_has_barge_switches(client, monkeypatch):
@@ -391,3 +407,40 @@ def test_debug_page_knows_the_new_steps():
     """Round-9 labels: the page names the new steps instead of showing raw keys."""
     for key in ("followup_closed", "card_size", "sessions", "barge_in", "barge_aec"):
         assert key in overlay.DEBUG_PAGE
+
+
+APP_SRC = ROOT / "mac/overlay/Sources/JarvisOverlay"
+
+
+def _swift_func(path: Path, name: str) -> str:
+    """The body of one Swift func, up to the next func/MARK at the same indent (source check only)."""
+    src = path.read_text()
+    start = src.index(f"func {name}(")
+    nxt = re.search(r"\n    (?:private |public |static |@MainActor )*func |\n    // MARK", src[start + 1:])
+    return src[start:start + 1 + nxt.start()] if nxt else src[start:]
+
+
+def test_unconfirmed_barge_final_is_never_a_turn():
+    """Security R1 (A2): the legacy recogniser's time-cap final while the barge gate is unsure must
+    end as nothing in SpeechInput, and the app sends only BargeWords.turnText (nil unless confirmed)."""
+    body = _swift_func(APP_SRC / "SpeechInput.swift", "completeTurn")
+    guard = body.index("if let barge = turn.barge, !barge.confirmed")
+    assert guard < body.index("turn.onFinal?(")
+    assert "return" in body[guard:body.index("turn.onFinal?(")]
+    start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
+    assert "BargeWords.turnText(final: text, reply: run.reply," in start
+    assert "confirmed: run.confirmed)" in start
+    assert "BargeWords.ownerWords" not in start
+
+
+def test_barge_reply_holds_the_first_clip():
+    """Code R1 (A2): reply = every .audio/.say of the turn so far, the clip that starts the run too."""
+    src = (APP_SRC / "AppController.swift").read_text()
+    start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
+    assert start.index("run.reply = replyTexts") < start.index("bargeRun = run")
+    audio = src[src.index("case .audio(let text"):src.index("case .shape(")]
+    assert audio.index("replyTexts.append(text)") < audio.index("startBargeListeningIfNeeded()")
+    say = src[src.index("case .say(let text)"):src.index("case .audio(let text")]
+    assert "replyTexts.append(text)" in say
+    assert "bargeRun?.reply.append" not in src
+    assert "replyTexts = []" in _swift_func(APP_SRC / "AppController.swift", "handleUtterance")

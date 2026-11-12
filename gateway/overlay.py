@@ -1383,6 +1383,11 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 async for ev in _line("no_sessions_access", deps):
                     yield ev
                 said.append(acks.PHRASES["no_sessions_access"])
+            elif not rows:  # nothing to read: a fixed line, so the model cannot make sessions up
+                key = "no_session_named" if intent.arg else "no_sessions"
+                async for ev in _line(key, deps):
+                    yield ev
+                said.append(acks.PHRASES[key])
             else:
                 _tainted.add(body.conv_id)  # before the model call: the rows are untrusted data
                 for row in [r for r in rows if r["needs_owner"]][:4]:  # fixed code, never the model
@@ -1395,8 +1400,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                             card["id"] = uuid.uuid4().hex[:8]
                         seen.add(card["id"])
                         yield {"type": "card", "card": card}
-                async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                                failed=failed, on_step=on_step,
+                # The owner's question (intent.arg is only the name filter); the rows travel
+                # only in the untrusted block.
+                async for event in _answer_turn(body, intents._clean(body.text), deps, metrics, said,
+                                                start, failed=failed, on_step=on_step,
                                                 extra_untrusted=_sessions_note(rows)):
                     yield event
 
