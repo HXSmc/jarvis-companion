@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -560,6 +561,7 @@ class HunkNav:
     editor: str | None
     ctx: agent_policy.Ctx
     head: str | None = None  # set when the list is commit-to-commit (what the last merge changed)
+    boxes: bool = True  # False: a Terminal-picked repo, so cards only (no `lines` event)
 
 
 # The stat card's title names the range the owner sees (gitdiff.pick_range kinds).
@@ -1001,24 +1003,30 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                 chosen = rel
                     of_file = [h for h in hunks if h["file"] == chosen][:20]
                     n = len(of_file)
+                    # A Terminal pick: no editor is in front and the app's title match could box another
+                    # repo's tab of the same name over the Terminal (Mac run 2, B1): cards only.
+                    boxes = bool(editor) or pick.get("how") != "terminal"
                     # The cursor first: a barge-in during the summary must not lose "next change".
                     ctx = agent_policy.Ctx(home=str(Path.home()),
                                            vault=os.environ.get("OVERLAY_VAULT") or None,
                                            cwd=str(repo))
                     _hunks[body.conv_id] = HunkNav(repo=repo, rel=chosen, base=rng.base, hunks=of_file,
-                                                   index=0, editor=editor, ctx=ctx, head=rng.head)
+                                                   index=0, editor=editor, ctx=ctx, head=rng.head,
+                                                   boxes=boxes)
                     if editor:  # scroll off the turn's stream: a hung CLI never holds it
                         threading.Thread(target=_scroll_to, daemon=True,
                                          args=(repo, chosen, _hunk_span(of_file[0])[0], editor,
                                                deps, on_step)).start()
                     ranges = [list(_hunk_span(h)) for h in of_file]
                     labels = [gitdiff.hunk_label(h, i + 1, n) for i, h in enumerate(of_file)]
-                    yield _lines_event(str(Path(repo) / chosen), ranges, labels)
+                    if boxes:
+                        yield _lines_event(str(Path(repo) / chosen), ranges, labels)
                     card = _hunk_card(chosen, of_file, current=0)
                     if card:
                         yield _keep_card(body.conv_id, "git", card)
                     tail = (f"I've opened {Path(chosen).name}." if editor
-                            else f"Showing the changes in {Path(chosen).name}.")
+                            else f"Showing the changes in {Path(chosen).name}." if boxes
+                            else acks.PHRASES["cards_only"].format(name=Path(chosen).name))
                     files = gitdiff.files_phrase(len(per_file))
                     summary = {"uncommitted": f"{files} with changes not committed yet. {tail}",
                                "merge_itself": f"Nothing since the last merge. Here is what that merge changed. {tail}",
@@ -1065,8 +1073,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     if nav.editor:
                         threading.Thread(target=_scroll_to, daemon=True,
                                          args=(nav.repo, nav.rel, a, nav.editor, deps, on_step)).start()
-                    yield _lines_event(str(nav.repo / nav.rel), [[a, b]],
-                                       [gitdiff.hunk_label(h, k, n)])
+                    if nav.boxes:
+                        yield _lines_event(str(nav.repo / nav.rel), [[a, b]],
+                                           [gitdiff.hunk_label(h, k, n)])
                     # Only the change list stays from the highlight, its cursor row on this change.
                     drop = _drop_cards(body.conv_id, "git", keep=("gd-list",))
                     if drop:
@@ -1371,7 +1380,10 @@ async def _owner_media(ask: intents.MediaAsk, deps: OverlayDeps, said: list[str]
     said.append(line)
     card, miss_line, result = await _media_result(task, video)
     if card:
-        yield {"type": "card", "card": card}
+        # Same words, same card id: the app replaces the earlier card instead of stacking a twin
+        # (Mac run 2: "a picture of a dog" asked twice left two dog cards).
+        key = f"{ask.kind}|{ask.count}|{ask.subject.lower()}".encode()
+        yield {"type": "card", "card": {**card, "id": "ow" + hashlib.sha256(key).hexdigest()[:10]}}
     else:
         if media_lookup._BLOCK.search(ask.subject):  # find refused it before any fetch
             result = "blocked"
@@ -2320,6 +2332,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         yield lines
                     elif run.model_lines:  # no host diff (e.g. the file's first commit): the model's
                         yield run.model_lines
+                else:  # no file on screen (Mac run 2, B3: a warm "what changed in the last commit"):
+                    _hunks.pop(run.conv_id, None)  # no change list either, so the old cursor goes
                 if len(said) == spoke:
                     async for out in _speak("I couldn't get an answer for that.", deps):
                         yield out

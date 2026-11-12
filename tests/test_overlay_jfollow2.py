@@ -287,7 +287,12 @@ def test_git_diff_uses_the_terminal_repo_pick(client, monkeypatch, tmp_path):
     screen = {"app": "Terminal", "windows": [{"app": "Terminal", "title": "r — -zsh — 80×24"}]}
     events = turn(client, "highlight the changes", conv_id="t11", screen=screen)
     assert _steps("repo_pick")[-1]["detail"].startswith("terminal")
-    assert any(e["file"].endswith("sample.py") for e in _lines(events))
+    # Round 4 (hub, Mac run 2 B1): only a Terminal in front -> cards and the cards-only line, no
+    # `lines` event: the app's title match would box another repo's sample.py tab over the Terminal.
+    assert _lines(events) == []
+    assert any(c.get("id") == "gd-list" for c in _cards(events))
+    assert acks.PHRASES["cards_only"].format(name="sample.py") in says(events)[-1]
+    assert _lines(turn(client, "next change", conv_id="t11")) == []  # the cursor keeps the rule
 
     monkeypatch.setattr(overlay, "_terminal_cwd", lambda app, title="", info=None: None)
     monkeypatch.setattr(gitdiff, "repo_for", lambda *a: None)
@@ -310,6 +315,35 @@ def test_agent_no_change_list_drops_the_old_cursor(client, monkeypatch, tmp_path
     events = turn(client, "next change", conv_id="a12")
     assert acks.PHRASES["no_hunks"] in says(events)
     assert not [c for c in _cards(events) if c.get("id") == "gd-list"]
+
+
+def test_warm_agent_turn_without_a_file_drops_the_old_cursor(client, monkeypatch, tmp_path):
+    # Mac run 2, B3: a warm "what changed in the last commit" with no file on screen (run.screen_file
+    # None) left the 1/1 cursor alive, so "next change" said "That was the last change."
+    repo = _build(tmp_path, "dirty")
+    _deps()
+    turn(client, "highlight the changes", conv_id="a13", screen=_on_screen(repo))
+    assert "a13" in overlay._hunks
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": "One commit."})]))
+    turn(client, "what changed in the last commit", conv_id="a13")
+    assert "a13" not in overlay._hunks
+    events = turn(client, "next change", conv_id="a13")
+    assert acks.PHRASES["no_hunks"] in says(events)
+    assert not [c for c in _cards(events) if c.get("id") == "gd-list"] and _lines(events) == []
+
+
+def test_same_owner_words_card_replaces_its_twin(client, monkeypatch):
+    # Mac run 2, finding 5: "show me a picture of a dog" twice left two dog cards. Same words ->
+    # same card id, so the app swaps the card; other words get another id.
+    monkeypatch.setattr(media_lookup, "find", FakeFind())
+    _deps()
+    overlay._tainted.add("ow11")
+    ids = []
+    for text in ("show me a picture of a dog", "Hey Jarvis, show me a picture of a dog.",
+                 "show me a picture of a cat"):
+        ids += [c["id"] for c in _cards(turn(client, text, conv_id="ow11")) if c["type"] == "image"]
+    assert len(ids) == 3 and ids[0] == ids[1] != ids[2]
 
 
 def test_git_diff_none_drops_the_cursor(client, monkeypatch, tmp_path):

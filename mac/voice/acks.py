@@ -52,6 +52,8 @@ PHRASES = {
     "no_repo": "I can't tell which repo. Open a file or Terminal in it.",
     # A template ({n} = the wanted line number only): spoken through the synth, never prerendered.
     "lines_short": "I see no line numbers here. The change is on line {n}.",
+    # A template ({name} = the changed file's name): a Terminal-picked repo gets cards, no boxes.
+    "cards_only": "Cards only. Open {name} in your editor to see the boxes.",
 }
 
 _ACK_KEYS = {
