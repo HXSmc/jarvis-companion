@@ -242,7 +242,6 @@ final class LineBandMapperTests: XCTestCase {
 
 #if canImport(Vision)
 import CoreText
-import ImageIO
 
 /// Mac run 3 (B4, B5 fold): Vision never read a 1-digit gutter number, so `seen` started at 10.
 /// These render a VS Code-like editor at 2x (Menlo 12 pt, 18 pt rows, grey numbers right-aligned,
@@ -313,16 +312,6 @@ final class GutterOCRTests: XCTestCase {
 
         let found = GutterOCR.lineDigits(in: image, observations: pass1, window: Self.window)
         let lines = Set(found.map(\.line))
-        let cells = GutterOCR.cellsToRead(in: image, observations: pass1, window: Self.window)
-        let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        if let made = GutterOCR.composite(cells, in: image),
-           let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: dir).appendingPathComponent("gutter-composite.png") as CFURL,
-                                                      "public.png" as CFString, 1, nil) {
-            CGImageDestinationAddImage(dest, made.image, nil)
-            CGImageDestinationFinalize(dest)
-            print("GUTTER cells \(cells) read \(GutterOCR.text(in: made.image).map { "\($0.text)@\(Int($0.box[0])),\(Int($0.box[1]))" })")
-        }
         XCTAssertTrue(Set(1...9).isSubset(of: lines), "read \(found.map(\.line).sorted()) pass1 \(pass1.map { "\($0.text)@\(Int($0.box[0]))" })")
         for hit in found where hit.line <= 9 {
             XCTAssertEqual(CGFloat((hit.box[1] + hit.box[3]) / 2), Self.rowY(hit.line), accuracy: 6, "line \(hit.line)")

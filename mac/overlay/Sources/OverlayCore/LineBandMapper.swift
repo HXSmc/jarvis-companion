@@ -377,17 +377,18 @@ public enum GutterOCR {
     /// with gaps of 3 cell heights, so two cells never read as one text.
     private static func readDoubled(_ cells: [CGRect], in image: CGImage) -> [(line: Int, box: [Double])] {
         guard let (composite, slots, crops) = composite(cells, in: image) else { return [] }
-        var perCell: [Int: [String]] = [:]
+        var perCell: [Int: [(x: Double, text: String)]] = [:]
         for o in text(in: composite) {
             let mid = CGPoint(x: (o.box[0] + o.box[2]) / 2, y: (o.box[1] + o.box[3]) / 2)
             guard let index = slots.firstIndex(where: { $0.contains(mid) }) else { continue }
-            perCell[index, default: []].append(o.text)
+            perCell[index, default: []].append((o.box[0], o.text))
         }
-        // Exactly one text per cell, and it must be two equal halves.
-        return perCell.compactMap { index, texts in
-            // The "Ln" label (or a misread of it) comes first: only what follows the first digit counts.
-            guard texts.count == 1, let start = texts[0].firstIndex(where: { $0.isASCII && $0.isNumber }),
-                  let line = doubled(String(texts[0][start...])) else { return nil }
+        // A slot's texts in reading order ("Ln" and "33" may come apart). The "Ln" label (or a misread
+        // of it) comes first: only what follows the first digit counts, and it must be two equal halves.
+        return perCell.compactMap { index, parts in
+            let joined = parts.sorted { $0.x < $1.x }.map(\.text).joined(separator: " ")
+            guard let start = joined.firstIndex(where: { $0.isASCII && $0.isNumber }),
+                  let line = doubled(String(joined[start...])) else { return nil }
             let c = crops[index].cell
             return (line: line, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
         }.sorted { $0.box[1] < $1.box[1] }
