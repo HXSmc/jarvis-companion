@@ -16,6 +16,8 @@ public enum TurnEndpointer {
     public static let completeHold: TimeInterval = 1.5
     /// A follow-up replay starts this long after the reply drained: the reply's room echo dies.
     public static let echoTail: TimeInterval = 0.15
+    /// An unpunctuated partial this long (in words) is mid-request, not a finished sentence.
+    public static let longRequestWords = 8
 
     /// A filler ends a turn as incomplete even when STT punctuates it ("the last, huh?").
     static let fillers: Set<String> = ["uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah"]  // Mac STT: "uh" -> "huh"
@@ -39,6 +41,14 @@ public enum TurnEndpointer {
 
     public static func silence(after text: String) -> TimeInterval {
         looksIncomplete(text) ? extended : fast
+    }
+
+    /// A long partial without terminal punctuation is still growing (final results punctuate),
+    /// so a natural pause inside it is not the end: it gets the extended window.
+    static func midRequest(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = t.last, !".?!".contains(last) else { return false }
+        return t.split { !$0.isLetter && $0 != "'" }.count >= longRequestWords
     }
 
     /// The words after the wake word (moved from SpeechInput unchanged, so tests can pin it).
@@ -66,10 +76,12 @@ public enum TurnEndpointer {
     }
 
     public static func shouldEnd(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> Bool {
-        let needed = silence(after: text)
+        let mid = midRequest(text)
+        let needed = mid ? extended : silence(after: text)
         if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return true }
         // A complete-looking sentence ends on text silence alone; empty text never does.
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        if !mid,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !looksIncomplete(text),
            now.timeIntervalSince(lastTextAt) >= completeHold { return true }
         let quietSince = max(lastTextAt, lastVoiceAt ?? .distantPast)
@@ -209,9 +221,10 @@ public enum LevelBlocks {
 /// runs 2 and 3: room speech joined a request, or took the turn). Words count as the owner's only
 /// when his voice, at `ratio` of the turn's loudest 100 ms block, was heard up to `lag` before them.
 public struct TailGate {
-    /// Room words are quieter than half the request's loudest voice (-6 dB); the service can change it
+    /// Room words glued onto a request sat within ~6 dB of the owner's loudest voice (jfollow4 E):
+    /// only 0.6 of the request's peak (-4.4 dB) still counts as him. The service can change it
     /// (`OVERLAY_TAIL_LEVEL_RATIO`, sent on /overlay/health).
-    public static let defaultRatio = 0.5
+    public static let defaultRatio = 0.6
     /// Partials trail the audio: a word shows up to this long after it was said.
     public static let lag: TimeInterval = 1.2
     /// Blocks below this RMS are silence, never the owner's voice.

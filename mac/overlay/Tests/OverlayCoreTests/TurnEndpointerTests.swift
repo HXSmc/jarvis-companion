@@ -27,6 +27,42 @@ final class TurnEndpointerTests: XCTestCase {
                                                now: t0.addingTimeInterval(0.75)))
     }
 
+    /// jfollow4 E: a 20-word request with natural 0.6 s pauses was cut by the fast window. Partials
+    /// trail the voice, so mid-pause the text and the voice flag both sit ~0.75 s old while the
+    /// request is still growing; a long unpunctuated partial gets the extended window.
+    func testLongRequestPausesDoNotEndTheTurnEarly() {
+        let t0 = Date()
+        let request = ("please show me the weather in paris tomorrow morning and then the news "
+            + "for the day after that as well plus the time")
+            .split(separator: " ").map(String.init)
+        XCTAssertGreaterThanOrEqual(request.count, 20)
+        var text = ""
+        for w in request.indices {
+            text = request[...w].joined(separator: " ")
+            // Five natural pauses inside the request, each after word 8, 11, 14, 17, 20.
+            if w + 1 >= 8, (w + 1 - 8) % 3 == 0, w < request.count - 1 {
+                // Mid-pause, 0.75 s since the last partial and its voice: not the end.
+                XCTAssertFalse(TurnEndpointer.shouldEnd(text: text,
+                                                        lastTextAt: t0,
+                                                        lastVoiceAt: t0,
+                                                        now: t0.addingTimeInterval(0.75)),
+                               "cut at word \(w + 1): \(text)")
+            }
+        }
+        // The finished short command stays fast.
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: "Open Safari", lastTextAt: t0, lastVoiceAt: t0,
+                                               now: t0.addingTimeInterval(0.75)))
+        // The long request does end: after the last word, 2.7 s of quiet (or 4 s of stuck text).
+        let last = t0.addingTimeInterval(Double(request.count) * 0.4)
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: text, lastTextAt: last,
+                                                lastVoiceAt: last, now: last.addingTimeInterval(2.0)))
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: text, lastTextAt: last,
+                                               lastVoiceAt: last, now: last.addingTimeInterval(2.8)))
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: text, lastTextAt: last,
+                                               lastVoiceAt: last.addingTimeInterval(4),
+                                               now: last.addingTimeInterval(4)))  // stuck text
+    }
+
     func testStillVoicedKeepsListeningWhilePartialsLag() {
         let t0 = Date()
         // Text stalled for 1 s but the mic heard voice 0.2 s ago: the user is still talking.
@@ -119,6 +155,20 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(TurnEndpointer.replayable(stamps: [d], drainedAt: nil), [false])
     }
 
+    /// jfollow4 D4: the owner's follow-up onset 0.2-1.0 s after the reply's drain must be replayed;
+    /// only chunks stamped before drain + echoTail are the reply's echo.
+    func testFollowUpOnsetKept() {
+        let t = Date(timeIntervalSince1970: 2000)
+        let stamps = (0...30).map { t.addingTimeInterval(Double($0) * 0.1) }  // ring stamps every 0.1 s
+        let flags = TurnEndpointer.replayable(stamps: stamps, drainedAt: t)
+        for (i, onset) in [0.2, 0.5, 1.0].enumerated() {
+            XCTAssertTrue(flags[[2, 5, 10][i]], "onset \(onset) s after the drain must replay")
+        }
+        for (i, flag) in flags.enumerated() where Double(i) * 0.1 < TurnEndpointer.echoTail {
+            XCTAssertFalse(flag, "chunk \(i * 100) ms after the drain is the reply's echo")
+        }
+    }
+
     func testVoiceActivityTracksTheNoiseFloor() {
         var vad = VoiceActivity()
         for _ in 0..<100 { XCTAssertFalse(vad.isVoiced(rms: 0.002)) }  // quiet room
@@ -150,6 +200,25 @@ final class TurnEndpointerTests: XCTestCase {
         let text = "Highlight the changes. What are you people"
         XCTAssertNil(gate.cut(text: text, now: t0.addingTimeInterval(2.9)))  // owner quiet < 1.5 s
         XCTAssertEqual(gate.cut(text: text, now: t0.addingTimeInterval(3.05)), "Highlight the changes.")
+    }
+
+    /// jfollow4 E: room speech at 55% of the owner's peak glued its words onto his request under the
+    /// old half-peak bar; only 0.6 of the peak still counts as him.
+    func testRoomSpeechJustOverHalfHisPeakIsCut() {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.12, from: t0, seconds: 1.5)                          // the owner's request
+        gate.partial("Show me the last merge.", at: t0.addingTimeInterval(1.6))
+        feed(&gate, 0.066, from: t0.addingTimeInterval(1.5), seconds: 3)   // the room at 0.55 of his peak
+        gate.partial("Show me the last merge. And the one before", at: t0.addingTimeInterval(3.2))
+        XCTAssertEqual(gate.cut(text: "Show me the last merge. And the one before",
+                                now: t0.addingTimeInterval(3.05)), "Show me the last merge.")
+        // He himself keeps the turn at 0.85 of his peak, still over the bar.
+        var softer = TailGate()
+        feed(&softer, 0.12, from: t0, seconds: 1.5)
+        feed(&softer, 0.102, from: t0.addingTimeInterval(1.5), seconds: 1.0)  // trailing off
+        softer.partial("Show me the last merge. Please.", at: t0.addingTimeInterval(2.9))
+        XCTAssertEqual(softer.kept, "Show me the last merge. Please.")
     }
 
     func testOwnerContinuingAtHisLevelIsKept() {

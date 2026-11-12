@@ -136,7 +136,7 @@ public enum ControlEvent: Equatable {
         case "workspace_save":
             // The nonce names the POST /overlay/workspace/<nonce> answer slot: 16 lowercase hex.
             guard let nonce = obj["nonce"] as? String, nonce.count == 16,
-                  nonce.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+                  nonce.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) })
             else { return nil }
             return .workspaceSave(nonce: nonce)
         case "open_pages":
