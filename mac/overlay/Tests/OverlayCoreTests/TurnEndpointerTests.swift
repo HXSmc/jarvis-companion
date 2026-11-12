@@ -57,6 +57,37 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(held.release(at: t0).count, HeldLine<String>.maxEvents)
     }
 
+    func testPushedLineIsNotHeldThroughAnOpenWindow() {
+        // Mac run 4, B5 fold: "folded" came 3 s into the follow-up window and was held to its end,
+        // heard >= 5.3 s late. An open window nobody spoke in is closed for the line instead.
+        XCTAssertEqual(PushTiming.decide(orb: .followUp, audioBusy: false), .closeWindow)
+        XCTAssertEqual(PushTiming.decide(orb: .idle, audioBusy: false), .now)
+        XCTAssertEqual(PushTiming.decide(orb: .error, audioBusy: false), .now)
+        // Never over a reply, the owner's words or a running turn.
+        XCTAssertEqual(PushTiming.decide(orb: .speaking, audioBusy: true), .hold)
+        XCTAssertEqual(PushTiming.decide(orb: .idle, audioBusy: true), .hold)
+        XCTAssertEqual(PushTiming.decide(orb: .followUp, audioBusy: true), .hold)
+        XCTAssertEqual(PushTiming.decide(orb: .listening, audioBusy: false), .hold)
+        XCTAssertEqual(PushTiming.decide(orb: .thinking, audioBusy: false), .hold)
+    }
+
+    func testReplayNeverRepeatsADroppedTurnsAudio() {
+        // Mac run 4, 32: room words "Right. I thought so. Exactly" were dropped (no reply, so no new
+        // drain); the next window replayed them from the old drain: "Thought so. Exactly. Next change".
+        let drain = Date(timeIntervalSince1970: 1000)
+        let heard = drain.addingTimeInterval(4)
+        let from = TurnEndpointer.replayFrom(drainedAt: drain, heardUntil: heard)
+        XCTAssertEqual(from, heard)
+        let room = heard.addingTimeInterval(-0.5), owner = heard.addingTimeInterval(0.6)
+        XCTAssertEqual(TurnEndpointer.replayable(stamps: [room, owner], drainedAt: from), [false, true])
+        // A spoken reply drains after the turn it answered: the drain still rules.
+        let later = heard.addingTimeInterval(3)
+        XCTAssertEqual(TurnEndpointer.replayFrom(drainedAt: later, heardUntil: heard), later)
+        XCTAssertEqual(TurnEndpointer.replayFrom(drainedAt: nil, heardUntil: heard), heard)
+        XCTAssertEqual(TurnEndpointer.replayFrom(drainedAt: drain, heardUntil: nil), drain)
+        XCTAssertNil(TurnEndpointer.replayFrom(drainedAt: nil, heardUntil: nil))
+    }
+
     func testStripWakeOneBreath() {
         XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis next change"), "next change")
     }

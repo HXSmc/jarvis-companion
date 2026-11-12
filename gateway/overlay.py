@@ -1833,6 +1833,7 @@ class AgentRun:
     opening_said: str | None = None  # the line it spoke; a tool's progress line never repeats it
     screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
     editor: str | None = None  # VS Code/Cursor CLI that scrolls that file to its first change
+    document: str | None = None  # repo-relative document in front: the model's lines in it get scrolled to
     model_lines: dict | None = None  # the model's validated lines, held while the host's may replace them
     cards_sent: bool = False  # the previous agent turn's cards were dropped at this run's first card
 
@@ -2188,8 +2189,15 @@ _SCREEN_FILE_RE = re.compile(r"\b(?:on (?:my|the) screen|this (?:file|code|funct
 
 def _screen_file(body: TurnBody, repo: Path | None, sub: str) -> str | None:
     """Repo-relative path of the file on screen when a git/code request points at it, else None."""
+    if sub not in ("git", "code") or not _SCREEN_FILE_RE.search(body.text):
+        return None
+    return _screen_doc(body, repo)
+
+
+def _screen_doc(body: TurnBody, repo: Path | None) -> str | None:
+    """Repo-relative path of the document in front, when it is a file inside `repo`, else None."""
     doc = body.screen.document if body.screen is not None else None
-    if repo is None or not doc or sub not in ("git", "code") or not _SCREEN_FILE_RE.search(body.text):
+    if repo is None or not doc:
         return None
     root, target = Path(repo).resolve(), Path(doc).expanduser().resolve()
     return str(target.relative_to(root)) if target.is_relative_to(root) and target.is_file() else None
@@ -2277,6 +2285,7 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
                    last_progress=deps.clock(),  # the ack just played: no tool progress line in the next 4 s
                    opening_key=acks.progress_key({"code": "file"}.get(sub, sub)),
                    screen_file=await asyncio.to_thread(_screen_file, body, repo, sub),
+                   document=await asyncio.to_thread(_screen_doc, body, repo),
                    editor=_EDITOR_CLI.get(body.screen.app if body.screen is not None else ""))
     await asyncio.to_thread(session.send_user, "\n\n".join(parts))
     async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
@@ -2406,7 +2415,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     metrics["agent_first_progress_s"] = metrics["agent_total_s"]
                 spoke = len(said)
                 for line in str(ev.get("result") or "").splitlines():
-                    async for out in _agent_flush(line, run, deps, metrics, said, start):
+                    async for out in _agent_flush(line, run, deps, metrics, said, start, on_step):
                         yield out
                 if run.screen_file:  # "what changed" in the file on screen: the host's card and lines
                     card, lines, nav = await asyncio.to_thread(_last_change, run)
@@ -2449,7 +2458,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
 
 
 async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dict, said: list[str],
-                       start: float) -> AsyncIterator[dict]:
+                       start: float, on_step=None) -> AsyncIterator[dict]:
     """One line of the agent's final reply: say / card / shape / lines only (no open, no incomplete)."""
     line = line.strip()
     if not line:
@@ -2487,6 +2496,12 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         # (Mac run 4: the model's own line was off screen, and it switched the host's card off).
         run.model_lines = lines
     elif lines:
+        rel = str(Path(lines["file"]).relative_to(Path(run.repo).resolve()))
+        if run.editor and rel == run.document:
+            # Only the document already in front, never another file (jfollow2 Mac run 4, 26: the lines
+            # sat below the view and Jarvis said "folded or wrapped").
+            threading.Thread(target=_scroll_to, daemon=True,
+                             args=(run.repo, rel, lines["ranges"][0][0], run.editor, deps, on_step)).start()
         yield lines
 
 
@@ -2582,7 +2597,8 @@ async def post_debug_note(body: DebugNote) -> dict:
             for ev in events:
                 bus.publish("hud", ev)
             # The page shows the line under the `lines` row (Mac run 2, B4: no row, so silence and a
-            # dropped push looked the same); the app holds it until its follow-up window closes.
+            # dropped push looked the same); the app says it when idle, after the reply, or closes an
+            # unused follow-up window for it.
             debug_log.add(rec, "spoke", text=acks.PHRASES[key] if n is None else acks.PHRASES[key].format(n=n),
                           ms=None, audio_ms=None, note="pushed to the app, played when idle")
     return {"ok": True}

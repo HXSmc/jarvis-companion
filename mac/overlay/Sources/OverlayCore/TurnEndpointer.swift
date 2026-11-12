@@ -70,6 +70,16 @@ public enum TurnEndpointer {
         drainedAt.addingTimeInterval(echoTail)
     }
 
+    /// The follow-up window's replay start: after the reply drained AND after the audio the last turn
+    /// already heard. A dropped room turn has no reply, so the drain alone replayed its words into the
+    /// next follow-up (Mac run 4: "Thought so. Exactly. Next change").
+    public static func replayFrom(drainedAt: Date?, heardUntil: Date?) -> Date? {
+        switch (drainedAt, heardUntil) {
+        case let (d?, h?): return max(d, h)
+        case let (d, h): return d ?? h
+        }
+    }
+
     /// Which ring chunks a follow-up may replay; all false when the drain time is unknown.
     public static func replayable(stamps: [Date], drainedAt: Date?) -> [Bool] {
         guard let drainedAt else { return stamps.map { _ in false } }
@@ -78,10 +88,31 @@ public enum TurnEndpointer {
     }
 }
 
+/// When a spoken line the service pushed after its turn ended may sound.
+public enum PushTiming: Equatable {
+    /// Idle: say it now.
+    case now
+    /// The follow-up mic is open and nobody has spoken: close the window, say it, reopen the window
+    /// after it (Mac run 4, B5 fold: held to the window's end, the line came >= 5.3 s late).
+    case closeWindow
+    /// A reply plays, the owner talks or a turn runs: hold it (`HeldLine`); the reply's drain or the
+    /// window's close says it, a new turn drops it.
+    case hold
+
+    public static func decide(orb: OrbState, audioBusy: Bool) -> PushTiming {
+        if audioBusy { return .hold }
+        switch orb {
+        case .idle, .error: return .now
+        case .followUp: return .closeWindow
+        case .listening, .thinking, .speaking: return .hold
+        }
+    }
+}
+
 /// A spoken line the service pushed after its turn ended ("no box, the change is on line 3") while
 /// Jarvis talked or the follow-up mic was open. Played then, it talks over the reply or the follow-up
-/// mic hears it as the owner, and dropping it left silence (Mac run 2, B4). So it waits until the
-/// window closes with no new turn; a new turn, or `maxAge` since it came, drops it.
+/// mic hears it as the owner, and dropping it left silence (Mac run 2, B4). So it waits for the reply
+/// to drain or the window to close (`PushTiming`); a new turn, or `maxAge` since it came, drops it.
 public struct HeldLine<Event> {
     public static var maxAge: TimeInterval { 15 }
     /// One line is a say and an audio event; a few lines at most.

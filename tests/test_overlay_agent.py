@@ -862,10 +862,53 @@ def test_model_lines_never_suppress_the_host_card_and_the_first_change_is_scroll
     events = turn(client, "what changed in this file", conv_id="r4c", screen={"app": "Xcode", "document": str(target)})
     assert calls == [] and [e for e in events if e["type"] == "lines"]
 
-    # A request not about the screen keeps the model's validated lines (no host card, no scroll).
+    # A request not about the screen keeps the model's validated lines (no host card); they are in the
+    # file on screen, so it is scrolled to them (jfollow2 Mac run 4, 26: below the view, no box).
     events = turn(client, "what changed in the last commit", conv_id="r4d",
                   screen={"app": "Code", "document": str(target)})
-    assert calls == [] and [e["ranges"] for e in events if e["type"] == "lines"] == [[[1, 1]]]
+    assert [e["ranges"] for e in events if e["type"] == "lines"] == [[[1, 1]]]
+    assert _wait(lambda: calls == [["code", "--goto", f"{target}:1"]])
+
+
+def test_model_lines_scroll_only_the_file_already_on_screen(client):
+    """jfollow2 Mac run 4, criterion 26: the agent's answer to "what changed in the last commit" sent
+    `lines want=153-154` for the file on screen with no `editor_scroll`; the lines sat below the view
+    and Jarvis said "folded or wrapped". Now the editor scrolls to the model's first range, but only in
+    the document already in front (never opens another file), and only for VS Code / Cursor."""
+    _changed_app_py(REPO)
+    (REPO / "other.py").write_text("x = 1\n")
+    target = (REPO / "app.py").resolve()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return type("P", (), {"returncode": 0, "stdout": ""})()
+
+    clock = Clock()
+    reply = [{"say": "Lines 3 and 4."}, {"lines": {"file": "app.py", "ranges": [[3, 4]]}}]
+    setup(clock, lambda: FakeAgent(clock, script=[result(*reply)]), run=fake_run)
+    events = turn(client, "what changed in the last commit", conv_id="ms1",
+                  screen={"app": "Code", "document": str(target)})
+    assert [e["ranges"] for e in events if e["type"] == "lines"] == [[[3, 4]]]
+    assert _wait(lambda: calls == [["code", "--goto", f"{target}:3"]])
+    rows = lambda: [s for s in overlay.debug_log.snapshot()["turns"][0]["steps"] if s["step"] == "editor_scroll"]  # noqa: E731
+    assert _wait(lambda: len(rows()) == 1) and rows()[0]["detail"].startswith("code in ")
+
+    # The model names another file: its lines still go out, nothing is opened or scrolled.
+    calls.clear()
+    reply = [{"say": "In other.py."}, {"lines": {"file": "other.py", "ranges": [[1, 1]]}}]
+    setup(clock, lambda: FakeAgent(clock, script=[result(*reply)]), run=fake_run)
+    events = turn(client, "what changed in the last commit", conv_id="ms2",
+                  screen={"app": "Code", "document": str(target)})
+    assert [e["ranges"] for e in events if e["type"] == "lines"] == [[[1, 1]]]
+    time.sleep(0.2)
+    assert calls == []
+    # Not an editor in front: never scrolled.
+    reply = [{"say": "Lines 3 and 4."}, {"lines": {"file": "app.py", "ranges": [[3, 4]]}}]
+    setup(clock, lambda: FakeAgent(clock, script=[result(*reply)]), run=fake_run)
+    turn(client, "what changed in the last commit", conv_id="ms3", screen={"app": "Xcode", "document": str(target)})
+    time.sleep(0.2)
+    assert calls == []
 
 
 def test_editor_scroll_is_skipped_when_the_cli_is_missing(client):

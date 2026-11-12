@@ -24,6 +24,8 @@ final class AppController {
     /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
     private var listenSerial = 0
     private var heldLine = HeldLine<OverlayEvent>()
+    /// When the last turn's speech was handed over: ring audio before it is never replayed again.
+    private var lastHeardUntil: Date?
 
     // Outage state.
     private var serviceVoice: String?
@@ -145,20 +147,31 @@ final class AppController {
         }
     }
 
-    /// A `hud` event pushed after its turn ended (an expired Confirm, a "no box" line): card always,
-    /// line when idle, else held until the follow-up window closes (`HeldLine`).
+    /// A `hud` event pushed after its turn ended (an expired Confirm, a "no box" line): card always;
+    /// its line when idle, in an open follow-up window nobody spoke in (closed for it, reopened after),
+    /// else held until the reply drains or the window closes (`PushTiming`, `HeldLine`).
     private func handlePush(_ event: OverlayEvent) {
-        let idle = model.orb == .idle && !audio.isBusy
-        if !idle {
-            switch event {
-            case .say, .audio:
+        let sounds: Bool
+        switch event {
+        case .audio: sounds = true
+        case .say: sounds = serviceVoice == nil
+        default: sounds = false
+        }
+        if sounds {
+            switch PushTiming.decide(orb: model.orb, audioBusy: audio.isBusy) {
+            case .hold:
                 heldLine.hold(event, at: Date())
                 return
-            default:
+            case .closeWindow:
+                listenSerial += 1  // the window's pending callbacks are stale
+                speech.cancel()    // the mic must not take Jarvis's line as the owner's
+                model.orb = .idle
+                turnDone = true    // the line's drain reopens the follow-up window
+            case .now:
                 break
             }
         }
-        switch event.pushed(idle: idle) {
+        switch event.pushed(idle: true) {
         case .card(let card)?:
             model.add(card: card)
         case .audio(_, let rate, let pcm)?:
@@ -236,7 +249,9 @@ final class AppController {
                 if followUp, self?.model.orb == .followUp { self?.model.orb = .listening }
             },
             onFinal: { [weak self] text, sttFinalMs, endOfSpeech, heard in
+                let heardUntil = Date()  // every ring chunk before this went to this turn
                 Task { @MainActor in
+                    self?.lastHeardUntil = heardUntil
                     await self?.handleUtterance(text: text,
                                           followUp: followUp,
                                           sttFinalMs: sttFinalMs,
@@ -560,12 +575,22 @@ final class AppController {
     /// trailing-off request gets its rest). 300 ms first so the room echo of the reply dies out.
     private func replyFinished() {
         model.orb = .idle
+        // A line pushed while the reply played: say it now; its drain comes back here for the window.
+        let held = heldLine.release(at: Date())
+        if !held.isEmpty {
+            turnDone = true
+            for event in held { handlePush(event) }
+            if audio.isBusy { return }
+            turnDone = false
+        }
         let serial = listenSerial
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard let self, self.listenSerial == serial, self.model.orb == .idle, !self.audio.isBusy
             else { return }
-            await self.handleWake(followUp: true, replayFrom: self.audio.lastDrainAt)
+            await self.handleWake(followUp: true,
+                                  replayFrom: TurnEndpointer.replayFrom(drainedAt: self.audio.lastDrainAt,
+                                                                        heardUntil: self.lastHeardUntil))
         }
     }
 }
