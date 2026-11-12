@@ -5,38 +5,81 @@ import Foundation
 public enum BargeReason: String { case wake, level, aec }
 
 /// Per-100-ms-block echo gate: the mic may only count as a barge-in candidate when it sits over
-/// what the audio out's echo would explain. The out->mic coupling is learned as a slow EMA of the
-/// echo ratio while the mic is under the threshold; blocks over it never learn (they would teach
-/// the owner's voice as echo). `holdBlocks` blocks (0.3 s) make the candidate.
+/// what the audio out's echo would explain. The echo reference is the loudest out block of the
+/// last `tailBlocks` (0.5 s): the speaker plays a buffer after the mixer tap saw it and the room
+/// keeps ringing after it, so the mic's echo trails the out blocks (Mac live run 1: a sentence
+/// gap with out 0 and the mic still ringing fired `barge_in reason=level` 3 times). The out->mic
+/// coupling is learned as a slow EMA of mic/reference while the mic is under the threshold; blocks
+/// over it never learn (they would teach the owner's voice as echo). `holdBlocks` blocks (0.3 s)
+/// make the candidate; partials trail the audio, so a candidate stays usable for `wordLag`.
 public struct EchoGate {
-    public static let outFloor = 0.01, micFloor = 0.01, defaultMargin = 2.0, aecMargin = 1.0, holdBlocks = 3, learnRate = 0.1, startCoupling = 1.0
+    public static let outFloor = 0.01, micFloor = 0.01, defaultMargin = 2.0, aecMargin = 1.0, holdBlocks = 3, learnRate = 0.1, startCoupling = 1.0, tailBlocks = 5
+    /// How long after its last over block a candidate still confirms a partial (= TailGate.lag).
+    public static let wordLag: TimeInterval = 1.2
 
     public private(set) var coupling: Double = EchoGate.startCoupling
     public let margin: Double
     public private(set) var candidateSince: Date?
     public private(set) var overBlocks = 0
+    /// The newest block that was over the echo, and the newest block that completed a candidate run.
+    public private(set) var lastOverAt: Date?
+    public private(set) var lastCandidateAt: Date?
+    /// Counters for the one-shot `barge_gate` debug note (numbers only).
+    public private(set) var blocks = 0, overTotal = 0, longestRun = 0
+    public private(set) var peakRatio = 0.0
+    private var recentOut: [Double] = []
 
     public init(margin: Double = EchoGate.defaultMargin) {
         self.margin = margin
     }
 
+    /// The echo the gate expects on the mic for a next block with this `out`.
+    public func echoEstimate(nextOut out: Double) -> Double {
+        coupling * max(recentOut.suffix(Self.tailBlocks - 1).max() ?? 0, out)
+    }
+
     /// One finished 100 ms block, `at` = its end.
     public mutating func block(mic: Double, out: Double, at: Date) {
-        let over = mic > max(margin * coupling * out, EchoGate.micFloor)
+        let reference = max(recentOut.suffix(Self.tailBlocks - 1).max() ?? 0, out)
+        recentOut = Array((recentOut + [out]).suffix(Self.tailBlocks))
+        blocks += 1
+        if reference >= EchoGate.outFloor { peakRatio = max(peakRatio, mic / (coupling * reference)) }
+        let over = mic > max(margin * coupling * reference, EchoGate.micFloor)
         if over {
             if overBlocks == 0 { candidateSince = at }
             overBlocks += 1
+            overTotal += 1
+            longestRun = max(longestRun, overBlocks)
+            lastOverAt = at
+            if overBlocks >= Self.holdBlocks { lastCandidateAt = at }
         } else {
             overBlocks = 0
             candidateSince = nil
-            if out >= EchoGate.outFloor {
-                coupling += EchoGate.learnRate * (mic / out - coupling)  // slow EMA of the echo ratio
+            if reference >= EchoGate.outFloor {
+                coupling += EchoGate.learnRate * (mic / reference - coupling)  // slow EMA of the echo ratio
             }
         }
     }
 
     /// `holdBlocks` blocks of 100 ms = 0.3 s of mic the echo cannot explain.
     public var isCandidate: Bool { overBlocks >= Self.holdBlocks }
+
+    /// A candidate now, or one that ended at most `wordLag` ago: the partial holding the owner's
+    /// words arrives after he spoke them, often after the run already ended.
+    public func candidate(at now: Date) -> Bool {
+        isCandidate || lastCandidateAt.map { now.timeIntervalSince($0) <= Self.wordLag } ?? false
+    }
+
+    /// Any over block in the last `wordLag`: words heard since then may be the owner's.
+    public func recentlyOver(at now: Date) -> Bool {
+        lastOverAt.map { now.timeIntervalSince($0) <= Self.wordLag } ?? false
+    }
+
+    /// The gate's numbers for the debug page (fixed words and numbers only).
+    public var summary: String {
+        "coupling=\((coupling * 1000).rounded() / 1000) blocks=\(blocks) over=\(overTotal) "
+            + "longest_run=\(longestRun) peak_ratio=\((peakRatio * 100).rounded() / 100)"
+    }
 }
 
 /// Stop phrases: a spoken line that alone says "stop". A Python test parses this literal from the
@@ -77,24 +120,44 @@ public enum StopPhrase {
 /// words the reply itself contains.
 public enum BargeWords {
     /// Ordered words, lower case, apostrophes removed, split on non-letters/digits.
+    /// Number words as digits: the reply text says "Change 1 of 3", the recogniser hears "change
+    /// one of three" (Mac live run 1: the echo confirmed itself on "one" and "three").
+    private static let numbers: [String: String] = [
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
+        "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12",
+        "thirteen": "13", "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+        "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
+        "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+    ]
+
     private static func tokens(_ s: String) -> [String] {
         let plain = s.lowercased().filter { $0 != "'" && $0 != "\u{2019}" }
-        return plain.split { !($0.isLetter || $0.isNumber) }.map(String.init)
+        return plain.split { !($0.isLetter || $0.isNumber) }.map { numbers[String($0)] ?? String($0) }
+    }
+
+    /// Whitespace words of a partial: `confirms(freshFrom:)` counts in these.
+    public static func wordCount(_ s: String) -> Int {
+        s.split(whereSeparator: { $0.isWhitespace }).count
     }
 
     private static func normToken(_ s: String) -> String {
         tokens(s).joined()
     }
 
-    /// (b) A stop phrase confirms only when none of its words is in the reply;
-    /// (a) otherwise >= 2 words outside the reply and the partial not a contiguous
-    /// sub-sequence of it.
-    public static func confirms(partial: String, reply: [String]) -> Bool {
-        let p = tokens(partial)
+    /// Only the partial's words from word `freshFrom` on count (the words heard since the gate last
+    /// went over the echo; the whole barge transcript holds every misheard echo word of the reply
+    /// so far), with their echo lead dropped (`ownerWords`). Then:
+    /// (b) a stop phrase confirms only when none of its words is in the reply;
+    /// (a) otherwise >= 2 words outside the reply and the words not a contiguous run of it.
+    public static func confirms(partial: String, reply: [String], freshFrom: Int = 0) -> Bool {
+        let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
+        let owned = ownerWords(partial: fresh, reply: reply)
+        let p = tokens(owned)
         let r = reply.flatMap(tokens)
         let rs = Set(r)
-        if StopPhrase.matches(partial) {
-            return p.allSatisfy { !rs.contains($0) }
+        if StopPhrase.matches(owned) {
+            return !p.isEmpty && p.allSatisfy { !rs.contains($0) }
         }
         guard p.filter({ !rs.contains($0) }).count >= 2 else { return false }
         return !isContiguous(p, in: r)
@@ -114,11 +177,24 @@ public enum BargeWords {
     }
 
     /// The barge turn's text for the service: nil until a barge-in was confirmed (an unsure gate
-    /// never starts a turn, A2), else the owner's words, nil when nothing of them is left.
-    public static func turnText(final: String, reply: [String], confirmed: Bool) -> String? {
+    /// never starts a turn, A2), else the owner's words from word `freshFrom` on (the words before
+    /// it were the reply's echo), nil when nothing of them is left.
+    public static func turnText(final: String, reply: [String], confirmed: Bool, freshFrom: Int = 0) -> String? {
         guard confirmed else { return nil }
-        let owned = ownerWords(partial: final, reply: reply)
+        let raw = final.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
+        let owned = ownerWords(partial: fresh, reply: reply)
         return owned.isEmpty ? nil : owned
+    }
+
+    /// A wake turn that cut a reply (A4) replays ring audio holding the reply's echo before and
+    /// after the wake word, which STT may mishear ("the overlay, sir. Hey, John. The overlay. So"):
+    /// drop the echo lead, a misheard wake, then the echo lead again.
+    public static func wakeTurnText(final: String, reply: [String]) -> String {
+        let lead = ownerWords(partial: final, reply: reply)
+        let unwoken = TurnEndpointer.dropMisheardWake(lead)
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?;:-"))
+        return ownerWords(partial: unwoken, reply: reply)
     }
 
     /// The longest leading run of >= 2 non-empty normalized tokens contiguous in the reply,
@@ -144,11 +220,11 @@ public enum BargeWords {
 /// The barge-in call: when unsure, never interrupt (nil).
 public enum BargeDecision {
     public static func decide(gateCandidate: Bool, partial: String?, reply: [String],
-                              wake: Bool, enabled: Bool, aec: Bool) -> BargeReason? {
+                              wake: Bool, enabled: Bool, aec: Bool, freshFrom: Int = 0) -> BargeReason? {
         if wake { return .wake }  // the wake word interrupts even when barge-in is off
         guard enabled else { return nil }
         if gateCandidate, let partial, !partial.isEmpty,
-           BargeWords.confirms(partial: partial, reply: reply) {
+           BargeWords.confirms(partial: partial, reply: reply, freshFrom: freshFrom) {
             return aec ? .aec : .level
         }
         return nil

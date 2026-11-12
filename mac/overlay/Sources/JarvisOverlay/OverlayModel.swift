@@ -274,6 +274,12 @@ final class OverlayModel: ObservableObject {
     /// and the cards unless they are parked aside (chips wait for restore or clear, no timer).
     /// Cleared cards stay restorable by "show them" (idleStash).
     private func idleExpired() {
+        // An enlarged card is being read: wait another round (Mac live run 1: the 60 s clear took
+        // the enlarged phone diagram, so "make it smaller" found nothing to bring back).
+        if enlarge.holdsIdle {
+            bumpIdle()
+            return
+        }
         if ScatterLayout.idleWaits(pointerOnPanel: pointerOnPanel(),
                                    playingSince: MediaPlaybackController.shared.playingSince,
                                    now: Date()) {

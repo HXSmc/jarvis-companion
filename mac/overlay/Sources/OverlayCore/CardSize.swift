@@ -5,6 +5,8 @@ import CoreGraphics
 public enum CardSize {
     public static let screenShare: CGFloat = 0.8
     public static let fontScaleCap: CGFloat = 2.5
+    /// A flow's text grows less than its width, so node labels get more room than on the tile.
+    public static let flowFontScaleCap: CGFloat = 1.6
 
     public static func enlargedFrame(natural: CGSize, visible: CGRect) -> CGRect {
         guard natural.width > 0, natural.height > 0 else {
@@ -33,6 +35,9 @@ public struct EnlargeState: Equatable {
         self.id = id
         return previous
     }
+
+    /// While a card is enlarged the idle clear waits (the owner is reading it).
+    public var holdsIdle: Bool { id != nil }
 
     public mutating func restore() {
         id = nil

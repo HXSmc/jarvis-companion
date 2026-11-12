@@ -57,7 +57,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 incomplete: "waiting for more", continued: "continued after a pause",
                 followup_dropped: "follow-up dropped", followup_closed: "follow-up window closed",
                 card_size: "card size", sessions: "sessions",
-                barge_in: "barge-in", barge_aec: "echo canceller" };
+                barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -81,7 +81,7 @@ function describe(s) {
     case "followup_closed": return s.detail || "no follow-up window left open";
     case "card_size": return `action=${s.action ?? "?"} card=${s.card ?? "none"} match=${s.match ?? "none"}`;
     case "sessions": return s.detail || "";
-    case "barge_in": case "barge_aec": return s.detail || "";
+    case "barge_in": case "barge_aec": case "barge_gate": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");

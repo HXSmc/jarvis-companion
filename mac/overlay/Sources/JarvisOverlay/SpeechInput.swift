@@ -117,6 +117,7 @@ final class SpeechInput {
     func cancel() {
         guard let turn = currentTurn else { return }
         turn.cancelled = true
+        turn.barge?.end()
         currentTurn = nil
         turnTask?.cancel()
         turnTask = nil
@@ -130,6 +131,9 @@ final class SpeechInput {
 
     private final class Turn: @unchecked Sendable {
         let startedAt = Date()
+        /// The 30 s cap and the no-speech wait count from here: the start, or a barge-in's
+        /// confirmation (a barge run can be 30 s into a reply when the owner speaks).
+        var capFrom = Date()
         var hasSpeech = false
         var lastText = ""
         var endOfSpeech: Date?
@@ -161,23 +165,36 @@ final class SpeechInput {
         turn.lastText = text
         turn.hasSpeech = true
         turn.endOfSpeech = Date()
-        if let barge = turn.barge, !barge.confirmed { checkBarge(barge, turn: turn, partial: text) }
+        if let barge = turn.barge, !barge.confirmed { checkBarge(barge, turn: turn, partial: text, now: Date()) }
         turn.tail.partial(text, at: Date())
         turn.onPartial?(text)
     }
 
-    /// The barge-in word check on one partial: gate candidate + words the reply does not
-    /// contain. On confirm the turn goes on as an ordinary follow-up from that moment.
-    private func checkBarge(_ barge: BargeRun, turn: Turn, partial: String) {
-        guard let reason = BargeDecision.decide(gateCandidate: barge.gate.isCandidate, partial: partial,
+    /// The barge-in word check on one partial: gate candidate (or one that ended within the
+    /// partials' lag) + words the reply does not contain, counted only from the words heard since
+    /// the gate last went over the echo. On confirm the turn goes on as an ordinary follow-up.
+    private func checkBarge(_ barge: BargeRun, turn: Turn, partial: String, now: Date) {
+        feedGate(barge, now: now)  // the gate is current before it is read
+        barge.partials += 1
+        guard barge.gate.recentlyOver(at: now) else {
+            // Echo only so far: these words are the reply's, the owner's can only come after them.
+            barge.freshFrom = BargeWords.wordCount(partial)
+            return
+        }
+        let candidate = barge.gate.candidate(at: now)
+        if candidate { barge.checked += 1 }
+        guard let reason = BargeDecision.decide(gateCandidate: candidate, partial: partial,
                                                 reply: barge.reply, wake: false,
-                                                enabled: barge.enabled, aec: barge.aec) else { return }
+                                                enabled: barge.enabled, aec: barge.aec,
+                                                freshFrom: barge.freshFrom) else { return }
         barge.confirmed = true
+        turn.capFrom = now
         // The tail gate and the sent levels start at the confirmation, not over the reply's echo.
         turn.tail = TailGate(ratio: tailRatio)
         turn.fedBlocks = 0
         turn.levelFrom = Date()
         barge.onConfirmed?(reason)
+        barge.end()
     }
 
     /// First caller wins; a queued callback after cancel stays silent.
@@ -193,7 +210,7 @@ final class SpeechInput {
         cancel?()
         // A2: an unconfirmed barge turn never calls onFinal/onNothing (the legacy recogniser's
         // time-cap final holds Jarvis's own echo); it just ends and the reply plays on.
-        if let barge = turn.barge, !barge.confirmed { return }
+        if let barge = turn.barge, !barge.confirmed { barge.end(); return }
         guard !nothing, let end = turn.endOfSpeech, let raw = turn.keptText ?? rawText else {
             turn.onNothing?(turn.diagnosis)
             return
@@ -225,10 +242,10 @@ final class SpeechInput {
                 continue
             }
             let now = Date()
-            if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
+            if now.timeIntervalSince(turn.capFrom) >= 30 { return .timedOut }
             feedTail(turn, now: now)
             if !turn.hasSpeech {
-                if now.timeIntervalSince(turn.startedAt) >= (turn.followUp ? 8 : 5) { return .nothing }
+                if now.timeIntervalSince(turn.capFrom) >= (turn.followUp ? 8 : 5) { return .nothing }
             } else if !turn.followUp, let kept = turn.tail.cut(text: turn.lastText, now: now) {
                 // Wake turns only (round-6 item 2): a follow-up may answer a pending Confirm.
                 // A complete request, then quieter room words: end with the request as it was.
@@ -583,6 +600,21 @@ final class BargeRun {
     var confirmed = false
     /// AppController's stop-the-reply path (audio.stop, stream cancel, orb).
     var onConfirmed: ((BargeReason) -> Void)?
+    /// Words of the partial heard while the gate was quiet (the reply's echo): the word check
+    /// starts after them.
+    var freshFrom = 0
+    /// Partials seen, and word checks made while the gate was a candidate (debug note only).
+    var partials = 0, checked = 0
+    /// Told once when the run ends (confirmed, cancelled at the drain, or the recogniser ended):
+    /// the gate's numbers for the one-shot `barge_gate` debug note.
+    var onEnded: ((String) -> Void)?
+    private var ended = false
+
+    func end() {
+        guard !ended else { return }
+        ended = true
+        onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) confirmed=\(confirmed ? 1 : 0)")
+    }
 
     init(enabled: Bool, aec: Bool, outLevels: @escaping () -> [LevelSample]) {
         self.enabled = enabled

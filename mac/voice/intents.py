@@ -106,7 +106,8 @@ _AGENT_SUBS = (
                       r"|issue #?\d+|my repos|repos? on github|releases? (?:of|on|for|in)|my releases)\b")),
     ("git", re.compile(r"\b(?:commits?|git history|commit history|file history"
                        r"|history of (?:this|the|that) (?:file|code|repo|function|project)|git log|commit log"
-                       r"|blame|who changed|who wrote|what changed in|when did .* change|push my changes"
+                       r"|blame|who changed|who wrote (?:this|that|it|these|those|the (?:code|line|lines|function|file|method|class|change))\b"
+                       r"|what changed in|when did .* change|push my changes"
                        r"|my branch(?:es)?)\b")),
     ("code", re.compile(r"\b(?:the|this|that) (?:code|file|function|class|method) on (?:my|the) screen\b"
                         r"|\bthis (?:file|function|class|method)\b|\bcode (?:i have |i've got )?on (?:my|the) screen\b")),
@@ -141,7 +142,8 @@ _STOP_RE = re.compile("(?:" + "|".join(re.escape(p) for p in STOP_PHRASES) + ")"
 _WRAP_LEAD = r"(?:(?:can|could|would) you |please |jarvis )*"
 _WRAP_TRAIL = r"(?:,? (?:please|for me|for now|now|jarvis))*"
 _OBJECT = r"(?:it|them|that|this|everything|all the cards|all of them|all of it|all|the overlay|the cards?)"
-_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:hide(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
+# STT writes a lone "hide" as the name "Hyde" (Mac live run 1); whole utterance only.
+_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:(?:hide|hyde)(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
                       r"|get (?:it|that|this|them) off my screen|go away"
                       r"|get (?:it|this|that|them|everything) out of (?:my face|here)"
                       r"|make (?:it|that|them|everything) (?:disappear|go away))" + _WRAP_TRAIL)

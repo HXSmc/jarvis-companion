@@ -54,6 +54,17 @@ public enum TurnEndpointer {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// intents._MISHEARD_WAKE_RE: STT's version of "Hey Jarvis." ("Hey, John Pierce.") at the
+    /// start is dropped too.
+    public static func dropMisheardWake(_ text: String) -> String {
+        var t = text
+        if let r = t.range(of: #"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+"#,
+                           options: [.regularExpression, .caseInsensitive]) {
+            t.removeSubrange(r)
+        }
+        return t
+    }
+
     public static func shouldEnd(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> Bool {
         let needed = silence(after: text)
         if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return true }
@@ -248,13 +259,7 @@ public struct TailGate {
     /// `s` alone could read as a Confirm answer to the service: after its wake strips, every word is
     /// in `answerWords`. tests/test_overlay_jfollow2.py fails if this lags mac/voice/intents.py.
     static func isAnswer(_ s: String) -> Bool {
-        var t = TurnEndpointer.stripWake(s)
-        // intents._MISHEARD_WAKE_RE: STT's version of "Hey Jarvis." ("Hey, John Pierce.") is dropped too.
-        if let r = t.range(of: #"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+"#,
-                           options: [.regularExpression, .caseInsensitive]) {
-            t.removeSubrange(r)
-        }
-        return words(t).isSubset(of: answerWords)
+        words(TurnEndpointer.dropMisheardWake(TurnEndpointer.stripWake(s))).isSubset(of: answerWords)
     }
 
     /// Every word of intents._CONFIRM_RE, _CANCEL_RE, _NO_RE and _POLITE (apostrophes removed), plus

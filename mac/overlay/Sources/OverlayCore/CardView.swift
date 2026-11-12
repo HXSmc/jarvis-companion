@@ -105,7 +105,8 @@ public struct CardView: View {
     /// Font scale of a card drawn at `width`: its base width ratio, capped (sharp text re-laid
     /// out, never a scaled bitmap).
     public static func fontScale(card: HUDCard, width: CGFloat) -> CGFloat {
-        min(width / baseWidth(of: card), CardSize.fontScaleCap)
+        if case .flow = card { return min(width / baseWidth(of: card), CardSize.flowFontScaleCap) }
+        return min(width / baseWidth(of: card), CardSize.fontScaleCap)
     }
 
     public var body: some View {
@@ -279,14 +280,14 @@ struct FlowBody: View {
 
     var body: some View {
         GeometryReader { geo in
-            let rects = FlowLayout.layout(nodes: card.nodes, edges: card.edges, size: geo.size)
+            let rects = Self.rects(card: card, size: geo.size, scale: scale)
             ZStack(alignment: .topLeading) {
                 Canvas { ctx, _ in
                     for edge in card.edges {
                         guard let f = rects[edge.from], let t = rects[edge.to] else { continue }
                         drawArrow(&ctx, from: f, to: t)
                         if let label = edge.label, !label.isEmpty {
-                            let mid = CGPoint(x: (f.midX + t.midX) / 2 + 6, y: (f.midY + t.midY) / 2)
+                            let mid = CGPoint(x: (f.midX + t.midX) / 2 + 6 * scale, y: (f.midY + t.midY) / 2)
                             ctx.draw(Text(label)
                                 .font(ScaledType.micro(scale))
                                 .foregroundColor(.white.opacity(0.72)), at: mid, anchor: .leading)
@@ -303,6 +304,17 @@ struct FlowBody: View {
             }
         }
         .frame(height: height)
+    }
+
+    /// Node rects at `scale`: FlowLayout's grid (34 pt rows, 22 pt gaps) laid out in the unscaled
+    /// space, then scaled, so a node grows with its font (Mac live run 1: rows stayed 34 pt under a
+    /// 2.5x font and every label was cut). The flow's font scale stays under the width ratio, so an
+    /// enlarged node has more room per word than the tile.
+    static func rects(card: FlowCard, size: CGSize, scale: CGFloat) -> [String: CGRect] {
+        let s = max(scale, 0.01)
+        let unscaled = FlowLayout.layout(nodes: card.nodes, edges: card.edges,
+                                         size: CGSize(width: size.width / s, height: size.height / s))
+        return unscaled.mapValues { CGRect(x: $0.minX * s, y: $0.minY * s, width: $0.width * s, height: $0.height * s) }
     }
 
     /// Rows of 34 pt nodes with 22 pt gaps (FlowLayout's numbers), so short flows stay compact.

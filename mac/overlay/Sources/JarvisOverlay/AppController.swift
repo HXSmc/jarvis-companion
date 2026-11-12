@@ -39,6 +39,8 @@ final class AppController {
     private var bargeInEnabled = true
     /// The barge listening run of the current turn, nil while its audio is not playing.
     private var bargeRun: BargeRun?
+    /// The reply texts a wake cut (A4): stripped from that wake turn's text.
+    private var cutReply: [String] = []
     /// Every .audio/.say text of the current turn so far, also the ones before the barge run
     /// exists (the first clip starts it): the run's reply is seeded from this.
     private var replyTexts: [String] = []
@@ -267,8 +269,10 @@ final class AppController {
             if !model.missingPermissions.isEmpty { speakPermissionNeed() }
             model.orb = .listening
             if audio.isBusy || turnStreaming {
+                cutReply = replyTexts  // the ring this wake turn replays holds that reply's echo
                 bargeIn(reason: .wake)  // A4: a wake during playback cuts the old reply's stream too
             } else {
+                cutReply = []
                 audio.stop()
             }
             noFollowUp = false  // an end_listening closes the mic only until the next wake
@@ -280,6 +284,7 @@ final class AppController {
         // Screen capture starts at wake; only awaited when an utterance lands.
         let screenTask = Task { await ScreenContext.capture() }
         let listenStart = Date()
+        let echoOf = followUp ? [] : cutReply
         speech.listenAfterWake(
             followUp: followUp,
             replayFrom: replayFrom,
@@ -287,10 +292,13 @@ final class AppController {
                 // Speech in the follow-up window: show the normal listening orb.
                 if followUp, self?.model.orb == .followUp { self?.model.orb = .listening }
             },
-            onFinal: { [weak self] text, sttFinalMs, endOfSpeech, heard in
+            onFinal: { [weak self] heardText, sttFinalMs, endOfSpeech, heard in
                 let heardUntil = Date()  // every ring chunk before this went to this turn
+                // A wake that cut a reply: drop that reply's echo and a misheard wake word.
+                let text = echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
+                    guard !text.isEmpty else { self?.model.orb = .idle; return }  // only the reply's echo
                     self?.startUtterance(text: text, followUp: followUp, bargeIn: false,
                                          sttFinalMs: sttFinalMs,
                                          audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
@@ -427,6 +435,7 @@ final class AppController {
         let confirmedAt = Date()
         let at = bargeFirstAudioAt.map { Int(confirmedAt.timeIntervalSince($0) * 1000) } ?? 0
         let pending = audio.pendingBuffers
+        let streamOpen = turnStreaming  // the model was still sending: later sentences never came
         audio.stop()  // silence first: the target is 300 ms from the confirmation
         let stopMs = Int(Date().timeIntervalSince(confirmedAt) * 1000)
         utteranceTask?.cancel()
@@ -436,7 +445,8 @@ final class AppController {
         model.orb = .listening
         client.debugNote(step: "barge_in",
                          detail: "at=\(at) reason=\(reason.rawValue) "
-                             + "dropped_sentences=\(pending + lateAudioCount) stop_ms=\(stopMs)")
+                             + "dropped_sentences=\(pending + lateAudioCount) stop_ms=\(stopMs) "
+                             + "stream_open=\(streamOpen ? 1 : 0)")
     }
 
     /// A2: with the first .audio of the turn playing, one recognition turn listens for a barge-in:
@@ -447,6 +457,8 @@ final class AppController {
         let audioOut = audio
         let run = BargeRun(enabled: true, aec: speech.aecActive, outLevels: { audioOut.outputLevels })
         run.onConfirmed = { [weak self] reason in self?.bargeIn(reason: reason) }
+        // One note per run with the gate's numbers (live tuning: coupling, peak ratio, runs).
+        run.onEnded = { [weak self] summary in self?.client.debugNote(step: "barge_gate", detail: summary) }
         run.reply = replyTexts
         bargeRun = run
         // Screen capture starts when the barge turn starts; only awaited when its utterance lands.
@@ -462,7 +474,8 @@ final class AppController {
                     // Unconfirmed: never a turn (the reply plays on). Confirmed: the recogniser
                     // also heard the reply's lead; strip it, the rest is the owner's.
                     guard let owned = BargeWords.turnText(final: text, reply: run.reply,
-                                                          confirmed: run.confirmed) else {
+                                                          confirmed: run.confirmed,
+                                                          freshFrom: run.freshFrom) else {
                         if run.confirmed { self.model.orb = .idle }  // nothing left to call the owner's
                         return
                     }
@@ -485,6 +498,7 @@ final class AppController {
         case .cardSize(let id, let max):
             guard model.cards.contains(where: { $0.id == id }) else { return }
             if max { _ = model.enlarge.max(id) } else { model.enlarge.restore() }
+            model.activity()  // a restored card gets a fresh idle countdown, not the old one's end
         }
     }
 

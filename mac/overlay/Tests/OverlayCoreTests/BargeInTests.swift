@@ -31,7 +31,7 @@ final class BargeInTests: XCTestCase {
         for i in 20..<23 {
             let out = outLevel(i)
             at = at.addingTimeInterval(0.1)
-            gate.block(mic: 3 * gate.coupling * out, out: out, at: at)
+            gate.block(mic: 3 * gate.echoEstimate(nextOut: out), out: out, at: at)
             XCTAssertEqual(gate.isCandidate, i == 22, "block \(i)")
         }
         XCTAssertTrue(gate.isCandidate)
@@ -98,5 +98,83 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(BargeWords.turnText(final: "the emperor augustus what time is it", reply: reply,
                                            confirmed: true), "what time is it")
         XCTAssertNil(BargeWords.turnText(final: "the emperor augustus", reply: reply, confirmed: true))
+    }
+
+    // MARK: Mac live run 1 (round 3)
+
+    /// Speech with sentence gaps; the mic hears it 2 blocks late (speaker latency) with a reverb
+    /// tail. Live: `barge_in reason=level` fired 3 times with nobody speaking (a gap: out 0, the
+    /// mic still ringing). The gate must never call that a candidate.
+    func testDelayedEchoWithReverbNeverCandidates() {
+        var gate = EchoGate()
+        var at = Date(timeIntervalSince1970: 2000)
+        var outs: [Double] = []
+        for i in 0..<300 {
+            let inGap = i % 40 >= 32  // 3.2 s sentences, 0.8 s gaps
+            outs.append(inGap ? 0 : 0.04 + 0.16 * abs(sin(Double(i) * 0.9)))
+            func o(_ k: Int) -> Double { k >= 0 ? outs[k] : 0 }
+            let mic = 0.9 * o(i - 2) + 0.35 * o(i - 3) + 0.15 * o(i - 4) + 0.004
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: mic, out: outs[i], at: at)
+            XCTAssertFalse(gate.isCandidate, "block \(i)")
+        }
+        XCTAssertFalse(gate.candidate(at: at))
+    }
+
+    /// The partial holding the owner's words lands after he spoke them: a run that ended under
+    /// `wordLag` ago still counts, an older one does not.
+    func testCandidateHoldsForTheWordLag() {
+        var gate = EchoGate()
+        var at = Date(timeIntervalSince1970: 3000)
+        for _ in 0..<10 { at = at.addingTimeInterval(0.1); gate.block(mic: 0.08, out: 0.1, at: at) }
+        for _ in 0..<3 {
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: 3 * gate.echoEstimate(nextOut: 0.1), out: 0.1, at: at)
+        }
+        XCTAssertTrue(gate.isCandidate)
+        at = at.addingTimeInterval(0.1)
+        gate.block(mic: 0.08, out: 0.1, at: at)
+        XCTAssertFalse(gate.isCandidate)
+        XCTAssertTrue(gate.candidate(at: at.addingTimeInterval(1.0)))
+        XCTAssertFalse(gate.candidate(at: at.addingTimeInterval(1.5)))
+        XCTAssertTrue(gate.summary.hasPrefix("coupling="))
+    }
+
+    /// Live: the 'why' reply 'Change 1 of 3 came from "Add the retry counter"' was heard as
+    /// "Writer. Change one of three came from add the retry counter" and confirmed itself.
+    func testNumberWordsAreTheReplysDigits() {
+        let reply = ["Change 1 of 3 came from \"Add the retry counter\", committed 12 November 2026."]
+        XCTAssertFalse(BargeWords.confirms(partial: "Writer. Change one of three came from add the retry counter",
+                                           reply: reply))
+        XCTAssertTrue(BargeWords.confirms(partial: "what time is it", reply: reply))
+    }
+
+    /// Only the words since the gate went over count: 20 s of transcript hold misheard echo words,
+    /// and a "stop" after them is still a whole stop phrase.
+    func testOnlyFreshWordsCount() {
+        let reply = ["Rome began as a small city state on the Tiber.",
+                     "It grew into a republic and then an empire that ruled the Mediterranean."]
+        let echo = "allowed Rome began as a small city state on the tie bar it grew into a republic"
+        let n = BargeWords.wordCount(echo)
+        XCTAssertTrue(BargeWords.confirms(partial: echo + " and then", reply: reply),
+                      "the whole transcript confirms on misheard echo words (the live self-interrupt)")
+        XCTAssertFalse(BargeWords.confirms(partial: echo + " and then", reply: reply, freshFrom: n))
+        XCTAssertTrue(BargeWords.confirms(partial: echo + " stop", reply: reply, freshFrom: n))
+        XCTAssertTrue(BargeWords.confirms(partial: echo + " and then stop", reply: reply, freshFrom: n))
+        XCTAssertTrue(BargeWords.confirms(partial: echo + " what time is it", reply: reply, freshFrom: n))
+        XCTAssertEqual(BargeDecision.decide(gateCandidate: true, partial: echo + " stop", reply: reply,
+                                            wake: false, enabled: true, aec: false, freshFrom: n), .level)
+        // Live: the confirmed barge turn sent 35 s of Jarvis's own words as the owner's.
+        XCTAssertEqual(BargeWords.turnText(final: echo + " what time is it", reply: reply, confirmed: true,
+                                           freshFrom: n), "what time is it")
+    }
+
+    /// Live: a wake that cut the hide reply sent "the overlay, sir. Hey, John. The overlay. So".
+    func testWakeTurnTextDropsTheCutReplyAndMisheardWake() {
+        let reply = ["Hiding the overlay, sir.", "The overlay is unchanged."]
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "the overlay, sir. Hey, John. The overlay. So", reply: reply),
+                       "So")
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "what time is it", reply: reply), "what time is it")
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "the overlay is unchanged", reply: reply), "")
     }
 }

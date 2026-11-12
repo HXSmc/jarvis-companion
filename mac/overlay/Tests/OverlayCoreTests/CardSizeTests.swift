@@ -34,4 +34,36 @@ final class CardSizeTests: XCTestCase {
         state.dropped(ids: ["z"])
         XCTAssertEqual(state.id, "q")
     }
+
+    /// Mac live run 1: the enlarged phone diagram cut every label ("Batte...", "Memory and stora...").
+    /// Nodes grow with the font, and an enlarged node has more room per word than the tile's.
+    @MainActor func testEnlargedFlowNodesGrowWithTheirText() {
+        let names = ["Battery", "Camera and sensors", "Processor (SoC)", "Memory and storage",
+                     "Touchscreen", "Modem, Wi-Fi, Bluetooth", "Speaker and microphone"]
+        let nodes = names.enumerated().map { FlowNode(id: "n\($0.offset)", text: $0.element) }
+        let edges = [FlowEdge(from: "n0", to: "n2", label: "power"), FlowEdge(from: "n1", to: "n2", label: "input"),
+                     FlowEdge(from: "n2", to: "n3", label: "data"), FlowEdge(from: "n2", to: "n4", label: "display"),
+                     FlowEdge(from: "n2", to: "n5", label: "network"), FlowEdge(from: "n2", to: "n6", label: "sound")]
+        let card = FlowCard(title: "How a phone works", nodes: nodes, edges: edges)
+        let scale = CardView.fontScale(card: .flow(card), width: 1152)
+        XCTAssertLessThanOrEqual(scale, CardSize.flowFontScaleCap)
+        let tile = FlowBody.rects(card: card, size: CGSize(width: 330, height: 146), scale: 1)
+        let big = FlowBody.rects(card: card, size: CGSize(width: 1120, height: 146 * scale), scale: scale)
+        XCTAssertEqual(big.count, nodes.count)
+        for node in nodes {
+            guard let t = tile[node.id], let b = big[node.id] else { return XCTFail(node.id) }
+            XCTAssertEqual(b.height, t.height * scale, accuracy: 0.5, "\(node.text) height grows with its font")
+            XCTAssertGreaterThan(b.width / scale, t.width * 1.5, "\(node.text) gets more room per word")
+        }
+    }
+
+    /// The idle clear waits while a card is enlarged (live: it took the enlarged diagram).
+    func testEnlargedCardHoldsTheIdleClear() {
+        var state = EnlargeState()
+        XCTAssertFalse(state.holdsIdle)
+        _ = state.max("a")
+        XCTAssertTrue(state.holdsIdle)
+        state.restore()
+        XCTAssertFalse(state.holdsIdle)
+    }
 }

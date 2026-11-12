@@ -72,7 +72,7 @@ PHRASES = {
 THINKING_POOL: tuple[tuple[str, str, str], ...] = tuple(
     (f"think_{i:02d}", text, tag)
     for i, (text, tag) in enumerate((
-        ("I'll check that for you right now, sir.", "look"),
+        ("I'll check that now, sir.", "look"),  # the 8-word line measured 2.03 s live (cap 1.8 s)
         ("Give me a second, sir.", "any"),
         ("Right away, sir.", "do"),
         ("Let me look into that.", "look"),

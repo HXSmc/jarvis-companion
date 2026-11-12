@@ -429,7 +429,7 @@ def test_unconfirmed_barge_final_is_never_a_turn():
     assert "return" in body[guard:body.index("turn.onFinal?(")]
     start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
     assert "BargeWords.turnText(final: text, reply: run.reply," in start
-    assert "confirmed: run.confirmed)" in start
+    assert "confirmed: run.confirmed," in start
     assert "BargeWords.ownerWords" not in start
 
 
@@ -444,3 +444,86 @@ def test_barge_reply_holds_the_first_clip():
     assert "replyTexts.append(text)" in say
     assert "bargeRun?.reply.append" not in src
     assert "replyTexts = []" in _swift_func(APP_SRC / "AppController.swift", "handleUtterance")
+
+
+# --- Round 3: Mac live run 1 findings -------------------------------------------------------------
+
+
+def test_pool_lines_are_short_enough_to_speak_under_1_8_s():
+    """Criterion 40 live: think_01 'I'll check that for you right now, sir.' measured 2.03 s; the
+    5-word pool lines measured 1.02-1.58 s. Six words is the cap that keeps every clip under 1.8 s."""
+    for key, text, _tag in acks.THINKING_POOL:
+        assert len(text.split()) <= 6, (key, text)
+    assert acks.PHRASES["think_01"] == "I'll check that now, sir."
+
+
+def test_hyde_is_hide_and_who_wrote_needs_code():
+    """Live 41: 'Hey Jarvis, hide' was heard as 'Hyde' and went to the model; live 40: 'who wrote
+    Pride and Prejudice' (heard 'Cride') went to the git agent with 'Checking the git history.'."""
+    for text in ("Hyde.", "Hyde it", "can you hyde the cards"):
+        assert parse(text, apps={}).kind == "hide", text
+    assert parse("Hyde Park", apps={}).kind != "hide"
+    for text in ("who wrote Pride and Prejudice", "who wrote Cride and Prejudice", "who wrote Hamlet"):
+        assert parse(text, apps={}).kind == "answer", text
+    for text in ("who wrote this line", "who wrote this function", "who wrote the code on line 40"):
+        assert parse(text, apps={}).kind == "agent", text
+
+
+def test_barge_gate_note_and_debug_label():
+    """Live 32: no gate numbers could be read. Every barge run posts one numbers-only barge_gate note."""
+    start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
+    assert 'run.onEnded = { [weak self] summary in self?.client.debugNote(step: "barge_gate", detail: summary) }' in start
+    speech = (APP_SRC / "SpeechInput.swift").read_text()
+    cancel = _swift_func(APP_SRC / "SpeechInput.swift", "cancel")
+    assert "turn.barge?.end()" in cancel
+    assert "barge.end()" in _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
+    assert "barge.end(); return" in _swift_func(APP_SRC / "SpeechInput.swift", "completeTurn")
+    assert "func end()" in speech and "guard !ended else { return }" in speech
+    assert "barge_gate" in overlay.DEBUG_PAGE
+    assert 'case "barge_gate": return s.detail' in overlay.DEBUG_PAGE.replace('case "barge_in": case "barge_aec": ', "")
+
+
+def test_barge_check_uses_the_lagged_candidate_and_fresh_words():
+    """Live 32/35: 'stop' and 'what time is it' never barged in: the partial lands after the gate's
+    run ended, and the word check read the whole transcript (echo first, so 'stop' was never whole).
+    Live 33/41: misheard echo words in that transcript confirmed a barge with nobody speaking."""
+    check = _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
+    assert "barge.gate.candidate(at: now)" in check
+    assert "barge.gate.isCandidate" not in check
+    assert "guard barge.gate.recentlyOver(at: now) else {" in check
+    assert "barge.freshFrom = BargeWords.wordCount(partial)" in check
+    assert "freshFrom: barge.freshFrom" in check
+    assert check.index("feedGate(barge, now: now)") < check.index("recentlyOver")
+    start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
+    assert "freshFrom: run.freshFrom" in start
+
+
+def test_confirmed_barge_turn_caps_count_from_the_confirmation():
+    """Live 33: a barge confirmed 35 s into a reply ended at once 'by timedOut' (30 s from the run's
+    start) and sent 35 s of Jarvis's own words as the owner's turn."""
+    watch = _swift_func(APP_SRC / "SpeechInput.swift", "watch")
+    assert "turn.capFrom) >= 30" in watch
+    assert "turn.startedAt) >= 30" not in watch
+    assert "turn.capFrom = now" in _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
+
+
+def test_wake_barge_turn_drops_the_cut_reply():
+    """Live 41: a wake that cut the hide reply sent 'the overlay, sir. Hey, John. The overlay. So'."""
+    wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
+    assert wake.index("cutReply = replyTexts") < wake.index("bargeIn(reason: .wake)")
+    assert "BargeWords.wakeTurnText(final: heardText, reply: echoOf)" in wake
+    assert "let echoOf = followUp ? [] : cutReply" in wake
+    barge = _swift_func(APP_SRC / "AppController.swift", "bargeIn")
+    assert "stream_open=" in barge
+
+
+def test_enlarged_card_holds_the_idle_clear():
+    """Live 37: the 60 s idle clear took the enlarged diagram (made 12:20:02, restore 12:21:40), so
+    'make it smaller' left no card. The clear waits while a card is enlarged; a restore restarts it."""
+    idle = _swift_func(APP_SRC / "OverlayModel.swift", "idleExpired")
+    guard = idle.index("if enlarge.holdsIdle {")
+    assert "bumpIdle()" in idle[guard:guard + 80]
+    assert guard < idle.index("cards = []")
+    control = _swift_func(APP_SRC / "AppController.swift", "handleControl")
+    assert "model.activity()" in control
+
