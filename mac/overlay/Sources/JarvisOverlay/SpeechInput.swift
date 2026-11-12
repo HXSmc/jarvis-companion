@@ -188,7 +188,8 @@ final class SpeechInput {
             feedTail(turn, now: now)
             if !turn.hasSpeech {
                 if now.timeIntervalSince(turn.startedAt) >= (turn.followUp ? 8 : 5) { return .nothing }
-            } else if let kept = turn.tail.cut(text: turn.lastText, now: now) {
+            } else if !turn.followUp, let kept = turn.tail.cut(text: turn.lastText, now: now) {
+                // Wake turns only (round-6 item 2): a follow-up may answer a pending Confirm.
                 // A complete request, then quieter room words: end with the request as it was.
                 turn.keptText = kept
                 turn.endNote = " (room words after the request dropped)"

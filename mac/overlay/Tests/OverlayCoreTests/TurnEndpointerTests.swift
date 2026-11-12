@@ -139,6 +139,32 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertNil(lagged.cut(text: "show me the weather in Paris", now: t0.addingTimeInterval(5)))
     }
 
+    // Round 8 (security): a quiet "no, wait" after "yes" must reach the service whole.
+    func testARetractedYesIsNeverCut() {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.10, from: t0, seconds: 0.4)                        // "Yes."
+        gate.partial("Yes.", at: t0.addingTimeInterval(0.6))
+        feed(&gate, 0.03, from: t0.addingTimeInterval(0.4), seconds: 1.5)  // "no, wait", muttered
+        gate.partial("Yes. No, wait.", at: t0.addingTimeInterval(1.7))
+        XCTAssertEqual(gate.kept, "Yes.")
+        XCTAssertNil(gate.cut(text: "Yes. No, wait.", now: t0.addingTimeInterval(2.0)))
+        // A bare yes is never the kept part, whatever follows.
+        var bare = TailGate()
+        feed(&bare, 0.10, from: t0, seconds: 0.4)
+        bare.partial("Jarvis, yes.", at: t0.addingTimeInterval(0.6))
+        feed(&bare, 0.03, from: t0.addingTimeInterval(0.4), seconds: 1.5)
+        bare.partial("Jarvis, yes. What are you people", at: t0.addingTimeInterval(1.7))
+        XCTAssertNil(bare.cut(text: "Jarvis, yes. What are you people", now: t0.addingTimeInterval(2.0)))
+        // Retract words in the cut-off part keep a normal request whole too.
+        var req = TailGate()
+        feed(&req, 0.12, from: t0, seconds: 1.5)
+        req.partial("Highlight the changes.", at: t0.addingTimeInterval(1.8))
+        feed(&req, 0.03, from: t0.addingTimeInterval(1.5), seconds: 3)
+        req.partial("Highlight the changes. Don't.", at: t0.addingTimeInterval(3.2))
+        XCTAssertNil(req.cut(text: "Highlight the changes. Don't.", now: t0.addingTimeInterval(3.05)))
+    }
+
     func testAnIncompleteRequestIsNeverCut() {
         let t0 = Date()
         var gate = TailGate()

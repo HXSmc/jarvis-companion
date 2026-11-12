@@ -199,11 +199,28 @@ public struct TailGate {
 
     /// The request to end the turn with: it is complete, the owner has been quiet for
     /// `TurnEndpointer.completeHold`, and the words since then came from the room. Else nil.
+    /// Never cuts an answer: a bare yes, or cut-off words that take it back ("Yes. No, wait."),
+    /// go to the service whole so its whole-utterance Confirm check still sees them.
     public func cut(text: String, now: Date) -> String? {
-        guard let kept, let ownerAt,
-              kept != text.trimmingCharacters(in: .whitespacesAndNewlines),
+        let full = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let kept, let ownerAt, kept != full,
               now.timeIntervalSince(ownerAt) >= TurnEndpointer.completeHold
         else { return nil }
+        let dropped = full.hasPrefix(kept) ? String(full.dropFirst(kept.count)) : full
+        if Self.words(kept).isSubset(of: Self.yesWords) || !Self.words(dropped).isDisjoint(with: Self.retractWords) {
+            return nil
+        }
         return kept
+    }
+
+    static let yesWords: Set<String> = ["hey", "jarvis", "yes", "yeah", "yep", "ok", "okay", "sure", "please",
+                                        "sir", "do", "it", "go", "ahead", "confirm", "confirmed"]
+    static let retractWords: Set<String> = ["no", "nope", "not", "dont", "stop", "cancel", "wait",
+                                            "hold", "abort", "never", "nevermind"]
+
+    /// Lowercased words, apostrophes removed ("Don't" -> "dont").
+    static func words(_ s: String) -> Set<String> {
+        let plain = s.lowercased().filter { $0 != "'" && $0 != "\u{2019}" }
+        return Set(plain.split { !$0.isLetter }.map(String.init))
     }
 }
