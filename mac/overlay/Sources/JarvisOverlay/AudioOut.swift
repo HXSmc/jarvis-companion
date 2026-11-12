@@ -1,4 +1,5 @@
 import AVFoundation
+import OverlayCore
 
 /// Plays service PCM clips in order and local fallback speech; reports levels/drain.
 @MainActor
@@ -9,7 +10,8 @@ final class AudioOut {
     private let synthWatcher = SynthWatcher()
     /// Rate of the current player->mixer connection; reconnect when a clip's rate differs.
     private var connectedRate: Int?
-    private var pendingBuffers = 0
+    /// Unplayed buffers right now; barge-in drops them (debug note dropped_sentences).
+    private(set) var pendingBuffers = 0
     private var synthSpeaking = false
     private var tapInstalled = false
 
@@ -21,6 +23,10 @@ final class AudioOut {
     var onDrain: (() -> Void)?
     /// When the last drain fired; the follow-up replay window starts here (plus echo tail).
     private(set) var lastDrainAt: Date?
+    /// Raw playback RMS per tap buffer with its time (last ~5 s); the barge-in echo gate reads it.
+    private let outLevels = OutputLevels()
+
+    var outputLevels: [LevelSample] { outLevels.snapshot() }
 
     /// Not player.isPlaying: that stays true after the last buffer played, until stop().
     var isBusy: Bool { pendingBuffers > 0 || synthSpeaking }
@@ -118,6 +124,8 @@ final class AudioOut {
     private func installTapOnce() {
         guard !tapInstalled else { return }
         tapInstalled = true
+        // The tap runs on the audio thread: it gets the ring directly, not through the actor.
+        let levels = outLevels
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 512, format: nil) { [weak self] buffer, _ in
             guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
             let n = Int(buffer.frameLength)
@@ -126,7 +134,9 @@ final class AudioOut {
                 let v = channel[i]
                 sum += v * v
             }
-            let level = Double(min(max((sum / Float(n)).squareRoot() * 3, 0), 1))
+            let rms = Double((sum / Float(n)).squareRoot())
+            levels.append(LevelSample(at: Date(), rms: rms, frames: n))
+            let level = Double(min(max(rms * 3, 0), 1))
             Task { @MainActor in self?.onLevel?(level) }
         }
     }
@@ -138,5 +148,25 @@ private final class SynthWatcher: NSObject, AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         onFinish?()
+    }
+}
+
+/// Lock-guarded raw output-RMS ring (~5 s): appended on the audio thread, read on the main actor.
+private final class OutputLevels: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [LevelSample] = []
+
+    func append(_ sample: LevelSample) {
+        lock.lock()
+        samples.append(sample)
+        let cutoff = sample.at.addingTimeInterval(-5)
+        while let first = samples.first, first.at < cutoff { samples.removeFirst() }
+        lock.unlock()
+    }
+
+    func snapshot() -> [LevelSample] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
     }
 }

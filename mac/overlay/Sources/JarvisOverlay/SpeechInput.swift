@@ -19,6 +19,10 @@ final class SpeechInput {
     private let log = Logger(subsystem: "JarvisOverlay", category: "SpeechInput")
     /// TailGate's ratio; the service sends it on /overlay/health (OVERLAY_TAIL_LEVEL_RATIO).
     var tailRatio = TailGate.defaultRatio
+    /// Barge-in with the AEC-backed gate wanted (health barge_aec); the start() probe decides.
+    var aecEnabled = false
+    /// The voice-processing probe actually stuck; the gate uses the AEC margin only when true.
+    private(set) var aecActive = false
 
     /// What the service's follow-up gate reads with the words: 100 ms mic levels, STT confidence.
     struct Heard {
@@ -40,9 +44,14 @@ final class SpeechInput {
             throw NSError(domain: "JarvisOverlay.SpeechInput", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "No audio input available"])
         }
+        // AEC must be enabled before the engine starts; any failure keeps today's plain path.
+        if aecEnabled {
+            do { try input.setVoiceProcessingEnabled(true); aecActive = true }
+            catch { aecActive = false }
+        }
         tap.install(on: input, format: format)
         engine.prepare()
-        try engine.start()
+        do { try engine.start() } catch { aecActive = false; throw error }
         isRunning = true
     }
 
@@ -54,9 +63,11 @@ final class SpeechInput {
     /// diagnosis for the debug page (STT path, buffers fed, results, errors).
     /// followUp: the open-mic window after a reply. Replays only ring audio stamped after
     /// replayFrom (the reply's drain + echo tail); nil replays nothing. 8 s to start speaking.
+    /// barge: listening during reply playback (barge-in); runs until confirmed or cancelled.
     func listenAfterWake(
         followUp: Bool = false,
         replayFrom: Date? = nil,
+        barge: BargeRun? = nil,
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date, _ heard: Heard) -> Void,
         onNothing: @escaping (_ why: String) -> Void
@@ -67,6 +78,10 @@ final class SpeechInput {
         turn.followUp = followUp
         turn.replayFrom = replayFrom
         turn.tail = TailGate(ratio: tailRatio)
+        if let barge {
+            turn.barge = barge
+            barge.gateThrough = turn.startedAt
+        }
         // Levels cover the audio the recogniser hears: the replayed ring (wake) or post-reply audio.
         turn.levelFrom = followUp ? (replayFrom.map { max($0, turn.startedAt.addingTimeInterval(-2)) } ?? turn.startedAt)
                                   : turn.startedAt.addingTimeInterval(-2)
@@ -126,6 +141,7 @@ final class SpeechInput {
         var onNothing: ((String) -> Void)?
         var followUp = false
         var replayFrom: Date?  // follow-up turns replay only ring chunks at/after the reply drain + echo tail
+        var barge: BargeRun?  // listening during reply playback; gate + confirm state (barge-in)
         var path = ""  // STT path + why it was taken, for the debug page
         var endNote = ""  // how long the end-of-turn silence was, for the debug page
         let stats = FeedStats()
@@ -183,6 +199,13 @@ final class SpeechInput {
     private func watch(turn: Turn) async -> Verdict {
         while true {
             if turn.cancelled || turn.finished { return .cancelled }
+            // Barge listening runs while the reply plays: silence, the caps and the endpointer
+            // never end it — only a confirmed barge-in or a cancel (the reply drain) does.
+            if let barge = turn.barge, !barge.confirmed {
+                feedGate(barge, now: Date())
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                continue
+            }
             let now = Date()
             if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
             feedTail(turn, now: now)

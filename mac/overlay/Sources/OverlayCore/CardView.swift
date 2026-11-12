@@ -4,6 +4,16 @@ import Foundation
 
 // MARK: - Card chrome
 
+/// Theme type sizes rebuilt at a scale (Font carries no size); the enlarged layer re-lays out
+/// with these instead of scaling a bitmap.
+enum ScaledType {
+    static func micro(_ s: CGFloat) -> Font { .system(size: 11 * s, weight: .medium, design: .monospaced) }
+    static func small(_ s: CGFloat) -> Font { .system(size: 12 * s) }
+    static func body(_ s: CGFloat) -> Font { .system(size: 13 * s) }
+    static func title(_ s: CGFloat) -> Font { .system(size: 17 * s, weight: .bold) }
+    static func display(_ s: CGFloat) -> Font { .system(size: 44 * s, weight: .bold).monospacedDigit() }
+}
+
 /// Two short accent corner marks, top-left.
 @MainActor
 struct CornerTicks: View {
@@ -33,18 +43,20 @@ struct CardChrome<Content: View>: View {
     let meta: String?
     let title: String
     let width: CGFloat?
+    /// Enlarged-layer font scale (1 = the fixed Theme sizes).
+    var fontScale: CGFloat = 1
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let meta {
                 Text(meta)
-                    .font(Theme.fontSmall)
+                    .font(ScaledType.small(fontScale))
                     .foregroundStyle(Color.white.opacity(0.72))
                     .lineLimit(1)
             }
             Text(title)
-                .font(Theme.cardTitle)
+                .font(ScaledType.title(fontScale))
                 .foregroundStyle(.white)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -70,27 +82,44 @@ struct CardChrome<Content: View>: View {
 @MainActor
 public struct CardView: View {
     public let card: HUDCard
+    /// Width override for the enlarged layer; nil = the card's fixed width.
+    var width: CGFloat?
+    /// Font scale for the enlarged layer, capped at CardSize.fontScaleCap.
+    var enlargedFontScale: CGFloat
 
-    public init(card: HUDCard) {
+    public init(card: HUDCard, width: CGFloat? = nil, enlargedFontScale: CGFloat = 1) {
         self.card = card
+        self.width = width
+        self.enlargedFontScale = min(enlargedFontScale, CardSize.fontScaleCap)
     }
 
     public var body: some View {
         switch card {
         case .info(let p):
-            CardChrome(meta: nil, title: p.title, width: 300) { InfoBody(lines: p.body) }
+            CardChrome(meta: nil, title: p.title, width: width ?? 300, fontScale: enlargedFontScale) {
+                InfoBody(lines: p.body, scale: enlargedFontScale)
+            }
         case .stat(let p):
-            CardChrome(meta: nil, title: p.title, width: 300) { StatBody(value: p.value, label: p.label) }
+            CardChrome(meta: nil, title: p.title, width: width ?? 300, fontScale: enlargedFontScale) {
+                StatBody(value: p.value, label: p.label, scale: enlargedFontScale)
+            }
         case .bar(let p):
-            CardChrome(meta: nil, title: p.title, width: 360) { BarBody(card: p) }
+            CardChrome(meta: nil, title: p.title, width: width ?? 360, fontScale: enlargedFontScale) {
+                BarBody(card: p, scale: enlargedFontScale)
+            }
         case .flow(let p):
-            CardChrome(meta: nil, title: p.title, width: 360) { FlowBody(card: p) }
+            CardChrome(meta: nil, title: p.title, width: width ?? 360, fontScale: enlargedFontScale) {
+                FlowBody(card: p, scale: enlargedFontScale)
+            }
         case .link(let p):
-            CardChrome(meta: LinkBody.host(of: p), title: p.title, width: 300) { LinkBody(card: p) }
+            CardChrome(meta: LinkBody.host(of: p), title: p.title, width: width ?? 300,
+                       fontScale: enlargedFontScale) {
+                LinkBody(card: p)
+            }
         case .image(let p):
-            ImageCardView(card: p)
+            ImageCardView(card: p, width: width, scale: enlargedFontScale)
         case .video(let p):
-            VideoCardView(card: p,
+            VideoCardView(card: p, width: width, scale: enlargedFontScale,
                           thumbnail: p.youtubeID != nil || p.thumbnailURL != nil ? .loading : nil,
                           phase: .idle,
                           onPlay: {})
@@ -103,12 +132,13 @@ public struct CardView: View {
 @MainActor
 struct InfoBody: View {
     let lines: [String]
+    var scale: CGFloat = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 Text(line)
-                    .font(Theme.fontBody)
+                    .font(ScaledType.body(scale))
                     .foregroundStyle(Color.white.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -120,15 +150,16 @@ struct InfoBody: View {
 struct StatBody: View {
     let value: String
     let label: String
+    var scale: CGFloat = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(Theme.fontDisplay)
+                .font(ScaledType.display(scale))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Text(label)
-                .font(Theme.fontSmall)
+                .font(ScaledType.small(scale))
                 .foregroundStyle(Color.white.opacity(0.72))
         }
     }
@@ -141,6 +172,7 @@ private func barValueText(_ v: Double) -> String {
 @MainActor
 struct BarBody: View {
     let card: BarCard
+    var scale: CGFloat = 1
 
     private var maxValue: Double {
         max(card.items.map(\.value).max() ?? 1, 0.001)
@@ -151,10 +183,10 @@ struct BarBody: View {
             ForEach(Array(card.items.enumerated()), id: \.offset) { _, item in
                 HStack(spacing: 8) {
                     Text(item.label)
-                        .font(Theme.fontSmall)
+                        .font(ScaledType.small(scale))
                         .foregroundStyle(Color.white.opacity(0.72))
                         .lineLimit(1)
-                        .frame(width: 92, alignment: .leading)
+                        .frame(width: 92 * scale, alignment: .leading)
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Rectangle().fill(Color.white.opacity(0.10))
@@ -162,16 +194,16 @@ struct BarBody: View {
                                 .frame(width: geo.size.width * CGFloat(item.value / maxValue))
                         }
                     }
-                    .frame(height: 10)
+                    .frame(height: 10 * scale)
                     Text(barValueText(item.value))
-                        .font(Theme.fontSmall.monospacedDigit())
+                        .font(ScaledType.small(scale).monospacedDigit())
                         .foregroundStyle(Color.white.opacity(0.85))
-                        .frame(width: 56, alignment: .trailing)
+                        .frame(width: 56 * scale, alignment: .trailing)
                 }
             }
             if let caption = card.caption, !caption.isEmpty {
                 Text(caption)
-                    .font(Theme.fontSmall)
+                    .font(ScaledType.small(scale))
                     .foregroundStyle(Color.white.opacity(0.72))
             }
         }
@@ -228,6 +260,7 @@ struct LinkBody: View {
 @MainActor
 struct FlowBody: View {
     let card: FlowCard
+    var scale: CGFloat = 1
 
     var body: some View {
         GeometryReader { geo in
@@ -240,7 +273,7 @@ struct FlowBody: View {
                         if let label = edge.label, !label.isEmpty {
                             let mid = CGPoint(x: (f.midX + t.midX) / 2 + 6, y: (f.midY + t.midY) / 2)
                             ctx.draw(Text(label)
-                                .font(Theme.fontMicro)
+                                .font(ScaledType.micro(scale))
                                 .foregroundColor(.white.opacity(0.72)), at: mid, anchor: .leading)
                         }
                     }
@@ -260,12 +293,12 @@ struct FlowBody: View {
     /// Rows of 34 pt nodes with 22 pt gaps (FlowLayout's numbers), so short flows stay compact.
     private var height: CGFloat {
         let rows = CGFloat(max(Set(FlowLayout.depths(nodes: card.nodes, edges: card.edges).values).count, 1))
-        return min(rows * 34 + (rows - 1) * 22, 300)
+        return min((rows * 34 + (rows - 1) * 22) * scale, 300 * scale)
     }
 
     private func nodeBox(_ node: FlowNode) -> some View {
         Text(node.text)
-            .font(Theme.fontSmall)
+            .font(ScaledType.small(scale))
             .foregroundStyle(Color.white.opacity(0.85))
             .lineLimit(2)
             .multilineTextAlignment(.center)
