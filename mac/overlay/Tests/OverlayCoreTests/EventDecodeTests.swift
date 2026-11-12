@@ -117,4 +117,19 @@ final class EventDecodeTests: XCTestCase {
         // Pushed outside a turn it is ignored: only turn streams replace cards.
         XCTAssertNil(OverlayEvent.dropCards(ids: ["gd-stat"]).pushed(idle: true))
     }
+
+    func testEndListeningAndCardSize() {
+        XCTAssertEqual(ControlEvent.decode(line: Data(#"{"type":"end_listening"}"#.utf8)), .endListening)
+        XCTAssertEqual(ControlEvent.decode(line: Data(#"{"type":"card_size","id":"ab12","size":"max"}"#.utf8)),
+                       .cardSize(id: "ab12", max: true))
+        XCTAssertEqual(ControlEvent.decode(line: Data(#"{"type":"card_size","id":"ab12","size":"restore"}"#.utf8)),
+                       .cardSize(id: "ab12", max: false))
+        // "huge" is not a size: no control event, and OverlayEvent alone still sees .unknown.
+        let huge = #"{"type":"card_size","id":"ab12","size":"huge"}"#
+        XCTAssertNil(ControlEvent.decode(line: Data(huge.utf8)))
+        XCTAssertEqual(decode(huge), .unknown)
+        XCTAssertEqual(TurnEvent.decode(line: Data(#"{"type":"clear"}"#.utf8)), .overlay(.clear))
+        XCTAssertEqual(TurnEvent.decode(line: Data(#"{"type":"end_listening"}"#.utf8)),
+                       .control(.endListening))
+    }
 }

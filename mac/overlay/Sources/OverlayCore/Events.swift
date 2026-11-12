@@ -107,3 +107,44 @@ public enum OverlayEvent: Equatable {
         return try? JSONDecoder().decode(T.self, from: data)
     }
 }
+
+/// Control events from the service that steer the overlay itself rather than its content.
+/// Unknown or malformed lines decode to nil; decode never throws.
+public enum ControlEvent: Equatable {
+    case endListening
+    case cardSize(id: String, max: Bool)
+
+    public static func decode(line: Data) -> ControlEvent? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              let type = obj["type"] as? String
+        else { return nil }
+        switch type {
+        case "end_listening":
+            return .endListening
+        case "card_size":
+            // Same id rules as drop_cards: string, <= 64 chars, non-empty.
+            guard let id = obj["id"] as? String, (1...64).contains(id.count),
+                  let size = obj["size"] as? String
+            else { return nil }
+            switch size {
+            case "max": return .cardSize(id: id, max: true)
+            case "restore": return .cardSize(id: id, max: false)
+            default: return nil
+            }
+        default:
+            return nil
+        }
+    }
+}
+
+/// One NDJSON line during a turn: overlay content or a control event. "end_listening" and
+/// "card_size" lines still decode to `.unknown` in `OverlayEvent` alone.
+public enum TurnEvent: Equatable {
+    case overlay(OverlayEvent)
+    case control(ControlEvent)
+
+    public static func decode(line: Data) -> TurnEvent {
+        if let control = ControlEvent.decode(line: line) { return .control(control) }
+        return .overlay(OverlayEvent.decode(line: line))
+    }
+}
