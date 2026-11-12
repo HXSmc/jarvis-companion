@@ -93,6 +93,21 @@ public struct CardView: View {
         self.enlargedFontScale = min(enlargedFontScale, CardSize.fontScaleCap)
     }
 
+    /// Width the card kind is built at; the enlarged layer scales fonts from it.
+    static func baseWidth(of card: HUDCard) -> CGFloat {
+        switch card {
+        case .bar, .flow: return 360
+        case .image, .video: return MediaPolicy.cardWidth
+        default: return 300
+        }
+    }
+
+    /// Font scale of a card drawn at `width`: its base width ratio, capped (sharp text re-laid
+    /// out, never a scaled bitmap).
+    static func fontScale(card: HUDCard, width: CGFloat) -> CGFloat {
+        min(width / baseWidth(of: card), CardSize.fontScaleCap)
+    }
+
     public var body: some View {
         switch card {
         case .info(let p):

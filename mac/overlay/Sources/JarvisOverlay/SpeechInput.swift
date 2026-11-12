@@ -161,8 +161,23 @@ final class SpeechInput {
         turn.lastText = text
         turn.hasSpeech = true
         turn.endOfSpeech = Date()
+        if let barge = turn.barge, !barge.confirmed { checkBarge(barge, turn: turn, partial: text) }
         turn.tail.partial(text, at: Date())
         turn.onPartial?(text)
+    }
+
+    /// The barge-in word check on one partial: gate candidate + words the reply does not
+    /// contain. On confirm the turn goes on as an ordinary follow-up from that moment.
+    private func checkBarge(_ barge: BargeRun, turn: Turn, partial: String) {
+        guard let reason = BargeDecision.decide(gateCandidate: barge.gate.isCandidate, partial: partial,
+                                                reply: barge.reply, wake: false,
+                                                enabled: barge.enabled, aec: barge.aec) else { return }
+        barge.confirmed = true
+        // The tail gate and the sent levels start at the confirmation, not over the reply's echo.
+        turn.tail = TailGate(ratio: tailRatio)
+        turn.fedBlocks = 0
+        turn.levelFrom = Date()
+        barge.onConfirmed?(reason)
     }
 
     /// First caller wins; a queued callback after cancel stays silent.
@@ -239,6 +254,22 @@ final class SpeechInput {
             turn.tail.level(blocks[i], at: turn.levelFrom.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
         }
         turn.fedBlocks = done
+    }
+
+    /// Gives the barge echo gate each finished 100 ms block since the barge turn started: mic
+    /// blocks from the tap, the reply's playback RMS from AudioOut's ring (a block with no
+    /// buffer is 0, so playback gaps can never raise the coupling).
+    private func feedGate(_ barge: BargeRun, now: Date) {
+        guard let from = barge.gateThrough else { return }
+        let mic = LevelBlocks.blocks(tap.levelSamples(since: from), from: from, to: now)
+        let out = LevelBlocks.blocks(barge.outLevels(), from: from, to: now)
+        let done = min(max(0, mic.count - 1), max(0, out.count - 1))  // the newest block is still filling
+        guard done > barge.fedBlocks else { return }
+        for i in barge.fedBlocks..<done {
+            barge.gate.block(mic: mic[i], out: out[i],
+                             at: from.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
+        }
+        barge.fedBlocks = done
     }
 
     // MARK: macOS 26 SpeechAnalyzer
@@ -522,6 +553,39 @@ private final class TranscriptBox: @unchecked Sendable {
     var text: String {
         lock.lock(); defer { lock.unlock() }
         return (finalized + volatile).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - barge-in run state
+
+/// One barge listening pass, shared by AppController (which starts it and appends the reply's
+/// spoken texts) and SpeechInput's barge turn (which feeds the gate and confirms on a partial).
+/// Main-actor only, like the turns that hold it.
+final class BargeRun {
+    /// The reply's spoken texts so far (every .audio/.say of the turn); AppController appends.
+    var reply: [String] = []
+    /// The echo gate; its margin is AEC's only when voice processing is really on.
+    var gate: EchoGate
+    /// Barge-in wanted (health barge_in); the turn is only started when true.
+    let enabled: Bool
+    /// AEC really on (the start() probe stuck): reason .aec and the AEC margin only then.
+    let aec: Bool
+    /// The reply's playback RMS (AudioOut's level ring), read on the main actor.
+    let outLevels: () -> [LevelSample]
+    /// Gate blocks already fed (each finished 100 ms block reaches the gate once).
+    var fedBlocks = 0
+    /// Set when the barge turn starts: gate blocks before it are pre-reply audio, never fed.
+    var gateThrough: Date?
+    /// True once a barge-in fired; the turn then runs on as an ordinary follow-up.
+    var confirmed = false
+    /// AppController's stop-the-reply path (audio.stop, stream cancel, orb).
+    var onConfirmed: ((BargeReason) -> Void)?
+
+    init(enabled: Bool, aec: Bool, outLevels: @escaping () -> [LevelSample]) {
+        self.enabled = enabled
+        self.aec = aec
+        self.outLevels = outLevels
+        self.gate = EchoGate(margin: aec ? EchoGate.aecMargin : EchoGate.defaultMargin)
     }
 }
 

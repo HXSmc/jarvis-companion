@@ -27,6 +27,25 @@ final class AppController {
     /// When the last turn's speech was handed over: ring audio before it is never replayed again.
     private var lastHeardUntil: Date?
 
+    // Barge-in / stop state.
+    /// The running turn's utterance stream task; a barge-in or a stop cancels it so no later
+    /// sentence of that reply is ever enqueued.
+    private var utteranceTask: Task<Void, Never>?
+    /// Bumped per turn; .audio/.say events of an older turn are ignored (barge-in, stop).
+    private var turnToken = 0
+    /// True while a turn's utterance stream is open; a wake during it barge-ins too.
+    private var turnStreaming = false
+    /// Barge-in wanted (health barge_in, default on).
+    private var bargeInEnabled = true
+    /// The barge listening run of the current turn, nil while its audio is not playing.
+    private var bargeRun: BargeRun?
+    /// When the current turn's first .audio arrived (the barge-in debug "at").
+    private var bargeFirstAudioAt: Date?
+    /// .audio events that arrived after their turn was cut (the barge-in dropped_sentences).
+    private var lateAudioCount = 0
+    /// end_listening: this turn opens no follow-up window (a stop closes the mic until the next wake).
+    private var noFollowUp = false
+
     // Outage state.
     private var serviceVoice: String?
     private var outage = OutageGate(grace: 30)
@@ -64,14 +83,24 @@ final class AppController {
     private func launch() async {
         await requestPermissionsIfNeeded()
         do {
+            // AEC is probed before the engine starts, so health is read once here for it.
+            if let health = try? await client.health() { speech.aecEnabled = health.bargeAec ?? false }
             try speech.start()
+            if speech.aecEnabled && !speech.aecActive { aecFailed() }
         } catch {
+            if speech.aecEnabled && !speech.aecActive { aecFailed() }
             model.orb = .error
             let line = "Microphone unavailable. Check System Settings > Privacy & Security > Microphone."
             model.banner = line
             audio.speakLocally(line)
         }
         await runEventsLoop()
+    }
+
+    /// The AEC probe did not stick: continue with AEC off (plain two-engine path, default margin).
+    private func aecFailed() {
+        speech.aecEnabled = false
+        client.debugNote(step: "barge_aec", detail: "failed")
     }
 
     private func requestPermissionsIfNeeded() async {
@@ -129,6 +158,8 @@ final class AppController {
                 let health = try await client.health()
                 serviceVoice = health.voice
                 speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
+                bargeInEnabled = health.bargeIn ?? true
+                speech.aecEnabled = health.bargeAec ?? false  // takes effect on the next start()
                 endOutage()
                 for try await event in client.events() {
                     endOutage()
@@ -232,7 +263,12 @@ final class AppController {
             refreshPermissions()
             if !model.missingPermissions.isEmpty { speakPermissionNeed() }
             model.orb = .listening
-            audio.stop()  // barge-in
+            if audio.isBusy || turnStreaming {
+                bargeIn(reason: .wake)  // A4: a wake during playback cuts the old reply's stream too
+            } else {
+                audio.stop()
+            }
+            noFollowUp = false  // an end_listening closes the mic only until the next wake
             if model.missingPermissions.isEmpty, let chime = wakeSound {
                 chime.stop()  // replay from the start if the last one still rings
                 chime.play()
@@ -252,13 +288,10 @@ final class AppController {
                 let heardUntil = Date()  // every ring chunk before this went to this turn
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
-                    await self?.handleUtterance(text: text,
-                                          followUp: followUp,
-                                          sttFinalMs: sttFinalMs,
-                                          audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
-                                          endOfSpeech: endOfSpeech,
-                                          heard: heard,
-                                          screenTask: screenTask)
+                    self?.startUtterance(text: text, followUp: followUp, bargeIn: false,
+                                         sttFinalMs: sttFinalMs,
+                                         audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
+                                         endOfSpeech: endOfSpeech, heard: heard, screenTask: screenTask)
                 }
             },
             onNothing: { [weak self] why in
@@ -284,15 +317,55 @@ final class AppController {
 
     // MARK: - Utterance turn
 
+    /// A final text becomes a service turn. A stop phrase silences the old reply and cancels
+    /// its stream before the request (B3); every new turn replaces the previous stream.
+    private func startUtterance(text: String,
+                                followUp: Bool,
+                                bargeIn: Bool,
+                                sttFinalMs: Double,
+                                audioMs: Double,
+                                endOfSpeech: Date,
+                                heard: SpeechInput.Heard,
+                                screenTask: Task<ScreenPayload?, Never>) {
+        if StopPhrase.matches(text) {
+            audio.stop()
+            utteranceTask?.cancel()
+            turnStreaming = false
+            turnDone = false  // the stop's stale drains must not start a follow-up
+        }
+        turnToken += 1
+        let token = turnToken
+        turnStreaming = true
+        utteranceTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.handleUtterance(text: text,
+                                       followUp: followUp,
+                                       bargeIn: bargeIn,
+                                       sttFinalMs: sttFinalMs,
+                                       audioMs: audioMs,
+                                       endOfSpeech: endOfSpeech,
+                                       heard: heard,
+                                       screenTask: screenTask,
+                                       token: token)
+            if self.turnToken == token { self.turnStreaming = false }
+        }
+    }
+
     private func handleUtterance(text: String,
                                  followUp: Bool,
+                                 bargeIn: Bool,
                                  sttFinalMs: Double,
                                  audioMs: Double,
                                  endOfSpeech: Date,
                                  heard: SpeechInput.Heard,
-                                 screenTask: Task<ScreenPayload?, Never>) async {
+                                 screenTask: Task<ScreenPayload?, Never>,
+                                 token: Int) async {
         heldLine.drop()  // a new turn: an older pushed line is out of date
         model.orb = .thinking
+        bargeRun = nil  // the new turn's reply texts collect from scratch
+        bargeFirstAudioAt = nil
+        lateAudioCount = 0
+        noFollowUp = false
         let screen = await screenTask.value
 
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -315,12 +388,19 @@ final class AppController {
                 for try await event in client.utterance(text: text, convId: conv,
                                                         sttFinalMs: sttFinalMs, audioMs: audioMs,
                                                         stt: speech.lastDiagnosis, followUp: followUp,
+                                                        bargeIn: bargeIn,
                                                         heard: heard, screen: screen) {
+                    // A barge-in or a stop cut this turn: nothing more of it is drawn or heard.
+                    guard !Task.isCancelled, token == turnToken else { return }
                     gotEvent = true
-                    handle(event, captured: captured)
+                    switch event {
+                    case .overlay(let e): handle(e, captured: captured, token: token)
+                    case .control(let c): handleControl(c)
+                    }
                 }
                 return
             } catch {
+                if Task.isCancelled || token != turnToken { return }  // cut on purpose, not an outage
                 failure = error
                 // Nothing played yet: the service may be mid-restart, so one retry is safe.
                 guard attempt == 1, !gotEvent else { break }
@@ -337,16 +417,88 @@ final class AppController {
         }
     }
 
+    /// One barge-in path (A3): silence the reply, cut its stream, drop held lines, listen.
+    /// stop_ms = the confirmation to audio.stop() returning; at = ms since the reply's first audio.
+    private func bargeIn(reason: BargeReason) {
+        let confirmedAt = Date()
+        let at = bargeFirstAudioAt.map { Int(confirmedAt.timeIntervalSince($0) * 1000) } ?? 0
+        let pending = audio.pendingBuffers
+        audio.stop()  // silence first: the target is 300 ms from the confirmation
+        let stopMs = Int(Date().timeIntervalSince(confirmedAt) * 1000)
+        utteranceTask?.cancel()
+        turnStreaming = false
+        turnDone = false  // the stop's stale drains must not start a follow-up
+        heldLine.drop()
+        model.orb = .listening
+        client.debugNote(step: "barge_in",
+                         detail: "at=\(at) reason=\(reason.rawValue) "
+                             + "dropped_sentences=\(pending + lateAudioCount) stop_ms=\(stopMs)")
+    }
+
+    /// A2: with the first .audio of the turn playing, one recognition turn listens for a barge-in:
+    /// no ring replay, never ends on silence, and while unconfirmed no final/nothing. On confirm it
+    /// runs on as the owner's ordinary follow-up turn; at the reply's drain it is cancelled silently.
+    private func startBargeListeningIfNeeded() {
+        guard bargeInEnabled, bargeRun == nil, model.missingPermissions.isEmpty else { return }
+        let audioOut = audio
+        let run = BargeRun(enabled: true, aec: speech.aecActive, outLevels: { audioOut.outputLevels })
+        run.onConfirmed = { [weak self] reason in self?.bargeIn(reason: reason) }
+        bargeRun = run
+        // Screen capture starts when the barge turn starts; only awaited when its utterance lands.
+        let screenTask = Task { await ScreenContext.capture() }
+        let listenStart = Date()
+        speech.listenAfterWake(
+            followUp: true,
+            barge: run,
+            onPartial: { _ in },
+            onFinal: { [weak self] text, sttFinalMs, endOfSpeech, heard in
+                Task { @MainActor in
+                    guard let self else { return }
+                    // The recogniser also heard the reply's lead: strip it, the rest is the owner's.
+                    let owned = BargeWords.ownerWords(partial: text, reply: run.reply)
+                    guard !owned.isEmpty else {
+                        self.model.orb = .idle  // nothing the word check can call the owner's
+                        return
+                    }
+                    self.lastHeardUntil = Date()
+                    self.startUtterance(text: owned, followUp: true, bargeIn: true,
+                                        sttFinalMs: sttFinalMs,
+                                        audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
+                                        endOfSpeech: endOfSpeech, heard: heard, screenTask: screenTask)
+                }
+            },
+            onNothing: { _ in })
+    }
+
+    /// Control events steer the overlay itself: end_listening closes the follow-up window for
+    /// this turn (B3), card_size draws one card enlarged or restores it (C3).
+    private func handleControl(_ event: ControlEvent) {
+        switch event {
+        case .endListening:
+            noFollowUp = true
+        case .cardSize(let id, let max):
+            guard model.cards.contains(where: { $0.id == id }) else { return }
+            if max { _ = model.enlarge.max(id) } else { model.enlarge.restore() }
+        }
+    }
+
     /// `captured`: the turn's capture items in points (ElementTrack.captured), to tell a grounded
-    /// shape from coordinates the brain wrote itself.
-    private func handle(_ event: OverlayEvent, captured: [CGRect]) {
+    /// shape from coordinates the brain wrote itself. `token`: this turn's token; .audio/.say of
+    /// an older turn (cut by a barge-in or a stop) never sound.
+    private func handle(_ event: OverlayEvent, captured: [CGRect], token: Int) {
         if ShapeTrack.extendsIdle(event) { model.activity() }
         switch event {
         case .say(let text):
+            guard token == turnToken else { return }
+            bargeRun?.reply.append(text)
             if serviceVoice == nil { audio.speakLocally(text) }
-        case .audio(_, let rate, let pcm):
+        case .audio(let text, let rate, let pcm):
+            guard token == turnToken else { lateAudioCount += 1; return }
+            if bargeFirstAudioAt == nil { bargeFirstAudioAt = Date() }
+            bargeRun?.reply.append(text)
             model.orb = .speaking
             audio.enqueue(pcm: pcm, rate: rate)
+            startBargeListeningIfNeeded()
         case .shape(let shape, let check):
             // The capture is seconds old: re-resolve once, off the main actor, before drawing.
             let stale = shape.rect, label = shape.label ?? ""
@@ -402,15 +554,15 @@ final class AppController {
     private func runDebug(_ command: LayoutDebugCommand, _ text: String) {
         log("layout debug: \(text)")
         switch command {
-        case .aside: handle(.layout(.aside), captured: [])
-        case .restore: handle(.layout(.restore), captured: [])
-        case .clear: handle(.clear, captured: [])
+        case .aside: handle(.layout(.aside), captured: [], token: turnToken)
+        case .restore: handle(.layout(.restore), captured: [], token: turnToken)
+        case .clear: handle(.clear, captured: [], token: turnToken)
         case .demo(let count):
-            for card in LayoutDebugCommand.demoCards(count: count) { handle(.card(card), captured: []) }
+            for card in LayoutDebugCommand.demoCards(count: count) { handle(.card(card), captured: [], token: turnToken) }
         case .demoMedia:
-            for card in LayoutDebugCommand.demoMediaCards() { handle(.card(card), captured: []) }
+            for card in LayoutDebugCommand.demoMediaCards() { handle(.card(card), captured: [], token: turnToken) }
         case .demoMediaBad:
-            for card in LayoutDebugCommand.demoMediaBadCards() { handle(.card(card), captured: []) }
+            for card in LayoutDebugCommand.demoMediaBadCards() { handle(.card(card), captured: [], token: turnToken) }
         case .shape:
             let size = overlayPanel?.frame.size ?? .zero
             let box = [size.width / 2 - 150, size.height / 2 - 40, size.width / 2 + 150, size.height / 2 + 40]
@@ -584,6 +736,7 @@ final class AppController {
             turnDone = false
         }
         let serial = listenSerial
+        guard !noFollowUp else { return }  // end_listening: the mic stays closed until the next wake
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard let self, self.listenSerial == serial, self.model.orb == .idle, !self.audio.isBusy
