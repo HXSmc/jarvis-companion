@@ -288,11 +288,13 @@ public struct ImageCardView: View {
         if case .loaded(let image) = state {
             if let width {
                 // Enlarged: the decoded image's aspect at the card width, height cap lifted.
-                size = CGSize(width: width,
-                              height: width * CGFloat(image.height) / CGFloat(max(image.width, 1)))
-                if let maxHeight, size.height > maxHeight {
+                let natural = CGSize(width: width,
+                                     height: width * CGFloat(image.height) / CGFloat(max(image.width, 1)))
+                if let maxHeight, natural.height > maxHeight {
                     size = CGSize(width: maxHeight * CGFloat(image.width) / CGFloat(max(image.height, 1)),
                                   height: maxHeight)
+                } else {
+                    size = natural
                 }
             } else {
                 size = MediaPolicy.imageAreaSize(pixelWidth: image.width, pixelHeight: image.height)
