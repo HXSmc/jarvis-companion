@@ -362,62 +362,58 @@ public enum GutterOCR {
             let rights = rows.compactMap { px.inkRight(from: codeLeft - textH * 0.25, to: codeLeft - textH * 8, y: $0.midY, half: textH * 0.5) }.sorted()
             guard !rights.isEmpty else { continue }
             let right = rights[rights.count / 2]
-            for row in rows where cells.count < maxCells {
+            // Also the rows whose text crosses the shared edge: pass 1 read a bright changed-row
+            // number with its code as one text ("3 three changed").
+            let crossing = taken.filter { $0.minX < codeLeft - 6 && $0.maxX > codeLeft + 6 && $0.minX > right - textH * 4 }
+            for row in rows + crossing where cells.count < maxCells {
                 if let cell = px.numberCell(right: right, y: row.midY, half: textH * 0.6, glyph: glyph), free(cell) { cells.append(cell) }
             }
         }
         return cells
     }
 
-    /// One read of all cells, each drawn twice side by side, cells far apart on one line.
+    /// One read of all cells, each drawn twice side by side ("6" -> "66"), on a grid of 8 per line
+    /// with gaps of 3 cell heights, so two cells never read as one text.
     private static func readDoubled(_ cells: [CGRect], in image: CGImage) -> [(line: Int, box: [Double])] {
-        let height = Int(cells.map(\.height).max() ?? 1)
-        let gap = max(30, height)
-        let pad = 40
-        var spans: [(range: ClosedRange<Int>, cell: CGRect, crop: CGImage)] = []
-        var x = pad
-        for cell in cells {
-            guard let crop = image.cropping(to: cell.integral) else { continue }
-            let span = x...(x + 2 * crop.width + 2)
-            spans.append((span, cell, crop))
-            x = span.upperBound + gap
-        }
-        guard !spans.isEmpty,
-              let ctx = CGContext(data: nil, width: x + pad, height: height + 2 * pad, bitsPerComponent: 8, bytesPerRow: 0,
+        let crops = cells.compactMap { cell in image.cropping(to: cell.integral).map { (cell: cell, crop: $0) } }
+        guard !crops.isEmpty else { return [] }
+        let cellH = crops.map(\.crop.height).max() ?? 1
+        let slotW = 2 * (crops.map(\.crop.width).max() ?? 1) + 2 + 3 * cellH
+        let slotH = 4 * cellH
+        let perLine = 8
+        let lines = (crops.count + perLine - 1) / perLine
+        let width = perLine * slotW + 2 * cellH, height = lines * slotH + 2 * cellH
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return [] }
-        // Paint the composite with the first cell's corner colour (the gutter background).
-        if let corner = Pixels(spans[0].crop)?.rgb(0, 0) {
+        // The first cell's corner colour is the gutter background.
+        if let corner = Pixels(crops[0].crop)?.rgb(0, 0) {
             ctx.setFillColor(CGColor(red: corner.0, green: corner.1, blue: corner.2, alpha: 1))
-            ctx.fill(CGRect(x: 0, y: 0, width: x + pad, height: height + 2 * pad))
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         }
-        for s in spans {
-            let y = pad + (height - s.crop.height) / 2
-            ctx.draw(s.crop, in: CGRect(x: s.range.lowerBound, y: y, width: s.crop.width, height: s.crop.height))
-            ctx.draw(s.crop, in: CGRect(x: s.range.lowerBound + s.crop.width + 2, y: y, width: s.crop.width, height: s.crop.height))
+        var slots: [CGRect] = []  // top-left pixel rect of each cell's slot
+        for (index, item) in crops.enumerated() {
+            let slot = CGRect(x: cellH + (index % perLine) * slotW, y: cellH + (index / perLine) * slotH, width: slotW, height: slotH)
+            slots.append(slot)
+            let w = item.crop.width, h = item.crop.height
+            let top = Int(slot.minY) + (slotH - h) / 2
+            let y = height - top - h  // CGContext draws bottom-up
+            ctx.draw(item.crop, in: CGRect(x: Int(slot.minX), y: y, width: w, height: h))
+            ctx.draw(item.crop, in: CGRect(x: Int(slot.minX) + w + 2, y: y, width: w, height: h))
         }
         guard let composite = ctx.makeImage() else { return [] }
-        // Each character goes to the cell under it, so two cells read as one text ("66 55") still count.
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        try? VNImageRequestHandler(cgImage: composite).perform([request])
-        var perCell: [Int: String] = [:]
-        for observation in request.results ?? [] {
-            guard let candidate = observation.topCandidates(1).first else { continue }
-            let text = candidate.string
-            for index in text.indices where text[index] != " " {
-                guard let hit = try? candidate.boundingBox(for: index..<text.index(after: index)) else { continue }
-                let mid = Int(hit.boundingBox.midX * Double(composite.width))
-                guard let cell = spans.firstIndex(where: { $0.range.contains(mid) }) else { continue }
-                perCell[cell, default: ""].append(text[index])
-            }
+        var perCell: [Int: [String]] = [:]
+        for o in text(in: composite) {
+            let mid = CGPoint(x: (o.box[0] + o.box[2]) / 2, y: (o.box[1] + o.box[3]) / 2)
+            guard let index = slots.firstIndex(where: { $0.contains(mid) }) else { continue }
+            perCell[index, default: []].append(o.text)
         }
-        let found = perCell.compactMapValues(doubled)
-        return found.sorted { $0.key < $1.key }.map { hit in
-            let c = spans[hit.key].cell
-            return (line: hit.value, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
-        }
+        // Exactly one text per cell, and it must be two equal halves.
+        return perCell.compactMap { index, texts in
+            guard texts.count == 1, let line = doubled(texts[0]) else { return nil }
+            let c = crops[index].cell
+            return (line: line, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
+        }.sorted { $0.box[1] < $1.box[1] }
     }
 }
 
