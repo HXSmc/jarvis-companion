@@ -16,8 +16,10 @@ struct Health: Decodable {
     var bargeIn: Bool?
     /// AEC-backed barge-in gate wanted; nil from an older service (the app defaults to false).
     var bargeAec: Bool?
+    /// How barge-in may open ("off" | "headphones" | "aec"); nil from an older service.
+    var bargeMode: String?
     private enum CodingKeys: String, CodingKey {
-        case ok, voice, tailLevelRatio = "tail_level_ratio", bargeIn = "barge_in", bargeAec = "barge_aec"
+        case ok, voice, tailLevelRatio = "tail_level_ratio", bargeIn = "barge_in", bargeAec = "barge_aec", bargeMode = "barge_mode"
     }
 }
 

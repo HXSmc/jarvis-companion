@@ -10,6 +10,9 @@ import OverlayCore
 @MainActor
 final class SpeechInput {
     private let engine = AVAudioEngine()
+    /// Read-only view of `engine`: the AEC path (barge_mode aec) attaches AudioOut's player to
+    /// it before start(), so the mic's voice processing also cancels the reply audio.
+    var audioEngine: AVAudioEngine { engine }
     private let tap = MicTap()
     private var isRunning = false
     private var currentTurn: Turn?
