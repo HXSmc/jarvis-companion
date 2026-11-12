@@ -602,8 +602,8 @@ def test_vault_excluded_constant(env, tmp_path):
               decide(ctx, "Glob", pattern="**/*.md", path=str(vault)),
               decide(ctx, "Grep", pattern="x", path=str(vault / "Notes2"))):
         assert isinstance(d, ap.Deny), d
-    for name in ("secrets", "SECRETS"):  # case-sensitive fs: one tmp vault per spelling
-        alt = tmp_path / f"vault-{name}"
+    for i, name in enumerate(("secrets", "SECRETS")):  # one tmp vault per spelling (macOS tmp is case-insensitive)
+        alt = tmp_path / f"vault-alt{i}"
         (alt / name).mkdir(parents=True)
         (alt / name / "a.md").write_text("x")
         (alt / "Notes").mkdir()

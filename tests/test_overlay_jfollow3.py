@@ -427,8 +427,9 @@ def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
     stops the audio (no barge_in row), and the setup rows say how to turn it on."""
     ctl = (APP_SRC / "AppController.swift").read_text()
     assert "private var bargeInEnabled = false" in ctl
-    assert "bargeInEnabled = health.bargeIn ?? false" in ctl
-    assert "?? true" not in ctl.split("bargeInEnabled = health.bargeIn")[1].split("\n")[0]
+    # jfollow4 D2: the mode comes from health (off / headphones only / echo canceller); speakers never barge.
+    assert "BargeMode.from(health:" in ctl
+    assert "case .headphones: bargeInEnabled = routeIsHeadphones" in ctl
     wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
     gated = wake.index("if bargeInEnabled {")
     assert gated < wake.index("bargeIn(reason: .wake)") < wake.index("audio.stop()", gated)
