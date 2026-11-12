@@ -345,8 +345,12 @@ public enum GutterOCR {
            let top = column.marks.min(by: { $0.midY < $1.midY }) {
             let widths = digits.filter { abs($0.right - column.right) <= 6 }.map { $0.width / CGFloat($0.count) }.sorted()
             let glyph = widths.isEmpty ? textH * 0.6 : widths[widths.count / 2]
+            // Only the rows that can hold lines 1-9: none when the top read number is 20 or more
+            // (a scrolled file pays no second read), at most one per missing line above it.
+            var rowsLeft = top.line < 20 ? top.line - 1 : 0
             var y = top.midY - pitch
-            while y - pitch / 2 >= window.minY, cells.count < maxCells {
+            while rowsLeft > 0, y - pitch / 2 >= window.minY, cells.count < maxCells {
+                rowsLeft -= 1
                 if let cell = px.numberCell(right: column.right, y: y, half: pitch * 0.4, glyph: glyph), free(cell) { cells.append(cell) }
                 y -= pitch
             }

@@ -250,7 +250,7 @@ final class GutterOCRTests: XCTestCase {
     /// Row n's text centre in pixels (baseline 250 + 36 n from the top, cap height about 17 px).
     static func rowY(_ n: Int) -> CGFloat { CGFloat(250 + 36 * n) - 8 }
 
-    static func render(lines: Int, code: (Int) -> String, changed: Set<Int>) -> CGImage {
+    static func render(lines: Int, from first: Int = 1, code: (Int) -> String, changed: Set<Int>) -> CGImage {
         let width = 2880, height = 1800
         let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -271,8 +271,8 @@ final class GutterOCRTests: XCTestCase {
         }
         for n in 1...lines {
             let top = CGFloat(250 + 36 * n)
-            draw("\(n)", x: 800, top: top, grey: changed.contains(n) ? 0.85 : 0.45, right: true)
-            draw(code(n), x: 840, top: top, grey: 0.8)
+            draw("\(first + n - 1)", x: 800, top: top, grey: changed.contains(n) ? 0.85 : 0.45, right: true)
+            draw(code(first + n - 1), x: 840, top: top, grey: 0.8)
             if changed.contains(n) {
                 ctx.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 1))  // CTLineDraw changes the fill colour
                 ctx.fill(CGRect(x: 812, y: CGFloat(height) - top - 8, width: 6, height: 36))            // git bar
@@ -336,6 +336,12 @@ final class GutterOCRTests: XCTestCase {
         XCTAssertEqual(pass.reason, "ok")
         let band = try XCTUnwrap(pass.bands.first?.rect)
         XCTAssertEqual(band.midY, Self.rowY(3) / 2, accuracy: 3)
+    }
+
+    func testScrolledFileSkipsTheSecondRead() {
+        // Lines 121-150 on screen: no 1-digit line can be above them, so no extra OCR pass.
+        let image = Self.render(lines: 30, from: 121, code: { "let v\($0) = \($0);" }, changed: [])
+        XCTAssertEqual(GutterOCR.cellsToRead(in: image, observations: GutterOCR.text(in: image), window: Self.window), [])
     }
 }
 #endif
