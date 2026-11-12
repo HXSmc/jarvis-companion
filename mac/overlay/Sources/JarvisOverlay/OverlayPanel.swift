@@ -446,7 +446,8 @@ final class CardPanel: NSObject {
             hideEnlarged()
             return
         }
-        let width = CardSize.enlargedFrame(natural: tileFrame.size, visible: visible).width
+        var width = CardSize.enlargedFrame(natural: tileFrame.size, visible: visible).width
+        if case .flow(let p) = card { width = FlowFit.enlargedWidth(p, fitted: width, visible: visible) }
         let tile = EnlargedCardTile(card: card, width: width,
                                     maxHeight: visible.height * CardSize.screenShare,
                                     remeasure: { [weak self] in self?.refitEnlarged() })

@@ -603,3 +603,11 @@ def test_bare_show_is_the_show_intent():
         assert parse(text, apps={}).kind == "show", text
     for text in ("show me a picture of a dog", "show the weather", "what's on the show tonight"):
         assert parse(text, apps={}).kind != "show", text
+
+
+def test_short_file_line_does_not_call_the_line_a_change():
+    # Mac live run 4: an agent pointed at a timer on line 205 and the pushed line said "The change is on
+    # line 205" for a line nothing changed. The lines note comes for any boxed line, so the line is neutral.
+    line = acks.PHRASES["lines_short"].format(n=205)
+    assert "change" not in line.lower()
+    assert line == "I see no line numbers here. It's line 205."

@@ -105,7 +105,7 @@ public struct CardView: View {
     /// Font scale of a card drawn at `width`: its base width ratio, capped (sharp text re-laid
     /// out, never a scaled bitmap).
     public static func fontScale(card: HUDCard, width: CGFloat) -> CGFloat {
-        if case .flow = card { return min(width / baseWidth(of: card), CardSize.flowFontScaleCap) }
+        if case .flow(let p) = card { return min(width / baseWidth(of: card), FlowFit.scale(p, width: width)) }
         return min(width / baseWidth(of: card), CardSize.fontScaleCap)
     }
 

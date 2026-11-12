@@ -54,7 +54,8 @@ PHRASES = {
     "lines_off_view": "That change is folded or wrapped; I can't box it.",
     "no_repo": "I can't tell which repo. Open a file or Terminal in it.",
     # A template ({n} = the wanted line number only): spoken through the synth, never prerendered.
-    "lines_short": "I see no line numbers here. The change is on line {n}.",
+    # Any boxed line, not only a change (Mac live run 4: an agent's timer line was called "the change").
+    "lines_short": "I see no line numbers here. It's line {n}.",
     # A template ({name} = the changed file's name): a Terminal-picked repo gets cards, no boxes.
     "cards_only": "Cards only. Open {name} in your editor to see the boxes.",
     "stop": "OK.",

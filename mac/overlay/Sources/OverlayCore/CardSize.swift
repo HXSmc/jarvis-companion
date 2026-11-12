@@ -34,6 +34,50 @@ public enum CardSize {
     }
 }
 
+/// Room an enlarged flow's node labels need: each label in whole words on at most two lines (the
+/// node box's lineLimit), in the 12 pt node font at about 0.6 em a character, plus the box's 6 pt
+/// side padding. Mac live run 4: the enlarged phone diagram took its width from the tile's shape
+/// (725 pt for a six-node row, 54 pt of text per node) and cut "Power manage…", "Memory and
+/// stor…" and "Touchscre/en".
+public enum FlowFit {
+    public static let charWidth: CGFloat = 12 * 0.6
+    /// Node box side padding (6 + 6) plus 4 pt of slack for wide letters.
+    public static let nodePad: CGFloat = 16
+    /// CardChrome's padding (14 each side) around the flow body.
+    public static let chromePad: CGFloat = 28
+
+    /// Narrowest line that holds `text` in at most two lines without breaking a word.
+    public static func labelWidth(_ text: String) -> CGFloat {
+        let words = text.split(separator: " ").map(String.init)
+        func w(_ part: ArraySlice<String>) -> CGFloat { CGFloat(part.joined(separator: " ").count) * charWidth }
+        var best = w(words[...])
+        for i in words.indices.dropFirst() { best = min(best, max(w(words[..<i]), w(words[i...]))) }
+        return best
+    }
+
+    /// Unscaled body width at which every node's cell fits its label (FlowLayout: equal cells, 8 pt gap).
+    public static func bodyWidth(_ card: FlowCard) -> CGFloat {
+        let depth = FlowLayout.depths(nodes: card.nodes, edges: card.edges)
+        var perRow: [Int: Int] = [:]
+        for n in card.nodes { perRow[depth[n.id] ?? 0, default: 0] += 1 }
+        let maxPerRow = CGFloat(max(perRow.values.max() ?? 1, 1))
+        let cell = (card.nodes.map { labelWidth($0.text) }.max() ?? 0) + nodePad
+        return maxPerRow * cell + (maxPerRow - 1) * 8
+    }
+
+    /// Enlarged flow card width: at least `fitted`, wide enough for the labels at the flow font cap,
+    /// never over the 80 % share of the visible width (the height does not grow with the width).
+    public static func enlargedWidth(_ card: FlowCard, fitted: CGFloat, visible: CGRect) -> CGFloat {
+        min(max(fitted, bodyWidth(card) * CardSize.flowFontScaleCap + chromePad),
+            CardSize.screenShare * visible.width)
+    }
+
+    /// Flow font scale at `width`: the cap, lowered when even the widest card would cut a label.
+    public static func scale(_ card: FlowCard, width: CGFloat) -> CGFloat {
+        min(CardSize.flowFontScaleCap, (width - chromePad) / max(bodyWidth(card), 1))
+    }
+}
+
 /// Which card is enlarged; `max(_:)` returns the previously enlarged id so the caller can
 /// shrink it back.
 public struct EnlargeState: Equatable {
@@ -61,7 +105,7 @@ public struct EnlargeState: Equatable {
 }
 
 /// Flow edge labels placed so no two overlap and none sits on a node: each label tries points
-/// along its edge (middle first) and is left out when none is free. Mac live run 2: the six
+/// along its edge (middle first) and is left out when none is free; labels keep `gap` apart. Mac live run 2: the six
 /// labels fanning out of "Processor (SoC)" all sat at their edges' middles and printed over each
 /// other ("image/touch/readings/data").
 public enum FlowEdgeLabels {
@@ -85,7 +129,8 @@ public enum FlowEdgeLabels {
                 if placed.contains(where: { $0.intersects(box) }) || nodes.contains(where: { $0.intersects(box) }) {
                     continue
                 }
-                placed.append(box)
+                // Keep `gap` clear on both sides: touching labels read as one ("data image and touch").
+                placed.append(box.insetBy(dx: -gap, dy: 0))
                 return p
             }
             return nil

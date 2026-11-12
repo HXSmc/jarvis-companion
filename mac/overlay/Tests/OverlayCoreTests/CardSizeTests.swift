@@ -123,4 +123,75 @@ final class CardSizeTests: XCTestCase {
             XCTAssertTrue(middles.indices.contains { i in middles.indices.contains { j in i < j && middles[i].intersects(middles[j]) } })
         }
     }
+
+    // MARK: Round 8 (Mac live run 4)
+
+    /// The live run 4 phone diagram: six nodes in one row. Enlarged at the tile's shape (725 pt) the
+    /// nodes had 54 pt of text and cut "Power management", "Memory and storage", "Touchscreen". The
+    /// enlarged flow is now as wide as its labels need (inside 80 % of the screen), so every label
+    /// fits in whole words on two lines.
+    func testEnlargedFlowGivesEveryLabelItsWords() {
+        let names = ["Battery", "Power management", "Processor (SoC)", "Memory and storage", "Touchscreen display",
+                     "Cameras", "Sensors", "Modem and radios", "Mic and speaker", "Antennas"]
+        let nodes = names.enumerated().map { FlowNode(id: "n\($0.offset)", text: $0.element) }
+        let edges = [FlowEdge(from: "n0", to: "n1", label: "power"), FlowEdge(from: "n1", to: "n2", label: "regulated power"),
+                     FlowEdge(from: "n2", to: "n3", label: "data"), FlowEdge(from: "n2", to: "n4", label: "image and touch"),
+                     FlowEdge(from: "n2", to: "n5", label: "image"), FlowEdge(from: "n2", to: "n6", label: "readings"),
+                     FlowEdge(from: "n2", to: "n7", label: "data"), FlowEdge(from: "n2", to: "n8", label: "sound"),
+                     FlowEdge(from: "n7", to: "n9", label: "signal")]
+        let card = FlowCard(title: "Phone: main components", nodes: nodes, edges: edges)
+        let visible = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        // Text room per node at a card width and font scale (FlowBody: chrome padding, then unscaled grid).
+        func room(width: CGFloat, scale: CGFloat) -> [String: CGFloat] {
+            FlowLayout.layout(nodes: nodes, edges: edges,
+                              size: CGSize(width: (width - FlowFit.chromePad) / scale, height: 300))
+                .mapValues { $0.width - 12 }
+        }
+        func cut(_ room: [String: CGFloat]) -> [String] {
+            nodes.filter { room[$0.id]! < FlowFit.labelWidth($0.text) }.map(\.text)
+        }
+        // Before: the tile-shaped width and the plain font cap cut the long labels.
+        let before = cut(room(width: 725, scale: CardSize.flowFontScaleCap))
+        XCTAssertTrue(before.contains("Power management") && before.contains("Memory and storage")
+                      && before.contains("Touchscreen display"), "\(before)")
+        let width = FlowFit.enlargedWidth(card, fitted: 725, visible: visible)
+        let scale = FlowFit.scale(card, width: width)
+        XCTAssertLessThanOrEqual(width, 1152.001)
+        XCTAssertEqual(scale, CardSize.flowFontScaleCap, accuracy: 0.001, "room at the full flow font")
+        XCTAssertEqual(cut(room(width: width, scale: scale)), [])
+        XCTAssertGreaterThanOrEqual(FlowFit.labelWidth("Touchscreen display"), CGFloat("Touchscreen".count) * FlowFit.charWidth)
+        // A wider fitted width is kept; the window stays centred inside the screen.
+        XCTAssertEqual(FlowFit.enlargedWidth(card, fitted: 1100, visible: visible), 1100, accuracy: 0.001)
+        // A row too long for 80 % of the screen lowers the font instead of cutting the words.
+        let many = (0..<12).map { FlowNode(id: "m\($0)", text: "Memory and storage") }
+        let wide = FlowCard(title: "Many", nodes: many, edges: [])
+        let w2 = FlowFit.enlargedWidth(wide, fitted: 725, visible: visible)
+        let s2 = FlowFit.scale(wide, width: w2)
+        XCTAssertEqual(w2, 1152, accuracy: 0.001)
+        XCTAssertLessThan(s2, CardSize.flowFontScaleCap)
+        let r2 = FlowLayout.layout(nodes: many, edges: [], size: CGSize(width: (w2 - FlowFit.chromePad) / s2, height: 300))
+        XCTAssertTrue(many.allSatisfy { r2[$0.id]!.width - 12 >= FlowFit.labelWidth($0.text) })
+    }
+
+    /// Live run 4: "data" and "image and touch" were placed edge to edge and read as one label.
+    /// Placed labels keep `gap` clear between them.
+    func testFlowEdgeLabelsKeepAGap() {
+        let parent = CGRect(x: 0, y: 0, width: 100, height: 30)
+        let size = FlowEdgeLabels.size("data", scale: 1)
+        let gap: CGFloat = 6
+        // The second edge's middle puts its label exactly where the first one ends.
+        let firstEnd = parent.midX + gap + size.width
+        let childA = CGRect(x: 0, y: 100, width: 100, height: 30)
+        let childB = CGRect(x: 2 * (firstEnd - gap) - parent.midX - 50, y: 100, width: 100, height: 30)
+        let edges = [(from: parent, to: childA, size: size), (from: parent, to: childB, size: size)]
+        let spots = FlowEdgeLabels.place(edges, nodes: [], gap: gap)
+        let boxes = zip(edges, spots).compactMap { e, p in
+            p.map { CGRect(x: $0.x, y: $0.y - e.size.height / 2, width: e.size.width, height: e.size.height) }
+        }
+        XCTAssertEqual(boxes.count, 2)
+        let a = boxes[0], b = boxes[1]
+        let rowsMeet = a.minY < b.maxY && b.minY < a.maxY
+        let space = max(b.minX - a.maxX, a.minX - b.maxX)
+        XCTAssertTrue(!rowsMeet || space >= gap, "labels \(space) pt apart on one line")
+    }
 }
