@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | sessions
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | sessions | session | memory | workspace
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -35,6 +35,28 @@ class MediaAsk:
 class CardSizeAsk:
     action: str  # "max" | "restore"
     target: str  # cleaned target words, "" for restore
+
+
+@dataclass
+class SessionAsk:
+    action: str  # "start" | "stop" | "answer"
+    device: str  # start only: "mini_pc" | "mac" | "windows"; "" otherwise
+    ref: str | None  # "this" | "name" | None
+    name: str  # stop/answer: the session name words, "" when none
+    words: str  # start: the request words; answer: the reply text; "" otherwise
+    answer: str | None  # answer only: "yes" | "no" | "approve" | "text"
+
+
+@dataclass
+class MemoryAsk:
+    action: str  # "add" | "list" | "forget_last" | "forget_about" | "forget_all"
+    text: str  # the fact/rule words for add and forget_about, "" otherwise
+
+
+@dataclass
+class WorkspaceAsk:
+    action: str  # "save" | "open" | "open_pages" | "list" | "delete"
+    name: str  # the spoken workspace name, "" for open_pages and list
 
 
 APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities", "~/Applications")
@@ -196,13 +218,56 @@ _CARD_TARGET_LEAD_RE = re.compile(r"^(?:the|that|this|my) ")
 _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anything stuck"
                           r"|are any sessions waiting(?: for me| on me)?"
                           r"|what went wrong with (?P<name>.+)|how are my sessions(?: doing)?"
-                          r"|session status)" + _WRAP_TRAIL)
+                          r"|session status"
+                          r"|(?P<itref>what is it doing|how is it going|what's it doing))"
+                          + _WRAP_TRAIL)
 
-def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
+# Owner asks over the deterministic session/memory/workspace stores; matched on the
+# cleaned transcript (original case kept for the extracted words), never a model.
+SESSION_WORDS_MAX = 300
+
+_SESSION_START_RE = re.compile(_WRAP_LEAD + r"(?:start|open|spin up) (?:a )?(?:new )?session"
+                               r"(?: on (?:the )?(?P<dev>mini ?pc|mac|windows(?: pc)?))?"
+                               r"(?: and| to| about| for)? (?P<words>.+)", re.I | re.S)
+_SESSION_STOP_RE = re.compile(r"stop (?:the )?(?P<name>.+?) session|stop session (?P<name2>.+)",
+                              re.I | re.S)
+_SESSION_ANSWER_RE = re.compile(
+    r"(?:tell (?P<tname>the .+? session) (?P<tyn>yes|no|to go ahead)"
+    r"|approve (?P<aname>the .+? session)"
+    r"|tell (?:(?P<sub>the .+? session)|it|that session)[:,]? (?P<words>.+)"
+    r"|answer (?P<asub>the .+? session)[:,]? (?P<awords>.+))", re.I | re.S)
+_SESSION_DEVICES = {"minipc": "mini_pc", "mac": "mac", "windows": "windows",
+                    "windowspc": "windows"}
+_SESSION_THIS_RE = re.compile(r"this session|that session|the quiet session|the stuck session", re.I)
+
+_MEMORY_ADD_RES = (re.compile(r"remember that (?P<fact>.+)", re.I | re.S),
+                   re.compile(r"remember this[:,] (?P<fact>.+)", re.I | re.S),
+                   re.compile(r"remember[:,] (?P<fact>.+)", re.I | re.S),
+                   re.compile(r"note that (?P<fact>.+)", re.I | re.S))
+_MEMORY_RULE_RE = re.compile(r"from now on (?P<rule>.+)", re.I | re.S)
+_MEMORY_LIST_RE = re.compile(r"what (?:do you remember|have you remembered)", re.I)
+_MEMORY_FORGET_ABOUT_RE = re.compile(r"forget what i said about (?P<words>.+)", re.I | re.S)
+_MEMORY_FORGET_ALL_RE = re.compile(r"forget everything(?: you remember)?", re.I)
+
+_WORKSPACE_SAVE_RE = re.compile(
+    r"save (?:these|this|them|everything)?(?: (?:pages and overlays|pages and cards"
+    r"|overlays|cards|pages))? as (?P<name>.+)", re.I | re.S)
+_WORKSPACE_OPEN_PAGES_RE = re.compile(r"open (?:the|those|these|the saved) pages", re.I)
+_WORKSPACE_OPEN_RE = re.compile(r"(?:open|bring back|show(?: me)?) (?:the |my |our )?(?P<name>.+)",
+                                re.I | re.S)
+_WORKSPACE_LIST_RE = re.compile(
+    r"what have i saved|what (?:workspaces|research) do i have|list my (?:workspaces|research)",
+    re.I)
+_WORKSPACE_DELETE_RE = re.compile(r"delete (?:the |my |our )?(?P<name>.+)", re.I | re.S)
+_WORKSPACE_FILLERS = frozenset({"our", "my", "the", "research", "workspace"})
+
+def parse(text: str, apps: dict[str, str] | None = None,
+          workspace_names: tuple[str, ...] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
-    to a real installed app before the domain check.
+    to a real installed app before the domain check. `workspace_names` (saved
+    workspace names) lets "open <name>" resolve to a workspace ask.
     """
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
     t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
@@ -214,7 +279,16 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
         return Intent("card_size", ask.action, ask.target)
     m = _SESSIONS_RE.fullmatch(low.replace(",", ""))
     if m:
-        return Intent("sessions", (m["name"] or "").strip())
+        return Intent("sessions", (m["name"] or "").strip(), "ref" if m.group("itref") else "")
+    ask = session_request(text)
+    if ask:
+        return Intent("session", ask.action)
+    ask = memory_request(text)
+    if ask:
+        return Intent("memory", ask.action)
+    ask = workspace_request(text, workspace_names or ())
+    if ask:
+        return Intent("workspace", ask.action)
     # Hide first: "get rid of it for now" is temporary, not the final clear.
     for rx, kind in ((_HIDE_RE, "hide"), (_CLEAR_RE, "clear"), (_SHOW_RE, "show"),
                      (_ASIDE_RE, "aside"), (_RESTORE_RE, "restore")):
@@ -357,6 +431,105 @@ def card_size_request(text: str) -> CardSizeAsk | None:
         return CardSizeAsk("max", target.strip())
     if _CARD_RESTORE_RE.fullmatch(t):
         return CardSizeAsk("restore", "")
+    return None
+
+
+def _ask_words(raw: str) -> str:
+    """Spoken words for an ask: control chars off, one line, collapsed, capped."""
+    return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", raw).split())[:SESSION_WORDS_MAX]
+
+
+def _ask_name(raw: str) -> str:
+    """A spoken session name: lower-cased, a leading the/my off."""
+    return re.sub(r"^(?:the|my) ", "", raw.lower().strip()).strip()
+
+
+def session_request(text: str) -> SessionAsk | None:
+    """The owner's spoken session ask (start/stop/answer), or None. Fixed code, never a model."""
+    if len(text) > 300:
+        return None
+    t = _clean(text)
+    m = _SESSION_START_RE.fullmatch(t)
+    if m:
+        dev = _SESSION_DEVICES.get((m["dev"] or "mini pc").lower().replace(" ", ""), "mini_pc")
+        ref = "this" if _SESSION_THIS_RE.search(m["words"]) else None
+        return SessionAsk("start", dev, ref, "", _ask_words(m["words"]), None)
+    m = _SESSION_STOP_RE.fullmatch(t)
+    if m:
+        return SessionAsk("stop", "", "name", _ask_name(m["name"] or m["name2"]), "", None)
+    m = _SESSION_ANSWER_RE.fullmatch(t)
+    if m:
+        # "the <name> session": the group carries the trailing word; the name is <name>.
+        name = _ask_name(re.sub(r"\s+session$", "", m["tname"] or m["aname"] or m["sub"]
+                                or m["asub"] or "", flags=re.I))
+        if m["tyn"]:
+            return SessionAsk("answer", "", "name", name, "",
+                              {"yes": "yes", "no": "no",
+                               "to go ahead": "approve"}[m["tyn"].lower()])
+        if m["aname"]:
+            return SessionAsk("answer", "", "name", name, "", "approve")
+        words = _ask_words(m["words"] or m["awords"] or "")
+        answer = {"yes": "yes", "no": "no"}.get(words.lower(), "text")
+        return SessionAsk("answer", "", "name" if (m["sub"] or m["asub"]) else "this",
+                          name, words, answer)
+    return None
+
+
+def memory_request(text: str) -> MemoryAsk | None:
+    """The owner's spoken remember/forget ask, or None. Fixed code, never a model."""
+    if len(text) > 300:
+        return None
+    t = _clean(text)
+    for rx in _MEMORY_ADD_RES:
+        m = rx.fullmatch(t)
+        if m:
+            return MemoryAsk("add", _ask_words(m["fact"]))
+    m = _MEMORY_RULE_RE.fullmatch(t)
+    if m:
+        return MemoryAsk("add", _ask_words("From now on " + m["rule"]))
+    if _MEMORY_LIST_RE.fullmatch(t):
+        return MemoryAsk("list", "")
+    if t.lower() == "forget that":
+        return MemoryAsk("forget_last", "")
+    m = _MEMORY_FORGET_ABOUT_RE.fullmatch(t)
+    if m:
+        return MemoryAsk("forget_about", _ask_words(m["words"]))
+    if _MEMORY_FORGET_ALL_RE.fullmatch(t):
+        return MemoryAsk("forget_all", "")
+    return None
+
+
+def _ws_name(raw: str) -> str:
+    """A spoken workspace name: lower-cased, a leading our/my/the off."""
+    return re.sub(r"^(?:our|my|the) ", "", raw.lower().strip()).strip()
+
+
+def _ws_known(name: str, names: tuple[str, ...]) -> bool:
+    """Open/delete guard: a research/workspace suffix, or words inside one saved name."""
+    if name.endswith(("research", "workspace")):
+        return True
+    words = set(name.split()) - _WORKSPACE_FILLERS
+    return any(words <= set(_ws_name(n).split()) for n in names)
+
+
+def workspace_request(text: str, names: tuple[str, ...] = ()) -> WorkspaceAsk | None:
+    """The owner's spoken save/open/list/delete workspace ask, or None. Fixed code, never a model."""
+    if len(text) > 300:
+        return None
+    t = _clean(text)
+    m = _WORKSPACE_SAVE_RE.fullmatch(t)
+    if m:
+        return WorkspaceAsk("save", _ws_name(m["name"]))
+    if _WORKSPACE_OPEN_PAGES_RE.fullmatch(t):
+        return WorkspaceAsk("open_pages", "")
+    m = _WORKSPACE_OPEN_RE.fullmatch(t)
+    if m and _ws_known(_ws_name(m["name"]), names):
+        return WorkspaceAsk("open", _ws_name(m["name"]))
+    if _WORKSPACE_LIST_RE.fullmatch(t):
+        return WorkspaceAsk("list", "")
+    m = _WORKSPACE_DELETE_RE.fullmatch(t)
+    if m and _ws_known(_ws_name(m["name"]), names):
+        return WorkspaceAsk("delete", _ws_name(m["name"]))
     return None
 
 

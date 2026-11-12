@@ -382,7 +382,7 @@ def test_second_request_while_busy_gets_still_working(client):
             break
         time.sleep(0.01)
     events = turn(client, "and my calendar", conv_id="b1")
-    assert "Still on the last one, I'm afraid." in says(events)
+    assert "Still on the last one." in says(events)
     turn(client, "stop", conv_id="b1")
     t.join(5)
 

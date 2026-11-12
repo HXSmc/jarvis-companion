@@ -114,7 +114,7 @@ def test_ack_policy_covers_parse_kinds():
         assert intent.kind == kind, (text, intent)
         seen.add(intent.kind)
     # Every kind parse can return is in ACK_POLICY; "media" never comes from parse.
-    assert seen == set(acks.ACK_POLICY) - {"media"}, seen
+    assert seen | {"session", "memory", "workspace"} == set(acks.ACK_POLICY) - {"media"}, seen  # jfollow4 kinds: tests/test_overlay_intents.py
     for kind in ("clock", "media", "stop", "card_size", "open_app", "open_site"):
         assert acks.ack_key(kind) is None, kind
     assert acks.ack_key("agent", "git") == "agent_git"
@@ -363,7 +363,7 @@ def test_sessions_turn_is_untrusted_and_read_only(client, monkeypatch, tmp_path)
     token = tmp_path / "companion-token"
     token.chmod(0o644)
     events = turn(client, "what are my sessions doing", conv_id="ss2")
-    assert says(events) == ["I can't reach your sessions from here."]
+    assert says(events) == ["I can't reach your sessions."]
     assert len(seen) == 2  # refused before any fetch
     assert "ss2" not in overlay._tainted
     assert _steps("sessions")[-1]["detail"].startswith("result=no_access")
