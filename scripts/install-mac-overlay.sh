@@ -16,8 +16,12 @@ Steps: tool checks (swift, brew, ffmpeg, espeak-ng, claude) -> brew install ffmp
 -> swift build of mac/overlay
 -> bundle + sign $HOME/Applications/JarvisOverlay.app with the stable local identity
    "JarvisOverlay Local Signing" (scripts/mac-overlay-sign.sh), so TCC grants survive reinstalls
-(the service writes its own dedicated overlay token on first start; no token step here)
+(the service still mints its own dedicated overlay token on first start; the only token
+file this script writes is the Companion sessions one, after the gateway answers a probe)
 -> render launchd/ templates into $HOME/Library/LaunchAgents and bootstrap them
+-> set OVERLAY_VAULT in .env from Obsidian's vault list (only when exactly one vault)
+-> set up Companion sessions access: companion-token (0600) from the vault ios_token after
+   the gateway answers an authorized probe, then OVERLAY_COMPANION_URL in .env
 -> refuse a taken OVERLAY_PORT -> print the TCC permissions to grant.
 EOF
 }
@@ -41,6 +45,17 @@ KOKORO_BASE="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model
 # run CMD...: execute, or print "would: CMD..." in dry-run.
 run() {
   if (( DRY_RUN )); then echo "would: $*"; else "$@"; fi
+}
+
+# append_env KEY VALUE: add a KEY=VALUE line to $REPO/.env (the gitignored file the
+# service reads via common.config.load_env_file); create it owner-only (600) when missing,
+# and keep it parseable when it lacks a trailing newline.
+append_env() {
+  (
+    umask 077
+    if [ -s "$REPO/.env" ] && [ -n "$(tail -c 1 "$REPO/.env")" ]; then printf '\n' >> "$REPO/.env"; fi
+    printf '%s=%s\n' "$1" "$2" >> "$REPO/.env"
+  )
 }
 
 # (a) platform + tool checks
@@ -239,7 +254,8 @@ for PLIST in com.jarvis.overlay.plist com.jarvis.overlay.service.plist; do
   fi
 done
 
-# (i2) setup checks (one line each): the editor CLI on the service's PATH, the notes vault
+# (i2) setup checks (one line each): the editor CLI on the service's PATH; the notes vault
+# (set from Obsidian below when unambiguous)
 SVC_PLIST="$HOME/Library/LaunchAgents/com.jarvis.overlay.service.plist"
 [ -f "$SVC_PLIST" ] || SVC_PLIST="$REPO/launchd/com.jarvis.overlay.service.plist"
 SVC_PATH="$(sed -n '/<key>PATH<\/key>/{n;s|.*<string>\(.*\)</string>.*|\1|p;}' "$SVC_PLIST" | sed "s|__HOME__|$HOME|g")"
@@ -260,10 +276,82 @@ else
   done
   [ -n "$found" ] || echo "VS Code CLI: missing on the service PATH; in VS Code run Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\""
 fi
+# Notes vault: set OVERLAY_VAULT from Obsidian's own vault list — but only when exactly one
+# vault exists (guessing between several could point the notes tool at the wrong folder).
 if [ -n "${OVERLAY_VAULT:-}" ] || grep -qs '^OVERLAY_VAULT=' "$REPO/.env"; then
-  echo "Notes vault: OVERLAY_VAULT is set"
+  echo "Notes vault: set"
+elif (( DRY_RUN )); then
+  echo "would: set OVERLAY_VAULT in .env from Obsidian's vault list (only when exactly one vault)"
 else
-  echo "Notes vault: OVERLAY_VAULT is not set; add OVERLAY_VAULT=<your vault folder> to $REPO/.env, then rerun this installer"
+  # prints two lines: the count of vaults whose path is an existing directory, then the
+  # single vault's path when the count is exactly 1 (empty otherwise).
+  VAULT_RES="$(python3 -c '
+import json, os
+try:
+    with open(os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json"), encoding="utf-8") as f:
+        cfg = json.load(f)
+    found = [v["path"] for v in cfg.get("vaults", {}).values()
+             if isinstance(v, dict) and isinstance(v.get("path"), str)
+             and os.path.isdir(os.path.expanduser(v["path"]))]
+except Exception:
+    found = []
+print(len(found))
+print(found[0] if len(found) == 1 else "")
+' 2>/dev/null || printf '0\n\n')"
+  if [ "${VAULT_RES%%$'\n'*}" = "1" ]; then
+    append_env OVERLAY_VAULT "${VAULT_RES#*$'\n'}"
+    echo "Notes vault: set from Obsidian"
+  else
+    echo "Notes vault: ${VAULT_RES%%$'\n'*} Obsidian vaults found, not set"
+  fi
+fi
+
+# (i3) Companion sessions access: write the phone-only token file (0600) from the vault's
+# ios_token, but only after the local gateway answers an authorized probe; then aim the
+# overlay service at it via .env (gateway/overlay.py _sessions_access accepts loopback http
+# or https and refuses a token file readable by group/other). The token itself never leaves
+# the helper below: not in argv, an env var, a log, a plist or stdout.
+JARVIS_DIR="$HOME/Library/Application Support/JarvisOverlay"
+TOKEN_FILE="$JARVIS_DIR/companion-token"
+GATEWAY_PORT="$(cd "$REPO" && python3 -c 'from common.config import PORT; print(PORT)' 2>/dev/null || echo 8788)"
+if (( DRY_RUN )); then
+  echo "would: create companion-token (mode 600) from the Companion ios_token via common.config.get_token"
+  echo "would: set OVERLAY_COMPANION_URL=http://127.0.0.1:$GATEWAY_PORT in .env when GET /central/sessions answers 200"
+else
+  mkdir -p "$JARVIS_DIR"  # create only; never delete or move anything already in this dir
+  chmod 700 "$JARVIS_DIR"
+  # exits 3 when the vault has no ios_token, 4 when the probe fails or the status is not 200;
+  # SystemExit is a BaseException, so the catch-all below never swallows the codes.
+  SESS_PROG='
+import os, sys, urllib.request
+try:
+    from common import config
+    tok = config.get_token(name="ios_token")
+    if tok is None:
+        sys.exit(3)
+    req = urllib.request.Request("http://127.0.0.1:%d/central/sessions" % config.PORT,
+                                 headers={"Authorization": "Bearer " + tok})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        status = resp.status
+    if status != 200:
+        sys.exit(4)
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(tok.encode())
+    os.chmod(sys.argv[1], 0o600)
+except Exception:
+    sys.exit(4)
+'
+  RC=0
+  (cd "$REPO" && umask 077 && python3 -c "$SESS_PROG" "$TOKEN_FILE") || RC=$?
+  case "$RC" in
+    0)
+      grep -qs '^OVERLAY_COMPANION_URL=' "$REPO/.env" || append_env OVERLAY_COMPANION_URL "http://127.0.0.1:$GATEWAY_PORT"
+      echo "Sessions access: set"
+      ;;
+    3) echo "Sessions access: no ios_token found; the owner runs: bash scripts/install-mac-overlay.sh" ;;
+    *) echo "Sessions access: the gateway on 127.0.0.1:$GATEWAY_PORT did not answer, not set" ;;
+  esac
 fi
 
 # (j) permissions to grant once, with deep links to the right System Settings pane

@@ -112,6 +112,29 @@ enum ScreenContext {
         return out
     }
 
+    /// Saved-workspace pages (C): each Safari/Chrome window's URL (kAXDocumentAttribute) and
+    /// title, read through AX the way walkFrontApp does (no AppleScript, no new permission).
+    /// Main actor: NSWorkspace; the per-app messaging timeout keeps a hung browser short.
+    @MainActor
+    static func browserPages() -> [(url: String, title: String)] {
+        var out: [(url: String, title: String)] = []
+        for app in NSWorkspace.shared.runningApplications {
+            guard let bundle = app.bundleIdentifier,
+                  bundle == "com.apple.Safari" || bundle == "com.google.Chrome"
+            else { continue }
+            let ax = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(ax, 0.25)
+            for window in axElements(ax, kAXWindowsAttribute) {
+                guard let doc = axString(window, kAXDocumentAttribute),
+                      let url = URL(string: doc), Workspace.openable(url)
+                else { continue }
+                out.append((url: doc, title: axString(window, kAXTitleAttribute) ?? ""))
+                if out.count == Workspace.maxPages { return out }
+            }
+        }
+        return out
+    }
+
     /// Fresh AX frame and element of the same element, or nil when it vanished/moved >400 pt.
     /// Call off the main actor (full AX walk).
     static func recheck(role: String, label: String, near box: CGRect) -> (frame: CGRect, element: AXUIElement)? {
@@ -337,6 +360,13 @@ enum ScreenContext {
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
+    }
+
+    private static func axElements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let list = value as? [AXUIElement] else { return [] }
+        return list
     }
 
     private static func axString(_ element: AXUIElement, _ attribute: String) -> String? {

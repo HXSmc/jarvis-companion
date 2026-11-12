@@ -382,3 +382,41 @@ def test_nested_values_in_id_at_commit_are_dropped():
     assert SECRET_OUTPUT not in json.dumps(body)
     assert body["turns"][0]["steps"] == [{"step": "foo", "at": None}, {"step": "wake"}]
     assert body["turns"][0]["id"] is None and body["commit"] is None
+
+
+def test_forwarder_imports_without_overlay_stack(monkeypatch):
+    """Mini-PC deploy: overlay_log imports and serves /overlay-log with gateway.overlay absent."""
+    import gateway
+    monkeypatch.setitem(sys.modules, "gateway.overlay", None)  # importing it now raises
+    monkeypatch.delattr(gateway, "overlay", raising=False)
+    monkeypatch.delitem(sys.modules, "gateway.overlay_log")
+    fresh = importlib.import_module("gateway.overlay_log")
+    assert not hasattr(fresh, "overlay")
+
+    seen: list[dict] = []
+    app = FastAPI()
+    app.include_router(fresh.router)
+    monkeypatch.setenv(screen.MAC_GATEWAY_ENV, "http://mac.test")
+    monkeypatch.setattr(config, "get_token",
+                        lambda path=None, name="token": IOS_TOKEN if name == "ios_token" else "shared-tok")
+    monkeypatch.setattr(fresh, "_mac_client",
+                        lambda: httpx.AsyncClient(transport=httpx.ASGITransport(app=_fake_mac(seen))))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as c:
+            assert (await c.get("/overlay-log")).status_code == 401
+            assert (await c.get("/overlay-log",
+                                headers={"Authorization": "Bearer shared-tok"})).status_code == 403
+            assert (await c.get("/overlay-log",
+                                headers={"Authorization": "Bearer wrong"})).status_code == 401
+            ok = await c.get("/overlay-log", headers=IOS_AUTH_HEADER)
+            assert ok.status_code == 200, ok.text
+            return ok.json()
+
+    body = asyncio.run(run())
+    assert seen[0]["auth"] == f"Bearer {IOS_TOKEN}"
+    assert seen[0]["since"] is None
+    assert SECRET_OUTPUT not in json.dumps(body)  # re-redacted even though the Mac sent it raw
+    assert set(body["turns"][0]["steps"][0]) == {"step", "at", "tool", "decision"}
+    assert body["commit"] == "abc123"

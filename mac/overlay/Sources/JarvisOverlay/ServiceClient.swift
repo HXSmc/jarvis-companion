@@ -152,4 +152,19 @@ final class ServiceClient {
                  bargeIn = "barge_in", levels, conf, screen
         }
     }
+
+    /// Saved-workspace answer (C): POSTs the snapshot body to /overlay/workspace/<nonce>. The
+    /// service times the nonce out itself, so a failure is one debug note and swallowed.
+    func postWorkspace(nonce: String, body: Data) async {
+        do {
+            var request = try authorizedRequest(path: "/overlay/workspace/\(nonce)", method: "POST")
+            request.timeoutInterval = 5
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+            let (_, response) = try await URLSession.shared.data(for: request)
+            try Self.check(response)
+        } catch {
+            debugNote(step: "workspace", detail: "post_failed")
+        }
+    }
 }

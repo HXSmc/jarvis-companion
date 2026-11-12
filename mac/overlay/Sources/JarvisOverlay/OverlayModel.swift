@@ -161,6 +161,13 @@ final class OverlayModel: ObservableObject {
         bumpIdle()
     }
 
+    /// Saved-workspace snapshot (C): the visible cards in display order with the enlarged flag;
+    /// a hide layout faded everything out, so nothing is on screen to save.
+    func workspaceSnapshot() -> [(card: HUDCard, enlarged: Bool)] {
+        guard !layout.hidden else { return [] }
+        return cards.map { (card: $0, enlarged: $0.id == enlarge.id) }
+    }
+
     /// Stores a measured card's scatter frame; cards retired to make room leave `cards`.
     func place(key: String, size: CGSize, visible: CGRect, keepOut: [CGRect]) {
         let retired = layout.cardAdded(key, size: size, visible: visible, keepOut: keepOut)

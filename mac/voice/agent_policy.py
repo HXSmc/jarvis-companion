@@ -74,6 +74,7 @@ _DENY_NAMES = (".env", ".env.*", "*.pem", "*.key", "id_*", "*.p12", "*.pfx", "*.
                "*.kdbx", "*.keystore", "*.jks", ".npmrc", ".pypirc", ".netrc", ".envrc", "secrets.*",
                "*.tfvars", "*.tfstate", "*.tfstate.*", "auth.json")
 _SECRET_DIR = "secrets"  # any folder of this name (any case) is closed, OVERLAY_VAULT set or not
+VAULT_EXCLUDED_DIRS = ("Secrets",)  # vault folders closed only when OVERLAY_VAULT is set
 _WALK_DIRS = 4000  # a search or git root bigger than this is refused: we could not rule out a secrets folder
 _WALK_DEPTH = 8
 # Appended after any model glob: the CLI's Grep runs rg --hidden and splits `glob` on whitespace into
@@ -154,11 +155,15 @@ def _under(path: str, root: str) -> bool:
     return p == r or p.startswith(r + "/")
 
 
+def _vault_roots(ctx: Ctx) -> list[str]:
+    return [os.path.realpath(os.path.join(os.path.expanduser(ctx.vault), d))
+            for d in VAULT_EXCLUDED_DIRS] if ctx.vault else []
+
+
 def _deny_roots(ctx: Ctx) -> list[str]:
     home = os.path.realpath(ctx.home)
     roots = [os.path.realpath(os.path.join(home, d)) for d in _DENY_HOME]
-    if ctx.vault:
-        roots.append(os.path.realpath(os.path.join(os.path.expanduser(ctx.vault), "Secrets")))
+    roots += _vault_roots(ctx)
     return roots
 
 
@@ -231,6 +236,8 @@ def _path_problem(raw, resolved: str, ctx: Ctx, search: bool) -> str | None:
     if ".git" in _fold(resolved).split("/"):
         return "that file holds secrets and is off limits"  # .git/config may hold tokens in remote URLs
     roots = _deny_roots(ctx)
+    if any(_under(resolved, r) for r in _vault_roots(ctx)):
+        return "that folder is excluded from the notes vault and is off limits"
     if _closed_dir(resolved, home) or any(_under(resolved, r) for r in roots):
         return "that folder holds secrets and is off limits"
     if search and os.path.isdir(resolved) and (any(_under(r, resolved) for r in roots)
@@ -698,6 +705,7 @@ def log_label(tool_name: str, tool_input: dict) -> str:
 
 
 _REASON_CODES = (  # first match wins; the debug page shows the code, never the reason's text
+    ("vault", ("excluded from the notes vault",)),
     ("secret", ("secret", "off limits")),
     ("form", ("one plain command", "could not parse", "use the form", "too long", "too many steps",
               "split it", "a chain must", "no command given", "bad tool input")),
@@ -709,6 +717,6 @@ _REASON_CODES = (  # first match wins; the debug page shows the code, never the 
 
 
 def reason_code(reason: str) -> str:
-    """A fixed word for why a call was denied (form | secret | option | place | tool | other)."""
+    """A fixed word for why a call was denied (vault | form | secret | option | place | tool | other)."""
     low = (reason or "").casefold()
     return next((code for code, keys in _REASON_CODES if any(k in low for k in keys)), "other")

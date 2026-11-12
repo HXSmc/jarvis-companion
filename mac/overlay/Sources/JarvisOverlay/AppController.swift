@@ -497,7 +497,8 @@ final class AppController {
     }
 
     /// Control events steer the overlay itself: end_listening closes the follow-up window for
-    /// this turn (B3), card_size draws one card enlarged or restores it (C3).
+    /// this turn (B3), card_size draws one card enlarged or restores it (C3), workspace_save
+    /// answers with the current snapshot and open_pages opens saved pages in the browser (C).
     private func handleControl(_ event: ControlEvent) {
         switch event {
         case .endListening:
@@ -506,6 +507,13 @@ final class AppController {
             guard model.cards.contains(where: { $0.id == id }) else { return }
             if max { _ = model.enlarge.max(id) } else { model.enlarge.restore() }
             model.activity()  // a restored card gets a fresh idle countdown, not the old one's end
+        case .workspaceSave(let nonce):
+            let body = Workspace.snapshotBody(cards: model.workspaceSnapshot(),
+                                              pages: ScreenContext.browserPages())
+            Task { await client.postWorkspace(nonce: nonce, body: body) }
+        case .openPages(let urls):
+            // Checked again here: the service already filtered, but the line could be stale.
+            for url in urls where Workspace.openable(url) { NSWorkspace.shared.open(url) }
         }
     }
 
