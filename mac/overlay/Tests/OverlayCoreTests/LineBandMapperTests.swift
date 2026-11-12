@@ -312,7 +312,7 @@ final class GutterOCRTests: XCTestCase {
 
         let found = GutterOCR.lineDigits(in: image, observations: pass1, window: Self.window)
         let lines = Set(found.map(\.line))
-        XCTAssertTrue(Set(1...9).isSubset(of: lines), "read \(found.map(\.line).sorted())")
+        XCTAssertTrue(Set(1...9).isSubset(of: lines), "read \(found.map(\.line).sorted()) pass1 \(pass1.map { "\($0.text)@\(Int($0.box[0]))" })")
         for hit in found where hit.line <= 9 {
             XCTAssertEqual(CGFloat((hit.box[1] + hit.box[3]) / 2), Self.rowY(hit.line), accuracy: 6, "line \(hit.line)")
         }
@@ -330,7 +330,7 @@ final class GutterOCRTests: XCTestCase {
         let pass1 = GutterOCR.text(in: image)
         XCTAssertTrue(pass1.compactMap { ShapeTrack.lineNumber($0.text) }.isEmpty)
         let found = GutterOCR.lineDigits(in: image, observations: pass1, window: Self.window)
-        XCTAssertEqual(Set(found.map(\.line)), [1, 2, 3], "line 4 has no text to anchor its row")
+        XCTAssertEqual(Set(found.map(\.line)), [1, 2, 3], "line 4 has no text to anchor its row; pass1 \(pass1.map { "\($0.text)@\(Int($0.box[0]))" })")
         let pass = LineBandFit.fit(ranges: [3...3], digits: Self.points(found),
                                    window: CGRect(x: 0, y: 0, width: 1440, height: 900), partial: false)
         XCTAssertEqual(pass.reason, "ok")

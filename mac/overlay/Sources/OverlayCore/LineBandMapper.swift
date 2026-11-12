@@ -324,12 +324,15 @@ public enum GutterOCR {
         guard !inWindow.isEmpty else { return [] }
         let heights = inWindow.map { $0.box[3] - $0.box[1] }.sorted()
         let textH = CGFloat(heights[heights.count / 2])
-        let taken = inWindow.map { CGRect(x: $0.box[0], y: $0.box[1], width: $0.box[2] - $0.box[0], height: $0.box[3] - $0.box[1]) }
+        let box: ([Double]) -> CGRect = { CGRect(x: $0[0], y: $0[1], width: $0[2] - $0[0], height: $0[3] - $0[1]) }
+        let taken = inWindow.map { box($0.box) }
+        let numbers = inWindow.filter { ShapeTrack.lineNumber($0.text) != nil }.map { box($0.box) }
         var cells: [CGRect] = []
-        // A cell where pass 1 already read text, or one already planned (an indented row group finds
-        // the same gutter), is not read again.
+        // A cell where pass 1 already read a number, or one already planned (an indented row group
+        // finds the same gutter), is not read again. Other text there ("@6": a gutter icon read with
+        // the digit) does not block it: the cell's crop keeps only grey ink.
         let free: (CGRect) -> Bool = { cell in
-            !taken.contains { $0.contains(CGPoint(x: cell.midX, y: cell.midY)) } && !cells.contains { $0.intersects(cell) }
+            !numbers.contains { $0.contains(CGPoint(x: cell.midX, y: cell.midY)) } && !cells.contains { $0.intersects(cell) }
         }
         let digits = inWindow.compactMap { o in
             ShapeTrack.lineNumber(o.text).map { (line: $0, centre: CGPoint(x: (o.box[0] + o.box[2]) / 2, y: (o.box[1] + o.box[3]) / 2),
@@ -394,15 +397,24 @@ public enum GutterOCR {
             ctx.draw(s.crop, in: CGRect(x: s.range.lowerBound + s.crop.width + 2, y: y, width: s.crop.width, height: s.crop.height))
         }
         guard let composite = ctx.makeImage() else { return [] }
-        var found: [Int: Int] = [:]
-        var clash = Set<Int>()
-        for o in text(in: composite) {
-            let mid = Int((o.box[0] + o.box[2]) / 2)
-            guard let index = spans.firstIndex(where: { $0.range.contains(mid) }), let line = doubled(o.text) else { continue }
-            if found[index] != nil { clash.insert(index) }
-            found[index] = line
+        // Each character goes to the cell under it, so two cells read as one text ("66 55") still count.
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try? VNImageRequestHandler(cgImage: composite).perform([request])
+        var perCell: [Int: String] = [:]
+        for observation in request.results ?? [] {
+            guard let candidate = observation.topCandidates(1).first else { continue }
+            let text = candidate.string
+            for index in text.indices where text[index] != " " {
+                guard let hit = try? candidate.boundingBox(for: index..<text.index(after: index)) else { continue }
+                let mid = Int(hit.boundingBox.midX * Double(composite.width))
+                guard let cell = spans.firstIndex(where: { $0.range.contains(mid) }) else { continue }
+                perCell[cell, default: ""].append(text[index])
+            }
         }
-        return found.filter { !clash.contains($0.key) }.sorted { $0.key < $1.key }.map { hit in
+        let found = perCell.compactMapValues(doubled)
+        return found.sorted { $0.key < $1.key }.map { hit in
             let c = spans[hit.key].cell
             return (line: hit.value, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
         }
