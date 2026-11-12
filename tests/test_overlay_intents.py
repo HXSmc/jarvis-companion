@@ -455,6 +455,11 @@ def test_card_size_request_and_match():
     ask = card_size_request("enlarge the spreadsheet")
     assert ask.action == "max"
     assert match_card(ask.target, cards) is None
+    # Mac live run 5: the model titled the card "Smartphone block diagram"; "the phone diagram" is it.
+    # A spoken word of 4+ letters may end a compound title word; short words still match whole only.
+    phones = [("s1", "flow", card_words("Smartphone block diagram")), ("h1", "image", card_words("Hotdog"))]
+    assert match_card("phone diagram", phones) == ("s1", "title")
+    assert match_card("dog picture", phones) is None
     # Questions about size, and "expand on that" as an elocution ask, stay with the model.
     for s in ("what's bigger, a whale or a bus", "can you expand on that"):
         assert parse(s, apps={}).kind != "card_size", s

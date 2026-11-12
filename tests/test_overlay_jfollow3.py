@@ -634,3 +634,51 @@ def test_short_file_line_does_not_call_the_line_a_change():
     line = acks.PHRASES["lines_short"].format(n=205)
     assert "change" not in line.lower()
     assert line == "I see no line numbers here. It's line 205."
+
+
+def test_card_index_outlives_a_fresh_conversation(client):
+    """Mac live run 5 (37a): 'make it smaller' 100 s after an enlarge started a fresh conversation,
+    which dropped the card index and the enlarged id while the app still showed the cards: a false
+    'Back to normal.' and the card stayed big. The cards on screen stay nameable after a fresh start."""
+    import dataclasses
+    clock = Clock()
+    card = '{"card": {"type": "flow", "title": "Phone diagram", "nodes": [{"id": "b", "text": "Battery"}, {"id": "d", "text": "Display"}], "edges": [["b", "d"]]}}\n'
+    overlay.set_deps(dataclasses.replace(make_deps(chunks=['{"say": "Here."}\n', card]), clock=clock))
+    first = turn(client, "draw me a diagram of a phone", conv_id="f1", audio_ms=900)
+    phone = [e["card"]["id"] for e in first if e["type"] == "card"][0]
+    assert says(turn(client, "enlarge the phone diagram", conv_id="f1", audio_ms=900)) == ["Enlarged, sir."]
+    clock.now += overlay.FRESH_AFTER_S + 10
+    events = turn(client, "make it smaller", conv_id="f1", audio_ms=900)
+    assert any(s.get("detail") == "fresh: wake" for s in _steps("conversation"))  # the fresh start ran
+    assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size", "id": phone,
+                                                                "size": "restore"}]
+    clock.now += overlay.FRESH_AFTER_S + 10
+    events = turn(client, "enlarge the phone diagram", conv_id="f1", audio_ms=900)
+    assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size", "id": phone,
+                                                                "size": "max"}]
+
+
+def test_model_path_picture_can_be_enlarged(client, monkeypatch):
+    """Mac live run 5 (37b): a picture shown through the model's image_search (an untainted turn) was
+    never indexed, so 'enlarge the dog picture' said "I don't see a card called that." with it on screen."""
+    dog = {"type": "image", "title": "Dog", "alt": "Dog 1",
+           "url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a1/Dog1.jpg/960px-Dog1.jpg"}
+    monkeypatch.setattr(media_lookup, "find", lambda query, count=1: dict(dog))
+    overlay.set_deps(make_deps(chunks=['{"say": "Looking for a picture of a dog."}\n',
+                                       '{"image_search": {"query": "dog", "count": 1}}\n']))
+    first = turn(client, "show me a picture of a dog", conv_id="d1")
+    shown = [e["card"]["id"] for e in first if e["type"] == "card" and e["card"]["type"] == "image"]
+    assert len(shown) == 1
+    for ask in ("enlarge the dog picture", "enlarge the picture"):
+        events = turn(client, ask, conv_id="d1")
+        assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size", "id": shown[0],
+                                                                    "size": "max"}], ask
+
+
+def test_brain_incomplete_leaves_a_debug_row(client):
+    """Mac live run 5 (33 side note): a cut-off request heard an ack and then nothing, with no row
+    saying why. The model's {"incomplete": true} keeps the mic open; the debug page now says so."""
+    overlay.set_deps(make_deps(chunks=['{"incomplete": true}\n']))
+    events = turn(client, "out loud and with no cards, tell me the history of the Roman", conv_id="i1")
+    assert len(says(events)) == 1 and says(events)[0] in POOL_TEXTS
+    assert _steps("incomplete")[-1]["detail"] == "model: waiting for the rest"

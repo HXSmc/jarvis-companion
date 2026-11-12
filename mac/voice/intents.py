@@ -396,7 +396,9 @@ def match_card(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) -> tu
             if ctype in kind:
                 return cid, "kind"
         return None
-    hits = [c for c in reversed(cards) if set(names) <= set(c[2])]
+    # A name of 4+ letters may end a compound title word ("phone" names "Smartphone block diagram").
+    hits = [c for c in reversed(cards)
+            if all(any(t == w or (len(w) >= 4 and t.endswith(w)) for t in c[2]) for w in names)]
     if kind:  # a spoken kind is a preference, not a requirement
         typed = [c for c in hits if c[1] in kind]
         if typed:

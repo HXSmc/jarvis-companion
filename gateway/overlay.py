@@ -621,8 +621,15 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     """Start conv_id over as if it were a new conversation id: the stores and both answer pools'
     CLI sessions (their own memory of earlier prompts) go in one step with no await in between, so
     the taint never outlives the text it guards. Agent-tier state is not touched: callers check
-    _holds_agent_state first. Returns the conversation's new reset count."""
+    _holds_agent_state first. Returns the conversation's new reset count.
+    The card index and the enlarged id stay: the app still shows those cards (Mac live run 5, 37a).
+    Their title words only feed intents.match_card (fixed code), never a model prompt."""
+    cards, enlarged = _card_index.get(conv_id), _enlarged.get(conv_id)
     _forget(conv_id)
+    if cards is not None:
+        _card_index[conv_id] = cards
+    if enlarged is not None:
+        _enlarged[conv_id] = enlarged
     deps.conversations.drop(conv_id)
     deps.quiet_conversations.drop(conv_id)
     _resets[conv_id] = _resets.get(conv_id, 0) + 1
@@ -1776,6 +1783,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         lookup, pictures = pictures, None
         card, miss_line, _result = await _media_result(lookup, video_lookup)
         if card:
+            _index_card(body.conv_id, card)  # Mac live run 5 (37b): a picture can be enlarged too
             yield {"type": "card", "card": card}
             return
         async for ev in _speak(miss_line, deps):
@@ -1828,6 +1836,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
             _pending[body.conv_id] = (body.text, deps.clock())
             produced = True
+            if on_step:
+                on_step("incomplete", detail="model: waiting for the rest")
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
             say_text = obj["say"].strip()
