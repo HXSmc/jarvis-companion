@@ -239,3 +239,87 @@ final class LineBandMapperTests: XCTestCase {
         XCTAssertEqual(LineBandMapper.evenRun([(line: 5, midY: 40)]).map(\.line), [5])
     }
 }
+
+#if canImport(Vision)
+import Vision
+import CoreText
+import ImageIO
+import UniformTypeIdentifiers
+
+// TEMP diagnostic (round 5): which Vision settings read 1-digit gutter numbers.
+final class GutterOCRDiagTests: XCTestCase {
+    static func render(lines: Int, width: Int = 2880, height: Int = 1800) -> CGImage {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let font = CTFontCreateWithName("Menlo" as CFString, 24, nil)
+        func draw(_ text: String, x: CGFloat, top: CGFloat, grey: CGFloat, right: Bool = false) {
+            let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(red: grey, green: grey, blue: grey, alpha: 1)]
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+            let w = CTLineGetTypographicBounds(line, nil, nil, nil)
+            ctx.textPosition = CGPoint(x: right ? x - CGFloat(w) : x, y: CGFloat(height) - top)
+            CTLineDraw(line, ctx)
+        }
+        draw("EXPLORER", x: 120, top: 160, grey: 0.8)
+        draw("imports.ts", x: 140, top: 230, grey: 0.8)
+        for n in 1...lines {
+            let top = 250 + CGFloat(n) * 36
+            draw("\(n)", x: 800, top: top, grey: n == 6 ? 0.85 : 0.45, right: true)
+            draw(n % 7 == 0 ? "" : "import { a\(n) } from \"./a\(n)\";", x: 840, top: top, grey: 0.8)
+        }
+        return ctx.makeImage()!
+    }
+
+    static func ocr(_ image: CGImage, level: VNRequestTextRecognitionLevel, minHeight: Float?) -> [String] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = level
+        request.usesLanguageCorrection = false
+        if let minHeight { request.minimumTextHeight = minHeight }
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { obs in
+            guard let c = obs.topCandidates(1).first else { return nil }
+            let bb = obs.boundingBox
+            return "\(c.string)@x\(Int(bb.minX * Double(image.width)))y\(Int((1 - bb.maxY) * Double(image.height)))"
+        }
+    }
+
+    static func scaled(_ image: CGImage, _ k: Int) -> CGImage {
+        let ctx = CGContext(data: nil, width: image.width * k, height: image.height * k, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width * k, height: image.height * k))
+        return ctx.makeImage()!
+    }
+
+    func testDiag() throws {
+        var out = ""
+        for lines in [3, 37] {
+            let image = Self.render(lines: lines)
+            let strip = image.cropping(to: CGRect(x: 600, y: 0, width: 220, height: image.height))!
+            let variants: [(String, CGImage, VNRequestTextRecognitionLevel, Float?)] = [
+                ("A full accurate 0.008", image, .accurate, 0.008),
+                ("B full fast 0.008", image, .fast, 0.008),
+                ("C full accurate default", image, .accurate, nil),
+                ("D strip accurate", strip, .accurate, nil),
+                ("E strip fast", strip, .fast, nil),
+                ("F strip x2 accurate", Self.scaled(strip, 2), .accurate, nil),
+            ]
+            for (name, img, level, minH) in variants {
+                let found = Self.ocr(img, level: level, minHeight: minH)
+                let nums = found.compactMap { ShapeTrack.lineNumber(String($0.split(separator: "@")[0])) }.sorted()
+                out += "lines=\(lines) \(name): nums=\(nums)\n   raw=\(found.prefix(60))\n"
+            }
+            let dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SNAPSHOT_DIR"] ?? NSTemporaryDirectory())
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let dest = CGImageDestinationCreateWithURL(dir.appendingPathComponent("gutter-diag-\(lines).png") as CFURL,
+                                                          UTType.png.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, image, nil); CGImageDestinationFinalize(dest)
+            }
+            try? out.write(to: dir.appendingPathComponent("gutter-diag.txt"), atomically: true, encoding: .utf8)
+        }
+        print("GUTTER-DIAG-BEGIN\n" + out + "GUTTER-DIAG-END")
+    }
+}
+#endif
