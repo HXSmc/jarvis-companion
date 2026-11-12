@@ -678,8 +678,11 @@ def test_model_path_picture_can_be_enlarged(client, monkeypatch):
 
 def test_brain_incomplete_leaves_a_debug_row(client):
     """Mac live run 5 (33 side note): a cut-off request heard an ack and then nothing, with no row
-    saying why. The model's {"incomplete": true} keeps the mic open; the debug page now says so."""
+    saying why. The model's {"incomplete": true} keeps the mic open; the debug page now says so,
+    and the fixed cut_off line follows the ack (jfollow4)."""
     overlay.set_deps(make_deps(chunks=['{"incomplete": true}\n']))
     events = turn(client, "out loud and with no cards, tell me the history of the Roman", conv_id="i1")
-    assert len(says(events)) == 1 and says(events)[0] in POOL_TEXTS
+    spoken = says(events)
+    assert len(spoken) == 2 and spoken[0] in POOL_TEXTS
+    assert spoken[1] == acks.PHRASES["cut_off"]
     assert _steps("incomplete")[-1]["detail"] == "model: waiting for the rest"

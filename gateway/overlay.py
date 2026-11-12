@@ -526,7 +526,7 @@ def _tunable(name: str, default: float) -> float:
 # percentile block of his last wake turn in the conversation (it carries the mic gain and distance).
 LEVEL_BLOCK_MS = 100  # the app's block width (LevelBlocks.width)
 # A follow-up block counts as near-field voice at this share of the owner's wake level (0.5 = -6 dB).
-FOLLOWUP_LEVEL_RATIO = _tunable("OVERLAY_FOLLOWUP_LEVEL_RATIO", 0.5)
+FOLLOWUP_LEVEL_RATIO = _tunable("OVERLAY_FOLLOWUP_LEVEL_RATIO", 0.4)
 # ...and never below this absolute RMS (quiet room peaks in the runs: 0.002-0.03 peak sample).
 FOLLOWUP_MIN_LEVEL = _tunable("OVERLAY_FOLLOWUP_MIN_LEVEL", 0.01)
 # Near-field voice needed in a follow-up: shorter is a cough, a door or a far voice.
@@ -578,6 +578,8 @@ def _forget(conv_id: str) -> None:
     for store in (_history, _notes, _card_text, _pending, _last_reply, _card_sets,
                   _card_index, _enlarged):
         store.pop(conv_id, None)
+    _session_ref.pop(conv_id, None)
+    _host_ask.pop(conv_id, None)
     _tainted.discard(conv_id)
 
 
@@ -652,7 +654,8 @@ def _holds_agent_state(conv_id: str, deps: OverlayDeps, cursor: bool = True) -> 
     """True while the agent tier holds anything for conv_id (a session, a pending or expired yes, a
     running turn, with `cursor` a change-list cursor): its read text and pending questions are not
     ours to drop, so no fresh start."""
-    if conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy or (cursor and conv_id in _hunks):
+    if (conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy
+            or conv_id in _host_ask or (cursor and conv_id in _hunks)):
         return True
     pool = deps.agent_conversations
     if pool is None:
@@ -900,9 +903,24 @@ def _sessions_access() -> tuple[str, str] | None:
     return (url, token) if token else None
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def _session_need(item: dict) -> dict | None:
+    """The row's open card need as {id, kind, options}; None when absent or already answered."""
+    card = item.get("card") if isinstance(item.get("card"), dict) else {}
+    need = card.get("need") if isinstance(card.get("need"), dict) else None
+    if not need or need.get("answered"):
+        return None
+    options = [str(o)[:40] for o in need.get("options") or [] if isinstance(o, str)]
+    return {"id": str(need.get("id") or "")[:64], "kind": str(need.get("kind") or "")[:16],
+            "options": options[:8]}
+
+
 def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
     """GET {url}/central/sessions -> (rows | None, status; 0 = unreachable). GET only, never a
-    redirect. Rows carry device/state/title/doing/needs_owner/updated, at most 20."""
+    redirect. Rows carry device/state/title/doing/needs_owner/updated plus id/health/need for the
+    voice session actions, at most 20."""
     try:
         with httpx.Client(timeout=5.0, follow_redirects=False, transport=_sessions_transport) as client:
             resp = client.get(f"{url}/central/sessions",
@@ -920,14 +938,33 @@ def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
         for item in body[:20]:
             if not isinstance(item, dict):
                 continue
-            rows.append({"device": str(item.get("device", ""))[:24],
+            sid = str(item.get("session_id") or "")
+            if not _SESSION_ID_RE.fullmatch(sid):  # a bad id can never be called back
+                continue
+            rows.append({"id": sid,
+                         "device": str(item.get("device", ""))[:24],
                          "state": str(item.get("state", ""))[:24],
                          "title": str(item.get("title", ""))[:80],
                          "doing": str(item.get("doing", ""))[:120],
+                         "health": str(item.get("health") or "")[:16],
                          "needs_owner": item.get("state") == "needs_input",
+                         "need": _session_need(item),
                          "updated": str(item.get("last_activity_at")
                                         or item.get("updated_at") or "")[:40]})
     return rows, 200
+
+
+# The session a "what is it doing" refers to (conv -> host ids); set only by fixed code,
+# never the model. Bounded like _history: oldest conversations drop first.
+_session_ref: dict[str, list[str]] = {}
+
+
+def _set_session_ref(conv_id: str, ids: list[str]) -> None:
+    _session_ref[conv_id] = ids
+    for oldest in [c for c in _session_ref if c != conv_id]:
+        if len(_session_ref) <= 64:
+            break
+        _session_ref.pop(oldest, None)
 
 
 def _sessions_note(rows: list[dict]) -> str:
@@ -938,6 +975,355 @@ def _sessions_note(rows: list[dict]) -> str:
                    + (f" (doing: {r['doing']})" if r["doing"] else "")
                    + (f", updated {r['updated']}" if r["updated"] else ""))
     return "\n".join(out)
+
+
+# A3-A7: start/stop/answer a Companion session by voice. Every prompt and answer the gateway
+# receives is built from the owner's own words (intents.session_request), never the model, the
+# rows or the screen; the owner confirms through the host-tier Confirm before anything is sent.
+SESSION_PROMPT_MAX = 600
+VOICE_SESSION_STARTS_PER_HOUR = 3
+VOICE_SESSION_STOPS_PER_HOUR = 6
+VOICE_SESSION_SENDS_PER_HOUR = 10
+_SESSION_RATES = {"start": VOICE_SESSION_STARTS_PER_HOUR, "stop": VOICE_SESSION_STOPS_PER_HOUR,
+                  "answer": VOICE_SESSION_SENDS_PER_HOUR}
+_session_calls: dict[str, list[float]] = {}  # action -> send times, sliding 3600 s on deps.clock()
+
+
+def _session_rate_ok(action: str, now: float) -> bool:
+    """True when action is under its hourly limit; checked before the Confirm, never after."""
+    hits = [t for t in _session_calls.get(action, ()) if now - t < 3600.0]
+    _session_calls[action] = hits
+    return len(hits) < _SESSION_RATES.get(action, 3)
+
+
+def _session_rate_sent(action: str, now: float) -> None:
+    """Count one confirmed call that was actually sent (hit or error, never unreachable)."""
+    times = _session_calls.setdefault(action, [])
+    times.append(now)
+    _session_calls[action] = [t for t in times if now - t < 3600.0]
+
+
+def _cut40(text: str) -> str:
+    """First 40 chars cut back to a word boundary, one line."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= 40:
+        return text
+    cut = text[:40]
+    return cut[:cut.rfind(" ")].rstrip() if " " in cut.rstrip() else cut.rstrip()
+
+
+def session_prompt(words: str, ref_row: dict | None = None) -> str:
+    """The new session's first message: owner words plus, with a ref, a fixed fix-it line."""
+    prompt = f'Started by voice from the Mac overlay. The owner said: "{words}"'
+    if ref_row:
+        title = " ".join(str(ref_row.get("title") or "").split())[:60]
+        prompt += (f" Investigate why session {title} ({ref_row['id']}) went quiet and fix it;"
+                   " read its transcript and state first.")
+    return prompt[:SESSION_PROMPT_MAX]
+
+
+def _companion_allowed(method: str, path: str) -> bool:
+    """The exact set of calls voice may make; an id that fails the pattern is refused unheard."""
+    if (method, path) in (("GET", "/central/sessions"), ("POST", "/chat")):
+        return True
+    if method != "POST":
+        return False
+    m = re.fullmatch(r"/central/sessions/([A-Za-z0-9-]{1,64})/(stop|message)", path)
+    if m:
+        return True
+    return bool(re.fullmatch(r"/central/cards/([A-Za-z0-9-]{1,64})/answer", path))
+
+
+def _companion_call(method: str, path: str, json: dict | None = None) -> tuple[int | None, dict | None]:
+    """One allow-listed call to the companion gateway -> (status, parsed JSON); (None, None) when
+    unreachable. follow_redirects off; the token goes in the Authorization header only."""
+    if not _companion_allowed(method, path):
+        raise ValueError("call not allowed")  # before any request: a bad id is never sent
+    access = _sessions_access()
+    if access is None:
+        return None, None
+    url, token = access
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=False, transport=_sessions_transport) as client:
+            resp = client.request(method, f"{url}{path}", json=json,
+                                  headers={"Authorization": f"Bearer {token}"})
+    except Exception:  # unreachable, TLS, timeout: the message never carries the token
+        return None, None
+    try:
+        return resp.status_code, (resp.json() if isinstance(resp.json(), dict) else None)
+    except ValueError:
+        return resp.status_code, None
+
+
+_NEED_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
+@dataclass
+class HostAsk:
+    """A question the host tier asked the owner; only her next spoken words settle it."""
+
+    kind: str
+    summary: str
+    deadline: float
+    payload: dict
+
+
+# conv -> HostAsk, under _confirm_lock like the agent tier's _confirm; no watchdog thread:
+# expiry is judged on the owner's next utterance.
+_host_ask: dict[str, HostAsk] = {}
+
+
+async def _session_failed(action: str, reason: str, deps: OverlayDeps, said: list[str],
+                          on_step) -> AsyncIterator[dict]:
+    async for ev in _line("session_failed", deps):
+        yield ev
+    said.append(acks.PHRASES["session_failed"])
+    if on_step:
+        on_step(f"session_{action}", detail=f"refused reason={reason}")
+
+
+async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: POST /chat with the fixed start body; the prompt was built at ask time."""
+    now = deps.clock()
+    req = {"msg_id": uuid.uuid4().hex, "thread_id": "ov-" + uuid.uuid4().hex[:8],
+           "text": session_prompt(str(payload.get("words") or ""), payload.get("ref_row")),
+           "new_session": True}
+    status, out = await asyncio.to_thread(_companion_call, "POST", "/chat", req)
+    if status is not None:
+        _session_rate_sent("start", now)
+    if not (isinstance(status, int) and 200 <= status < 300 and isinstance(out, dict)):
+        async for ev in _session_failed("start", "unreachable" if status is None else f"http_{status}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    new_id = str(out.get("session_id") or "")
+    if _SESSION_ID_RE.fullmatch(new_id):
+        _set_session_ref(body.conv_id, [new_id])
+        if on_step:
+            on_step("session_start", detail=f"confirmed id={new_id}")
+    elif on_step:
+        on_step("session_start", detail="confirmed")
+    title = " ".join(str(out.get("title") or "").split())[:60]
+    line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
+    async for ev in _speak(line, deps):
+        yield ev
+    said.append(line)
+    detail = " ".join(str(out.get("action") or out.get("state") or "").split())[:40]
+    card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
+                              "title": title or "Session",
+                              "body": ["Mini PC"] + ([detail] if detail else [])})
+    if card:
+        seen = _card_ids.setdefault(body.conv_id, set())
+        if card["id"] in seen or _host_card_id(card["id"]):
+            card["id"] = uuid.uuid4().hex[:8]
+        seen.add(card["id"])
+        yield {"type": "card", "card": card}
+
+
+async def _session_stop_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                               said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: POST the allow-listed stop for the stored id."""
+    now = deps.clock()
+    sid = str(payload.get("id") or "")
+    status, _out = await asyncio.to_thread(_companion_call, "POST", f"/central/sessions/{sid}/stop")
+    if status is not None:
+        _session_rate_sent("stop", now)
+    if not (isinstance(status, int) and 200 <= status < 300):
+        async for ev in _session_failed("stop", "unreachable" if status is None else f"http_{status}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    async for ev in _line("stopped", deps):
+        yield ev
+    said.append(acks.PHRASES["stopped"])
+    if on_step:
+        on_step("session_stop", detail=f"confirmed id={sid}")
+
+
+async def _session_answer_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                 said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: re-check the ask is still open, then a card button or a plain message."""
+    now = deps.clock()
+    sid = str(payload.get("id") or "")
+    access = _sessions_access()
+    if access is None:
+        async for ev in _session_failed("answer", "no_access", deps, said, on_step):
+            yield ev
+        return
+    rows, st = await asyncio.to_thread(_fetch_sessions, *access)
+    if rows is None:
+        async for ev in _session_failed("answer", "unreachable" if st == 0 else f"http_{st}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    row = next((r for r in rows if r["id"] == sid and r["need"]), None)
+    if row is None:  # answered by hand, or the session is gone: no call leaves here
+        async for ev in _line("session_ask_gone", deps):
+            yield ev
+        said.append(acks.PHRASES["session_ask_gone"])
+        if on_step:
+            on_step("session_answer", detail="refused reason=ask_gone")
+        return
+    need = row["need"]
+    words = str(payload.get("words") or "")
+    answer = str(payload.get("answer") or "")
+    button = {"approve": "Approve", "yes": "Yes", "no": "No"}.get(answer, "")
+    if not button:  # the owner's own words: the one option whose words they all contain, else text
+        low = words.lower()
+        hits = [o for o in need["options"] if o.strip() and all(w in low for w in o.lower().split())]
+        if len(hits) == 1:
+            button = hits[0]
+    # The gateway's own rule (cards.valid_answer, read-only): approve/yesno take fixed buttons,
+    # choice takes its options; anything else goes as the owner's words.
+    allowed = {"approve": ("Approve",), "yesno": ("Yes", "No"),
+               "choice": tuple(need["options"])}.get(need.get("kind"), ())
+    if button and button in allowed and len(button) <= 40 and _NEED_ID_RE.fullmatch(need["id"]):
+        path, req = (f"/central/cards/{sid}/answer",
+                     {"msg_id": uuid.uuid4().hex, "need_id": need["id"], "answer": button})
+    else:
+        path, req = f"/central/sessions/{sid}/message", {"msg_id": uuid.uuid4().hex,
+                                                         "text": words[:300]}
+    status, _out = await asyncio.to_thread(_companion_call, "POST", path, req)
+    if status is not None:
+        _session_rate_sent("answer", now)
+    if not (isinstance(status, int) and 200 <= status < 300):
+        async for ev in _session_failed("answer", "unreachable" if status is None else f"http_{status}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    async for ev in _line("session_sent", deps):
+        yield ev
+    said.append(acks.PHRASES["session_sent"])
+    if on_step:
+        on_step("session_answer", detail=f"confirmed id={sid}")
+
+
+# kind -> the action run once on the owner's yes; it sees only the stored payload.
+_HOST_ACTIONS: dict[str, Callable] = {"start": _session_start_action,
+                                      "stop": _session_stop_action,
+                                      "answer": _session_answer_action}
+
+
+async def _ask_host(conv_id: str, kind: str, summary: str, question: str,
+                    payload: dict, deps: OverlayDeps) -> AsyncIterator[dict]:
+    """Ask the owner in this turn's stream, then show the Confirm card; the next utterance settles."""
+    with _confirm_lock:
+        _host_ask[conv_id] = HostAsk(kind=kind, summary=summary,
+                                     deadline=deps.clock() + CONFIRM_S, payload=payload)
+    async for ev in _speak(question, deps):  # in the turn stream: the app's echo drop sees it
+        yield ev
+    card = hud.validate_card({"id": _CONFIRM_CARD_ID, "type": "info", "title": "Confirm",
+                              "body": [summary, "Say yes to go ahead, or no."]})
+    if card:
+        yield {"type": "card", "card": card}
+
+
+async def _session_rows(action: str, deps: OverlayDeps, said: list[str],
+                        on_step, held: dict) -> AsyncIterator[dict]:
+    """The session list for resolving a name or "this"; rows land in held["rows"],
+    None -> the failed line was already said."""
+    access = _sessions_access()
+    rows, reason = None, "no_access"
+    if access is not None:
+        rows, st = await asyncio.to_thread(_fetch_sessions, *access)
+        if rows is None:
+            reason = "unreachable" if st == 0 else f"http_{st}"
+    if rows is None:
+        async for ev in _session_failed(action, reason, deps, said, on_step):
+            yield ev
+    held["rows"] = rows
+
+
+async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
+                               said: list[str], on_step) -> AsyncIterator[dict]:
+    """A start/stop/answer request: checks, resolve the target, then the host-tier Confirm."""
+    action = ask.action
+
+    def refused(reason: str) -> None:
+        if on_step:
+            on_step(f"session_{action}", detail=f"refused reason={reason}")
+
+    if action == "start" and ask.device != "mini_pc":
+        async for ev in _line("session_device", deps):
+            yield ev
+        said.append(acks.PHRASES["session_device"])
+        refused("device")
+        return
+    if _sessions_access() is None:
+        async for ev in _line("no_sessions_access", deps):
+            yield ev
+        said.append(acks.PHRASES["no_sessions_access"])
+        refused("no_access")
+        return
+    if not _session_rate_ok(action, deps.clock()):  # before the Confirm: over is over
+        async for ev in _line("session_limit", deps):
+            yield ev
+        said.append(acks.PHRASES["session_limit"])
+        refused("rate_limit")
+        return
+    ref_row: dict | None = None
+    if action == "start":
+        if ask.ref == "this":
+            held: dict = {}
+            async for ev in _session_rows(action, deps, said, on_step, held):
+                yield ev
+            if held["rows"] is None:
+                return
+            hits = [r for r in held["rows"] if r["id"] in (_session_ref.get(body.conv_id) or [])]
+            if len(hits) != 1:
+                async for ev in _speak("Which session, sir? Say its name.", deps):
+                    yield ev
+                refused("ambiguous")
+                return
+            ref_row = hits[0]
+    else:  # stop / answer need a target row
+        held = {}
+        async for ev in _session_rows(action, deps, said, on_step, held):
+            yield ev
+        if held["rows"] is None:
+            return
+        rows = held["rows"]
+        if ask.ref == "name" and ask.name:
+            hits = [r for r in rows if ask.name.lower() in r["title"].lower()]
+            if not hits:
+                async for ev in _line("session_none_named", deps):
+                    yield ev
+                said.append(acks.PHRASES["session_none_named"])
+                refused("none_named")
+                return
+            if len(hits) > 1:
+                titles = [_cut40(r["title"]) or r["id"] for r in hits[:3]]
+                async for ev in _speak(f"Which one: {', '.join(titles[:-1])} or {titles[-1]}?", deps):
+                    yield ev
+                refused("ambiguous")
+                return
+            ref_row = hits[0]
+        else:  # "this" (or nothing): the session this conv last touched
+            hits = [r for r in rows if r["id"] in (_session_ref.get(body.conv_id) or [])]
+            if len(hits) != 1:
+                async for ev in _speak("Which session, sir? Say its name.", deps):
+                    yield ev
+                refused("ambiguous")
+                return
+            ref_row = hits[0]
+    title40 = _cut40(ref_row["title"]) if ref_row else ""
+    if action == "start":
+        question = (f"Start a session on the mini PC to fix why {title40} went quiet?" if ref_row
+                    else f"Start a session on the mini PC: {_cut40(ask.words)}?")
+        payload = {"words": ask.words, "ref_row": ref_row}
+    elif action == "stop":
+        question = f"Stop the {title40} session?"
+        payload = {"id": ref_row["id"], "title": title40}
+    else:
+        shown = {"approve": "approve", "yes": "yes", "no": "no"}.get(ask.answer)
+        if not shown:
+            shown = '"' + _cut40(ask.words) + '"'
+        question = f"Send to {title40}: {shown}?"
+        payload = {"id": ref_row["id"], "title": title40, "answer": ask.answer, "words": ask.words}
+    async for ev in _ask_host(body.conv_id, action, question.rstrip("?"), question, payload, deps):
+        yield ev
+    said.append(question)
 
 
 async def _run_turn(body: TurnBody, deps: OverlayDeps,
@@ -955,7 +1341,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     agent_state = _holds_agent_state(body.conv_id, deps, cursor=False)
     # A yes/no the agent tier waits for (or a turn it runs) is never stray speech: read before the
     # preflight settles it.
-    owner_answer_due = body.conv_id in _confirm or body.conv_id in _expired or body.conv_id in _agent_busy
+    owner_answer_due = (body.conv_id in _confirm or body.conv_id in _expired
+                        or body.conv_id in _agent_busy or body.conv_id in _host_ask)
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
@@ -1025,6 +1412,11 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
         intent = _hunk_rewrite(intent, body.text, body.conv_id, on_step)
+        # A3: owner words only. The action re-parses raw_text (before any continuation join);
+        # a join that hid the request is a plain answer turn, never an ask.
+        sess_ask = intents.session_request(raw_text) if intent.kind == "session" else None
+        if intent.kind == "session" and sess_ask is None:
+            intent = intents.Intent("answer", intents._clean(body.text))
         media_ask: intents.MediaAsk | None = None
         if (intent.kind == "answer" and not joined
                 and (body.conv_id in _tainted or _holds_agent_state(body.conv_id, deps, cursor=False))):
@@ -1034,7 +1426,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             if media_ask is not None:
                 intent = intents.Intent("media", media_ask.kind)
         if on_step:
-            on_step("intent", kind=intent.kind, arg=intent.arg)
+            if sess_ask is not None:  # A7: the session row carries the action's own fields
+                detail = (f"device={sess_ask.device or 'none'} ref={sess_ask.ref or 'none'}"
+                          f" words={len(sess_ask.words.split())}"
+                          + (f" answer={sess_ask.answer}" if sess_ask.action == "answer" else ""))
+                on_step("intent", kind=f"session_{sess_ask.action}", detail=detail)
+            else:
+                on_step("intent", kind=intent.kind, arg=intent.arg)
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         ack_phrase_key = acks.ack_key(intent.kind, intent.sub)
@@ -1389,7 +1787,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 else:
                     rows = fetched
                     result = "ok"
-            if intent.arg:  # "what went wrong with X": only X's rows, by title
+            if intent.sub == "ref":  # "what is it doing": the session this conv last touched
+                ids = _session_ref.get(body.conv_id) or []
+                rows = [r for r in rows if r["id"] in ids]
+            elif intent.arg:  # "what went wrong with X": only X's rows, by title
                 rows = [r for r in rows if intent.arg.lower() in r["title"].lower()]
             if on_step:
                 on_step("sessions", detail=f"result={result}" + (f" rows={len(rows)}" if rows else ""))
@@ -1398,11 +1799,22 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield ev
                 said.append(acks.PHRASES["no_sessions_access"])
             elif not rows:  # nothing to read: a fixed line, so the model cannot make sessions up
-                key = "no_session_named" if intent.arg else "no_sessions"
+                key = "no_session_named" if (intent.arg or intent.sub == "ref") else "no_sessions"
                 async for ev in _line(key, deps):
                     yield ev
                 said.append(acks.PHRASES[key])
             else:
+                # Fixed code picks what "it" will mean next, never the model: the one row the
+                # name filter left, else the one carded needs_owner row, else the only quiet one.
+                if len(rows) == 1 and intent.arg:
+                    _set_session_ref(body.conv_id, [rows[0]["id"]])
+                else:
+                    needing = [r for r in rows if r["needs_owner"]]
+                    quiet = [r for r in rows if r["health"] in ("quiet", "attention", "failed")]
+                    if len(needing) == 1:
+                        _set_session_ref(body.conv_id, [needing[0]["id"]])
+                    elif len(quiet) == 1:
+                        _set_session_ref(body.conv_id, [quiet[0]["id"]])
                 _tainted.add(body.conv_id)  # before the model call: the rows are untrusted data
                 for row in [r for r in rows if r["needs_owner"]][:4]:  # fixed code, never the model
                     card = hud.validate_card({"type": "info", "title": row["title"][:60],
@@ -1420,6 +1832,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                                 start, failed=failed, on_step=on_step,
                                                 extra_untrusted=_sessions_note(rows)):
                     yield event
+
+        elif intent.kind == "session":
+            async for ev in _session_action_turn(body, sess_ask, deps, said, on_step):
+                yield ev
 
         elif intent.kind == "agent":
             async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step,
@@ -1834,6 +2250,10 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             produced = True
             return
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
+            if metrics.get("ack_ms") is not None:  # an ack was already spoken: own the cut-off too
+                async for ev in _speak(acks.PHRASES["cut_off"], deps):
+                    yield ev
+                said.append(acks.PHRASES["cut_off"])
             _pending[body.conv_id] = (body.text, deps.clock())
             produced = True
             if on_step:
@@ -2043,6 +2463,7 @@ class AgentRun:
     confirm_label: str = ""  # log label of the tool call waiting for a yes
     confirm_summary: str = ""  # what the owner was asked, for the card that replaces the Confirm card
     cancelled: bool = False
+    vault_denied: bool = False  # a tool call hit the vault: the fixed line replaces the reply
     opening_key: str | None = None  # progress line the 1.5 s timer speaks once if no tool call came first
     opening_said: str | None = None  # the line it spoke; a tool's progress line never repeats it
     screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
@@ -2174,6 +2595,55 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
     Ends with a `done` event when it answered the turn; otherwise the utterance goes on through the
     normal pipeline (after any "Very well, I won't." it yielded for a dropped confirmation).
     """
+    # H: a pending host-tier ask settles first, on the raw transcript (before the continuation
+    # join): only the owner's spoken words can say yes, and a barge-in never confirms.
+    for other in [c for c in list(_host_ask) if c != body.conv_id]:  # a new conversation: deny
+        with _confirm_lock:
+            other_ask = _host_ask.pop(other, None)
+        if other_ask is not None:
+            yield _settled_card(other_ask.summary, "Not done")
+    ask = None if body.barge_in else _host_ask.get(body.conv_id)
+    if ask is not None:
+        with _confirm_lock:
+            _host_ask.pop(body.conv_id, None)
+        if intents.is_confirm(body.text) and deps.clock() < ask.deadline:
+            yield _settled_card(ask.summary, "Going ahead")
+            async for ev in _HOST_ACTIONS[ask.kind](ask.payload, body, deps, said, on_step):
+                yield ev
+            yield _finish(body, deps, metrics, said, start)
+            return
+        late = intents.is_confirm(body.text)  # a yes after the deadline: it expired unseen
+        if late:
+            yield _settled_card(ask.summary, "Not done: it timed out")
+            async for ev in _line("expired", deps):
+                yield ev
+            said.append(acks.PHRASES.get("expired", ""))
+            if on_step:
+                on_step(f"session_{ask.kind}", detail="refused reason=expired")
+            yield _finish(body, deps, metrics, said, start)
+            return
+        if intents.is_stop(body.text):
+            yield _settled_card(ask.summary, "Not done")
+            async for ev in _line("stop", deps):
+                yield ev
+            said.append(acks.PHRASES["stop"])
+            yield {"type": "end_listening"}
+            yield _finish(body, deps, metrics, said, start)
+            return
+        if intents.is_no(body.text) or intents.is_cancel(body.text):
+            yield _settled_card(ask.summary, "Not done")
+            if on_step:
+                on_step(f"session_{ask.kind}", detail="cancelled")
+            async for ev in _line("not_confirmed", deps):
+                yield ev
+            said.append(acks.PHRASES.get("not_confirmed", ""))
+            yield _finish(body, deps, metrics, said, start)
+            return
+        # anything else: dropped, the utterance goes on as a normal turn (no `done`)
+        yield _settled_card(ask.summary, "Not done")
+        if on_step:
+            on_step(f"session_{ask.kind}", detail="cancelled")
+        return
     for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
         run = _take_confirm(other)
         if run is not None:
@@ -2613,6 +3083,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     run.tool = (label, deps.clock(), family)
                     await asyncio.to_thread(run.session.respond, rid, True, decision.updated_input)
                 elif isinstance(decision, agent_policy.Deny):
+                    if agent_policy.reason_code(decision.reason) == "vault":
+                        run.vault_denied = True
                     if on_step:
                         on_step("agent_tool", tool=label, decision="deny", kind=family,
                                 reason=agent_policy.reason_code(decision.reason), ms=None)
@@ -2644,9 +3116,14 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 if metrics.get("agent_first_progress_s") is None:
                     metrics["agent_first_progress_s"] = metrics["agent_total_s"]
                 spoke = len(said)
-                for line in str(ev.get("result") or "").splitlines():
-                    async for out in _agent_flush(line, run, deps, metrics, said, start, on_step):
+                if run.vault_denied:  # D1: the fixed line replaces the model's own say and cards
+                    async for out in _line("vault_off_limits", deps):
                         yield out
+                    said.append(acks.PHRASES["vault_off_limits"])
+                else:
+                    for line in str(ev.get("result") or "").splitlines():
+                        async for out in _agent_flush(line, run, deps, metrics, said, start, on_step):
+                            yield out
                 if run.screen_file:  # "what changed" in the file on screen: the host's card and lines
                     card, lines, nav = await asyncio.to_thread(_last_change, run)
                     if card:  # the change list (gd-list): it replaces the conv's earlier git cards
@@ -2880,10 +3357,16 @@ def _app_commit() -> str | None:
     return commit if isinstance(commit, str) and _COMMIT_RE.fullmatch(commit) else None
 
 
+def barge_mode() -> str:
+    """"off" (OVERLAY_BARGE_IN not "1"), "aec" (also OVERLAY_BARGE_AEC=1) or "headphones"."""
+    if os.environ.get("OVERLAY_BARGE_IN", "0") != "1":
+        return "off"
+    return "aec" if os.environ.get("OVERLAY_BARGE_AEC", "0") == "1" else "headphones"
+
+
 def barge_in_on() -> bool:
-    """The one barge-in switch (app reads it from /health): off unless OVERLAY_BARGE_IN=1.
-    Off since Mac live run 3 (self-cuts, no plain-speech barge at speaker volume)."""
-    return os.environ.get("OVERLAY_BARGE_IN", "0") == "1"
+    """Any barge-in mode but "off" (app reads it from /health); off by default."""
+    return barge_mode() != "off"
 
 
 @router.get("/health", dependencies=_LOOP_DEPS)
@@ -2893,6 +3376,7 @@ async def get_health() -> dict:
             "brain": shutil.which("claude") is not None,
             "tail_level_ratio": TAIL_LEVEL_RATIO,
             # A6: the barge-in switches and the installed bundle's commit, read at request time.
+            "barge_mode": barge_mode(),
             "barge_in": barge_in_on(),
             "barge_aec": barge_in_on() and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1",
             "commit": _app_commit()}

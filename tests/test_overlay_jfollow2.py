@@ -550,7 +550,7 @@ def test_speech_gate_is_tunable_and_shown(client, monkeypatch, tmp_path):
     assert "SOME_TOKEN" not in os.environ
     _deps()
     gate = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["speech_gate"]
-    assert gate == {"followup_level_ratio": 0.5, "followup_min_level": 0.01, "followup_min_voiced_ms": 300,
+    assert gate == {"followup_level_ratio": 0.4, "followup_min_level": 0.01, "followup_min_voiced_ms": 300,
                     "followup_min_conf": 0.35, "tail_level_ratio": 0.5}
     assert client.get("/overlay/health", headers=AUTH_HEADER).json()["tail_level_ratio"] == 0.5
     page = overlay.DEBUG_PAGE

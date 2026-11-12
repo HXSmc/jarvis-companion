@@ -150,7 +150,8 @@ def test_handover_and_incomplete_are_not_failures(client, caplog):
     overlay._pending.clear()
     events, _ = run(client, ScriptedSession(chunks=['{"incomplete": true}\n']))
     spoken = says(events)
-    assert len(spoken) == 1 and spoken[0] in POOL and cards(events) == []  # the ack is the only speech
+    assert len(spoken) == 2 and spoken[0] in POOL and cards(events) == []  # jfollow4 E: ack, then the cut-off line
+    assert spoken[1] == "I didn't catch the end of that, sir."
     assert done(events)["error"] is None
 
 
