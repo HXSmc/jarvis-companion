@@ -183,18 +183,32 @@ public enum BargeWords {
         guard confirmed else { return nil }
         let raw = final.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
-        let owned = ownerWords(partial: fresh, reply: reply)
+        let owned = dropEchoAnswer(ownerWords(partial: fresh, reply: reply), reply: reply)
         return owned.isEmpty ? nil : owned
+    }
+
+    /// A heard text that reads as a Confirm answer (`TailGate.isAnswer`) and whose every word is in
+    /// the line Jarvis was speaking is that line's echo, never the owner's yes/no/stop: "" (fail
+    /// closed: a pending Confirm stays pending). "Shall I send … with subject Yes?" must not answer
+    /// itself. Every path where speech heard during or right after a reply reaches the service runs
+    /// it: wake barge (`wakeTurnText`), level barge and a stop said over the reply (`turnText`),
+    /// follow-up replay (AppController.handleWake).
+    public static func dropEchoAnswer(_ text: String, reply: [String]) -> String {
+        let heard = tokens(TurnEndpointer.dropMisheardWake(TurnEndpointer.stripWake(text)))
+        guard !heard.isEmpty, TailGate.isAnswer(text) else { return text }
+        let replyWords = Set(reply.flatMap(tokens))
+        return heard.allSatisfy(replyWords.contains) ? "" : text
     }
 
     /// A wake turn that cut a reply (A4) replays ring audio holding the reply's echo before and
     /// after the wake word, which STT may mishear ("the overlay, sir. Hey, John. The overlay. So"):
-    /// drop the echo lead, a misheard wake, then the echo lead again.
+    /// drop the echo lead, a misheard wake, then the echo lead again; an answer made only of the
+    /// reply's words is echo too (`dropEchoAnswer`).
     public static func wakeTurnText(final: String, reply: [String]) -> String {
         let lead = ownerWords(partial: final, reply: reply)
         let unwoken = TurnEndpointer.dropMisheardWake(lead)
             .trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?;:-"))
-        return ownerWords(partial: unwoken, reply: reply)
+        return dropEchoAnswer(ownerWords(partial: unwoken, reply: reply), reply: reply)
     }
 
     /// The longest leading run of >= 2 non-empty normalized tokens contiguous in the reply,

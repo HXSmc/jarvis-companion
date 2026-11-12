@@ -284,7 +284,8 @@ final class AppController {
         // Screen capture starts at wake; only awaited when an utterance lands.
         let screenTask = Task { await ScreenContext.capture() }
         let listenStart = Date()
-        let echoOf = followUp ? [] : cutReply
+        // The reply this turn's audio may echo: the one just finished (follow-up) or the one cut.
+        let echoOf = followUp ? replyTexts : cutReply
         speech.listenAfterWake(
             followUp: followUp,
             replayFrom: replayFrom,
@@ -294,8 +295,10 @@ final class AppController {
             },
             onFinal: { [weak self] heardText, sttFinalMs, endOfSpeech, heard in
                 let heardUntil = Date()  // every ring chunk before this went to this turn
-                // A wake that cut a reply: drop that reply's echo and a misheard wake word.
-                let text = echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
+                // A wake that cut a reply: drop that reply's echo and a misheard wake word. A
+                // follow-up: an answer made only of the reply's words is its echo, not the owner's.
+                let text = followUp ? BargeWords.dropEchoAnswer(heardText, reply: echoOf)
+                    : echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
                     guard !text.isEmpty else { self?.model.orb = .idle; return }  // only the reply's echo

@@ -512,9 +512,24 @@ def test_wake_barge_turn_drops_the_cut_reply():
     wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
     assert wake.index("cutReply = replyTexts") < wake.index("bargeIn(reason: .wake)")
     assert "BargeWords.wakeTurnText(final: heardText, reply: echoOf)" in wake
-    assert "let echoOf = followUp ? [] : cutReply" in wake
+    # Round 4: the follow-up window checks the reply it follows for an echoed answer.
+    assert "let echoOf = followUp ? replyTexts : cutReply" in wake
+    assert "followUp ? BargeWords.dropEchoAnswer(heardText, reply: echoOf)" in wake
     barge = _swift_func(APP_SRC / "AppController.swift", "bargeIn")
     assert "stream_open=" in barge
+
+
+def test_echo_answer_drop_is_shared_by_every_path():
+    """Round 4 security: 'Shall I ... subject Yes?' cut by a wake left 'Yes.', which said yes to the
+    Confirm. One pure function drops an answer made only of the reply's words on every path."""
+    core = (APP_SRC.parent / "OverlayCore" / "BargeIn.swift").read_text()
+    for name in ("turnText", "wakeTurnText"):
+        assert "dropEchoAnswer(" in _swift_func(APP_SRC.parent / "OverlayCore" / "BargeIn.swift", name)
+    assert "TailGate.isAnswer(text)" in core
+    tests = (APP_SRC.parents[1] / "Tests" / "OverlayCoreTests" / "BargeInTests.swift").read_text()
+    for name in ("testWakeTurnTextDropsAnEchoedYes", "testBargeTurnTextDropsAnEchoedYes",
+                 "testStopEchoIsDroppedOnEveryPath", "testFollowUpDropsAnEchoedAnswerOnly"):
+        assert f"func {name}()" in tests
 
 
 def test_enlarged_card_holds_the_idle_clear():

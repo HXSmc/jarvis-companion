@@ -177,4 +177,53 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(BargeWords.wakeTurnText(final: "what time is it", reply: reply), "what time is it")
         XCTAssertEqual(BargeWords.wakeTurnText(final: "the overlay is unchanged", reply: reply), "")
     }
+
+    // MARK: Round 4 (security): the reply's own echo never answers a pending Confirm
+
+    private let confirmQuestion = ["Shall I send an email to bob@example.com with subject Yes?"]
+
+    /// Wake barge (A4): the reviewer's input. Before the fix the result was "Yes." (a yes).
+    func testWakeTurnTextDropsAnEchoedYes() {
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "send an email to Bob with subject. Hey, John. Yes.",
+                                               reply: confirmQuestion), "")
+        // "jarvis" heard: stripWake leaves the lone echo.
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "Hey Jarvis. Yes.", reply: confirmQuestion), "")
+        // The owner's own answer, not in the reply, still passes.
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "send an email to Bob with subject. Hey, John. No.",
+                                               reply: confirmQuestion), "No")
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "with subject. Hey, John. Stop.",
+                                               reply: confirmQuestion), "Stop")
+    }
+
+    /// Level barge (A3): a confirmed barge turn whose words are only the echoed answer is no turn.
+    func testBargeTurnTextDropsAnEchoedYes() {
+        XCTAssertNil(BargeWords.turnText(final: "Yes.", reply: confirmQuestion, confirmed: true))
+        XCTAssertNil(BargeWords.turnText(final: "with subject yes", reply: confirmQuestion, confirmed: true))
+        XCTAssertEqual(BargeWords.turnText(final: "No.", reply: confirmQuestion, confirmed: true), "No.")
+        XCTAssertEqual(BargeWords.turnText(final: "stop", reply: confirmQuestion, confirmed: true), "stop")
+    }
+
+    /// Stop over the reply: a "stop" that is the reply's own word is echo; the owner's stop passes.
+    func testStopEchoIsDroppedOnEveryPath() {
+        let reply = ["Shall I stop the server?"]
+        XCTAssertNil(BargeWords.turnText(final: "stop", reply: reply, confirmed: true))
+        XCTAssertEqual(BargeWords.wakeTurnText(final: "Hey Jarvis, stop.", reply: reply), "")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("Stop.", reply: reply), "")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("no", reply: reply), "no")
+        XCTAssertEqual(BargeWords.turnText(final: "no", reply: reply, confirmed: true), "no")
+    }
+
+    /// Follow-up replay: the window after the question hears its tail; an echoed yes is dropped,
+    /// the owner's yes (not a word of the question), no and stop pass, and a non-answer passes whole.
+    func testFollowUpDropsAnEchoedAnswerOnly() {
+        XCTAssertEqual(BargeWords.dropEchoAnswer("Yes.", reply: confirmQuestion), "")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("Hey, John. Yes.", reply: confirmQuestion), "")
+        let plain = ["Shall I push the branch?"]
+        XCTAssertEqual(BargeWords.dropEchoAnswer("Yes.", reply: plain), "Yes.")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("No.", reply: confirmQuestion), "No.")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("stop", reply: confirmQuestion), "stop")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("send an email", reply: confirmQuestion), "send an email")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("Yes.", reply: []), "Yes.")
+        XCTAssertEqual(BargeWords.dropEchoAnswer("", reply: confirmQuestion), "")
+    }
 }
