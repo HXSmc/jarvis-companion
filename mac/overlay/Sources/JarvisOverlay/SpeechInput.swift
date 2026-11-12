@@ -19,6 +19,10 @@ final class SpeechInput {
     private let log = Logger(subsystem: "JarvisOverlay", category: "SpeechInput")
     /// TailGate's ratio; the service sends it on /overlay/health (OVERLAY_TAIL_LEVEL_RATIO).
     var tailRatio = TailGate.defaultRatio
+    /// Barge-in with the AEC-backed gate wanted (health barge_aec); the start() probe decides.
+    var aecEnabled = false
+    /// The voice-processing probe actually stuck; the gate uses the AEC margin only when true.
+    private(set) var aecActive = false
 
     /// What the service's follow-up gate reads with the words: 100 ms mic levels, STT confidence.
     struct Heard {
@@ -40,9 +44,14 @@ final class SpeechInput {
             throw NSError(domain: "JarvisOverlay.SpeechInput", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "No audio input available"])
         }
+        // AEC must be enabled before the engine starts; any failure keeps today's plain path.
+        if aecEnabled {
+            do { try input.setVoiceProcessingEnabled(true); aecActive = true }
+            catch { aecActive = false }
+        }
         tap.install(on: input, format: format)
         engine.prepare()
-        try engine.start()
+        do { try engine.start() } catch { aecActive = false; throw error }
         isRunning = true
     }
 
@@ -54,9 +63,11 @@ final class SpeechInput {
     /// diagnosis for the debug page (STT path, buffers fed, results, errors).
     /// followUp: the open-mic window after a reply. Replays only ring audio stamped after
     /// replayFrom (the reply's drain + echo tail); nil replays nothing. 8 s to start speaking.
+    /// barge: listening during reply playback (barge-in); runs until confirmed or cancelled.
     func listenAfterWake(
         followUp: Bool = false,
         replayFrom: Date? = nil,
+        barge: BargeRun? = nil,
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (_ text: String, _ sttFinalMs: Double, _ endOfSpeech: Date, _ heard: Heard) -> Void,
         onNothing: @escaping (_ why: String) -> Void
@@ -67,6 +78,10 @@ final class SpeechInput {
         turn.followUp = followUp
         turn.replayFrom = replayFrom
         turn.tail = TailGate(ratio: tailRatio)
+        if let barge {
+            turn.barge = barge
+            barge.gateThrough = turn.startedAt
+        }
         // Levels cover the audio the recogniser hears: the replayed ring (wake) or post-reply audio.
         turn.levelFrom = followUp ? (replayFrom.map { max($0, turn.startedAt.addingTimeInterval(-2)) } ?? turn.startedAt)
                                   : turn.startedAt.addingTimeInterval(-2)
@@ -102,6 +117,7 @@ final class SpeechInput {
     func cancel() {
         guard let turn = currentTurn else { return }
         turn.cancelled = true
+        turn.barge?.end()
         currentTurn = nil
         turnTask?.cancel()
         turnTask = nil
@@ -115,6 +131,9 @@ final class SpeechInput {
 
     private final class Turn: @unchecked Sendable {
         let startedAt = Date()
+        /// The 30 s cap and the no-speech wait count from here: the start, or a barge-in's
+        /// confirmation (a barge run can be 30 s into a reply when the owner speaks).
+        var capFrom = Date()
         var hasSpeech = false
         var lastText = ""
         var endOfSpeech: Date?
@@ -126,6 +145,7 @@ final class SpeechInput {
         var onNothing: ((String) -> Void)?
         var followUp = false
         var replayFrom: Date?  // follow-up turns replay only ring chunks at/after the reply drain + echo tail
+        var barge: BargeRun?  // listening during reply playback; gate + confirm state (barge-in)
         var path = ""  // STT path + why it was taken, for the debug page
         var endNote = ""  // how long the end-of-turn silence was, for the debug page
         let stats = FeedStats()
@@ -145,8 +165,40 @@ final class SpeechInput {
         turn.lastText = text
         turn.hasSpeech = true
         turn.endOfSpeech = Date()
+        if let barge = turn.barge, !barge.confirmed { checkBarge(barge, turn: turn, partial: text, now: Date()) }
         turn.tail.partial(text, at: Date())
         turn.onPartial?(text)
+    }
+
+    /// The barge-in word check on one partial: gate candidate (or one that ended within the
+    /// partials' lag) + words the reply does not contain, counted only from the words heard since
+    /// the gate last went over the echo. On confirm the turn goes on as an ordinary follow-up.
+    private func checkBarge(_ barge: BargeRun, turn: Turn, partial: String, now: Date) {
+        feedGate(barge, now: now)  // the gate is current before it is read
+        barge.partials += 1
+        guard barge.gate.recentlyOver(at: now) else {
+            // Echo only so far: these words are the reply's, the owner's can only come after them.
+            barge.freshFrom = BargeWords.wordCount(partial)
+            return
+        }
+        let candidate = barge.gate.candidate(at: now)
+        if candidate {
+            barge.checked += 1
+            barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: barge.reply,
+                                                                      freshFrom: barge.freshFrom))
+        }
+        guard let reason = BargeDecision.decide(gateCandidate: candidate, partial: partial,
+                                                reply: barge.reply, wake: false,
+                                                enabled: barge.enabled, aec: barge.aec,
+                                                freshFrom: barge.freshFrom) else { return }
+        barge.confirmed = true
+        turn.capFrom = now
+        // The tail gate and the sent levels start at the confirmation, not over the reply's echo.
+        turn.tail = TailGate(ratio: tailRatio)
+        turn.fedBlocks = 0
+        turn.levelFrom = Date()
+        barge.onConfirmed?(reason)
+        barge.end()
     }
 
     /// First caller wins; a queued callback after cancel stays silent.
@@ -160,6 +212,9 @@ final class SpeechInput {
         let cancel = turn.cancelHandler
         turn.cancelHandler = nil
         cancel?()
+        // A2: an unconfirmed barge turn never calls onFinal/onNothing (the legacy recogniser's
+        // time-cap final holds Jarvis's own echo); it just ends and the reply plays on.
+        if let barge = turn.barge, !barge.confirmed { barge.end(); return }
         guard !nothing, let end = turn.endOfSpeech, let raw = turn.keptText ?? rawText else {
             turn.onNothing?(turn.diagnosis)
             return
@@ -183,11 +238,18 @@ final class SpeechInput {
     private func watch(turn: Turn) async -> Verdict {
         while true {
             if turn.cancelled || turn.finished { return .cancelled }
+            // Barge listening runs while the reply plays: silence, the caps and the endpointer
+            // never end it — only a confirmed barge-in or a cancel (the reply drain) does.
+            if let barge = turn.barge, !barge.confirmed {
+                feedGate(barge, now: Date())
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                continue
+            }
             let now = Date()
-            if now.timeIntervalSince(turn.startedAt) >= 30 { return .timedOut }
+            if now.timeIntervalSince(turn.capFrom) >= 30 { return .timedOut }
             feedTail(turn, now: now)
             if !turn.hasSpeech {
-                if now.timeIntervalSince(turn.startedAt) >= (turn.followUp ? 8 : 5) { return .nothing }
+                if now.timeIntervalSince(turn.capFrom) >= (turn.followUp ? 8 : 5) { return .nothing }
             } else if !turn.followUp, let kept = turn.tail.cut(text: turn.lastText, now: now) {
                 // Wake turns only (round-6 item 2): a follow-up may answer a pending Confirm.
                 // A complete request, then quieter room words: end with the request as it was.
@@ -216,6 +278,22 @@ final class SpeechInput {
             turn.tail.level(blocks[i], at: turn.levelFrom.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
         }
         turn.fedBlocks = done
+    }
+
+    /// Gives the barge echo gate each finished 100 ms block since the barge turn started: mic
+    /// blocks from the tap, the reply's playback RMS from AudioOut's ring (a block with no
+    /// buffer is 0, so playback gaps can never raise the coupling).
+    private func feedGate(_ barge: BargeRun, now: Date) {
+        guard let from = barge.gateThrough else { return }
+        let mic = LevelBlocks.blocks(tap.levelSamples(since: from), from: from, to: now)
+        let out = LevelBlocks.blocks(barge.outLevels(), from: from, to: now)
+        let done = min(max(0, mic.count - 1), max(0, out.count - 1))  // the newest block is still filling
+        guard done > barge.fedBlocks else { return }
+        for i in barge.fedBlocks..<done {
+            barge.gate.block(mic: mic[i], out: out[i],
+                             at: from.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
+        }
+        barge.fedBlocks = done
     }
 
     // MARK: macOS 26 SpeechAnalyzer
@@ -499,6 +577,56 @@ private final class TranscriptBox: @unchecked Sendable {
     var text: String {
         lock.lock(); defer { lock.unlock() }
         return (finalized + volatile).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - barge-in run state
+
+/// One barge listening pass, shared by AppController (which starts it and appends the reply's
+/// spoken texts) and SpeechInput's barge turn (which feeds the gate and confirms on a partial).
+/// Main-actor only, like the turns that hold it.
+final class BargeRun {
+    /// The reply's spoken texts so far (every .audio/.say of the turn); AppController appends.
+    var reply: [String] = []
+    /// The echo gate; its margin is AEC's only when voice processing is really on.
+    var gate: EchoGate
+    /// Barge-in wanted (health barge_in); the turn is only started when true.
+    let enabled: Bool
+    /// AEC really on (the start() probe stuck): reason .aec and the AEC margin only then.
+    let aec: Bool
+    /// The reply's playback RMS (AudioOut's level ring), read on the main actor.
+    let outLevels: () -> [LevelSample]
+    /// Gate blocks already fed (each finished 100 ms block reaches the gate once).
+    var fedBlocks = 0
+    /// Set when the barge turn starts: gate blocks before it are pre-reply audio, never fed.
+    var gateThrough: Date?
+    /// True once a barge-in fired; the turn then runs on as an ordinary follow-up.
+    var confirmed = false
+    /// AppController's stop-the-reply path (audio.stop, stream cancel, orb).
+    var onConfirmed: ((BargeReason) -> Void)?
+    /// Words of the partial heard while the gate was quiet (the reply's echo): the word check
+    /// starts after them.
+    var freshFrom = 0
+    /// Partials seen, and word checks made while the gate was a candidate (debug note only).
+    var partials = 0, checked = 0
+    /// Most new (not-in-the-reply) words any checked partial held; the word check needs 2.
+    var maxNew = 0
+    /// Told once when the run ends (confirmed, cancelled at the drain, or the recogniser ended):
+    /// the gate's numbers for the one-shot `barge_gate` debug note.
+    var onEnded: ((String) -> Void)?
+    private var ended = false
+
+    func end() {
+        guard !ended else { return }
+        ended = true
+        onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) max_new=\(maxNew) confirmed=\(confirmed ? 1 : 0)")
+    }
+
+    init(enabled: Bool, aec: Bool, outLevels: @escaping () -> [LevelSample]) {
+        self.enabled = enabled
+        self.aec = aec
+        self.outLevels = outLevels
+        self.gate = EchoGate(margin: aec ? EchoGate.aecMargin : EchoGate.defaultMargin)
     }
 }
 

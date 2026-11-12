@@ -361,7 +361,7 @@ def test_cancel_and_timeout(client):
     events = turn(client, "stop", conv_id="c1")
     t.join(5)
     assert not t.is_alive()
-    assert "Stopped." in says(events)
+    assert "OK." in says(events)  # jfollow3 B1/B2: a stop word (incl. cancel) now answers "OK."
     assert "c1" in pool.dropped and pool.made[0].closed
 
     # A turn that never ends is stopped at 120 s of (fake) wall clock.

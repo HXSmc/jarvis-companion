@@ -9,8 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from mac.voice import acks, media_lookup
-from mac.voice.intents import (Intent, is_cancel, is_confirm, is_hunk_back, is_no,
-                               list_apps, media_request, noise_words, open_app, open_site,
+from mac.voice.intents import (STOP_PHRASES, Intent, card_size_request, card_words, is_cancel,
+                               is_confirm, is_hunk_back, is_no, is_stop, list_apps,
+                               media_request, match_card, noise_words, open_app, open_site,
                                parse, tail_hunk)
 from mac.voice.lean import Conversations, lean_argv
 
@@ -184,7 +185,7 @@ def test_agent_ack_keys():
 def test_ack_cache_fallback():
     cache = acks.AckCache()
     cache.prerender()  # no synth: quiet no-op
-    assert cache.get("open") == ("Of course.", None, 0)
+    assert cache.get("open") == ("Of course, sir.", None, 0)
     # Unknown key falls back to the generic phrase.
     assert cache.get("nope") == ("On it.", None, 0)
 
@@ -196,7 +197,7 @@ def test_ack_cache_fallback():
 
     cache = acks.AckCache(synth)
     cache.prerender()
-    assert cache.get("open") == ("Of course.", b"pcm:Of course.", 24000)
+    assert cache.get("open") == ("Of course, sir.", b"pcm:Of course, sir.", 24000)
     # PHRASES with a template ({n}) are spoken at turn time, never prerendered.
     assert sorted(calls) == sorted(t for t in acks.PHRASES.values() if "{" not in t)
 
@@ -413,3 +414,61 @@ def test_media_request_extraction():
     # A deixis subject ("this page") never searches; the look tier owns the turn.
     assert parse("show me a picture of this page").kind == "look"
     assert media_request("show me a picture of this page").subject == ""
+
+
+def test_stop_phrases():
+    """STOP_PHRASES end the turn (a superset of cancel); talk about stopping does not."""
+    for s in STOP_PHRASES + ("Stop.", "Hey Jarvis, stop.", "Jarvis stop",
+                             "Stop listening, please", "That's all, thanks"):
+        assert parse(s, apps={}).kind == "stop", s
+    for s in ("stop the server", "stop the timer in the code", "can you stop the build",
+              "stop listening to music on Spotify", "what does stop mean"):
+        assert parse(s, apps={}).kind != "stop", s
+    # Every _CANCEL_RE form is still a stop; ordinary requests are neither.
+    for s in ("stop", "stop it", "Stop.", "cancel", "cancel it", "cancel that",
+              "Cancel, please", "never mind", "nevermind", "Never mind, Jarvis",
+              "forget it", "Forget it.", "that's enough", "abort", "Abort, sir"):
+        assert is_cancel(s) and is_stop(s), s
+    for s in ("no", "yes", "stop the music"):
+        assert not is_cancel(s) and not is_stop(s), s
+
+
+def test_card_size_request_and_match():
+    cards = [("c1", "flow", card_words("Phone diagram")),
+             ("c2", "image", card_words("Dog")),
+             ("c3", "image", card_words("Cat"))]
+    intent = parse("can you maximise the phone diagram", apps={})
+    assert (intent.kind, intent.arg, intent.sub) == ("card_size", "max", "phone diagram")
+    assert match_card(intent.sub, cards) == ("c1", "title")
+    ask = card_size_request("enlarge the picture")
+    assert (ask.action, ask.target) == ("max", "picture")
+    assert match_card(ask.target, cards) == ("c3", "kind")  # newest picture, no name given
+    ask = card_size_request("make that one bigger")
+    assert (ask.action, ask.target) == ("max", "one")
+    assert match_card(ask.target, cards) == ("c3", "newest")  # only fillers: the newest card
+    for s in ("make it smaller", "back to normal"):
+        ask = card_size_request(s)
+        assert (ask.action, ask.target) == ("restore", ""), s
+    ask = card_size_request("zoom in on the dog picture")
+    assert (ask.action, ask.target) == ("max", "dog picture")
+    assert match_card(ask.target, cards) == ("c2", "title")
+    ask = card_size_request("enlarge the spreadsheet")
+    assert ask.action == "max"
+    assert match_card(ask.target, cards) is None
+    # Mac live run 5: the model titled the card "Smartphone block diagram"; "the phone diagram" is it.
+    # A spoken word of 4+ letters may end a compound title word; short words still match whole only.
+    phones = [("s1", "flow", card_words("Smartphone block diagram")), ("h1", "image", card_words("Hotdog"))]
+    assert match_card("phone diagram", phones) == ("s1", "title")
+    assert match_card("dog picture", phones) is None
+    # Questions about size, and "expand on that" as an elocution ask, stay with the model.
+    for s in ("what's bigger, a whale or a bus", "can you expand on that"):
+        assert parse(s, apps={}).kind != "card_size", s
+
+
+def test_sessions_intent():
+    for s, arg in (("what are my sessions doing", ""), ("Hey Jarvis, is anything stuck?", ""),
+                   ("what went wrong with the build session", "the build session"),
+                   ("session status please", "")):
+        intent = parse(s, apps={})
+        assert (intent.kind, intent.arg) == ("sessions", arg), (s, intent)
+    assert parse("what's the status of the order", apps={}).kind != "sessions"

@@ -20,12 +20,13 @@ from test_overlay_service import (  # noqa: E402  (shared stubs + fixtures)
     FakeConversations, client, make_deps, reset_overlay_state, says, turn,
 )
 from gateway import overlay  # noqa: E402
-from mac.voice import lean  # noqa: E402
+from mac.voice import acks, lean  # noqa: E402
 
 __all__ = ["client", "reset_overlay_state"]
 
 QUESTION = "what is the capital of France"
-ACK = "Just a moment."
+# The answer ack draws a random line from the thinking pool: assert pool membership, not a literal.
+POOL = {text for _key, text, _tag in acks.THINKING_POOL}
 
 
 class ScriptedSession:
@@ -75,7 +76,7 @@ def done(events):
 
 
 def check(events, caplog, cls, line, title):
-    spoken = [s for s in says(events) if s not in (ACK, "Having a look.")]  # acks never count
+    spoken = [s for s in says(events) if s not in POOL and s != "Having a look."]  # acks never count
     assert spoken == [line]
     got = cards(events)
     assert len(got) == 1 and got[0]["type"] == "info" and got[0]["title"] == title
@@ -132,7 +133,8 @@ def test_empty_stream(client, caplog):
 def test_failure_after_speech_adds_no_line_or_card(client, caplog):
     caplog.set_level(logging.WARNING)
     events, _ = run(client, ScriptedSession(chunks=['{"say": "Paris."}\n'], exc=RuntimeError("x")))
-    assert says(events) == [ACK, "Paris."] and cards(events) == []
+    spoken = says(events)
+    assert spoken[0] in POOL and spoken == [spoken[0], "Paris."] and cards(events) == []
     assert any("class=error" in r.getMessage() for r in caplog.records)
     assert done(events)["error"] == "answer_error"
 
@@ -147,7 +149,8 @@ def test_handover_and_incomplete_are_not_failures(client, caplog):
     assert not [r for r in caplog.records if "answer failed" in r.getMessage()]
     overlay._pending.clear()
     events, _ = run(client, ScriptedSession(chunks=['{"incomplete": true}\n']))
-    assert says(events) == [ACK] and cards(events) == []
+    spoken = says(events)
+    assert len(spoken) == 1 and spoken[0] in POOL and cards(events) == []  # the ack is the only speech
     assert done(events)["error"] is None
 
 

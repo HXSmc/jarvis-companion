@@ -34,10 +34,13 @@ public enum VideoPhase: Equatable {
 
 /// Shared frame for media cards: fixed title bar, edge-to-edge media area, optional footer row,
 /// on the same surface as CardChrome (material + 0.86 black, 1pt border, corner ticks).
+/// `width`/`titleScale` are the enlarged layer's overrides; the defaults draw the tile.
 @MainActor
 private struct MediaChrome<Media: View, Footer: View>: View {
     let tag: String
     let title: String
+    var width: CGFloat = MediaPolicy.cardWidth
+    var titleScale: CGFloat = 1
     let hasFooter: Bool
     @ViewBuilder let media: () -> Media
     @ViewBuilder let footer: () -> Footer
@@ -49,10 +52,10 @@ private struct MediaChrome<Media: View, Footer: View>: View {
                 .clipped()
             if hasFooter {
                 footer()
-                    .frame(width: MediaPolicy.cardWidth, height: MediaPolicy.footerHeight)
+                    .frame(width: width, height: MediaPolicy.footerHeight * max(titleScale, 1))
             }
         }
-        .frame(width: MediaPolicy.cardWidth, alignment: .leading)
+        .frame(width: width, alignment: .leading)
         .background(
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
@@ -67,26 +70,28 @@ private struct MediaChrome<Media: View, Footer: View>: View {
     private var titleBar: some View {
         HStack(spacing: 8) {
             Text(title)
-                .font(Theme.cardTitle)
+                .font(ScaledType.title(titleScale))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 8)
             Text(tag)
-                .font(Theme.fontMicro)
+                .font(ScaledType.micro(titleScale))
                 .foregroundStyle(Theme.accent)
                 .fixedSize()
         }
         .padding(.horizontal, 14)
-        .frame(width: MediaPolicy.cardWidth, height: MediaPolicy.titleBarHeight, alignment: .leading)
+        .frame(width: width, height: MediaPolicy.titleBarHeight * max(titleScale, 1), alignment: .leading)
         .accessibilityAddTraits(.isHeader)
     }
 }
 
 /// Media cards without a footer row (image cards).
 extension MediaChrome where Footer == EmptyView {
-    init(tag: String, title: String, @ViewBuilder media: @escaping () -> Media) {
-        self.init(tag: tag, title: title, hasFooter: false, media: media, footer: { EmptyView() })
+    init(tag: String, title: String, width: CGFloat = MediaPolicy.cardWidth, titleScale: CGFloat = 1,
+         @ViewBuilder media: @escaping () -> Media) {
+        self.init(tag: tag, title: title, width: width, titleScale: titleScale,
+                  hasFooter: false, media: media, footer: { EmptyView() })
     }
 }
 
@@ -224,25 +229,43 @@ public struct MediaImageView: View {
 
 // MARK: - Image card
 
-/// Whole image card (title bar + single image or gallery grid), sized by MediaPolicy.
+/// Whole image card (title bar + single image or gallery grid), sized by MediaPolicy. The
+/// enlarged layer overrides the width and lifts the single-image height cap (maxCardHeight
+/// bounds tiles only; maxDecodedSide still bounds the decode, the window bounds the layer).
 @MainActor
 public struct ImageCardView: View {
     private let card: ImageCard
     private let states: [String: MediaImageState]
+    /// Enlarged layer: card width override, type scale, single-image height bound.
+    private let width: CGFloat?
+    private let scale: CGFloat
+    private let maxHeight: CGFloat?
 
-    public init(card: ImageCard, states: [String: MediaImageState] = [:]) {
+    public init(card: ImageCard, states: [String: MediaImageState] = [:],
+                width: CGFloat? = nil, scale: CGFloat = 1, maxHeight: CGFloat? = nil) {
         self.card = card
         self.states = states
+        self.width = width
+        self.scale = scale
+        self.maxHeight = maxHeight
     }
 
     public var body: some View {
-        MediaChrome(tag: tag, title: card.title, media: { mediaArea })
+        MediaChrome(tag: tag, title: card.title, width: width ?? MediaPolicy.cardWidth,
+                    titleScale: scale, media: { mediaArea })
     }
 
     /// "n FRAMES" for a gallery (capped by policy), "IMAGE" otherwise.
     private var tag: String {
         let count = min(card.images.count, MediaPolicy.maxMediaItems)
         return count >= 2 ? "\(count) FRAMES" : "IMAGE"
+    }
+
+    /// The no-image tile keeps the policy 16:9 area for tiles, the enlarged width's own for the
+    /// enlarged layer.
+    private var placeholderSize: CGSize {
+        guard let width else { return MediaPolicy.videoAreaSize }
+        return CGSize(width: width, height: width * MediaPolicy.videoAreaSize.height / MediaPolicy.videoAreaSize.width)
     }
 
     @ViewBuilder
@@ -254,7 +277,7 @@ public struct ImageCardView: View {
             singleImage(item)
         } else {
             MediaTile(text: card.fileID?.isEmpty == false ? "Saved image" : "No image")
-                .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                .frame(width: placeholderSize.width, height: placeholderSize.height)
         }
     }
 
@@ -263,9 +286,21 @@ public struct ImageCardView: View {
         let state = states[item.url] ?? .loading
         let size: CGSize
         if case .loaded(let image) = state {
-            size = MediaPolicy.imageAreaSize(pixelWidth: image.width, pixelHeight: image.height)
+            if let width {
+                // Enlarged: the decoded image's aspect at the card width, height cap lifted.
+                let natural = CGSize(width: width,
+                                     height: width * CGFloat(image.height) / CGFloat(max(image.width, 1)))
+                if let maxHeight, natural.height > maxHeight {
+                    size = CGSize(width: maxHeight * CGFloat(image.width) / CGFloat(max(image.height, 1)),
+                                  height: maxHeight)
+                } else {
+                    size = natural
+                }
+            } else {
+                size = MediaPolicy.imageAreaSize(pixelWidth: image.width, pixelHeight: image.height)
+            }
         } else {
-            size = MediaPolicy.videoAreaSize
+            size = placeholderSize
         }
         return MediaImageView(state: state, alt: item.alt, sourcePage: item.sourcePage)
             .frame(width: size.width, height: size.height)
@@ -273,23 +308,26 @@ public struct ImageCardView: View {
             .mediaTileLabel(state: state, fallback: item.alt ?? card.title)
     }
 
-    /// Full rows from MediaPolicy.galleryRows (no empty cell), one row height, policy gaps.
+    /// Full rows from MediaPolicy.galleryRows (no empty cell), one row height, policy gaps; the
+    /// enlarged layer scales the tile sizes by its width ratio (images scale, no tile text to blur).
     private func gallery(_ images: [ImageItem]) -> some View {
         let shown = Array(images.prefix(MediaPolicy.maxMediaItems))
         let rows = MediaPolicy.galleryRows(count: shown.count)
         let height = MediaPolicy.galleryRowHeight(count: shown.count)
         let starts = rows.indices.map { rows[..<$0].reduce(0, +) }
-        return VStack(alignment: .leading, spacing: MediaPolicy.gridGap) {
+        let ratio = (width ?? MediaPolicy.cardWidth) / MediaPolicy.cardWidth
+        return VStack(alignment: .leading, spacing: MediaPolicy.gridGap * max(ratio, 1)) {
             ForEach(rows.indices, id: \.self) { row in
-                HStack(spacing: MediaPolicy.gridGap) {
+                HStack(spacing: MediaPolicy.gridGap * max(ratio, 1)) {
                     ForEach(0..<rows[row], id: \.self) { column in
                         galleryTile(shown[starts[row] + column],
-                                    size: CGSize(width: MediaPolicy.galleryTileWidth(columns: rows[row]), height: height))
+                                    size: CGSize(width: MediaPolicy.galleryTileWidth(columns: rows[row]) * ratio,
+                                                 height: height * ratio))
                     }
                 }
             }
         }
-        .frame(width: MediaPolicy.cardWidth, alignment: .leading)
+        .frame(width: width ?? MediaPolicy.cardWidth, alignment: .leading)
     }
 
     private func galleryTile(_ item: ImageItem, size: CGSize) -> some View {
@@ -304,9 +342,12 @@ public struct ImageCardView: View {
 // MARK: - Video card
 
 /// Whole video card: title bar, a 16:9 area (player, thumbnail + play, or fallback), footer row.
+/// `width`/`scale` are the enlarged layer's overrides; the defaults draw the tile.
 @MainActor
 public struct VideoCardView<Player: View>: View {
     private let card: VideoCard
+    private let width: CGFloat?
+    private let scale: CGFloat
     private let thumbnail: MediaImageState?
     private let phase: VideoPhase
     private let onPlay: () -> Void
@@ -314,9 +355,11 @@ public struct VideoCardView<Player: View>: View {
 
     @State private var hovering = false
 
-    public init(card: VideoCard, thumbnail: MediaImageState?, phase: VideoPhase,
-                onPlay: @escaping () -> Void, @ViewBuilder player: () -> Player) {
+    public init(card: VideoCard, width: CGFloat? = nil, scale: CGFloat = 1, thumbnail: MediaImageState?,
+                phase: VideoPhase, onPlay: @escaping () -> Void, @ViewBuilder player: () -> Player) {
         self.card = card
+        self.width = width
+        self.scale = scale
         self.thumbnail = thumbnail
         self.phase = phase
         self.onPlay = onPlay
@@ -324,12 +367,19 @@ public struct VideoCardView<Player: View>: View {
     }
 
     public var body: some View {
-        MediaChrome(tag: card.youtubeID != nil ? "YOUTUBE" : "VIDEO", title: card.title, hasFooter: true,
+        MediaChrome(tag: card.youtubeID != nil ? "YOUTUBE" : "VIDEO", title: card.title,
+                    width: width ?? MediaPolicy.cardWidth, titleScale: scale, hasFooter: true,
                     media: { area }, footer: { footerRow })
     }
 
     /// Only YouTube plays inside the card; a direct video file opens in the browser.
     private var playsInline: Bool { card.youtubeID != nil }
+
+    /// 16:9 area: the policy size for tiles, the enlarged width's own for the enlarged layer.
+    private var areaSize: CGSize {
+        guard let width else { return MediaPolicy.videoAreaSize }
+        return CGSize(width: width, height: width * MediaPolicy.videoAreaSize.height / MediaPolicy.videoAreaSize.width)
+    }
 
     @ViewBuilder
     private var area: some View {
@@ -342,7 +392,7 @@ public struct VideoCardView<Player: View>: View {
                 // recreated, and the video does not restart, when the cover goes away.
                 if phase == .starting || phase == .playing {
                     player
-                        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+                        .frame(width: areaSize.width, height: areaSize.height)
                 }
                 switch phase {
                 case .playing:
@@ -372,7 +422,7 @@ public struct VideoCardView<Player: View>: View {
                 }
             }
         }
-        .frame(width: MediaPolicy.videoAreaSize.width, height: MediaPolicy.videoAreaSize.height)
+        .frame(width: areaSize.width, height: areaSize.height)
         .clipped()
     }
 
@@ -483,13 +533,15 @@ public struct VideoCardView<Player: View>: View {
             }
         }
         .padding(.horizontal, 14)
-        .frame(width: MediaPolicy.cardWidth, height: MediaPolicy.footerHeight)
+        .frame(width: width ?? MediaPolicy.cardWidth, height: MediaPolicy.footerHeight * max(scale, 1))
     }
 }
 
 /// VideoCardView with no inline player (the overlay wires players separately).
 public extension VideoCardView where Player == EmptyView {
-    init(card: VideoCard, thumbnail: MediaImageState?, phase: VideoPhase, onPlay: @escaping () -> Void) {
-        self.init(card: card, thumbnail: thumbnail, phase: phase, onPlay: onPlay, player: { EmptyView() })
+    init(card: VideoCard, width: CGFloat? = nil, scale: CGFloat = 1,
+         thumbnail: MediaImageState?, phase: VideoPhase, onPlay: @escaping () -> Void) {
+        self.init(card: card, width: width, scale: scale,
+                  thumbnail: thumbnail, phase: phase, onPlay: onPlay, player: { EmptyView() })
     }
 }

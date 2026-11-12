@@ -214,6 +214,38 @@ final class HUDWindow: NSPanel {
     }
 }
 
+/// The enlarged card's top layer (control event card_size, C3): click-through — a click on it
+/// does nothing new, the card's own tile underneath keeps its buttons and drag — and it grows
+/// from the tile's frame in 0.2 s ease-out.
+final class EnlargedWindow: NSPanel {
+    init() {
+        super.init(contentRect: .zero,
+                   styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered,
+                   defer: false)
+        configureHUDPanel(self, ignoresMouseEvents: true)
+        alphaValue = 0
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    /// Animates the frame (AppKit coords) and opacity in 0.2 s ease-out (instant with Reduce
+    /// Motion); opacity 0 orders the window out when the animation ends.
+    func animate(to frame: CGRect, alpha: CGFloat) {
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = Theme.reduceMotion ? 0 : ScatterLayout.motionShort
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().setFrame(frame, display: false)
+            self.animator().alphaValue = alpha
+        }, completionHandler: { [self] in
+            MainActor.assumeIsolated {
+                if alpha == 0 { orderOut(nil) }
+            }
+        })
+    }
+}
+
 /// One clickable panel per card, scattered over the visible screen by ScatterLayout (frames
 /// stored in the model, so a card never moves when another comes or goes). The permission
 /// card keeps its own panel top-right; parked cards become small chip panels on the left
@@ -235,6 +267,11 @@ final class CardPanel: NSObject {
     private let permissionWindow: HUDWindow
     /// One small panel per parked chip, so the gaps between chips stay click-through.
     private var chipWindows: [String: (window: HUDWindow, host: NSHostingView<CardChipButton>)] = [:]
+    /// The enlarged card's top layer (C3); its tile stays in place underneath.
+    private let enlargedWindow = EnlargedWindow()
+    private var enlargedHost: NSHostingView<EnlargedCardTile>?
+    /// HUD frame (top-left) the enlarged layer shrinks back to on restore.
+    private var enlargedBackFrame: CGRect?
     /// Card keys as last stacked on screen, back to front.
     private var stacked: [String] = []
     /// The keep-outs `sync` last placed with (orb, highlights, permission card), for remeasure.
@@ -275,6 +312,7 @@ final class CardPanel: NSObject {
         cancellables = [
             model.$cards.sink(receiveValue: refit),
             model.$missingPermissions.sink(receiveValue: refit),
+            model.$enlarge.map { $0.id }.removeDuplicates().sink(receiveValue: refit),
             model.$layout.map { ($0.mode, $0.hidden, $0.moveCount) }.removeDuplicates { $0 == $1 }
                 .sink(receiveValue: refit),
             model.$shapes.throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)
@@ -394,6 +432,57 @@ final class CardPanel: NSObject {
         }
         restack(aside || hidden ? [] : model.layout.order.filter { entries[$0] != nil })
         syncChips(model, visible: visible, highlights: highlights, aside: aside)
+        syncEnlarged(visible: visible)
+        if enlargedWindow.isVisible { enlargedWindow.orderFrontRegardless() }
+    }
+
+    /// The enlarged layer: one extra top window above the tiles at CardSize.enlargedFrame, grown
+    /// from the tile's own frame (0.2 s ease-out). The card re-lays out sharp at the larger width
+    /// (width override + font scale, media re-sized); its tile stays in place underneath.
+    private func syncEnlarged(visible: CGRect) {
+        guard let model, let id = model.enlarge.id,
+              let card = model.cards.first(where: { $0.id == id }),
+              let tileFrame = model.layout.frames[card.listKey] else {
+            hideEnlarged()
+            return
+        }
+        var width = CardSize.enlargedFrame(natural: tileFrame.size, visible: visible).width
+        if case .flow(let p) = card { width = FlowFit.enlargedWidth(p, fitted: width, visible: visible) }
+        let tile = EnlargedCardTile(card: card, width: width,
+                                    maxHeight: visible.height * CardSize.screenShare,
+                                    remeasure: { [weak self] in self?.refitEnlarged() })
+        if let host = enlargedHost {
+            host.rootView = tile
+        } else {
+            let host = NSHostingView(rootView: tile)
+            enlargedHost = host
+            enlargedWindow.contentView = host
+        }
+        guard let host = enlargedHost else { return }
+        // Measure, then fit: a single image with its height cap lifted can be taller than the
+        // uniform tile scale, so the frame is the content's own measured size, never scaled up.
+        let target = CardSize.windowFrame(content: host.fittingSize, visible: visible)
+        if !enlargedWindow.isVisible {
+            enlargedWindow.alphaValue = 0
+            enlargedWindow.setFrame(Self.flip(tileFrame), display: false)
+            enlargedWindow.orderFrontRegardless()
+        }
+        enlargedBackFrame = tileFrame
+        enlargedWindow.animate(to: Self.flip(target), alpha: 1)
+    }
+
+    /// Restore: shrink back to the tile's frame and fade out.
+    private func hideEnlarged() {
+        guard enlargedWindow.isVisible, let back = enlargedBackFrame else { return }
+        enlargedBackFrame = nil
+        enlargedWindow.animate(to: Self.flip(back), alpha: 0)
+    }
+
+    /// A single image arriving in the enlarged layer refits its window once.
+    private func refitEnlarged() {
+        DispatchQueue.main.async { [weak self] in
+            self?.syncEnlarged(visible: self?.geometry.visible ?? .zero)
+        }
     }
 
     /// Stacks the shown card panels as `layout.order` (back to front), the one z-order for

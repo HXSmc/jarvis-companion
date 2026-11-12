@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | sessions
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -29,6 +29,12 @@ class MediaAsk:
     subject: str   # cleaned search words; "" = asked, but no clear subject
     count: int     # 0 when subject == ""
     article: str = ""  # the leading article cut from the subject ("a"/"an"/"the"/"some"/""), for the spoken line only
+
+
+@dataclass
+class CardSizeAsk:
+    action: str  # "max" | "restore"
+    target: str  # cleaned target words, "" for restore
 
 
 APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utilities", "~/Applications")
@@ -100,7 +106,8 @@ _AGENT_SUBS = (
                       r"|issue #?\d+|my repos|repos? on github|releases? (?:of|on|for|in)|my releases)\b")),
     ("git", re.compile(r"\b(?:commits?|git history|commit history|file history"
                        r"|history of (?:this|the|that) (?:file|code|repo|function|project)|git log|commit log"
-                       r"|blame|who changed|who wrote|what changed in|when did .* change|push my changes"
+                       r"|blame|who changed|who wrote (?:this|that|it|these|those|the (?:code|line|lines|function|file|method|class|change))\b"
+                       r"|what changed in|when did .* change|push my changes"
                        r"|my branch(?:es)?)\b")),
     ("code", re.compile(r"\b(?:the|this|that) (?:code|file|function|class|method) on (?:my|the) screen\b"
                         r"|\bthis (?:file|function|class|method)\b|\bcode (?:i have |i've got )?on (?:my|the) screen\b")),
@@ -120,6 +127,14 @@ _CANCEL_RE = re.compile(r"(?:stop(?: it)?|cancel(?: it| that)?|never ?mind|forge
                         + _POLITE)
 _NO_RE = re.compile(r"(?:(?:no|nope)(?: (?:don't|do not|thanks|thank you|stop|cancel(?: it)?|leave it))?"
                     r"|don't(?: do it)?|do not(?: do it)?)" + _POLITE)
+# Stop the turn: a superset of _CANCEL_RE (every cancel is a stop), plus silence asks.
+STOP_PHRASES: tuple[str, ...] = (
+    "stop", "stop it", "stop talking", "stop listening", "stop now", "ok stop", "okay stop",
+    "that's all", "that's all for now", "that's it", "thanks that's all", "thank you that's all",
+    "never mind", "nevermind", "be quiet", "quiet", "enough", "that's enough", "cancel",
+    "cancel that", "cancel it", "forget it", "abort",
+)
+_STOP_RE = re.compile("(?:" + "|".join(re.escape(p) for p in STOP_PHRASES) + ")" + _POLITE)
 
 # Overlay hide/show/aside/restore/move and the widened clear: whole-utterance
 # phrases with an optional politeness wrapper ("can you hide it for now, please").
@@ -127,11 +142,13 @@ _NO_RE = re.compile(r"(?:(?:no|nope)(?: (?:don't|do not|thanks|thank you|stop|ca
 _WRAP_LEAD = r"(?:(?:can|could|would) you |please |jarvis )*"
 _WRAP_TRAIL = r"(?:,? (?:please|for me|for now|now|jarvis))*"
 _OBJECT = r"(?:it|them|that|this|everything|all the cards|all of them|all of it|all|the overlay|the cards?)"
-_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:hide(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
+# STT writes a lone "hide" as the name "Hyde" (Mac live run 1); whole utterance only.
+_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:(?:hide|hyde)(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
                       r"|get (?:it|that|this|them) off my screen|go away"
                       r"|get (?:it|this|that|them|everything) out of (?:my face|here)"
                       r"|make (?:it|that|them|everything) (?:disappear|go away))" + _WRAP_TRAIL)
-_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show (?:it|them|everything|the overlay|the cards?)(?: again)?"
+# A bare "show" (whole utterance) is show too: Mac live run 2 sent it to the model.
+_SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show(?: (?:it|them|everything|the overlay|the cards?))?(?: again)?"
                       r"|bring (?:it|them|everything) back|unhide(?: " + _OBJECT + r")?|come back)" + _WRAP_TRAIL)
 _CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: it| them| all| everything| the (?:screen|overlay|cards?))?"
                        r"|dismiss(?: it| them| that| all| everything)?"
@@ -165,6 +182,22 @@ _MEDIA_PRIVATE_WORDS = frozenset(
     "this that it these those here there my our screen file files code repo commit"
     " email mail note notes window tab page".split())
 
+# Card enlarge/restore: whole-utterance asks with the usual politeness wrapper. An
+# "on "/"upon " target is refused: "expand on that" is a question for the model.
+_CARD_MAX_RE = re.compile(_WRAP_LEAD + r"(?:(?:maximi[sz]e|enlarge|zoom in on|full ?screen|blow up|expand)"
+                          r" (?P<target>.+)"
+                          r"|make (?P<make_target>it|that|this|that one|this one|the .+?) bigger)"
+                          + _WRAP_TRAIL)
+_CARD_RESTORE_RE = re.compile(_WRAP_LEAD + r"(?:make (?:it|that) smaller|shrink (?:it|that)"
+                              r"|restore (?:it|that|the card)|back to normal|normal size"
+                              r"|minimi[sz]e (?:it|that))" + _WRAP_TRAIL)
+_CARD_TARGET_LEAD_RE = re.compile(r"^(?:the|that|this|my) ")
+# Sessions read-only question; "what went wrong with X" carries the session name.
+_SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anything stuck"
+                          r"|are any sessions waiting(?: for me| on me)?"
+                          r"|what went wrong with (?P<name>.+)|how are my sessions(?: doing)?"
+                          r"|session status)" + _WRAP_TRAIL)
+
 def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
@@ -174,6 +207,14 @@ def parse(text: str, apps: dict[str, str] | None = None) -> Intent:
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
     t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
     low = t.lower()
+    if is_stop(text):
+        return Intent("stop")
+    ask = card_size_request(text)
+    if ask:
+        return Intent("card_size", ask.action, ask.target)
+    m = _SESSIONS_RE.fullmatch(low.replace(",", ""))
+    if m:
+        return Intent("sessions", (m["name"] or "").strip())
     # Hide first: "get rid of it for now" is temporary, not the final clear.
     for rx, kind in ((_HIDE_RE, "hide"), (_CLEAR_RE, "clear"), (_SHOW_RE, "show"),
                      (_ASIDE_RE, "aside"), (_RESTORE_RE, "restore")):
@@ -302,6 +343,69 @@ def media_request(text: str) -> MediaAsk | None:
     return None
 
 
+def card_size_request(text: str) -> CardSizeAsk | None:
+    """Card enlarge/restore ask from the whole utterance, or None. Fixed code, never a model."""
+    t = _clean(text).lower().replace(",", "")
+    m = _CARD_MAX_RE.fullmatch(t)
+    if m:
+        target = (m["target"] or m["make_target"]).strip()
+        if target.startswith(("on ", "upon ")):
+            return None
+        target = _CARD_TARGET_LEAD_RE.sub("", target)
+        if target.endswith(" card"):
+            target = target[:-5]
+        return CardSizeAsk("max", target.strip())
+    if _CARD_RESTORE_RE.fullmatch(t):
+        return CardSizeAsk("restore", "")
+    return None
+
+
+def card_words(title: str) -> tuple[str, ...]:
+    """Lower-case words of a title (apostrophes dropped, split on non-letters/digits)."""
+    return tuple(_tokens(title.replace("'", "")))
+
+
+# Spoken kind word -> the card types it can mean ("the picture" -> any image card).
+_CARD_FLOW = frozenset({"flow", "bar"})
+KIND_WORDS: dict[str, frozenset[str]] = {
+    "diagram": _CARD_FLOW, "diagrams": _CARD_FLOW, "flow": _CARD_FLOW,
+    "chart": _CARD_FLOW, "charts": _CARD_FLOW,
+    "picture": frozenset({"image"}), "pictures": frozenset({"image"}),
+    "image": frozenset({"image"}), "images": frozenset({"image"}),
+    "photo": frozenset({"image"}), "photos": frozenset({"image"}), "pic": frozenset({"image"}),
+    "video": frozenset({"video"}), "videos": frozenset({"video"}),
+    "list": frozenset({"bar", "info"}), "changes": frozenset({"bar", "info"}),
+}
+# Words that never name a card: pointers and politeness around the real words.
+_CARD_FILLERS = frozenset({"the", "a", "an", "that", "this", "these", "those", "my", "one",
+                           "card", "please", "it"})
+
+
+def match_card(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) -> tuple[str, str] | None:
+    """(id, how) for a spoken target against (id, type, title_words) cards, oldest first,
+    searched newest first; None = no card answers to it."""
+    words = [w for w in card_words(target) if w not in _CARD_FILLERS]
+    kind: set[str] = set()
+    for w in words:
+        kind |= KIND_WORDS.get(w, frozenset())
+    names = [w for w in words if w not in KIND_WORDS]
+    if not names:
+        if not kind:
+            return (cards[-1][0], "newest") if cards else None
+        for cid, ctype, _title in reversed(cards):
+            if ctype in kind:
+                return cid, "kind"
+        return None
+    # A name of 4+ letters may end a compound title word ("phone" names "Smartphone block diagram").
+    hits = [c for c in reversed(cards)
+            if all(any(t == w or (len(w) >= 4 and t.endswith(w)) for t in c[2]) for w in names)]
+    if kind:  # a spoken kind is a preference, not a requirement
+        typed = [c for c in hits if c[1] in kind]
+        if typed:
+            hits = typed
+    return (hits[0][0], "title") if hits else None
+
+
 def _answer(text: str) -> str:
     """Whole-utterance form for yes/no/cancel: cleaned, lower case, punctuation as spaces."""
     t = re.sub(r"[,;:.!?]+", " ", _clean(text).casefold().replace("’", "'"))
@@ -316,6 +420,11 @@ def is_confirm(text: str) -> bool:
 def is_cancel(text: str) -> bool:
     """Whole utterance cancels the agent's work."""
     return bool(_CANCEL_RE.fullmatch(_answer(text)))
+
+
+def is_stop(text: str) -> bool:
+    """Whole utterance stops the turn: silence, a cancel, or both."""
+    return bool(_STOP_RE.fullmatch(_answer(text)))
 
 
 def is_no(text: str) -> bool:

@@ -15,6 +15,8 @@ final class OverlayModel: ObservableObject {
     }
     /// Stored scatter frame per card and the normal / aside mode (CardPanel draws it).
     @Published private(set) var layout = ScatterLayout.LayoutState()
+    /// The card drawn enlarged (control event card_size); CardPanel draws the extra layer.
+    @Published var enlarge = EnlargeState()
     /// Missing system permissions; drives the native permission card, which the
     /// idle timer and clear() must not remove.
     @Published var missingPermissions: [Permission] = []
@@ -110,6 +112,7 @@ final class OverlayModel: ObservableObject {
     /// holding one of them can no longer come back with "show them".
     func remove(cardIDs: [String]) {
         let ids = Set(cardIDs)
+        enlarge.dropped(ids: cardIDs)
         if let stash = idleStash, stash.cards.contains(where: { $0.id.map(ids.contains) ?? false }) {
             idleStash = nil
         }
@@ -152,6 +155,7 @@ final class OverlayModel: ObservableObject {
         // Over the cap the first card of the layout's retire order goes (pinned cards last).
         while cards.count > ScatterLayout.maxCards {
             let index = layout.retireOrder.compactMap { key in cards.firstIndex { $0.listKey == key } }.first ?? 0
+            if let gone = cards[index].id { enlarge.dropped(ids: [gone]) }
             cards.remove(at: index)
         }
         bumpIdle()
@@ -250,6 +254,7 @@ final class OverlayModel: ObservableObject {
         idleStash = nil  // clear wipes everything, the idle-cleared set too (IdleStash.survives(.clear) is false)
         clearShapes()
         cards = []
+        enlarge.restore()
         layout.clear()
         idleTask?.cancel()
         idleTask = nil
@@ -269,6 +274,12 @@ final class OverlayModel: ObservableObject {
     /// and the cards unless they are parked aside (chips wait for restore or clear, no timer).
     /// Cleared cards stay restorable by "show them" (idleStash).
     private func idleExpired() {
+        // An enlarged card is being read: wait another round (Mac live run 1: the 60 s clear took
+        // the enlarged phone diagram, so "make it smaller" found nothing to bring back).
+        if enlarge.holdsIdle {
+            bumpIdle()
+            return
+        }
         if ScatterLayout.idleWaits(pointerOnPanel: pointerOnPanel(),
                                    playingSince: MediaPlaybackController.shared.playingSince,
                                    now: Date()) {

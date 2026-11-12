@@ -12,8 +12,12 @@ struct Health: Decodable {
     var voice: String?
     /// TailGate ratio (OVERLAY_TAIL_LEVEL_RATIO); nil from an older service.
     var tailLevelRatio: Double?
+    /// Barge-in wanted; nil from an older service (the app defaults to true).
+    var bargeIn: Bool?
+    /// AEC-backed barge-in gate wanted; nil from an older service (the app defaults to false).
+    var bargeAec: Bool?
     private enum CodingKeys: String, CodingKey {
-        case ok, voice, tailLevelRatio = "tail_level_ratio"
+        case ok, voice, tailLevelRatio = "tail_level_ratio", bargeIn = "barge_in", bargeAec = "barge_aec"
     }
 }
 
@@ -54,11 +58,11 @@ final class ServiceClient {
         }
     }
 
-    /// NDJSON utterance stream; one decoded event per line.
+    /// NDJSON utterance stream; one decoded turn event (overlay content or control) per line.
     func utterance(text: String, convId: String, sttFinalMs: Double, audioMs: Double,
-                   stt: String, followUp: Bool = false,
+                   stt: String, followUp: Bool = false, bargeIn: Bool = false,
                    heard: SpeechInput.Heard? = nil,
-                   screen: ScreenPayload?) -> AsyncThrowingStream<OverlayEvent, Error> {
+                   screen: ScreenPayload?) -> AsyncThrowingStream<TurnEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -72,13 +76,14 @@ final class ServiceClient {
                              audioMs: audioMs,
                              stt: String(stt.prefix(500)),
                              followup: followUp,
+                             bargeIn: bargeIn,
                              levels: heard?.levels,
                              conf: heard?.conf,
                              screen: screen))
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response)
                     for try await line in bytes.lines {
-                        continuation.yield(OverlayEvent.decode(line: Data(line.utf8)))
+                        continuation.yield(TurnEvent.decode(line: Data(line.utf8)))
                     }
                     continuation.finish()
                 } catch {
@@ -138,12 +143,13 @@ final class ServiceClient {
         var audioMs: Double
         var stt: String
         var followup: Bool
+        var bargeIn: Bool
         var levels: [Double]?
         var conf: Double?
         var screen: ScreenPayload?
         private enum CodingKeys: String, CodingKey {
             case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", stt, followup,
-                 levels, conf, screen
+                 bargeIn = "barge_in", levels, conf, screen
         }
     }
 }

@@ -35,6 +35,32 @@ struct CardTile: View {
     }
 }
 
+/// The enlarged top layer over the card's tile: the card re-laid out at the larger width (sharp:
+/// CardView's width override and font scale, media re-sized by MediaViews), never a scaled
+/// bitmap. Clicks pass through it; the tile underneath keeps its own behaviour.
+@MainActor
+struct EnlargedCardTile: View {
+    let card: HUDCard
+    /// The enlarged layer's card width (from CardSize).
+    let width: CGFloat
+    /// Bounds a single image's height (the tile's maxCardHeight cap is lifted here).
+    let maxHeight: CGFloat
+    /// Lets a just-loaded single image refit the enlarged window.
+    let remeasure: () -> Void
+
+    var body: some View {
+        switch card {
+        case .image, .video:
+            LiveMediaCard(card: card, active: true, remeasure: remeasure,
+                          width: width, fontScale: CardView.fontScale(card: card, width: width),
+                          maxHeight: maxHeight)
+        default:
+            CardView(card: card, width: width,
+                     enlargedFontScale: CardView.fontScale(card: card, width: width))
+        }
+    }
+}
+
 /// Live media inside a card panel: images load only while the card is shown and playable;
 /// a video click goes to the one shared MediaPlaybackController.
 @MainActor
@@ -42,19 +68,25 @@ struct LiveMediaCard: View {
     let card: HUDCard
     let active: Bool
     let remeasure: () -> Void
+    /// Enlarged-layer overrides; the defaults draw the tile.
+    var width: CGFloat? = nil
+    var fontScale: CGFloat = 1
+    var maxHeight: CGFloat? = nil
     @ObservedObject private var playback = MediaPlaybackController.shared
     @State private var states: [String: MediaImageState] = [:]
 
     var body: some View {
         switch card {
         case .image(let p):
-            ImageCardView(card: p, states: states)
+            ImageCardView(card: p, states: states, width: width, scale: fontScale, maxHeight: maxHeight)
                 .task(id: LoadKey(active: active, urls: p.images.map(\.url))) {
                     await load(p.images.map(\.url), single: p.images.count == 1)
                 }
         case .video(let p):
             let thumb = p.youtubeID.map { MediaPolicy.thumbnailURL(id: $0).absoluteString } ?? p.thumbnailURL
             VideoCardView(card: p,
+                          width: width,
+                          scale: fontScale,
                           thumbnail: thumb.map { states[$0] ?? .loading },
                           phase: playback.phase(for: card.listKey),
                           onPlay: { playback.play(key: card.listKey) }) {

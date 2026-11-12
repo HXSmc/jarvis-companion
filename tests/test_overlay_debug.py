@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from conftest import AUTH_HEADER
 from gateway import overlay
-from test_overlay_service import client, make_app, make_deps, reset_overlay_state, turn  # noqa: F401
+from test_overlay_service import POOL_TEXTS, client, make_app, make_deps, reset_overlay_state, turn  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +69,7 @@ def test_debug_turn_steps_newest_first(client):
     assert steps["transcribed"]["text"] == "what is the capital of France"
     assert steps["intent"]["kind"] == "answer"
     spoken = [s["text"] for s in first["steps"] if s["step"] == "spoke"]
-    assert spoken == ["Just a moment.", "Paris."]  # ack, then the answer; a say + its audio count once
+    assert spoken[0] in POOL_TEXTS and spoken == [spoken[0], "Paris."]  # pool ack, then the answer
     assert all(s["audio_ms"] is not None for s in first["steps"] if s["step"] == "spoke")  # all voiced
     assert steps["done"]["cards"] == 1 and steps["done"]["error"] is None
     assert steps["done"]["first_audio_ms"] is not None
@@ -125,12 +125,14 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     """jtools2 item 4: the page shows a red row when the `code` CLI is not on the service PATH."""
     monkeypatch.setattr(overlay.shutil, "which", lambda name: None)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
     data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
-    assert data["setup"] == {"code_cli": False, "vault": False}
+    assert data["setup"] == {"code_cli": False, "vault": False, "barge_in": False}
     monkeypatch.setattr(overlay.shutil, "which", lambda name: str(tmp_path / name))
     monkeypatch.setenv("OVERLAY_VAULT", str(tmp_path))
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"] == {"code_cli": True,
-                                                                                        "vault": True}
+                                                                                        "vault": True,
+                                                                                        "barge_in": False}
     page = client.get("/overlay/debug").text
     assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
     assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
