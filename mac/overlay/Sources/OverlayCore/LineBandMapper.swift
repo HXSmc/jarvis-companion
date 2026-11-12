@@ -262,3 +262,235 @@ public enum BandRetry {
         return best?.index
     }
 }
+
+#if canImport(Vision)
+import CoreGraphics
+import Vision
+
+/// Gutter line numbers from a screen shot. Vision's text reader drops a lone glyph: lines 1-9 never
+/// came back, so a 3-line file said no_gutter and line 6 said off_view with the line on screen (Mac
+/// run 3, B4 and B5 fold: `seen` always started at 10). A second read doubles each gutter cell that
+/// pass 1 left unread ("6" -> "66", "10" -> "1010") and accepts only a text that is two equal halves.
+public enum GutterOCR {
+    /// Text observations as top-left pixel boxes [x0, y0, x1, y1].
+    public static func text(in image: CGImage) -> [(text: String, box: [Double])] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.008
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        let w = Double(image.width), h = Double(image.height)
+        var out: [(String, [Double])] = []
+        for observation in request.results ?? [] {
+            guard let candidate = observation.topCandidates(1).first else { continue }
+            let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let bb = observation.boundingBox
+            let x0 = bb.minX * w, y0 = (1 - bb.maxY) * h
+            out.append((text, [x0, y0, x0 + bb.width * w, y0 + bb.height * h]))
+        }
+        return out
+    }
+
+    /// Line numbers (pixel boxes) in `window` (pixels): pass 1's 1-5 digit texts plus the cells
+    /// pass 1 left unread. `observations`: pass 1 over the same image.
+    public static func lineDigits(in image: CGImage, observations: [(text: String, box: [Double])],
+                                  window: CGRect) -> [(line: Int, box: [Double])] {
+        let read = observations.compactMap { o in ShapeTrack.lineNumber(o.text).map { (line: $0, box: o.box) } }
+        let cells = cellsToRead(in: image, observations: observations, window: window)
+        guard !cells.isEmpty else { return read }
+        return read + readDoubled(cells, in: image)
+    }
+
+    /// Two equal halves, spaces ignored: "66" -> 6, "8 8" -> 8, "1010" -> 10; else nil.
+    public static func doubled(_ text: String) -> Int? {
+        let s = text.filter { $0 != " " }
+        guard s.count % 2 == 0, (1...5).contains(s.count / 2), s.allSatisfy(\.isASCII), s.allSatisfy(\.isNumber),
+              s.prefix(s.count / 2) == s.suffix(s.count / 2) else { return nil }
+        return Int(s.prefix(s.count / 2))
+    }
+
+    // MARK: cells
+
+    private static let maxCells = 80
+
+    /// Tight pixel boxes of the unread gutter numbers. With a read column (5+ numbers, as
+    /// gutterMarks): the rows above its top number (1-9 are always above 10). Without one (a short
+    /// file): the gutter cell of every row of text that starts at a shared left edge.
+    static func cellsToRead(in image: CGImage, observations: [(text: String, box: [Double])],
+                            window: CGRect) -> [CGRect] {
+        guard let px = Pixels(image) else { return [] }
+        let inWindow = observations.filter { window.contains(CGPoint(x: ($0.box[0] + $0.box[2]) / 2, y: ($0.box[1] + $0.box[3]) / 2)) }
+        guard !inWindow.isEmpty else { return [] }
+        let heights = inWindow.map { $0.box[3] - $0.box[1] }.sorted()
+        let textH = CGFloat(heights[heights.count / 2])
+        let taken = inWindow.map { CGRect(x: $0.box[0], y: $0.box[1], width: $0.box[2] - $0.box[0], height: $0.box[3] - $0.box[1]) }
+        var cells: [CGRect] = []
+        // A cell where pass 1 already read text, or one already planned (an indented row group finds
+        // the same gutter), is not read again.
+        let free: (CGRect) -> Bool = { cell in
+            !taken.contains { $0.contains(CGPoint(x: cell.midX, y: cell.midY)) } && !cells.contains { $0.intersects(cell) }
+        }
+        let digits = inWindow.compactMap { o in
+            ShapeTrack.lineNumber(o.text).map { (line: $0, centre: CGPoint(x: (o.box[0] + o.box[2]) / 2, y: (o.box[1] + o.box[3]) / 2),
+                                                 right: CGFloat(o.box[2]), width: CGFloat(o.box[2] - o.box[0]), count: o.text.count) }
+        }
+        if let column = ShapeTrack.gutterMarks(digits: digits.map { (line: $0.line, centre: $0.centre, right: $0.right) },
+                                               window: window),
+           let pitch = LineBandMapper.unitPitch(column.marks), pitch > 0,
+           let top = column.marks.min(by: { $0.midY < $1.midY }) {
+            let widths = digits.filter { abs($0.right - column.right) <= 6 }.map { $0.width / CGFloat($0.count) }.sorted()
+            let glyph = widths.isEmpty ? textH * 0.6 : widths[widths.count / 2]
+            var y = top.midY - pitch
+            while y - pitch / 2 >= window.minY, cells.count < maxCells {
+                if let cell = px.numberCell(right: column.right, y: y, half: pitch * 0.4, glyph: glyph), free(cell) { cells.append(cell) }
+                y -= pitch
+            }
+            return cells
+        }
+        // No column: rows of text sharing a left edge (within 6 px), at least 2 rows per edge.
+        var lefts: [[CGRect]] = []
+        for box in taken.filter({ $0.minX > window.minX + textH }).sorted(by: { $0.minX < $1.minX }) {
+            if let first = lefts.last?.first, box.minX - first.minX <= 6 { lefts[lefts.count - 1].append(box) } else { lefts.append([box]) }
+        }
+        for rows in lefts where rows.count >= 2 {
+            let codeLeft = rows.map(\.minX).min() ?? 0
+            let glyph = textH * 0.6
+            let rights = rows.compactMap { px.inkRight(from: codeLeft - textH * 0.25, to: codeLeft - textH * 8, y: $0.midY, half: textH * 0.5) }.sorted()
+            guard !rights.isEmpty else { continue }
+            let right = rights[rights.count / 2]
+            for row in rows where cells.count < maxCells {
+                if let cell = px.numberCell(right: right, y: row.midY, half: textH * 0.6, glyph: glyph), free(cell) { cells.append(cell) }
+            }
+        }
+        return cells
+    }
+
+    /// One read of all cells, each drawn twice side by side, cells far apart on one line.
+    private static func readDoubled(_ cells: [CGRect], in image: CGImage) -> [(line: Int, box: [Double])] {
+        let height = Int(cells.map(\.height).max() ?? 1)
+        let gap = max(30, height)
+        let pad = 40
+        var spans: [(range: ClosedRange<Int>, cell: CGRect, crop: CGImage)] = []
+        var x = pad
+        for cell in cells {
+            guard let crop = image.cropping(to: cell.integral) else { continue }
+            let span = x...(x + 2 * crop.width + 2)
+            spans.append((span, cell, crop))
+            x = span.upperBound + gap
+        }
+        guard !spans.isEmpty,
+              let ctx = CGContext(data: nil, width: x + pad, height: height + 2 * pad, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return [] }
+        // Paint the composite with the first cell's corner colour (the gutter background).
+        if let corner = Pixels(spans[0].crop)?.rgb(0, 0) {
+            ctx.setFillColor(CGColor(red: corner.0, green: corner.1, blue: corner.2, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: x + pad, height: height + 2 * pad))
+        }
+        for s in spans {
+            let y = pad + (height - s.crop.height) / 2
+            ctx.draw(s.crop, in: CGRect(x: s.range.lowerBound, y: y, width: s.crop.width, height: s.crop.height))
+            ctx.draw(s.crop, in: CGRect(x: s.range.lowerBound + s.crop.width + 2, y: y, width: s.crop.width, height: s.crop.height))
+        }
+        guard let composite = ctx.makeImage() else { return [] }
+        var found: [Int: Int] = [:]
+        var clash = Set<Int>()
+        for o in text(in: composite) {
+            let mid = Int((o.box[0] + o.box[2]) / 2)
+            guard let index = spans.firstIndex(where: { $0.range.contains(mid) }), let line = doubled(o.text) else { continue }
+            if found[index] != nil { clash.insert(index) }
+            found[index] = line
+        }
+        return found.filter { !clash.contains($0.key) }.sorted { $0.key < $1.key }.map { hit in
+            let c = spans[hit.key].cell
+            return (line: hit.value, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
+        }
+    }
+}
+
+/// RGBA8 copy of an image, rows top-down, for the gutter ink scan.
+struct Pixels {
+    let width: Int, height: Int
+    private let data: [UInt8]
+
+    init?(_ image: CGImage) {
+        width = image.width; height = image.height
+        var buffer = [UInt8](repeating: 0, count: width * height * 4)
+        let ok = buffer.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
+                                      bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return true
+        }
+        guard ok else { return nil }
+        data = buffer
+    }
+
+    func rgb(_ x: Int, _ y: Int) -> (CGFloat, CGFloat, CGFloat) {
+        let i = (y * width + x) * 4
+        return (CGFloat(data[i]) / 255, CGFloat(data[i + 1]) / 255, CGFloat(data[i + 2]) / 255)
+    }
+
+    private func lum(_ x: Int, _ y: Int) -> Int {
+        let i = (y * width + x) * 4
+        return (Int(data[i]) * 299 + Int(data[i + 1]) * 587 + Int(data[i + 2]) * 114) / 1000
+    }
+
+    /// Grey ink per column (its top and bottom ink row): far from the band's median brightness and
+    /// unsaturated (a coloured git bar or icon is not a digit).
+    private func inkColumns(_ xs: ClosedRange<Int>, rows: ClosedRange<Int>) -> [Int: ClosedRange<Int>] {
+        let xs = xs.clamped(to: 0...(width - 1)), rows = rows.clamped(to: 0...(height - 1))
+        var lums: [Int] = []
+        for y in rows where y % 2 == 0 {
+            for x in xs where x % 2 == 0 { lums.append(lum(x, y)) }
+        }
+        guard !lums.isEmpty else { return [:] }
+        let bg = lums.sorted()[lums.count / 2]
+        var out: [Int: ClosedRange<Int>] = [:]
+        for x in xs {
+            for y in rows {
+                let i = (y * width + x) * 4
+                let r = Int(data[i]), g = Int(data[i + 1]), b = Int(data[i + 2])
+                guard abs(lum(x, y) - bg) > 40, max(r, g, b) - min(r, g, b) < 48 else { continue }
+                out[x] = out[x].map { min($0.lowerBound, y)...max($0.upperBound, y) } ?? y...y
+            }
+        }
+        return out
+    }
+
+    private func rows(_ y: CGFloat, _ half: CGFloat) -> ClosedRange<Int> {
+        Int((y - half).rounded(.down))...max(Int((y - half).rounded(.down)), Int((y + half).rounded(.up)))
+    }
+
+    /// Right-most ink column between `from` (right) and `to` (left) on the row at `y`.
+    func inkRight(from: CGFloat, to: CGFloat, y: CGFloat, half: CGFloat) -> CGFloat? {
+        let lo = Int(to.rounded(.down)), hi = Int(from.rounded(.up))
+        guard lo < hi else { return nil }
+        return inkColumns(lo...hi, rows: rows(y, half)).keys.max().map { CGFloat($0) }
+    }
+
+    /// The number ending near `right` on the row at `y`: its ink, extended left while the gaps
+    /// stay under 0.6 glyph, at most 5.5 glyphs wide; 2 px of margin. nil = an empty row.
+    func numberCell(right: CGFloat, y: CGFloat, half: CGFloat, glyph: CGFloat) -> CGRect? {
+        let lo = Int((right - glyph * 5.5).rounded(.down)), hi = Int((right + glyph * 0.3).rounded(.up))
+        guard lo < hi, glyph > 0 else { return nil }
+        let ink = inkColumns(lo...hi, rows: rows(y, half))
+        guard let last = ink.keys.max(), CGFloat(last) >= right - glyph, var span = ink[last] else { return nil }
+        var first = last, gap = 0
+        var x = last - 1
+        while x >= lo, CGFloat(gap) < glyph * 0.6 {
+            if let column = ink[x] {
+                first = x; gap = 0
+                span = min(span.lowerBound, column.lowerBound)...max(span.upperBound, column.upperBound)
+            } else {
+                gap += 1
+            }
+            x -= 1
+        }
+        // Tight in y too, so the cell's centre is the number's centre (the band fit uses it).
+        return CGRect(x: first - 2, y: span.lowerBound - 2, width: last - first + 5, height: span.upperBound - span.lowerBound + 5)
+    }
+}
+#endif

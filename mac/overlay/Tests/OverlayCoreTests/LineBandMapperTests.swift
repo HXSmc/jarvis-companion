@@ -241,96 +241,101 @@ final class LineBandMapperTests: XCTestCase {
 }
 
 #if canImport(Vision)
-import Vision
 import CoreText
-import ImageIO
-import UniformTypeIdentifiers
 
-// TEMP diagnostic (round 5): which Vision settings read 1-digit gutter numbers.
-final class GutterOCRDiagTests: XCTestCase {
-    static func render(lines: Int, width: Int = 2880, height: Int = 1800) -> CGImage {
+/// Mac run 3 (B4, B5 fold): Vision never read a 1-digit gutter number, so `seen` started at 10.
+/// These render a VS Code-like editor at 2x (Menlo 12 pt, 18 pt rows, grey numbers right-aligned,
+/// a blue git bar and a blue icon on the changed row) and run the real reader on it.
+final class GutterOCRTests: XCTestCase {
+    /// Row n's text centre in pixels (baseline 250 + 36 n from the top, cap height about 17 px).
+    static func rowY(_ n: Int) -> CGFloat { CGFloat(250 + 36 * n) - 8 }
+
+    static func render(lines: Int, code: (Int) -> String, changed: Set<Int>) -> CGImage {
+        let width = 2880, height = 1800
         let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         ctx.setFillColor(CGColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         let font = CTFontCreateWithName("Menlo" as CFString, 24, nil)
         func draw(_ text: String, x: CGFloat, top: CGFloat, grey: CGFloat, right: Bool = false) {
-            let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): font,
+            let attrs: [NSAttributedString.Key: Any] = [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
                 NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(red: grey, green: grey, blue: grey, alpha: 1)]
             let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
             let w = CTLineGetTypographicBounds(line, nil, nil, nil)
             ctx.textPosition = CGPoint(x: right ? x - CGFloat(w) : x, y: CGFloat(height) - top)
             CTLineDraw(line, ctx)
         }
-        draw("EXPLORER", x: 120, top: 160, grey: 0.8)
-        draw("imports.ts", x: 140, top: 230, grey: 0.8)
+        for (i, item) in ["EXPLORER", "> .vscode", "imports.ts", "sample.py", "side.txt"].enumerated() {
+            draw(item, x: 120, top: 160 + CGFloat(i) * 44, grey: 0.8)
+        }
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 1))
         for n in 1...lines {
-            let top = 250 + CGFloat(n) * 36
-            draw("\(n)", x: 800, top: top, grey: n == 6 ? 0.85 : 0.45, right: true)
-            draw(n % 7 == 0 ? "" : "import { a\(n) } from \"./a\(n)\";", x: 840, top: top, grey: 0.8)
+            let top = CGFloat(250 + 36 * n)
+            draw("\(n)", x: 800, top: top, grey: changed.contains(n) ? 0.85 : 0.45, right: true)
+            draw(code(n), x: 840, top: top, grey: 0.8)
+            if changed.contains(n) {
+                ctx.fill(CGRect(x: 812, y: CGFloat(height) - top - 8, width: 6, height: 36))            // git bar
+                ctx.fillEllipse(in: CGRect(x: 732, y: CGFloat(height) - top - 2, width: 20, height: 20))  // gutter icon
+            }
         }
         return ctx.makeImage()!
     }
 
-    static func ocr(_ image: CGImage, level: VNRequestTextRecognitionLevel, minHeight: Float?) -> [String] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = level
-        request.usesLanguageCorrection = false
-        if let minHeight { request.minimumTextHeight = minHeight }
-        try? VNImageRequestHandler(cgImage: image).perform([request])
-        return (request.results ?? []).compactMap { obs in
-            guard let c = obs.topCandidates(1).first else { return nil }
-            let bb = obs.boundingBox
-            return "\(c.string)@x\(Int(bb.minX * Double(image.width)))y\(Int((1 - bb.maxY) * Double(image.height)))"
+    /// Reader output in points (scale 2), as ScreenContext.lineBands feeds LineBandFit.
+    static func points(_ found: [(line: Int, box: [Double])]) -> [(line: Int, centre: CGPoint, right: CGFloat)] {
+        found.map { (line: $0.line, centre: CGPoint(x: ($0.box[0] + $0.box[2]) / 4, y: ($0.box[1] + $0.box[3]) / 4),
+                     right: CGFloat($0.box[2] / 2)) }
+    }
+
+    static let window = CGRect(x: 0, y: 0, width: 2880, height: 1800)
+
+    func testDoubledText() {
+        XCTAssertEqual(GutterOCR.doubled("66"), 6)
+        XCTAssertEqual(GutterOCR.doubled("8 8"), 8)
+        XCTAssertEqual(GutterOCR.doubled("1010"), 10)
+        XCTAssertNil(GutterOCR.doubled("61"))
+        XCTAssertNil(GutterOCR.doubled("6"))
+        XCTAssertNil(GutterOCR.doubled("||"))
+        XCTAssertNil(GutterOCR.doubled(""))
+        XCTAssertNil(GutterOCR.doubled("123456123456"))
+    }
+
+    func testOneDigitLinesAreRead() throws {
+        let image = Self.render(lines: 37, code: { $0 == 13 ? "" : "import { a\($0) } from \"./a\($0)\";" }, changed: [6, 30])
+        let pass1 = GutterOCR.text(in: image)
+        // The cause, pinned: pass 1 alone reads no 1-digit number, and line 6 is off view.
+        XCTAssertTrue(pass1.compactMap { ShapeTrack.lineNumber($0.text) }.allSatisfy { $0 >= 10 })
+        let before = LineBandFit.fit(ranges: [6...6], digits: Self.points(pass1.compactMap { o in
+            ShapeTrack.lineNumber(o.text).map { (line: $0, box: o.box) } }), window: CGRect(x: 0, y: 0, width: 1440, height: 900), partial: true)
+        XCTAssertNotEqual(before.reason, "ok")
+
+        let found = GutterOCR.lineDigits(in: image, observations: pass1, window: Self.window)
+        let lines = Set(found.map(\.line))
+        XCTAssertTrue(Set(1...9).isSubset(of: lines), "read \(found.map(\.line).sorted())")
+        for hit in found where hit.line <= 9 {
+            XCTAssertEqual(CGFloat((hit.box[1] + hit.box[3]) / 2), Self.rowY(hit.line), accuracy: 6, "line \(hit.line)")
         }
+        let pass = LineBandFit.fit(ranges: [6...6], digits: Self.points(found),
+                                   window: CGRect(x: 0, y: 0, width: 1440, height: 900), partial: true)
+        XCTAssertEqual(pass.reason, "ok")
+        XCTAssertEqual(pass.seen?.lowerBound, 1)
+        let band = try XCTUnwrap(pass.bands.first?.rect)
+        XCTAssertEqual(band.midY, Self.rowY(6) / 2, accuracy: 3)
     }
 
-    static func scaled(_ image: CGImage, _ k: Int) -> CGImage {
-        let ctx = CGContext(data: nil, width: image.width * k, height: image.height * k, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        ctx.interpolationQuality = .high
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width * k, height: image.height * k))
-        return ctx.makeImage()!
-    }
-
-    static func ocrDigits(_ img: CGImage, _ level: VNRequestTextRecognitionLevel) -> String {
-        Self.ocr(img, level: level, minHeight: nil).joined(separator: " ")
-    }
-
-    static func compose(_ cells: [CGImage], gap: Int, bg: CGFloat = 0.12, pad: Int = 40) -> CGImage {
-        let h = (cells.map(\.height).max() ?? 1) + 2 * pad
-        let w = cells.reduce(2 * pad) { $0 + $1.width + gap }
-        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        ctx.setFillColor(CGColor(red: bg, green: bg, blue: bg, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-        var x = pad
-        for c in cells { ctx.draw(c, in: CGRect(x: x, y: pad, width: c.width, height: c.height)); x += c.width + gap }
-        return ctx.makeImage()!
-    }
-
-    func testDiag() throws {
-        var out = ""
-        let image = Self.render(lines: 37)
-        // cell of line n: digits right-aligned at x=800, baseline top = 250 + 36n (font 24 px)
-        func cell(_ n: Int, left: Int, right: Int = 802) -> CGImage {
-            image.cropping(to: CGRect(x: left, y: 250 + 36 * n - 26, width: right - left, height: 34))!
-        }
-        let tight = (1...12).map { n in cell(n, left: 800 - (n < 10 ? 16 : 31)) }
-        out += "G1 one cell 6 tight acc: \(Self.ocrDigits(Self.compose([tight[5]], gap: 0), .accurate))\n"
-        out += "G2 one cell 6 tight fast: \(Self.ocrDigits(Self.compose([tight[5]], gap: 0), .fast))\n"
-        out += "G3 one cell 6 x4 acc: \(Self.ocrDigits(Self.scaled(Self.compose([tight[5]], gap: 0), 4), .accurate))\n"
-        for gap in [6, 12, 20] {
-            out += "H gap\(gap) acc: \(Self.ocrDigits(Self.compose(tight, gap: gap), .accurate))\n"
-            out += "H gap\(gap) fast: \(Self.ocrDigits(Self.compose(tight, gap: gap), .fast))\n"
-        }
-        let doubled = (1...12).map { n in Self.compose([tight[n - 1], tight[n - 1]], gap: 2, pad: 0) }
-        out += "J doubled cells gap 30 acc: \(Self.ocrDigits(Self.compose(doubled, gap: 30), .accurate))\n"
-        // K: rows stacked as the editor shows them, but each cell followed by a tight copy of itself
-        let rect = VNDetectTextRectanglesRequest(); rect.reportCharacterBoxes = true
-        try? VNImageRequestHandler(cgImage: image).perform([rect])
-        let boxes = (rect.results ?? []).map { o in "x\(Int(o.boundingBox.minX * 2880))y\(Int((1 - o.boundingBox.maxY) * 1800))w\(Int(o.boundingBox.width * 2880))c\(o.characterBoxes?.count ?? 0)" }
-        out += "K rects: \(boxes.prefix(50))\n"
-        print("GUTTER-DIAG-BEGIN\n" + out + "GUTTER-DIAG-END")
+    func testShortFileGutterIsRead() throws {
+        let words = ["one", "two", "three changed", ""]
+        let image = Self.render(lines: 4, code: { words[$0 - 1] }, changed: [3])
+        let pass1 = GutterOCR.text(in: image)
+        XCTAssertTrue(pass1.compactMap { ShapeTrack.lineNumber($0.text) }.isEmpty)
+        let found = GutterOCR.lineDigits(in: image, observations: pass1, window: Self.window)
+        XCTAssertEqual(Set(found.map(\.line)), [1, 2, 3], "line 4 has no text to anchor its row")
+        let pass = LineBandFit.fit(ranges: [3...3], digits: Self.points(found),
+                                   window: CGRect(x: 0, y: 0, width: 1440, height: 900), partial: false)
+        XCTAssertEqual(pass.reason, "ok")
+        let band = try XCTUnwrap(pass.bands.first?.rect)
+        XCTAssertEqual(band.midY, Self.rowY(3) / 2, accuracy: 3)
     }
 }
 #endif

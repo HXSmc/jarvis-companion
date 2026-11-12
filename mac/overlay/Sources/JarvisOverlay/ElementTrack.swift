@@ -615,8 +615,9 @@ final class ElementTrack: ElementSource, @unchecked Sendable {
             .integral.intersection(CGRect(x: 0, y: 0, width: shot.image.width, height: shot.image.height))
         guard !crop.isNull, let image = shot.image.cropping(to: crop) else { return ([:], frame) }
         var digits: [(line: Int, centre: CGPoint, right: CGFloat)] = []
-        for pair in ScreenContext.ocrText(in: image) {
-            guard let line = ShapeTrack.lineNumber(pair.text) else { continue }
+        let whole = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        for pair in GutterOCR.lineDigits(in: image, observations: ScreenContext.ocrText(in: image), window: whole) {
+            let line = pair.line
             let centre = CGPoint(x: (crop.minX + (pair.box[0] + pair.box[2]) / 2) / scale,
                                  y: (crop.minY + (pair.box[1] + pair.box[3]) / 2) / scale)
             digits.append((line, centre, (crop.minX + pair.box[2]) / scale))
