@@ -265,6 +265,7 @@ public enum BandRetry {
 
 #if canImport(Vision)
 import CoreGraphics
+import CoreText
 import Vision
 
 /// Gutter line numbers from a screen shot. Vision's text reader drops a lone glyph: lines 1-9 never
@@ -384,39 +385,51 @@ public enum GutterOCR {
         }
         // Exactly one text per cell, and it must be two equal halves.
         return perCell.compactMap { index, texts in
-            guard texts.count == 1, let line = doubled(texts[0]) else { return nil }
+            // The "Ln" label (or a misread of it) comes first: only what follows the first digit counts.
+            guard texts.count == 1, let start = texts[0].firstIndex(where: { $0.isASCII && $0.isNumber }),
+                  let line = doubled(String(texts[0][start...])) else { return nil }
             let c = crops[index].cell
             return (line: line, box: [Double(c.minX), Double(c.minY), Double(c.maxX), Double(c.maxY)])
         }.sorted { $0.box[1] < $1.box[1] }
     }
 
+    /// The cells on a grid of 8 per line, gaps of 3 cell heights, each slot "Ln" + the cell twice.
+    /// "Ln" fixes the reading direction: a lone "99" also reads as an upside-down "66" (CI run, 6 and 9 swapped).
     static func composite(_ cells: [CGRect], in image: CGImage)
         -> (image: CGImage, slots: [CGRect], crops: [(cell: CGRect, crop: CGImage)])? {
         let crops = cells.compactMap { cell in image.cropping(to: cell.integral).map { (cell: cell, crop: $0) } }
-        guard !crops.isEmpty else { return nil }
+        guard !crops.isEmpty, let corner = Pixels(crops[0].crop)?.rgb(0, 0) else { return nil }
         let cellH = crops.map(\.crop.height).max() ?? 1
-        let slotW = 2 * (crops.map(\.crop.width).max() ?? 1) + 2 + 3 * cellH
+        let font = CTFontCreateWithName("Menlo" as CFString, CGFloat(max(cellH - 4, 8)) / 0.73, nil)
+        let space = CGColorSpaceCreateDeviceRGB()
+        let lum = 0.299 * corner.0 + 0.587 * corner.1 + 0.114 * corner.2
+        let ink = CGColor(colorSpace: space, components: lum < 0.5 ? [0.75, 0.75, 0.75, 1] : [0.25, 0.25, 0.25, 1])!
+        let label = CTLineCreateWithAttributedString(NSAttributedString(string: "Ln ", attributes: [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): ink]))
+        let labelW = Int(CTLineGetTypographicBounds(label, nil, nil, nil).rounded(.up))
+        let slotW = labelW + 2 * (crops.map(\.crop.width).max() ?? 1) + 2 + 3 * cellH
         let slotH = 4 * cellH
         let perLine = 8
         let lines = (crops.count + perLine - 1) / perLine
         let width = perLine * slotW + 2 * cellH, height = lines * slotH + 2 * cellH
         guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                                  space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let background = CGColor(colorSpace: space, components: [corner.0, corner.1, corner.2, 1])
         else { return nil }
-        // The first cell's corner colour is the gutter background.
-        if let corner = Pixels(crops[0].crop)?.rgb(0, 0) {
-            ctx.setFillColor(CGColor(red: corner.0, green: corner.1, blue: corner.2, alpha: 1))
-            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        }
-        var slots: [CGRect] = []  // top-left pixel rect of each cell's slot
+        ctx.setFillColor(background)  // the gutter background
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        var slots: [CGRect] = []  // top-left pixel rect of each slot
         for (index, item) in crops.enumerated() {
             let slot = CGRect(x: cellH + (index % perLine) * slotW, y: cellH + (index / perLine) * slotH, width: slotW, height: slotH)
             slots.append(slot)
             let w = item.crop.width, h = item.crop.height
             let top = Int(slot.minY) + (slotH - h) / 2
             let y = height - top - h  // CGContext draws bottom-up
-            ctx.draw(item.crop, in: CGRect(x: Int(slot.minX), y: y, width: w, height: h))
-            ctx.draw(item.crop, in: CGRect(x: Int(slot.minX) + w + 2, y: y, width: w, height: h))
+            ctx.textPosition = CGPoint(x: slot.minX, y: CGFloat(y + 2))  // the label's baseline on the cell's ink bottom
+            CTLineDraw(label, ctx)
+            ctx.draw(item.crop, in: CGRect(x: Int(slot.minX) + labelW, y: y, width: w, height: h))
+            ctx.draw(item.crop, in: CGRect(x: Int(slot.minX) + labelW + w + 2, y: y, width: w, height: h))
         }
         return ctx.makeImage().map { ($0, slots, crops) }
     }
