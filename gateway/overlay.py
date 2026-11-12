@@ -1017,7 +1017,7 @@ def _cut40(text: str) -> str:
     return cut[:cut.rfind(" ")].rstrip() if " " in cut.rstrip() else cut.rstrip()
 
 
-FEEDBACK_S = 0.4  # UX: a wait longer than this gets a spoken line, never silence
+FEEDBACK_S = 0.3  # UX: feedback within 400 ms, so a wait past this gets a spoken line
 
 
 async def _say_if_slow(task: asyncio.Future, key: str, deps: OverlayDeps,
@@ -1185,15 +1185,18 @@ async def _session_answer_action(payload: dict, body: TurnBody, deps: OverlayDep
                                         deps, said, on_step):
             yield ev
         return
-    row = next((r for r in rows if r["id"] == sid and r["need"]), None)
-    if row is None:  # answered by hand, or the session is gone: no call leaves here
+    row = next((r for r in rows if r["id"] == sid), None)
+    asked = payload.get("need_id")  # the card the owner heard about must still be the open one
+    if row is None or (asked and (row["need"] or {}).get("id") != asked):
+        # answered by hand, or the session is gone: no call leaves here
         async for ev in _line("session_ask_gone", deps):
             yield ev
         said.append(acks.PHRASES["session_ask_gone"])
         if on_step:
             on_step("session_answer", detail="refused reason=ask_gone")
         return
-    need = row["need"]
+    # No card at ask time: a message, even if a card opened since (the owner never heard that one).
+    need = (row["need"] if asked else None) or {"id": "", "kind": "", "options": []}
     words = str(payload.get("words") or "")
     answer = str(payload.get("answer") or "")
     button = {"approve": "Approve", "yes": "Yes", "no": "No"}.get(answer, "")
@@ -1755,7 +1758,8 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
         if not shown:
             shown = '"' + _cut40(ask.words) + '"'
         question = f"Send to {title40}: {shown}?"
-        payload = {"id": ref_row["id"], "title": title40, "answer": ask.answer, "words": ask.words}
+        payload = {"id": ref_row["id"], "title": title40, "answer": ask.answer, "words": ask.words,
+                   "need_id": (ref_row.get("need") or {}).get("id")}  # the card open at ask time
     async for ev in _ask_host(body.conv_id, action, question.rstrip("?"), question, payload, deps):
         yield ev
     said.append(question)

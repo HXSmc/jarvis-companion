@@ -67,7 +67,8 @@ def test_new_and_shortened_lines():
 
 
 @pytest.fixture(autouse=True)
-def fresh_session_state():
+def fresh_session_state(monkeypatch):
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 5.0)  # exact says() lists: no wall-clock filler line
     overlay._host_ask.clear()
     overlay._session_ref.clear()
     overlay._session_calls.clear()
@@ -480,6 +481,7 @@ def test_slow_session_list_speaks_first(client, monkeypatch, tmp_path):
         time.sleep(overlay.FEEDBACK_S + 0.3)
         return fast.handle_request(request)
 
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 0.2)
     monkeypatch.setattr(overlay, "_sessions_transport", httpx.MockTransport(slow))
     events = turn(client, "stop the build runner session", conv_id="z1")
     assert says(events) == [acks.PHRASES["sessions"], "Stop the build runner session?"]
@@ -525,3 +527,29 @@ def test_host_ask_other_answers_never_confirm(client, monkeypatch, tmp_path):
     assert "n4" not in overlay._host_ask
     turn(client, "yes", conv_id="n4")
     assert [m for m, _u, _a, _b in seen if m == "POST"] == []
+
+
+def test_session_answer_with_no_open_card_sends_a_message(client, monkeypatch, tmp_path):
+    """Criterion 13 / Hub Q10: no card on the session -> the owner's words go as a message."""
+    clock = Clock()
+    _deps(clock)
+    rows = [dict(ROWS[1], card=None)]
+    seen = _session_env(monkeypatch, tmp_path, rows=rows)
+    overlay._session_ref["g1"] = ["s2"]
+    events = turn(client, "tell it: use the second option", conv_id="g1")
+    assert says(events) == ['Send to build runner: "use the second option"?']
+    events = turn(client, "yes", conv_id="g1")
+    assert says(events) == ["Sent."]
+    assert (seen[-1][0], seen[-1][1]) == ("POST", "http://127.0.0.1:8788/central/sessions/s2/message")
+    assert json.loads(seen[-1][3])["text"] == "use the second option"
+    # a card that was open at ask time and is gone at yes time: nothing is sent
+    gone = _session_env(monkeypatch, tmp_path, rows=[dict(ROWS[1], card=None)])
+    overlay._host_ask["g2"] = overlay.HostAsk(
+        kind="answer", summary="Send", deadline=clock() + overlay.CONFIRM_S,
+        payload={"id": "s2", "title": "build runner", "answer": "yes", "words": "",
+                 "need_id": "def456abc123"})
+    events = turn(client, "yes", conv_id="g2")
+    assert says(events) == [acks.PHRASES["session_ask_gone"]]
+    assert [m for m, _u, _a, _b in gone] == ["GET"]
+    from mac.voice.intents import session_request
+    assert session_request("tell it:") is None  # a text answer never has empty words

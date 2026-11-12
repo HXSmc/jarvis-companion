@@ -110,7 +110,8 @@ def test_store_delete(ws_dir):
 
 
 @pytest.fixture(autouse=True)
-def fresh_ws_state():
+def fresh_ws_state(monkeypatch):
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 5.0)  # exact says() lists: no wall-clock filler line
     overlay._host_ask.clear()
     overlay._ws_pages.clear()
     overlay._ws_nonces.clear()
@@ -309,6 +310,7 @@ def test_stale_tmp_is_an_io_error(ws_dir):
 def test_slow_snapshot_speaks_first(client, ws_dir, monkeypatch):
     """UX R1-2: a snapshot slower than FEEDBACK_S gets a short line, then the timeout line."""
     _deps()
-    monkeypatch.setattr(overlay, "WORKSPACE_SNAPSHOT_WAIT_S", overlay.FEEDBACK_S + 0.3)
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 0.1)
+    monkeypatch.setattr(overlay, "WORKSPACE_SNAPSHOT_WAIT_S", 0.4)
     events = turn(client, "save this as battery research")
     assert says(events) == [acks.PHRASES["generic"], acks.PHRASES["workspace_failed"]]
