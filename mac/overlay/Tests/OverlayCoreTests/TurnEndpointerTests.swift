@@ -96,4 +96,72 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertTrue(vad.isVoiced(rms: 0.05))  // 1 s of speech does not become the floor
         XCTAssertFalse(vad.isVoiced(rms: 0.003))
     }
+
+    // Round 6: a wake request keeps its words when quieter room talk follows (Mac runs 2-3).
+
+    /// Feeds 100 ms blocks of `rms` from `start` for `seconds`.
+    private func feed(_ gate: inout TailGate, _ rms: Double, from start: Date, seconds: Double) {
+        var t = start
+        while t < start.addingTimeInterval(seconds - 0.001) {
+            t = t.addingTimeInterval(LevelBlocks.width)
+            gate.level(rms, at: t)
+        }
+    }
+
+    func testRoomWordsAfterACompleteRequestAreCut() {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.12, from: t0, seconds: 1.5)                  // the owner: "Highlight the changes."
+        gate.partial("Highlight the", at: t0.addingTimeInterval(1.0))
+        gate.partial("Highlight the changes.", at: t0.addingTimeInterval(1.8))
+        feed(&gate, 0.03, from: t0.addingTimeInterval(1.5), seconds: 3)  // the room, a quarter as loud
+        gate.partial("Highlight the changes. What are you people", at: t0.addingTimeInterval(3.2))
+        let text = "Highlight the changes. What are you people"
+        XCTAssertNil(gate.cut(text: text, now: t0.addingTimeInterval(2.9)))  // owner quiet < 1.5 s
+        XCTAssertEqual(gate.cut(text: text, now: t0.addingTimeInterval(3.05)), "Highlight the changes.")
+    }
+
+    func testOwnerContinuingAtHisLevelIsKept() {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.12, from: t0, seconds: 1.5)
+        gate.partial("Highlight the changes.", at: t0.addingTimeInterval(1.6))
+        feed(&gate, 0.1, from: t0.addingTimeInterval(1.5), seconds: 1.0)  // he goes on, same distance
+        gate.partial("Highlight the changes. And the next one.", at: t0.addingTimeInterval(2.9))
+        XCTAssertEqual(gate.kept, "Highlight the changes. And the next one.")
+        XCTAssertNil(gate.cut(text: "Highlight the changes. And the next one.", now: t0.addingTimeInterval(4.5)))
+        // Late words of his own (STT lag under 1.2 s) are his, not the room's.
+        var lagged = TailGate()
+        feed(&lagged, 0.12, from: t0, seconds: 2.0)
+        lagged.partial("show me the weather", at: t0.addingTimeInterval(1.2))
+        lagged.partial("show me the weather in Paris", at: t0.addingTimeInterval(3.0))
+        XCTAssertEqual(lagged.kept, "show me the weather in Paris")
+        XCTAssertNil(lagged.cut(text: "show me the weather in Paris", now: t0.addingTimeInterval(5)))
+    }
+
+    func testAnIncompleteRequestIsNeverCut() {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.12, from: t0, seconds: 1.0)
+        gate.partial("show me the last", at: t0.addingTimeInterval(1.1))
+        feed(&gate, 0.03, from: t0.addingTimeInterval(1.0), seconds: 3)
+        gate.partial("show me the last thing they said", at: t0.addingTimeInterval(3.5))
+        XCTAssertNil(gate.kept)
+        XCTAssertNil(gate.cut(text: "show me the last thing they said", now: t0.addingTimeInterval(4)))
+        XCTAssertEqual(TailGate(ratio: 7).ratio, TailGate.defaultRatio)  // a bad service value is ignored
+    }
+
+    func testLevelBlocksAreRMSPer100ms() {
+        let t0 = Date()
+        let samples = [LevelSample(at: t0.addingTimeInterval(0.01), rms: 0.1, frames: 1024),
+                       LevelSample(at: t0.addingTimeInterval(0.05), rms: 0.3, frames: 1024),
+                       LevelSample(at: t0.addingTimeInterval(0.25), rms: 0.02, frames: 1024),
+                       LevelSample(at: t0.addingTimeInterval(-0.5), rms: 0.9, frames: 1024)]  // before `from`
+        let blocks = LevelBlocks.blocks(samples, from: t0, to: t0.addingTimeInterval(0.3))
+        XCTAssertEqual(blocks.count, 3)
+        XCTAssertEqual(blocks[0], 0.2236, accuracy: 0.0001)  // sqrt((0.01 + 0.09) / 2)
+        XCTAssertEqual(blocks[1], 0)
+        XCTAssertEqual(blocks[2], 0.02, accuracy: 0.0001)
+        XCTAssertEqual(LevelBlocks.blocks(samples, from: t0, to: t0), [])
+    }
 }

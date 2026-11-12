@@ -126,6 +126,7 @@ final class AppController {
             do {
                 let health = try await client.health()
                 serviceVoice = health.voice
+                speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
                 endOutage()
                 for try await event in client.events() {
                     endOutage()
@@ -234,13 +235,14 @@ final class AppController {
                 // Speech in the follow-up window: show the normal listening orb.
                 if followUp, self?.model.orb == .followUp { self?.model.orb = .listening }
             },
-            onFinal: { [weak self] text, sttFinalMs, endOfSpeech in
+            onFinal: { [weak self] text, sttFinalMs, endOfSpeech, heard in
                 Task { @MainActor in
                     await self?.handleUtterance(text: text,
                                           followUp: followUp,
                                           sttFinalMs: sttFinalMs,
                                           audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
                                           endOfSpeech: endOfSpeech,
+                                          heard: heard,
                                           screenTask: screenTask)
                 }
             },
@@ -272,6 +274,7 @@ final class AppController {
                                  sttFinalMs: Double,
                                  audioMs: Double,
                                  endOfSpeech: Date,
+                                 heard: SpeechInput.Heard,
                                  screenTask: Task<ScreenPayload?, Never>) async {
         heldLine.drop()  // a new turn: an older pushed line is out of date
         model.orb = .thinking
@@ -297,7 +300,7 @@ final class AppController {
                 for try await event in client.utterance(text: text, convId: conv,
                                                         sttFinalMs: sttFinalMs, audioMs: audioMs,
                                                         stt: speech.lastDiagnosis, followUp: followUp,
-                                                        screen: screen) {
+                                                        heard: heard, screen: screen) {
                     gotEvent = true
                     handle(event, captured: captured)
                 }

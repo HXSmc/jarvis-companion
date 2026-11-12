@@ -124,3 +124,86 @@ public struct VoiceActivity {
         return rms > max(next * 3, next + 0.006)
     }
 }
+
+/// One mic buffer's level: when it came, its RMS (0...1) and how many frames it held.
+public struct LevelSample {
+    public let at: Date
+    public let rms: Double
+    public let frames: Int
+
+    public init(at: Date, rms: Double, frames: Int) {
+        self.at = at
+        self.rms = rms
+        self.frames = frames
+    }
+}
+
+/// The mic level in 100 ms blocks (each the RMS over its buffers). The service's follow-up gate reads
+/// them (`LEVEL_BLOCK_MS` in gateway/overlay.py) and the tail gate compares new words with them.
+public enum LevelBlocks {
+    public static let width: TimeInterval = 0.1
+    /// At most this many blocks go to the service (40 s; the service refuses more).
+    public static let maxSent = 400
+
+    /// Blocks from `from` up to `to`; a block with no buffer is 0. Rounded to 4 places.
+    public static func blocks(_ samples: [LevelSample], from: Date, to: Date) -> [Double] {
+        // Date sums carry ~1e-7 s of float error: 0.3 s must stay 3 blocks, not 4.
+        let count = Int((to.timeIntervalSince(from) / width - 1e-4).rounded(.up))
+        guard count > 0 else { return [] }
+        var power = [Double](repeating: 0, count: count)
+        var frames = [Int](repeating: 0, count: count)
+        for s in samples where s.at >= from && s.at < to && s.frames > 0 {
+            let i = min(count - 1, Int(s.at.timeIntervalSince(from) / width))
+            power[i] += s.rms * s.rms * Double(s.frames)
+            frames[i] += s.frames
+        }
+        return zip(power, frames).map { p, n in
+            n > 0 ? ((p / Double(n)).squareRoot() * 10_000).rounded() / 10_000 : 0
+        }
+    }
+}
+
+/// After a complete wake request, words from quieter room talk must not extend or replace it (Mac
+/// runs 2 and 3: room speech joined a request, or took the turn). Words count as the owner's only
+/// when his voice, at `ratio` of the turn's loudest 100 ms block, was heard up to `lag` before them.
+public struct TailGate {
+    /// Room words are quieter than half the request's loudest voice (-6 dB); the service can change it
+    /// (`OVERLAY_TAIL_LEVEL_RATIO`, sent on /overlay/health).
+    public static let defaultRatio = 0.5
+    /// Partials trail the audio: a word shows up to this long after it was said.
+    public static let lag: TimeInterval = 1.2
+    /// Blocks below this RMS are silence, never the owner's voice.
+    public static let silence = 0.002
+
+    public let ratio: Double
+    public private(set) var peak = 0.0
+    public private(set) var ownerAt: Date?
+    /// The newest complete-looking text heard while the owner spoke.
+    public private(set) var kept: String?
+
+    public init(ratio: Double = TailGate.defaultRatio) {
+        self.ratio = ratio > 0 && ratio <= 1 ? ratio : TailGate.defaultRatio
+    }
+
+    /// One finished 100 ms block, `at` = its end.
+    public mutating func level(_ rms: Double, at: Date) {
+        peak = max(peak, rms)
+        if rms >= max(Self.silence, ratio * peak) { ownerAt = at }
+    }
+
+    public mutating func partial(_ text: String, at: Date) {
+        guard let ownerAt, at.timeIntervalSince(ownerAt) <= Self.lag else { return }  // the room's words
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        kept = !t.isEmpty && !TurnEndpointer.looksIncomplete(t) ? t : nil
+    }
+
+    /// The request to end the turn with: it is complete, the owner has been quiet for
+    /// `TurnEndpointer.completeHold`, and the words since then came from the room. Else nil.
+    public func cut(text: String, now: Date) -> String? {
+        guard let kept, let ownerAt,
+              kept != text.trimmingCharacters(in: .whitespacesAndNewlines),
+              now.timeIntervalSince(ownerAt) >= TurnEndpointer.completeHold
+        else { return nil }
+        return kept
+    }
+}
