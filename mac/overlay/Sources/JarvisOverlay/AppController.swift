@@ -35,8 +35,8 @@ final class AppController {
     private var turnToken = 0
     /// True while a turn's utterance stream is open; a wake during it barge-ins too.
     private var turnStreaming = false
-    /// Barge-in wanted (health barge_in, default on).
-    private var bargeInEnabled = true
+    /// Barge-in wanted (health barge_in; off unless the service's OVERLAY_BARGE_IN=1).
+    private var bargeInEnabled = false
     /// The barge listening run of the current turn, nil while its audio is not playing.
     private var bargeRun: BargeRun?
     /// The reply texts a wake cut (A4): stripped from that wake turn's text.
@@ -163,7 +163,7 @@ final class AppController {
                 let health = try await client.health()
                 serviceVoice = health.voice
                 speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
-                bargeInEnabled = health.bargeIn ?? true
+                bargeInEnabled = health.bargeIn ?? false
                 speech.aecEnabled = health.bargeAec ?? false  // takes effect on the next start()
                 endOutage()
                 for try await event in client.events() {
@@ -270,7 +270,11 @@ final class AppController {
             model.orb = .listening
             if audio.isBusy || turnStreaming {
                 cutReply = replyTexts  // the ring this wake turn replays holds that reply's echo
-                bargeIn(reason: .wake)  // A4: a wake during playback cuts the old reply's stream too
+                if bargeInEnabled {
+                    bargeIn(reason: .wake)  // A4: a wake during playback cuts the old reply's stream too
+                } else {
+                    audio.stop()  // barge-in off: as before barge-in existed, no barge_in row
+                }
             } else {
                 cutReply = []
                 audio.stop()

@@ -2209,7 +2209,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         stopped = intents.is_stop(body.text)  # covers cancel words too: B1 widened the stop list
         # A barge-in that is not itself a stop cancels the running turn quietly and the words go
         # on through the normal pipeline (A5): cards are never cleared by it.
-        barge = body.barge_in and not stopped
+        barge = body.barge_in and barge_in_on() and not stopped
         if stopped or barge or clearing:
             busy.cancelled = True
             if deps.agent_conversations is not None:
@@ -2827,7 +2827,8 @@ _off_view_said: float | None = None
 async def get_debug_turns() -> dict:
     # Setup the owner must fix (booleans only, never a path): no `code` CLI = the editor never scrolls.
     return {**debug_log.snapshot(), "setup": {"code_cli": gitdiff.editor_path("code") is not None,
-                                              "vault": bool(os.environ.get("OVERLAY_VAULT"))},
+                                              "vault": bool(os.environ.get("OVERLAY_VAULT")),
+                                              "barge_in": barge_in_on()},
             "speech_gate": _gate_setup()}  # numbers the owner can tune, shown under the setup rows
 
 
@@ -2860,6 +2861,12 @@ def _app_commit() -> str | None:
     return commit if isinstance(commit, str) and _COMMIT_RE.fullmatch(commit) else None
 
 
+def barge_in_on() -> bool:
+    """The one barge-in switch (app reads it from /health): off unless OVERLAY_BARGE_IN=1.
+    Off since Mac live run 3 (self-cuts, no plain-speech barge at speaker volume)."""
+    return os.environ.get("OVERLAY_BARGE_IN", "0") == "1"
+
+
 @router.get("/health", dependencies=_LOOP_DEPS)
 async def get_health() -> dict:
     return {"ok": True,
@@ -2867,6 +2874,6 @@ async def get_health() -> dict:
             "brain": shutil.which("claude") is not None,
             "tail_level_ratio": TAIL_LEVEL_RATIO,
             # A6: the barge-in switches and the installed bundle's commit, read at request time.
-            "barge_in": os.environ.get("OVERLAY_BARGE_IN", "1") != "0",
-            "barge_aec": os.environ.get("OVERLAY_BARGE_AEC", "0") == "1",
+            "barge_in": barge_in_on(),
+            "barge_aec": barge_in_on() and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1",
             "commit": _app_commit()}

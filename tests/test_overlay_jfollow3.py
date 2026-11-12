@@ -150,8 +150,9 @@ def _until(cond, n=300):
     return cond()
 
 
-def test_barge_in_turn_cancels_running_agent_quietly(client):
+def test_barge_in_turn_cancels_running_agent_quietly(client, monkeypatch):
     """B1: a barge turn cancels the running agent, says nothing about it, then answers."""
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
     clock = Clock()
     never = lambda: FakeAgent(clock, script=[], tick=0.0, sleep=0.02)  # noqa: E731
     pool, deps = setup(clock, never)
@@ -360,16 +361,64 @@ def test_sessions_with_no_rows_say_a_fixed_line(client, monkeypatch, tmp_path):
 
 
 def test_health_has_barge_switches(client, monkeypatch):
-    """A6: barge switches are read at request time."""
+    """A6 + hub amendment R6: barge-in is off unless OVERLAY_BARGE_IN=1; AEC only with it on."""
     overlay.set_deps(make_deps())
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    monkeypatch.delenv("OVERLAY_BARGE_AEC", raising=False)
 
     def health():
         return client.get("/overlay/health", headers=AUTH_HEADER).json()
 
+    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+    monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
+    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
+    assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
+    monkeypatch.setenv("OVERLAY_BARGE_AEC", "0")
     assert (health()["barge_in"], health()["barge_aec"]) == (True, False)
     monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
-    monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
-    assert (health()["barge_in"], health()["barge_aec"]) == (False, True)
+    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+
+
+def test_barge_in_off_by_default_turn_is_not_a_barge(client, monkeypatch):
+    """Hub amendment R6: with the switch off a barge_in turn never cancels a running agent turn
+    quietly; it is an ordinary follow-up during a busy turn (the busy line), as on ci-ipa."""
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    clock = Clock()
+    never = lambda: FakeAgent(clock, script=[], tick=0.0, sleep=0.02)  # noqa: E731
+    pool, deps = setup(clock, never)
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.setdefault("a", turn(client, "check my inbox", conv_id="c9")))
+    t.start()
+    assert _until(lambda: "c9" in overlay._agent_busy)
+    events = turn(client, "what time is it", conv_id="c9", barge_in=True)
+    assert "c9" in overlay._agent_busy and "c9" not in pool.dropped
+    assert says(events) == [acks.PHRASES["busy"]]
+    overlay._agent_busy["c9"].cancelled = True
+    t.join(5)
+    assert not t.is_alive()
+
+
+def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
+    """Hub amendment R6: the app's default is off (no health = off), a wake during playback only
+    stops the audio (no barge_in row), and the setup rows say how to turn it on."""
+    ctl = (APP_SRC / "AppController.swift").read_text()
+    assert "private var bargeInEnabled = false" in ctl
+    assert "bargeInEnabled = health.bargeIn ?? false" in ctl
+    assert "?? true" not in ctl.split("bargeInEnabled = health.bargeIn")[1].split("\n")[0]
+    wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
+    gated = wake.index("if bargeInEnabled {")
+    assert gated < wake.index("bargeIn(reason: .wake)") < wake.index("audio.stop()", gated)
+    start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
+    assert "guard bargeInEnabled," in start
+    assert ctl.count("bargeIn(reason:") == 3  # the def, the gated wake and the run's onConfirmed
+    assert 'rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)")' in overlay.DEBUG_PAGE
+    assert "ok.barge_in === false" in overlay.DEBUG_PAGE
+    overlay.set_deps(make_deps())
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["barge_in"] is False
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
+    assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["barge_in"] is True
 
 
 def test_health_commit(client, monkeypatch, tmp_path):

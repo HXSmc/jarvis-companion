@@ -114,6 +114,7 @@ function render(data) {
   const rows = [];
   if (ok.code_cli === false) rows.push("VS Code command line tool (code) missing: the editor will not scroll");
   if (ok.vault === false) rows.push("Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes");
+  if (ok.barge_in === false) rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)");
   setup.hidden = rows.length === 0;
   setup.textContent = rows.join("\n");
   const g = data.speech_gate;

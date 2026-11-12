@@ -125,12 +125,14 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     """jtools2 item 4: the page shows a red row when the `code` CLI is not on the service PATH."""
     monkeypatch.setattr(overlay.shutil, "which", lambda name: None)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
     data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
-    assert data["setup"] == {"code_cli": False, "vault": False}
+    assert data["setup"] == {"code_cli": False, "vault": False, "barge_in": False}
     monkeypatch.setattr(overlay.shutil, "which", lambda name: str(tmp_path / name))
     monkeypatch.setenv("OVERLAY_VAULT", str(tmp_path))
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"] == {"code_cli": True,
-                                                                                        "vault": True}
+                                                                                        "vault": True,
+                                                                                        "barge_in": False}
     page = client.get("/overlay/debug").text
     assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
     assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
