@@ -39,6 +39,24 @@ final class TurnEndpointerTests: XCTestCase {
                                                now: t0.addingTimeInterval(4)))
     }
 
+    func testHeldLineWaitsForTheWindowToClose() {
+        // Mac run 2, B4: "no box, the change is on line 3" came during the follow-up window and the
+        // push dropped it. Held, it plays when the window closes; a new turn or 15 s drops it.
+        let t0 = Date(timeIntervalSince1970: 1000)
+        var held = HeldLine<String>()
+        held.hold("say", at: t0)
+        held.hold("audio", at: t0.addingTimeInterval(0.1))
+        XCTAssertEqual(held.release(at: t0.addingTimeInterval(8)), ["say", "audio"])
+        XCTAssertEqual(held.release(at: t0.addingTimeInterval(8)), [])  // said once
+        held.hold("say", at: t0)
+        XCTAssertEqual(held.release(at: t0.addingTimeInterval(HeldLine<String>.maxAge + 1)), [])  // too old
+        held.hold("say", at: t0)
+        held.drop()  // the owner started a new turn
+        XCTAssertEqual(held.release(at: t0.addingTimeInterval(1)), [])
+        for i in 0..<10 { held.hold("e\(i)", at: t0) }
+        XCTAssertEqual(held.release(at: t0).count, HeldLine<String>.maxEvents)
+    }
+
     func testStripWakeOneBreath() {
         XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis next change"), "next change")
     }

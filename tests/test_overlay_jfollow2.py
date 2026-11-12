@@ -383,6 +383,19 @@ def test_short_file_line(client, monkeypatch):
     assert bus.events == []
 
 
+def test_box_line_has_a_spoke_row(client, monkeypatch):
+    # Mac run 2, B4: the lines_short line left no trace on the debug page, so a dropped push and
+    # a spoken one looked the same. Now a `spoke` row with the push note sits on the lines' turn.
+    monkeypatch.setattr(overlay, "bus", BusRecorder())
+    _deps()
+    client.post("/overlay/debug/note", json={"step": "lines", "detail": "no_gutter win=title try=3 want=3-3"},
+                headers=AUTH_HEADER)
+    row = _steps("spoke")[-1]
+    assert row["text"] == acks.PHRASES["lines_short"].format(n=3)
+    assert row["ms"] is None and row["note"] == "pushed to the app, played when idle"
+    assert [s["step"] for s in overlay.debug_log.snapshot()["turns"][0]["steps"]][-2:] == ["lines", "spoke"]
+
+
 def test_folded_note_speaks(client, monkeypatch):
     bus = BusRecorder()
     monkeypatch.setattr(overlay, "bus", bus)

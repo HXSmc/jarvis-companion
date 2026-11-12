@@ -23,6 +23,7 @@ final class AppController {
     private var turnDone = false
     /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
     private var listenSerial = 0
+    private var heldLine = HeldLine<OverlayEvent>()
 
     // Outage state.
     private var serviceVoice: String?
@@ -143,9 +144,20 @@ final class AppController {
         }
     }
 
-    /// A `hud` event pushed after its turn ended (an expired Confirm): card always, line only when idle.
+    /// A `hud` event pushed after its turn ended (an expired Confirm, a "no box" line): card always,
+    /// line when idle, else held until the follow-up window closes (`HeldLine`).
     private func handlePush(_ event: OverlayEvent) {
-        switch event.pushed(idle: model.orb == .idle && !audio.isBusy) {
+        let idle = model.orb == .idle && !audio.isBusy
+        if !idle {
+            switch event {
+            case .say, .audio:
+                heldLine.hold(event, at: Date())
+                return
+            default:
+                break
+            }
+        }
+        switch event.pushed(idle: idle) {
         case .card(let card)?:
             model.add(card: card)
         case .audio(_, let rate, let pcm)?:
@@ -236,7 +248,11 @@ final class AppController {
                 Task { @MainActor in
                     guard let self else { return }
                     if followUp {  // nobody spoke after the reply: close the window quietly
-                        if self.model.orb == .followUp { self.model.orb = .idle }
+                        if self.model.orb == .followUp {
+                            self.model.orb = .idle
+                            // A line pushed while the reply or this window ran: say it now.
+                            for event in self.heldLine.release(at: Date()) { self.handlePush(event) }
+                        }
                         return
                     }
                     self.client.debugNote(step: "no_speech", detail: why)
@@ -257,6 +273,7 @@ final class AppController {
                                  audioMs: Double,
                                  endOfSpeech: Date,
                                  screenTask: Task<ScreenPayload?, Never>) async {
+        heldLine.drop()  // a new turn: an older pushed line is out of date
         model.orb = .thinking
         let screen = await screenTask.value
 

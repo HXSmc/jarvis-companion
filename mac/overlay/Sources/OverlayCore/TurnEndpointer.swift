@@ -78,6 +78,37 @@ public enum TurnEndpointer {
     }
 }
 
+/// A spoken line the service pushed after its turn ended ("no box, the change is on line 3") while
+/// Jarvis talked or the follow-up mic was open. Played then, it talks over the reply or the follow-up
+/// mic hears it as the owner, and dropping it left silence (Mac run 2, B4). So it waits until the
+/// window closes with no new turn; a new turn, or `maxAge` since it came, drops it.
+public struct HeldLine<Event> {
+    public static var maxAge: TimeInterval { 15 }
+    /// One line is a say and an audio event; a few lines at most.
+    public static var maxEvents: Int { 4 }
+    private var events: [Event] = []
+    private var since: Date?
+
+    public init() {}
+
+    public mutating func hold(_ event: Event, at now: Date) {
+        if events.isEmpty { since = now }
+        if events.count < Self.maxEvents { events.append(event) }
+    }
+
+    /// The held events when still fresh, oldest first; nothing is held afterwards.
+    public mutating func release(at now: Date) -> [Event] {
+        defer { drop() }
+        guard let since, now.timeIntervalSince(since) <= Self.maxAge else { return [] }
+        return events
+    }
+
+    public mutating func drop() {
+        events = []
+        since = nil
+    }
+}
+
 /// Per-buffer voice activity from mic RMS against a tracked noise floor.
 public struct VoiceActivity {
     public private(set) var floor: Double?

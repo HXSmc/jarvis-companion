@@ -346,13 +346,15 @@ class DebugLog:
         with self._lock:
             entry.update(fields)
 
-    def note(self, step: str, detail: str) -> None:
+    def note(self, step: str, detail: str) -> dict:
         """App-side step on the turn it belongs to: a line highlight's outcome (`lines`, a reason
         code) on the newest turn, whose `done` came before it; anything else (no speech heard,
         service unreachable) on the waiting wake or a new turn."""
         with self._lock:
             newest = self._turns[-1] if self._turns and step == "lines" else None
-        self.add(newest if newest is not None else self.for_utterance(), step, detail=detail)
+        turn = newest if newest is not None else self.for_utterance()
+        self.add(turn, step, detail=detail)
+        return turn
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -2468,7 +2470,7 @@ async def post_wake(body: WakeBody | None = None) -> dict:
 
 @router.post("/debug/note", dependencies=_LOOP_DEPS)
 async def post_debug_note(body: DebugNote) -> dict:
-    debug_log.note(body.step, body.detail)
+    rec = debug_log.note(body.step, body.detail)
     global _off_view_said
     if body.step == "lines" and _OFF_VIEW_FINAL_RE.search(body.detail):
         key, n = None, None
@@ -2486,6 +2488,10 @@ async def post_debug_note(body: DebugNote) -> dict:
                       else [ev async for ev in _speak(acks.PHRASES[key].format(n=n), deps)])
             for ev in events:
                 bus.publish("hud", ev)
+            # The page shows the line under the `lines` row (Mac run 2, B4: no row, so silence and a
+            # dropped push looked the same); the app holds it until its follow-up window closes.
+            debug_log.add(rec, "spoke", text=acks.PHRASES[key] if n is None else acks.PHRASES[key].format(n=n),
+                          ms=None, audio_ms=None, note="pushed to the app, played when idle")
     return {"ok": True}
 
 
