@@ -388,6 +388,14 @@ def test_media_request_extraction():
     assert (m.kind, m.subject, m.count) == ("image", "eiffel tower", 3)
     m = media_request("find a video of a rocket launch")
     assert (m.kind, m.subject, m.count) == ("video", "rocket launch", 1)
+    # Bare form (D-A1): "a picture of a dog" with no verb.
+    for text in ("a picture of a dog", "picture of a dog", "hey jarvis, a picture of a dog"):
+        m = media_request(text)
+        assert (m.kind, m.subject, m.count) == ("image", "dog", 1), text
+    m = media_request("pictures of foxes")
+    assert (m.kind, m.subject, m.count) == ("image", "foxes", min(4, media_lookup.MAX_COUNT))
+    m = media_request("an image of a cat")
+    assert (m.kind, m.subject, m.count) == ("image", "cat", 1)
     m = media_request("show me a diagram of a heart")
     assert (m.kind, m.subject, m.count) == ("image", "heart diagram", 1)
     for text in ("show me a picture of this", "show me a picture of my screen",

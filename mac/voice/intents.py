@@ -153,7 +153,8 @@ _MEDIA_NOUN = r" (?P<noun>picture|photo|image|pic|video|clip|diagram)(?P<plural>
 _MEDIA_REQUEST_RE = re.compile(r"(?:(?:can|could|would|will) you |please |jarvis,? )*"
                                + _MEDIA_VERBS + r"(?: me)?" + _MEDIA_AMOUNT + _MEDIA_NOUN
                                + r"(?: of (?P<subject>.+))?")
-_MEDIA_OF_RE = re.compile(r"(?:a |an )?" + _MEDIA_NOUN + r" of (?P<subject>.+)")
+# Bare form "a picture of a dog": _MEDIA_NOUN carries the verb's leading space, so strip it.
+_MEDIA_OF_RE = re.compile(r"(?:an? )?" + _MEDIA_NOUN.lstrip() + r" of (?P<subject>.+)")
 # Subject tails that are politeness/timing, not search words.
 _MEDIA_TAILS = ("as a test", "please", "for me", "right now", "now", "again",
                 "jarvis", "sir", "thanks", "thank you")
