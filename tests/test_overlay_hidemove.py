@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_overlay_service import FakeConversations, make_deps, reset_overlay_state  # noqa: E402
 from gateway import overlay  # noqa: E402
 from mac.voice import acks  # noqa: E402
+POOL = {text for _key, text, _tag in acks.THINKING_POOL}
 from mac.voice.intents import parse  # noqa: E402
 
 __all__ = ["reset_overlay_state"]  # pytest fixture re-exported
@@ -211,7 +212,8 @@ def test_directive_bad_layout_dropped(bad):
     deps = make_deps(chunks=model_lines({"say": "Fine."}, bad))
     events, steps = run_turn(deps, ODD)
     assert directive_events(events) == []
-    assert [e["text"] for e in events if e["type"] == "say"] == [acks.PHRASES["answer"], "Fine."]
+    spoken = [e["text"] for e in events if e["type"] == "say"]  # ack = a pool line (B4), then Fine.
+    assert spoken == [spoken[0], "Fine."] and spoken[0] in POOL
     assert not [s for s in steps if s[0] == "layout"]
     assert done(events)["error"] is None
 
@@ -220,7 +222,7 @@ def test_directive_bad_layout_alone_says_nothing():
     deps = make_deps(chunks=model_lines('{"layout": "explode"}'))
     events, _ = run_turn(deps, ODD)
     assert directive_events(events) == []
-    assert [e["text"] for e in events if e["type"] == "say"][0] == acks.PHRASES["answer"]
+    assert [e["text"] for e in events if e["type"] == "say"][0] in POOL
     assert "explode" not in json.dumps(events)
 
 
@@ -242,7 +244,8 @@ def test_directive_alone_is_an_answer():
     events, _ = run_turn(deps, ODD)
     assert directive_events(events) == [{"type": "layout", "mode": "hide"}]
     assert done(events)["error"] is None
-    assert [e["text"] for e in events if e["type"] == "say"] == [acks.PHRASES["answer"]]
+    spoken = [e["text"] for e in events if e["type"] == "say"]  # the ack is the only speech
+    assert spoken == [spoken[0]] and spoken[0] in POOL
 
 
 def test_directive_quiet_conversation_still_emits():
@@ -452,7 +455,8 @@ def test_gate_drop_says_the_honest_line_once():
 def test_gate_drop_alone_is_not_an_empty_reply():
     deps = make_deps(chunks=model_lines({"layout": "hide"}))
     events, _ = run_turn(deps, "what is the weather like")
-    assert [e["text"] for e in events if e["type"] == "say"] == [acks.PHRASES["answer"], overlay.OVERLAY_UNCHANGED_LINE]
+    spoken = [e["text"] for e in events if e["type"] == "say"]  # ack (pool, B4), then unchanged
+    assert spoken == [spoken[0], overlay.OVERLAY_UNCHANGED_LINE] and spoken[0] in POOL
     assert done(events)["error"] is None
 
 

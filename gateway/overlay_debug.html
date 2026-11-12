@@ -55,7 +55,9 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 agent_progress: "progress line", lines: "line highlight", editor_scroll: "editor scroll",
                 repo_pick: "repo picked", hunk: "change list", media: "media",
                 incomplete: "waiting for more", continued: "continued after a pause",
-                followup_dropped: "follow-up dropped" };
+                followup_dropped: "follow-up dropped", followup_closed: "follow-up window closed",
+                card_size: "card size", sessions: "sessions",
+                barge_in: "barge-in", barge_aec: "echo canceller" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -67,7 +69,8 @@ function el(tag, cls, text) {
 function describe(s) {
   switch (s.step) {
     case "wake": return `score ${s.score ?? "?"} (${s.source})`;
-    case "voice": return (s.followup ? "follow-up, no wake word · " : "") + `${s.audio_ms != null ? (s.audio_ms / 1000).toFixed(1) + " s of audio" : "audio length unknown"}`
+    case "voice": return (s.followup ? "follow-up, no wake word · " : "") + (s.barge_in ? "barge-in · " : "")
+                       + `${s.audio_ms != null ? (s.audio_ms / 1000).toFixed(1) + " s of audio" : "audio length unknown"}`
                        + (s.stt_final_ms != null ? `, STT final ${Math.round(s.stt_final_ms)} ms` : "")
                        + (s.level != null ? ` · level ${s.level}` : "") + (s.conf != null ? ` · confidence ${s.conf}` : "")
                        + (s.stt ? ` · ${s.stt}` : "");
@@ -75,6 +78,10 @@ function describe(s) {
     case "transcribed": return null;  // rendered as a quote
     case "continued": return `as one request: "${s.text}"`;
     case "intent": return s.kind + (s.arg ? ` → ${s.arg}` : "");
+    case "followup_closed": return s.detail || "no follow-up window left open";
+    case "card_size": return `action=${s.action ?? "?"} card=${s.card ?? "none"} match=${s.match ?? "none"}`;
+    case "sessions": return s.detail || "";
+    case "barge_in": case "barge_aec": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");

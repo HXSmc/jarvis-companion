@@ -66,12 +66,12 @@ def test_turn_c_parse_and_launch():
 def test_tie_asks(client):
     ran, events = run_turn(client, "open code", [])
     assert ran == []
-    assert says(events)[1:] == ["Did you mean Code Helper or Code Runner?"]
+    assert says(events) == ["Did you mean Code Helper or Code Runner?"]  # B4: open turns have no ack
 
 
 def test_unknown_app_unchanged(client):
     ran, events = run_turn(client, "open Photoshop", [])
-    assert ran == [] and says(events)[1:] == ["I couldn't find Photoshop."]
+    assert ran == [] and says(events) == ["I couldn't find Photoshop."]  # B4: no ack before the line
 
 
 # --- model open ----------------------------------------------------------------

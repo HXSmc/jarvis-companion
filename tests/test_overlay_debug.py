@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from conftest import AUTH_HEADER
 from gateway import overlay
-from test_overlay_service import client, make_app, make_deps, reset_overlay_state, turn  # noqa: F401
+from test_overlay_service import POOL_TEXTS, client, make_app, make_deps, reset_overlay_state, turn  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +69,7 @@ def test_debug_turn_steps_newest_first(client):
     assert steps["transcribed"]["text"] == "what is the capital of France"
     assert steps["intent"]["kind"] == "answer"
     spoken = [s["text"] for s in first["steps"] if s["step"] == "spoke"]
-    assert spoken == ["Just a moment.", "Paris."]  # ack, then the answer; a say + its audio count once
+    assert spoken[0] in POOL_TEXTS and spoken == [spoken[0], "Paris."]  # pool ack, then the answer
     assert all(s["audio_ms"] is not None for s in first["steps"] if s["step"] == "spoke")  # all voiced
     assert steps["done"]["cards"] == 1 and steps["done"]["error"] is None
     assert steps["done"]["first_audio_ms"] is not None

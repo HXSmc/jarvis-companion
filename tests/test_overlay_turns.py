@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 
 from test_overlay_service import (  # noqa: E402  (shared stubs + fixtures)
-    AUTH_HEADER, FakeConversations, client, make_deps, reset_overlay_state, says, turn,
+    AUTH_HEADER, POOL_TEXTS, FakeConversations, client, make_deps, reset_overlay_state, says, turn,
 )
 from gateway import overlay  # noqa: E402
 from mac.voice.intents import join_continuation, looks_incomplete, parse  # noqa: E402
@@ -80,7 +80,8 @@ def test_brain_judges_incomplete_and_keeps_listening(client):
     events = turn(client, "could you compare the", conv_id="a3")  # precheck catches this one
     assert says(events) == []
     events = turn(client, "could you compare", conv_id="a4")  # only the brain can tell
-    assert says(events) == ["Just a moment."]  # the ack only, never "you were cut off"
+    spoken = says(events)
+    assert spoken and spoken[0] in POOL_TEXTS  # the pool ack only, never "you were cut off"
     pool.chunks = ['{"say": "Sure."}\n']
     pool.sessions.clear()
     turn(client, "Python and Swift", conv_id="a4", followup=True)

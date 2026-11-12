@@ -186,6 +186,15 @@ else
 </plist>
 PLIST
 fi
+# A6: stamp the built bundle with its commit; /overlay/health reports it (JarvisCommit).
+COMMIT="$(git -C "$REPO" rev-parse --short HEAD)"
+if (( DRY_RUN )); then
+  echo "would: /usr/libexec/PlistBuddy -c 'Add :JarvisCommit string $COMMIT' $APP/Contents/Info.plist (Set when present)"
+elif /usr/libexec/PlistBuddy -c "Set :JarvisCommit $COMMIT" "$APP/Contents/Info.plist" 2>/dev/null; then
+  :
+else
+  /usr/libexec/PlistBuddy -c "Add :JarvisCommit string $COMMIT" "$APP/Contents/Info.plist"
+fi
 run bash "$REPO/scripts/mac-overlay-sign.sh" "$APP"
 run touch "$APP"  # Finder and the Dock re-read the bundle icon after the new AppIcon.icns
 

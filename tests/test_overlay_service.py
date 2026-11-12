@@ -96,6 +96,10 @@ def says(events: list[dict]) -> list[str]:
     return [e["text"] for e in events if e["type"] == "say"]
 
 
+# The answer ack draws a random line from the thinking pool, so tests assert pool membership.
+POOL_TEXTS = {text for _key, text, _tag in acks.THINKING_POOL}
+
+
 # --- fixtures ----------------------------------------------------------------
 
 
@@ -184,7 +188,7 @@ def test_stream_order_ack_first(client):
     # no voice: the ack degrades to text, still first, and the turn still ends done
     overlay.set_deps(make_deps(chunks=['{"say": "Hi."}\n']))
     events = turn(client, "what is the capital of France", conv_id="c2")
-    assert events[0] == {"type": "say", "text": "Just a moment."}
+    assert events[0]["type"] == "say" and events[0]["text"] in POOL_TEXTS
     assert events[-1]["type"] == "done"
 
 
@@ -198,7 +202,7 @@ def test_open_turn_runs_open(client):
     overlay.set_deps(make_deps(run=fake_run, apps={"safari": "Safari"}))
     events = turn(client, "open Safari")
     assert ["open", "-a", "Safari"] in calls
-    assert says(events)[1] == "Opening Safari."  # [0] is the ack
+    assert says(events) == ["Opening Safari."]  # open_app has no ack (B4): its line is the only one
 
 
 def test_every_spoken_line_gets_audio_when_there_is_a_voice(client):
@@ -206,7 +210,7 @@ def test_every_spoken_line_gets_audio_when_there_is_a_voice(client):
     overlay.set_deps(make_deps(synth=lambda text: (b"\x00\x00" * 10, 24000), apps={"safari": "Safari"}))
     events = turn(client, "open Safari", stt_final_ms=140.5)
     spoken = [e["text"] for e in events if e["type"] == "audio"]
-    assert spoken == ["Of course.", "Opening Safari."]
+    assert spoken == ["Opening Safari."]  # no open ack (B4): only the line's own audio
 
 
 def test_ground_turn_shape_and_check(client):
@@ -283,7 +287,7 @@ def test_answer_streams_cards_and_say(client):
     assert [e["type"] for e in events] == ["audio", "say", "audio", "card", "say", "audio", "done"]
     assert [e["card"]["title"] for e in events if e["type"] == "card"] == ["Why"]  # Bad card dropped
     assert says(events) == ["The quick answer.", "plain text line"]
-    assert events[0]["text"] == "Just a moment."  # the ack audio
+    assert events[0]["text"] in POOL_TEXTS  # the thinking-pool ack audio
 
 
 # --- untrusted context: reference-gated, scrubbed, tool-less ------------------
