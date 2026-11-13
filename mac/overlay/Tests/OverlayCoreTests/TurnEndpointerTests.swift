@@ -214,6 +214,7 @@ final class TurnEndpointerTests: XCTestCase {
         let t0 = Date()
         // The stalled prefixes (4 and 3 words after the wake) and the full transcripts, as logged.
         for (text, voiceQuiet) in [("Hey Jarvis, can you tell me", 0.06),
+                                   ("Start a new", 0.01),
                                    ("Start a new session", 0.01),
                                    ("Start a session", 0.01),
                                    ("can you tell me, when you have a moment, what the weather", 0.06),

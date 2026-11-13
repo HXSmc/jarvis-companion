@@ -12,7 +12,8 @@ public enum TurnEndpointer {
     public static let extended: TimeInterval = 2.7
     /// No new text for this long ends the turn even if the mic still "hears voice" (fan, TV).
     public static let stuckText: TimeInterval = 4
-    /// Text silence this long ends a complete-looking sentence even while the mic hears voice.
+    /// Text silence this long ends a short complete-looking command over room voice that has paused
+    /// for holdVoiceQuiet (it never fires while the owner is heard).
     public static let completeHold: TimeInterval = 1.5
     /// completeHold applies only to a short command (wake word off): Mac run r2 cut 20-word
     /// requests at "Can you tell me when you have a moment" while the owner was still talking.
