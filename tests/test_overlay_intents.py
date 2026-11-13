@@ -745,6 +745,14 @@ def test_card_remove_collisions():
                          ("take away the picture", "picture")):
         intent = parse(text, apps=())
         assert (intent.kind, intent.arg, intent.sub) == ("card_remove", "target", target), text
+    # A trailing please/for me/now/sir never becomes part of the target.
+    for text in ("remove that please", "remove it please", "remove that for me",
+                 "remove that now", "remove that card please", "dismiss that card please",
+                 "close this card sir"):
+        assert parse(text, apps=()).kind == "card_remove", text
+        assert parse(text, apps=()).arg == "pointer", text
+    intent = parse("remove the dog picture for me", apps=())
+    assert (intent.kind, intent.arg, intent.sub) == ("card_remove", "target", "dog picture")
     assert parse("forget that", apps=()).kind == "memory"
     assert parse("delete the battery research", apps=(),
                  workspace_names=("battery research",)).kind == "workspace"

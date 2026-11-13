@@ -585,7 +585,9 @@ def card_size_request(text: str) -> CardSizeAsk | None:
 def card_remove_request(text: str) -> CardRemoveAsk | None:
     """One-card removal ask ("close the phone diagram"), or None. Fixed code, never a model."""
     t = _clean(text).lower().replace(",", "")
-    for form in _match_forms(t):
+    # Tail-stripped form first: the target is free text, so "remove that please" would
+    # otherwise match with "that please" as the target.
+    for form in reversed(list(_match_forms(t))):
         m = _CARD_REMOVE_RE.fullmatch(form)
         if not m:
             continue

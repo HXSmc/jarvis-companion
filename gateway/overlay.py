@@ -2183,6 +2183,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         next(c for c in reversed(cards) if c[0] == i)[2][:4]) for i in hit[1][:3]]
                     which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
                     line = f"Which one: {which}? {ASK_AGAIN}"
+                    _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
                     async for ev in _speak(line, deps):
                         yield ev
                     said.append(line)

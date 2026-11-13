@@ -320,6 +320,8 @@ def test_card_remove_none_and_ambiguous(client):
     assert not [e for e in events if e["type"] == "drop_cards"]
     assert _steps("card_remove")[-1]["detail"] == "refused reason=ambiguous"
     assert len(overlay._card_index["cr2"]) == 2  # both stayed
+    # the line speaks card titles (maybe untrusted) into _history: the conv goes quiet
+    assert "cr2" in overlay._tainted
 
     # nothing held: no search, no model, one line
     clock = Clock()
