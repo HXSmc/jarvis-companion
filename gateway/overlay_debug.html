@@ -90,7 +90,7 @@ function describe(s) {
     case "barge_in": case "barge_aec": case "barge_gate": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
-    case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
+    case "agent": return s.detail || (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
     case "agent_tool": return `${s.tool} · ${s.decision}` + (s.kind ? ` · ${s.kind}` : "") +
                               (s.reason ? ` · ${s.reason}` : "") + (s.ms != null ? ` · ${s.ms} ms` : "");
     case "agent_confirm": return s.state;

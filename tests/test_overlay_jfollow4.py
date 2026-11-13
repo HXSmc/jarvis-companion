@@ -24,28 +24,29 @@ from test_overlay_service import POOL_TEXTS, FakeConversations, make_deps, says,
 NEW_AND_SHORTENED = {
     "busy": "Still on the last one.",
     "no_sessions_access": "I can't reach your sessions.",
-    "diff_none_auto": "No uncommitted changes here.",
-    "session_none_named": "I don't see a session called that, sir.",
-    "session_device": "Sessions start on the mini PC only, sir.",
+    "diff_none_auto": "No changes here.",
+    "session_none_named": "I don't see that session.",
+    "session_device": "Mini PC only.",
     "session_failed": "That didn't go through, sir.",
-    "session_limit": "That's the limit for this hour, sir.",
-    "session_ask_gone": "That question is no longer open, sir.",
-    "session_started_it": "Started it on the mini PC, sir.",
+    "session_limit": "Hourly limit reached, sir.",
+    "session_ask_gone": "That question has closed.",
+    "session_started_it": "Started it, sir.",
     "session_sent": "Sent.",
-    "memory_none": "I don't have anything about that, sir.",
-    "memory_empty": "I don't remember anything yet, sir.",
+    "memory_none": "Nothing about that, sir.",
+    "memory_empty": "I remember nothing yet.",
     "memory_forgot": "Forgotten, sir.",
     "memory_forgot_all": "All forgotten, sir.",
     "memory_failed": "I couldn't save that, sir.",
-    "workspace_failed": "I couldn't save that one, sir.",
-    "workspace_none": "I have nothing saved by that name.",
-    "workspace_empty": "There's nothing on screen to save.",
-    "workspace_full": "That's thirty saved. Delete one first.",
+    "workspace_failed": "I couldn't save it, sir.",
+    "workspace_none": "I don't have that one.",
+    "workspace_empty": "Nothing here to save.",
+    "workspace_full": "That's thirty. Delete one.",
     "workspace_deleted": "Deleted, sir.",
-    "workspace_none_saved": "You haven't saved anything yet, sir.",
-    "workspace_no_pages": "No pages were saved there.",
-    "vault_off_limits": "That folder is off limits, sir.",
-    "cut_off": "I didn't catch the end of that, sir.",
+    "workspace_none_saved": "Nothing saved yet, sir.",
+    "workspace_no_pages": "That one has no pages.",
+    "vault_off_limits": "That folder's off limits.",
+    "cut_off": "I missed the end of that.",
+    "vault_unset": "Notes vault not set, sir.",
 }
 
 
@@ -553,3 +554,60 @@ def test_session_answer_with_no_open_card_sends_a_message(client, monkeypatch, t
     assert [m for m, _u, _a, _b in gone] == ["GET"]
     from mac.voice.intents import session_request
     assert session_request("tell it:") is None  # a text answer never has empty words
+
+
+# --- Round 3 fixes (Mac live run) ----------------------------------------------------------
+
+
+def test_notes_search_with_vault_unset_says_so(client):
+    """Live 47d: with no OVERLAY_VAULT, "search my notes" started the file agent in a repo."""
+    clock = Clock()
+    pool, _deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Found it."})]))
+    events = turn(client, "search my notes for meeting notes", conv_id="vu1")
+    assert says(events) == [acks.PHRASES["vault_unset"]]  # no "Searching your notes." ack first
+    assert pool.made == []  # no agent started, so no tool call outside the vault
+    assert "vu1" not in overlay._tainted
+    assert [s.get("detail") for s in _steps("agent")] == ["refused reason=vault_unset"]
+
+
+def test_notes_search_with_vault_set_still_runs_the_agent(client, monkeypatch):
+    monkeypatch.setenv("OVERLAY_VAULT", str(Path(os.environ["HOME"]) / "vault"))
+    clock = Clock()
+    pool, _deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Found it."})]))
+    events = turn(client, "search my notes for meeting notes", conv_id="vu2")
+    assert says(events)[0] == acks.PHRASES["agent_notes"]
+    assert "Found it." in says(events)
+    assert len(pool.made) == 1
+
+
+def test_stuck_policy_check_fails_closed_and_the_turn_ends(client, monkeypatch):
+    """Live 47d: a policy walk stuck on a macOS privacy prompt parked the turn: no keepalive, no
+    time limit, no done row, the app timed out. Now the check is bounded and a timeout denies."""
+    import threading
+
+    from mac.voice import agent_policy
+
+    release = threading.Event()
+    real = agent_policy.decide
+
+    def stuck(name, tool_input, ctx):
+        if tool_input.get("pattern") == "stuck":
+            release.wait(2)
+        return real(name, tool_input, ctx)
+
+    monkeypatch.setattr(agent_policy, "decide", stuck)
+    monkeypatch.setattr(overlay, "POLICY_CHECK_S", 0.2)
+    clock = Clock()
+    pool, _deps = setup(clock, lambda: FakeAgent(
+        clock, script=[can_use("r1", "Glob", {"pattern": "stuck", "path": os.environ["HOME"]})],
+        after={"deny": [result({"say": "I couldn't search there."})]}))
+    try:
+        events = turn(client, "commit my changes", conv_id="ps1")
+    finally:
+        release.set()
+    agent_sess = pool.made[0]
+    assert [r["behavior"] for r in agent_sess.responses] == ["deny"]
+    assert agent_sess.responses[0]["message"] == overlay.POLICY_TIMEOUT_REASON
+    assert "I couldn't search there." in says(events)
+    assert [s["decision"] for s in _steps("agent_tool")] == ["deny"]
+    assert _steps("done")

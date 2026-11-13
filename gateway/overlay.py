@@ -1886,8 +1886,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         ack_phrase_key = acks.ack_key(intent.kind, intent.sub)
+        # A notes search with no vault set would start the file agent in some repo: say it is unset.
+        notes_unset = intent.kind == "agent" and intent.sub == "notes" and not os.environ.get("OVERLAY_VAULT")
         if intent.kind == "sessions" and _sessions_access() is None:
             ack_phrase_key = None  # no gateway access: the no_sessions_access line is the whole speech
+        elif notes_unset:
+            ack_phrase_key = None  # the vault_unset line is the whole speech
         elif (intent.kind == "answer"
               and (body.conv_id in _tainted or _holds_agent_state(body.conv_id, deps, cursor=False))
               and _MEDIA_NOUN_RE.search(body.text)):
@@ -2294,6 +2298,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         elif intent.kind == "workspace":
             async for ev in _workspace_turn(body, ws_ask, deps, said, on_step):
                 yield ev
+
+        elif notes_unset:
+            if on_step:
+                on_step("agent", detail="refused reason=vault_unset")
+            async for ev in _line("vault_unset", deps):
+                yield ev
+            said.append(acks.PHRASES["vault_unset"])
 
         elif intent.kind == "agent":
             async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step,
@@ -2892,6 +2903,8 @@ AGENT_WALL_S = 120  # hard limit per agent turn
 AGENT_TICK_S = 1.0  # how often the stream loop wakes up to check the clock
 KEEPALIVE_S = 15  # the app's URLSession idles out at 90 s; stay far below
 PROGRESS_GAP_S = 4  # at most one templated progress line per 4 s
+POLICY_CHECK_S = 10.0  # one tool call's policy check (path walks, git) normally takes milliseconds
+POLICY_TIMEOUT_REASON = "that location did not answer in time; search a narrower folder"
 FIRST_PROGRESS_S = 1.5  # no tool call yet this long after the agent started: speak the sub's progress line
 CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
 CONFIRM_POLL_S = 0.5
@@ -3522,10 +3535,15 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 rid = str(ev.get("request_id", ""))
                 name = str(req.get("tool_name") or "")
                 tool_input = req.get("input") if isinstance(req.get("input"), dict) else {}
-                # git subprocesses and tree walks: never on the event loop
-                decision = await asyncio.to_thread(agent_policy.decide, name, tool_input, run.ctx)
+                # git subprocesses and tree walks: never on the event loop, and never unbounded: a walk
+                # stuck on a macOS privacy prompt (iCloud Drive) parked this loop with no keepalive.
+                try:
+                    decision, family = await asyncio.wait_for(asyncio.to_thread(
+                        lambda: (agent_policy.decide(name, tool_input, run.ctx),
+                                 agent_policy.kind_of(name, tool_input, run.ctx))), POLICY_CHECK_S)
+                except asyncio.TimeoutError:  # fail closed; the stuck thread is left to finish on its own
+                    decision, family = agent_policy.Deny(POLICY_TIMEOUT_REASON), "file"
                 label = agent_policy.log_label(name, tool_input)
-                family = await asyncio.to_thread(agent_policy.kind_of, name, tool_input, run.ctx)
                 now = deps.clock()
                 run.opening_key = None  # a tool call came first: its own progress rules apply
                 if metrics.get("agent_first_tool_s") is None:
