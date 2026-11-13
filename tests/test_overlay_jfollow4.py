@@ -611,3 +611,35 @@ def test_stuck_policy_check_fails_closed_and_the_turn_ends(client, monkeypatch):
     assert "I couldn't search there." in says(events)
     assert [s["decision"] for s in _steps("agent_tool")] == ["deny"]
     assert _steps("done")
+
+
+def test_stuck_policy_checks_use_their_own_pool(client, monkeypatch):
+    """More stuck checks than the policy pool has workers: each is denied, the turn still ends,
+    and asyncio's default pool (respond, next_event) is never the one that gets stuck."""
+    import threading
+
+    from mac.voice import agent_policy
+
+    release = threading.Event()
+    threads: list[str] = []
+
+    def stuck(name, tool_input, ctx):
+        threads.append(threading.current_thread().name)
+        release.wait(3)
+        return agent_policy.Deny("released")
+
+    monkeypatch.setattr(agent_policy, "decide", stuck)
+    monkeypatch.setattr(overlay, "POLICY_CHECK_S", 0.1)
+    n = overlay._POLICY_POOL._max_workers + 2
+    clock = Clock()
+    pool, _deps = setup(clock, lambda: FakeAgent(
+        clock, script=[*(can_use(f"r{i}", "Glob", {"pattern": f"p{i}"}) for i in range(n)),
+                       result({"say": "Nothing found."})]))
+    try:
+        events = turn(client, "commit my changes", conv_id="ps2")
+    finally:
+        release.set()
+    assert [r["message"] for r in pool.made[0].responses] == [overlay.POLICY_TIMEOUT_REASON] * n
+    assert "Nothing found." in says(events)
+    assert _steps("done")
+    assert threads and all(t.startswith("policy") for t in threads)

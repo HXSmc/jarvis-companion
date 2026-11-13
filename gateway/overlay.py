@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -2905,6 +2906,9 @@ KEEPALIVE_S = 15  # the app's URLSession idles out at 90 s; stay far below
 PROGRESS_GAP_S = 4  # at most one templated progress line per 4 s
 POLICY_CHECK_S = 10.0  # one tool call's policy check (path walks, git) normally takes milliseconds
 POLICY_TIMEOUT_REASON = "that location did not answer in time; search a narrower folder"
+# Its own small pool: stuck checks must not fill asyncio's default pool, which runs every turn's
+# to_thread calls. When all four are stuck, queued checks time out and are denied (fail closed).
+_POLICY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="policy")
 FIRST_PROGRESS_S = 1.5  # no tool call yet this long after the agent started: speak the sub's progress line
 CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
 CONFIRM_POLL_S = 0.5
@@ -3538,9 +3542,10 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 # git subprocesses and tree walks: never on the event loop, and never unbounded: a walk
                 # stuck on a macOS privacy prompt (iCloud Drive) parked this loop with no keepalive.
                 try:
-                    decision, family = await asyncio.wait_for(asyncio.to_thread(
-                        lambda: (agent_policy.decide(name, tool_input, run.ctx),
-                                 agent_policy.kind_of(name, tool_input, run.ctx))), POLICY_CHECK_S)
+                    decision, family = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                        _POLICY_POOL, lambda: (agent_policy.decide(name, tool_input, run.ctx),
+                                               agent_policy.kind_of(name, tool_input, run.ctx))),
+                        POLICY_CHECK_S)
                 except asyncio.TimeoutError:  # fail closed; the stuck thread is left to finish on its own
                     decision, family = agent_policy.Deny(POLICY_TIMEOUT_REASON), "file"
                 label = agent_policy.log_label(name, tool_input)
