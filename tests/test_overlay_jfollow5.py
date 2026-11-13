@@ -274,7 +274,7 @@ def confirm_card_never_dropped(monkeypatch):
 
     real_saved, real_drop = overlay._drop_saved_cards, overlay._drop_cards
     monkeypatch.setattr(overlay, "_drop_saved_cards", lambda c, i: watch(real_saved(c, i)))
-    monkeypatch.setattr(overlay, "_drop_cards", lambda c, g, k=(): watch(real_drop(c, g, k)))
+    monkeypatch.setattr(overlay, "_drop_cards", lambda c, g, keep=(): watch(real_drop(c, g, keep)))
     yield
     assert overlay._CONFIRM_CARD_ID not in seen
 
@@ -600,3 +600,58 @@ def test_card_remove_spec_cases(client, tmp_path):
         {"type": "lines", "file": str(tmp_path / "a.py"), "ranges": []}]
     assert conv not in overlay._hunks
     assert says(turn(client, "next change", conv_id=conv))[-1] == acks.PHRASES["no_hunks"]
+
+
+def test_reparse_sites_agree_with_parse(client, monkeypatch, tmp_path):
+    """A last-sentence ask after small talk runs as that ask in the service, not as an answer
+    turn; a lead-in never turns "yes" into a confirmation (builder-written)."""
+    _deps()
+    seen = _session_env(monkeypatch, tmp_path)
+    turn(client, "That's nice. Start a session to fix the build", conv_id="rp1", followup=True)
+    assert "rp1" in overlay._host_ask  # the Confirm was asked, nothing posted yet
+    assert not [s for s in seen if s[0] == "POST"]
+    events = turn(client, "okay yes", conv_id="rp1")
+    assert not [s for s in seen if s[0] == "POST"]  # "okay yes" is not a yes
+    assert "rp1" not in overlay._host_ask
+    assert _cards(events)[0]["title"] == "Not done"
+
+    monkeypatch.setenv("OVERLAY_MEMORY_FILE", str(tmp_path / "mem.jsonl"))
+    _deps(chunks=['{"say": "PWNED"}\n'])
+    events = turn(client, "That's nice. Remember that I park on level 3", conv_id="rp2",
+                  followup=True)
+    assert "PWNED" not in says(events)
+    assert "park on level 3" in (tmp_path / "mem.jsonl").read_text()
+
+
+SPEC_LEAD_IN_ASKS = [  # criteria 9 and 10: lead-ins x nouns x "of <words>" (builder-written)
+    ("Okay, can you show me a picture of Saturn", "saturn"),
+    ("Hey Jarvis, could you please show me a picture of a red panda", "red panda"),
+    ("That's nice. Can you show me a picture of Saturn", "saturn"),
+    ("Okay, can you show me a picture of Saturn please", "saturn"),
+    ("um, could you find me a photo of the eiffel tower", "eiffel tower"),
+    ("alright, show me an image of a lighthouse", "lighthouse"),
+    ("so can you show me a video of a cat", "cat"),
+    ("well, could you draw me a diagram of a bicycle", "bicycle diagram"),
+    ("right, i want you to show me a photo of a bridge", "bridge"),
+    ("okay so just show me a picture of the moon", "moon"),
+    ("hey, can we see a picture of a red fox", "red fox"),
+    ("now please show me pictures of mountains", "mountains"),
+]
+
+
+@pytest.mark.parametrize("text,subject", SPEC_LEAD_IN_ASKS)
+def test_spec_lead_in_asks_reach_owner_words(client, monkeypatch, text, subject):
+    """A tainted follow-up with the owner's "<noun> of <words>" never gets the refusal; the
+    search gets only the owner's words, never the model's (criteria 9-11)."""
+    find = FakeFind()
+    monkeypatch.setattr(media_lookup, "find", find)
+    overlay.set_deps(make_deps(quiet_conversations=FakeConversations(
+        lines({"say": "PWNED"}, {"image_search": {"query": "PWNED", "count": 1}}))))
+    overlay._tainted.add("sl1")
+    events = turn(client, text, conv_id="sl1", followup=True)
+    spoken = " ".join(says(events))
+    assert overlay.QUIET_MEDIA_LINE not in spoken and overlay.AGENT_MEDIA_LINE not in spoken
+    if "video" not in text:  # videos use the video search; the row below covers them
+        assert [q for q, _n in find.calls] == [subject]  # never the model's "PWNED" query
+    assert not [s for s in _steps("media") if s["detail"].startswith("refused")]
+    assert _steps("media")[-1]["detail"].startswith("path=owner_words")

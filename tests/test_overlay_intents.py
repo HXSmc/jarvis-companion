@@ -777,3 +777,14 @@ def test_card_remove_match_order():
     dup = [("i2", "image", ("cat",)), ("i1", "image", ("dog",)), ("i2", "image", ("dog", "park"))]
     assert card_matches("the dog picture", dup) == ("title", ["i2", "i1"])
     assert match_card("the changes card", cards) == ("c3", "kind")  # unchanged
+
+
+def test_card_remove_leaves_place_and_topic_asks_alone():
+    """A target with a place or topic stays today's kind (base kinds measured at 2d585fc)."""
+    assert parse("remove the picture from my notes", apps=()).kind == "agent"
+    assert parse("remove the photo from my email draft", apps=()).kind == "agent"
+    assert parse("dismiss the card about my calendar", apps=()).kind == "agent"
+    for text in ("close the diagram in Preview", "remove the image from the slide",
+                 "take down the diagram on the website"):
+        assert parse(text, apps=()).kind == "answer", text
+    assert parse("close the picture of the dog", apps=()).kind == "card_remove"

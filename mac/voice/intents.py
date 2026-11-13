@@ -238,7 +238,10 @@ _CARD_REMOVE_POINTERS = frozenset({"that", "this", "it", "that one", "this one",
 # remove; plural "cards"/"them"/"everything"/"all" is the clear, not a one-card ask.
 _CARD_REMOVE_BLOCKED = frozenset(
     "highlight highlights box boxes arrow arrows outline outlines app apps window windows "
-    "tab tabs cards them everything all".split())
+    "tab tabs cards them everything all "
+    # A place or topic after the target ("the picture from my notes", "the diagram in
+    # Preview") is owner-data or app work for the agent, never a card on screen.
+    "from in on about into inside onto at to off within under".split())
 # Sessions read-only question; "what went wrong with X" carries the session name.
 _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anything stuck"
                           r"|are any sessions waiting(?: for me| on me)?"

@@ -2003,15 +2003,15 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         intent = _hunk_rewrite(intent, body.text, body.conv_id, on_step)
         # A3: owner words only. The action re-parses raw_text (before any continuation join);
         # a join that hid the request is a plain answer turn, never an ask.
-        sess_ask = intents.session_request(raw_text) if intent.kind == "session" else None
+        sess_ask = intents.first_form(raw_text, intents.session_request) if intent.kind == "session" else None
         if intent.kind == "session" and sess_ask is None:
             intent = intents.Intent("answer", intents._clean(body.text))
         mem_ask: intents.MemoryAsk | None = None
         ws_ask: intents.WorkspaceAsk | None = None
         if intent.kind == "memory":
-            mem_ask = intents.memory_request(raw_text)
+            mem_ask = intents.first_form(raw_text, intents.memory_request)
         elif intent.kind == "workspace":
-            ws_ask = intents.workspace_request(raw_text, ws_names)
+            ws_ask = intents.first_form(raw_text, lambda t: intents.workspace_request(t, ws_names))
         if intent.kind == "memory" and mem_ask is None:
             intent = intents.Intent("answer", intents._clean(body.text))
         if intent.kind == "workspace" and ws_ask is None:
