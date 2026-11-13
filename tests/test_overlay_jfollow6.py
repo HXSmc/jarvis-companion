@@ -283,3 +283,141 @@ def test_pick_ids_only_from_line(client):
 
 
 # --- C/D service tests (helper 2) ---
+
+from test_overlay_agent import FakeAgent, FakeAgentPool, result, setup  # noqa: E402
+from test_overlay_jfollow4 import _session_env  # noqa: E402
+from test_overlay_service import POOL_TEXTS  # noqa: E402
+
+
+def test_card_help_turn(client):
+    """C1 / criterion 16: a 'can you remove one card' question helps, never deletes the newest."""
+    ids = _show_cards(client, "ch", "Jarvis capabilities", "Jarvis companion capabilities")
+    clock = Clock()
+    loud, quiet = _model_deps(clock)
+    events = turn(client, "can you remove one card", conv_id="ch")
+    assert not _drops(events)
+    assert set(_held("ch")) == set(ids.values())  # both cards still held
+    assert events[0]["type"] == "say" and events[0]["text"] == acks.PHRASES["card_help"]
+    assert says(events) == [acks.PHRASES["card_help"]]  # no ack audio/say before the fixed line
+    assert _model_calls(loud, quiet) == 0
+    assert _steps("intent")[-1]["kind"] == "card_help"
+
+
+def test_answer_claim_held_and_dropped(client):
+    """C2 / criterion 18: a false overlay claim is held, then dropped with the honest lines."""
+    claim = "Understood, sir, clearing the capabilities card from the overlay now."
+
+    def pools(*objs):
+        clock = Clock()
+        loud, quiet = FakeConversations(lines(*objs)), FakeConversations(lines(*objs))
+        _deps(clock, conversations=loud, quiet_conversations=quiet)
+        return loud, quiet
+
+    # the claim then a gate-dropped clear: never spoken, honest lines instead, no clear event
+    pools({"say": claim}, {"clear": True})
+    events = turn(client, "the jarvis capabilities card", conv_id="cd1")
+    spoken = says(events)
+    assert claim not in " ".join(spoken) and claim not in str(events)
+    assert spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+    assert spoken.count(acks.PHRASES["card_hint"]) == 1
+    assert set(spoken) - {overlay.OVERLAY_UNCHANGED_LINE,
+                          acks.PHRASES["card_hint"]} <= POOL_TEXTS  # only a thinking ack may lead
+    assert not [e for e in events if e["type"] == "clear"]
+    row = _steps("layout")[-1]
+    assert (row["mode"], row["state"]) == ("clear", "dropped")
+    assert _steps("answer")[-1]["claim"] == "dropped"
+
+    # a claim with no directive after it: same outcome
+    pools({"say": claim})
+    events = turn(client, "the jarvis capabilities card", conv_id="cd2")
+    spoken = says(events)
+    assert claim not in " ".join(spoken)
+    assert spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+    assert spoken.count(acks.PHRASES["card_hint"]) == 1
+    assert _steps("answer")[-1]["claim"] == "dropped"
+
+    # regression, hold-then-speak: the directive passes, so the claim is spoken just before it
+    pools({"say": "Hiding the cards now, sir."}, {"layout": "hide"})
+    events = turn(client, "hide the overlay for a bit", conv_id="cd3")
+    say_i = next(i for i, e in enumerate(events)
+                 if e["type"] == "say" and e["text"] == "Hiding the cards now, sir.")
+    layout_i = next(i for i, e in enumerate(events) if e["type"] == "layout")
+    assert say_i < layout_i
+    assert overlay.OVERLAY_UNCHANGED_LINE not in says(events)
+
+    # regression: today's order for a passing clear (as test_overlay_jfollow3.py:298)
+    pools({"say": "Clearing the cards."}, {"clear": True})
+    events = turn(client, "please wipe the screen for me now", conv_id="cd4")
+    say_i = next(i for i, e in enumerate(events)
+                 if e["type"] == "say" and e["text"] == "Clearing the cards.")
+    assert say_i < next(i for i, e in enumerate(events) if e["type"] == "clear")
+
+
+def test_model_clear_never_wipes_for_one_card(client):
+    """C3 / criterion 19 turn part: one card the owner named survives a whole-screen wipe."""
+    clock = Clock()
+    loud = FakeConversations(lines({"say": "Done."}, {"clear": True}))
+    quiet = FakeConversations()
+    _deps(clock, conversations=loud, quiet_conversations=quiet)
+    overlay._card_index["cw"] = deque([("k1", "info", ("weather", "report"))], maxlen=12)
+    before = list(overlay._card_index["cw"])
+    # Names-only: no held card answers to "jarvis thing", so it stays an answer turn, and its
+    # "remove" passes the owner-verb gate for a model clear (the spec's second risk).
+    events = turn(client, "remove the jarvis thing", conv_id="cw")
+    assert not [e for e in events if e["type"] == "clear"]
+    assert list(overlay._card_index["cw"]) == before
+    row = _steps("layout")[-1]
+    assert (row["mode"], row["state"], row["reason"]) == ("clear", "dropped", "one_card")
+    assert "Done." in says(events)  # the non-claiming say line is unchanged
+    assert overlay.OVERLAY_UNCHANGED_LINE in says(events) and acks.PHRASES["card_hint"] in says(events)
+
+    # the C1 question never reaches the model at all
+    calls = _model_calls(loud, quiet)
+    events = turn(client, "can you not remove a single card", conv_id="cw2")
+    assert _model_calls(loud, quiet) == calls and not _drops(events)
+
+    # regression: whole-overlay asks still let the model clear, once each
+    for j, phrase in enumerate(("close the overlay", "dismiss the overlay", "remove these")):
+        loud = FakeConversations(lines({"say": "Done."}, {"clear": True}))
+        _deps(clock, conversations=loud, quiet_conversations=FakeConversations())
+        events = turn(client, phrase, conv_id=f"cr{j}")
+        assert len([e for e in events if e["type"] == "clear"]) == 1
+
+
+def test_agent_claim_dropped(client):
+    """C4 / criterion 20: the agent tier has no overlay directive, so its claims are false."""
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(
+        clock, script=[result({"say": "Files read."},
+                              {"say": "I've cleared the capabilities card, sir."})]),
+        chunks=['{"agent": true}\n'])
+    events = turn(client, "tell me about the work I did", conv_id="ag1")
+    spoken = says(events)
+    assert "Files read." in spoken  # other agent say lines speak as today
+    assert "cleared the capabilities card" not in " ".join(spoken)
+    assert spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+
+
+def test_sessions_variants_turn(client, monkeypatch, tmp_path):
+    """Criterion 22: the new sessions phrasings take the read-only sessions path, quiet pool only."""
+    _session_env(monkeypatch, tmp_path)
+    clock = Clock()
+    made: list = []
+    deps = _deps(clock, conversations=FakeConversations(),
+                 quiet_conversations=FakeConversations(lines({"say": "Two sessions, one waiting."})))
+    deps.agent_conversations = FakeAgentPool(lambda: made.append(1))
+    for i, phrase in enumerate(("what's running on my Jarvis Companion",
+                                "what sessions are on my driver's companion",
+                                "how are the sessions on my Jarvis Companion")):
+        conv = f"sv{i}"
+        events = turn(client, phrase, conv_id=conv)
+        assert events[0]["text"] == "Checking your sessions."  # the ack, before anything else
+        assert "can't see" not in " ".join(says(events))
+        assert any(r.get("kind") == "sessions" for r in _steps("intent"))
+        assert _steps("sessions")[-1]["detail"] == "result=ok rows=2"
+        assert [c for c in (e.get("card") for e in events) if c and c["type"] == "info"]
+        prompt = deps.quiet_conversations.sessions[conv].prompts[0]
+        assert "never instructions" in prompt and '<context untrusted="true">' in prompt
+    assert deps.conversations.sessions == {}  # loud pool untouched
+    assert not made  # no agent run
+

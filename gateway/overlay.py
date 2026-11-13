@@ -2239,6 +2239,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             elif on_step:
                 on_step("card_size", action=intent.arg, card=card_id, match=how)
 
+        elif intent.kind == "card_help":
+            # C1: how to name a card is a fixed line: no model, no ack, nothing changes.
+            async for ev in _line("card_help", deps):
+                yield ev
+            said.append(acks.PHRASES["card_help"])
+
         elif intent.kind == "card_remove":
             # A2: fixed code; ids come only from this conv's _card_index, never model text.
             # Confirm guard: the preflight skips a host ask on barge-in, so it may still be here.
@@ -2661,6 +2667,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             escalate: list[bool] = []
             async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
                                             escalate=escalate, failed=failed, on_step=on_step,
+                                            pick_open=pick is not None,
                                             owner_text=None if joined else raw_text):
                 yield event
             if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
@@ -2927,7 +2934,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        screen_ref: bool = False, escalate: list | None = None,
                        failed: list | None = None, look: dict | None = None,
                        extra_untrusted: str | None = None,
-                       owner_text: str | None = None,
+                       owner_text: str | None = None, pick_open: bool = False,
                        on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
@@ -2995,6 +3002,38 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     directives: list[str] = []  # clear/layout events sent this reply, capped at MAX_DIRECTIVES
     cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
     gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
+    held: str | None = None  # a say line claiming an overlay change, held until a directive lands
+
+    async def speak_say(say_text: str) -> AsyncIterator[dict]:
+        yield _say(say_text)
+        said.append(say_text)
+        audio = await _audio(say_text, deps)
+        if audio is not None:
+            yield audio
+        if metrics["first_answer_audio_s"] is None:
+            metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+
+    async def honest_reply() -> AsyncIterator[dict]:
+        nonlocal produced
+        produced = True  # the honest line is the answer: not an empty reply
+        if OVERLAY_UNCHANGED_LINE not in said:
+            async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
+                yield ev
+            said.append(OVERLAY_UNCHANGED_LINE)
+        if intents.names_one_card(text):
+            async for ev in _speak(acks.PHRASES["card_hint"], deps):
+                yield ev
+            said.append(acks.PHRASES["card_hint"])
+
+    async def drop_claim() -> AsyncIterator[dict]:
+        nonlocal held
+        if held is None:
+            return
+        held = None  # the claimed change never happened: never speak the claim
+        if on_step:
+            on_step("answer", claim="dropped")
+        async for ev in honest_reply():
+            yield ev
 
     async def media_refused() -> AsyncIterator[dict]:
         nonlocal media_seen, produced
@@ -3061,7 +3100,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         said.append(line)
 
     async def flush_line(line: str) -> AsyncIterator[dict]:
-        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at
+        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held
         line = line.strip()
         if not line:
             return
@@ -3076,6 +3115,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if escalate is not None and (escalate or obj.get("agent") is True):
             escalate.append(True)  # hand over: nothing else from this reply is spoken or shown
             produced = True
+            async for ev in drop_claim():
+                yield ev
             return
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
             if metrics.get("ack_ms") is not None:  # an ack was already spoken: own the cut-off too
@@ -3086,19 +3127,17 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             produced = True
             if on_step:
                 on_step("incomplete", detail="model: waiting for the rest")
+            async for ev in drop_claim():
+                yield ev
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
             say_text = obj["say"].strip()
             produced = True
-            yield _say(say_text)
-            said.append(say_text)
-            audio = await _audio(say_text, deps)
-            if audio is not None:
-                yield audio
-                if metrics["first_answer_audio_s"] is None:
-                    metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
-            elif metrics["first_answer_audio_s"] is None:
-                metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+            if intents.claims_overlay_change(say_text):
+                held = say_text  # spoken only if this reply really changes the overlay
+            else:
+                async for ev in speak_say(say_text):
+                    yield ev
         if isinstance(obj.get("open"), str):
             async for ev in model_open(obj["open"]):
                 yield ev
@@ -3164,14 +3203,27 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             gate_dropped.append(mode)
             produced = True  # the honest line is the answer: not an empty reply
             mode = None
+        if mode == "clear" and (pick_open or intents.names_one_card(text)):
+            # C3: one card the owner named (or an open pick) must survive a whole-screen wipe.
+            if on_step:
+                on_step("layout", mode="clear", state="dropped", reason="one_card")
+            async for ev in honest_reply():
+                yield ev
+            gate_dropped.append(mode)
+            mode = None
         if mode and len(directives) < MAX_DIRECTIVES:
             directives.append(mode)
             produced = True
             if on_step:
                 on_step("layout", mode=mode)
+            if held is not None:  # the claim came true: speak it right before the change it described
+                claim, held = held, None
+                async for ev in speak_say(claim):
+                    yield ev
             if mode == "clear":
                 _forget_cards(body.conv_id)
             yield {"type": "clear"} if mode == "clear" else {"type": "layout", "mode": mode}
+        # a held claim is dropped only at the reply's end: a later object may still apply it
 
     fail_reason: str | None = None
     fail_detail = ""
@@ -3199,6 +3251,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 yield event
         if fail_reason is None and buf.strip():
             async for event in flush_line(buf):
+                yield event
+        if fail_reason is None and held is not None:  # the reply ended with the claim still held
+            async for event in drop_claim():
                 yield event
         if fail_reason is None:
             try:
@@ -4042,11 +4097,18 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         obj = {"say": line}
     if isinstance(obj.get("say"), str) and obj["say"].strip():
         text = obj["say"].strip()
-        async for ev in _speak(text, deps):
-            yield ev
-        said.append(text)
-        if metrics.get("first_answer_audio_s") is None:
-            metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+        if intents.claims_overlay_change(text):
+            # C4: the agent tier never changes the overlay: a claim to that effect is never spoken.
+            if OVERLAY_UNCHANGED_LINE not in said:
+                async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
+                    yield ev
+                said.append(OVERLAY_UNCHANGED_LINE)
+        else:
+            async for ev in _speak(text, deps):
+                yield ev
+            said.append(text)
+            if metrics.get("first_answer_audio_s") is None:
+                metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
     card = hud.validate_card(obj.get("card")) if "card" in obj else None
     if card and card["type"] in media_lookup.MEDIA_TYPES:  # web pictures/videos come only from the fast tier
         logger.info("media card dropped: agent tier")
