@@ -165,7 +165,11 @@ _WRAP_LEAD = r"(?:(?:can|could|would) you |please |jarvis )*"
 _WRAP_TRAIL = r"(?:,? (?:please|for me|for now|now|jarvis))*"
 _OBJECT = r"(?:it|them|that|this|everything|all the cards|all of them|all of it|all|the overlay|the cards?)"
 # STT writes a lone "hide" as the name "Hyde" (Mac live run 1); whole utterance only.
-_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:(?:hide|hyde)(?: " + _OBJECT + r")?|get rid of it|put (?:it|them|everything) away"
+# Mac run r2: Daniel's "Hide everything." / "Hide the cards." came back as "Hi, everything" and
+# "Hide the gods"; a "hi" counts only with one of these objects (a bare "hi" stays a greeting).
+_HIDE_RE = re.compile(_WRAP_LEAD + r"(?:(?:hide|hyde)(?: " + _OBJECT + r")?"
+                      r"|(?:hi|hide|hyde),? (?:everything|the cards?|the gods|them)"
+                      r"|get rid of it|put (?:it|them|everything) away"
                       r"|get (?:it|that|this|them) off my screen|go away"
                       r"|get (?:it|this|that|them|everything) out of (?:my face|here)"
                       r"|make (?:it|that|them|everything) (?:disappear|go away))" + _WRAP_TRAIL)
@@ -229,8 +233,15 @@ SESSION_WORDS_MAX = 300
 _SESSION_START_RE = re.compile(_WRAP_LEAD + r"(?:start|open|spin up) (?:a )?(?:new )?session"
                                r"(?: on (?:the )?(?P<dev>mini ?pc|mac|windows(?: pc)?))?"
                                r"(?: and| to| about| for)? (?P<words>.+)", re.I | re.S)
-_SESSION_STOP_RE = re.compile(r"stop (?:the )?(?P<name>.+?) session|stop session (?P<name2>.+)",
+# Mac run r2: "stop the session called voice test write hello file" fell through to the model.
+_SESSION_STOP_RE = re.compile(r"stop (?:the )?(?P<name>.+?) session"
+                              r"|stop (?:the )?session (?:called |named )?(?P<name2>.+)",
                               re.I | re.S)
+# D1, Mac run r2: "open the note Projects in the Secrets folder" went to the app opener and a
+# notes ask to the model, so the fixed refusal was never heard. Any ask naming the vault's
+# Secrets folder gets the host line, before any app, model or tool (stricter, never looser).
+_VAULT_SECRETS_RE = re.compile(r".*\b(?:secrets? (?:folder|directory|notes?)"
+                               r"|(?:in|from|inside|under) (?:my |the |your )?secrets)\b.*", re.I | re.S)
 _SESSION_ANSWER_RE = re.compile(
     r"(?:tell (?P<tname>the .+? session) (?P<tyn>yes|no|to go ahead)"
     r"|approve (?P<aname>the .+? session)"
@@ -286,6 +297,8 @@ def parse(text: str, apps: dict[str, str] | None = None,
     ask = memory_request(text)
     if ask:
         return Intent("memory", ask.action)
+    if _VAULT_SECRETS_RE.fullmatch(low):
+        return Intent("vault_secrets")
     ask = workspace_request(text, workspace_names or ())
     # An installed app or a site wins over a saved name sharing a word ("open notes").
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):

@@ -640,3 +640,21 @@ def test_workspace_request():
     assert (ask.action, ask.name) == ("delete", "battery research")
     assert workspace_request("open Safari") is None
     assert parse("open Safari", apps=APPS).kind != "workspace"
+
+
+def test_round7_live_phrasings():
+    """Mac run r2 transcripts that missed their fixed path (F6, 41 stop, 49 Secrets)."""
+    from mac.voice.intents import parse
+    for text in ("Hi, everything", "Hide the gods", "hi the cards", "hide, everything"):
+        assert parse(text, apps={}).kind == "hide", text
+    for text in ("Hi", "hi there", "hi Jarvis how are you"):
+        assert parse(text, apps={}).kind != "hide", text
+    ask = session_request("Stop the session called Voice Test, write hello")
+    assert (ask.action, ask.ref, ask.name) == ("stop", "name", "voice test, write hello")
+    assert session_request("stop session named build runner").name == "build runner"
+    for text in ("Open the note Projects in the Secrets folder",
+                 "Read my note called Projects, in the Secrets folder of my notes",
+                 "show me my secrets note", "what's in my secrets"):
+        assert parse(text, apps={"notes": "Notes"}).kind == "vault_secrets", text
+    for text in ("what is the secret of success", "tell me a secret"):
+        assert parse(text, apps={}).kind != "vault_secrets", text

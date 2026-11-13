@@ -759,3 +759,40 @@ def test_follow_up_echo_drop_is_timed_when_a_confirm_is_pending():
     core = (ROOT / "mac/overlay/Sources/OverlayCore/BargeIn.swift").read_text()
     assert "audioFrom >= TurnEndpointer.replayStart(drainedAt: drainedAt)" in core
     assert "func testConfirmAnswerTimingTable()" in BARGE_TESTS.read_text()
+
+
+# --- Round 7 fixes -------------------------------------------------------------------------
+
+
+def test_session_list_keeps_the_newest_open_sessions(client, monkeypatch, tmp_path):
+    """Mac run r2, F1: /central/sessions lists 400 rows oldest first; the cap kept the 20 oldest,
+    so a session started minutes earlier was never found ("I don't see that session")."""
+    old = [{"session_id": f"old-{i}", "state": "done", "device": "Mini PC",
+            "title": f"October job {i}", "last_activity_at": f"2026-10-{1 + i % 28:02d}T10:00:00Z"}
+           for i in range(400)]
+    new = {"session_id": "3ea976dd-a01c", "state": "idle", "device": "Mini PC",
+           "title": "Voice test: write hello file", "last_activity_at": "2026-11-13T03:08:00Z"}
+    clock = Clock()
+    _deps(clock)
+    seen = _session_env(monkeypatch, tmp_path, rows=old + [new])
+    rows, status = overlay._fetch_sessions("http://127.0.0.1:8788", "not-a-real-token")
+    assert status == 200 and len(rows) == 20
+    assert rows[0]["id"] == "3ea976dd-a01c"
+    assert [r["updated"] for r in rows[1:]] == sorted((r["updated"] for r in rows[1:]), reverse=True)
+    events = turn(client, "stop the voice-test session", conv_id="r7a")
+    assert says(events) == ["Stop the Voice test: write hello file session?"]
+    turn(client, "yes", conv_id="r7a")
+    assert seen[-1][:2] == ("POST", "http://127.0.0.1:8788/central/sessions/3ea976dd-a01c/stop")
+
+
+def test_secrets_folder_ask_gets_the_fixed_line_without_the_model(client, monkeypatch):
+    """Mac run r2, 49: the model answered in its own words (no tool call), so the fixed line was
+    never heard; the host now refuses an ask naming the Secrets folder before any model call."""
+    monkeypatch.setenv("OVERLAY_VAULT", "/nonexistent-vault")
+    deps = _deps(chunks=['{"say": "MODEL WORDS"}\n'])
+    for i, text in enumerate(("Open the note Projects in the Secrets folder",
+                              "Read my note called Projects, in the Secrets folder of my notes")):
+        events = turn(client, text, conv_id=f"r7s{i}")
+        assert says(events) == [acks.PHRASES["vault_off_limits"]]
+        assert _cards(events) == []
+    assert not deps.conversations.sessions and not deps.quiet_conversations.sessions  # no model

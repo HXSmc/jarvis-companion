@@ -135,7 +135,7 @@ ACK_POLICY: dict[str, str | None] = {
     "look": "look", "ground": "look",
     "agent": "agent",
     "sessions": "sessions",
-    "session": None, "memory": None, "workspace": None,
+    "session": None, "memory": None, "workspace": None, "vault_secrets": None,
     "answer": "answer",
 }
 

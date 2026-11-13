@@ -923,6 +923,9 @@ def _session_need(item: dict) -> dict | None:
             "options": options[:8]}
 
 
+SESSIONS_SCAN_MAX = 2000  # rows read from one /central/sessions answer before sorting
+
+
 def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
     """GET {url}/central/sessions -> (rows | None, status; 0 = unreachable). GET only, never a
     redirect. Rows carry device/state/title/doing/needs_owner/updated plus id/health/need for the
@@ -941,9 +944,13 @@ def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
         return None, resp.status_code
     rows: list[dict] = []
     if isinstance(body, list):
-        for item in body[:20]:
-            if not isinstance(item, dict):
-                continue
+        # The gateway lists every session oldest first (Mac run r2: 400 rows, today's past the first
+        # 20): open sessions first, newest first inside each group, then the cap.
+        items = sorted((i for i in body[:SESSIONS_SCAN_MAX] if isinstance(i, dict)),
+                       key=lambda i: (i.get("state") not in ("done", "stopped", "failed"),
+                                      str(i.get("last_activity_at") or i.get("updated_at") or "")),
+                       reverse=True)
+        for item in items[:20]:
             sid = str(item.get("session_id") or "")
             if not _SESSION_ID_RE.fullmatch(sid):  # a bad id can never be called back
                 continue
@@ -1949,6 +1956,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             if on_step:
                 on_step("layout", mode=mode)
             yield {"type": "layout", "mode": mode}
+
+        elif intent.kind == "vault_secrets":
+            # D1: fixed code names the vault's Secrets folder; no model, tool or file read runs.
+            async for ev in _line("vault_off_limits", deps):
+                yield ev
+            said.append(acks.PHRASES["vault_off_limits"])
 
         elif intent.kind == "clock":
             line = _clock_line(intent.arg, deps.now())

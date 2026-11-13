@@ -104,6 +104,7 @@ KIND_FIXTURE = [
     ("session status", {}, "sessions"),
     ("tell me a joke", {}, "answer"),
     ("what is the capital of France", {}, "answer"),
+    ("open the note projects in the secrets folder", {}, "vault_secrets"),
 ]
 
 
