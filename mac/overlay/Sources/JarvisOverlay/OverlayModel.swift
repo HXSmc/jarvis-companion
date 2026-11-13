@@ -108,13 +108,17 @@ final class OverlayModel: ObservableObject {
         return true
     }
 
-    /// A newer turn replaces these cards (drop_cards): they leave the screen, and an idle-cleared set
-    /// holding one of them can no longer come back with "show them".
+    /// These cards leave (drop_cards: a newer turn replaces them, or the owner removed one): they go
+    /// from the screen and from an idle-cleared set, so "show them" brings back only the others.
     func remove(cardIDs: [String]) {
         let ids = Set(cardIDs)
         enlarge.dropped(ids: cardIDs)
-        if let stash = idleStash, stash.cards.contains(where: { $0.id.map(ids.contains) ?? false }) {
-            idleStash = nil
+        if let stash = idleStash {
+            let kept = stash.cards.filter { !($0.id.map(ids.contains) ?? false) }
+            if kept.count != stash.cards.count {  // the stale frame goes on restore (cards didSet -> layout.keep)
+                idleStash = kept.isEmpty ? nil
+                    : ScatterLayout.IdleStash(cards: kept, layout: stash.layout, clearedAt: stash.clearedAt)
+            }
         }
         cards.removeAll { $0.id.map(ids.contains) ?? false }
     }

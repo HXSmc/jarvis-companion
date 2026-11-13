@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | sessions | session | memory | workspace
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -35,6 +35,13 @@ class MediaAsk:
 class CardSizeAsk:
     action: str  # "max" | "restore"
     target: str  # cleaned target words, "" for restore
+
+
+@dataclass
+class CardRemoveAsk:
+    target: str  # cleaned target words, or the pointer phrase ("that one")
+    pointer: bool  # True: "that/this/it/..." -> the card the service already tracks
+    card: bool = False  # True: the spoken target named a card/kind ("picture", "the ... card")
 
 
 @dataclass
@@ -198,6 +205,9 @@ _MEDIA_REQUEST_RE = re.compile(r"(?:(?:can|could|would|will) you |please |jarvis
                                + r"(?: of (?P<subject>.+))?")
 # Bare form "a picture of a dog": _MEDIA_NOUN carries the verb's leading space, so strip it.
 _MEDIA_OF_RE = re.compile(r"(?:an? )?" + _MEDIA_NOUN.lstrip() + r" of (?P<subject>.+)")
+# loose=True's net: any "<noun> of <subject>" inside a sentence that didn't fullmatch.
+_MEDIA_LOOSE_RE = re.compile(
+    r"\b(?P<noun>picture|photo|image|video|diagram|clip)(?P<plural>s)? of (?P<subject>.+)")
 # Subject tails that are politeness/timing, not search words.
 _MEDIA_TAILS = ("as a test", "please", "for me", "right now", "now", "again",
                 "jarvis", "sir", "thanks", "thank you")
@@ -218,6 +228,20 @@ _CARD_RESTORE_RE = re.compile(_WRAP_LEAD + r"(?:make (?:it|that) smaller|shrink 
                               r"|restore (?:it|that|the card)|back to normal|normal size"
                               r"|minimi[sz]e (?:it|that))" + _WRAP_TRAIL)
 _CARD_TARGET_LEAD_RE = re.compile(r"^(?:the|that|this|my) ")
+# Remove ONE card ("close the phone diagram"); fixed code, never a model. Whole utterance.
+_CARD_REMOVE_RE = re.compile(r"(?:(?:remove|close|dismiss|get rid of|take away|take down|lose)"
+                             r" (?P<t1>.+)|take (?P<t2>.+) (?:away|down))")
+_CARD_REMOVE_POINTERS = frozenset({"that", "this", "it", "that one", "this one", "that card",
+                                    "this card", "the card", "the last card",
+                                    "the newest card", "the last one"})
+# These targets belong to today's kinds (highlighting, boxes, apps, windows): never a card
+# remove; plural "cards"/"them"/"everything"/"all" is the clear, not a one-card ask.
+_CARD_REMOVE_BLOCKED = frozenset(
+    "highlight highlights box boxes arrow arrows outline outlines app apps window windows "
+    "tab tabs cards them everything all "
+    # A place or topic after the target ("the picture from my notes", "the diagram in
+    # Preview") is owner-data or app work for the agent, never a card on screen.
+    "from in on about into inside onto at to off within under".split())
 # Sessions read-only question; "what went wrong with X" carries the session name.
 _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anything stuck"
                           r"|are any sessions waiting(?: for me| on me)?"
@@ -272,23 +296,49 @@ _WORKSPACE_LIST_RE = re.compile(
 _WORKSPACE_DELETE_RE = re.compile(r"delete (?:the |my |our )?(?P<name>.+)", re.I | re.S)
 _WORKSPACE_FILLERS = frozenset({"our", "my", "the", "research", "workspace"})
 
-def parse(text: str, apps: dict[str, str] | None = None,
-          workspace_names: tuple[str, ...] | None = None) -> Intent:
-    """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
+def fast_forms(text: str) -> list[str]:
+    """The whole text, plus its last sentence for short 2-3 sentence dictation
+    ("That's nice. Clear"): a fast-path kind may hide behind the small talk."""
+    forms = [text]
+    if len(text) <= 200:
+        pieces = [p.strip() for p in re.split(r"[.?!]+", text) if p.strip()]
+        if 2 <= len(pieces) <= 3:
+            forms.append(pieces[-1])
+    return forms
 
-    `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
-    to a real installed app before the domain check. `workspace_names` (saved
-    workspace names) lets "open <name>" resolve to a workspace ask.
-    """
-    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
-    t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
-    low = t.lower()
+
+def first_form(text: str, fn):
+    """fn(form) for the first form in fast_forms(text) that returns non-None, else None.
+    The service re-parses raw speech per kind; this keeps it agreeing with parse."""
+    for form in fast_forms(text):
+        result = fn(form)
+        if result is not None:
+            return result
+    return None
+
+
+def _form_hit(rx: re.Pattern, low: str) -> re.Match | None:
+    """The first fullmatch of a fixed-phrase regex across the matcher's forms."""
+    for form in _match_forms(low):
+        m = rx.fullmatch(form)
+        if m:
+            return m
+    return None
+
+
+def _fast_intent(text: str, apps: dict[str, str] | None,
+                 ws_names: tuple[str, ...], last: bool = False) -> Intent | None:
+    """Every fixed fast-path kind for one utterance form; None = this form matches none.
+    `last` (the last-sentence pass) skips clock and hunk: those stay whole-utterance
+    ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
     if is_stop(text):
         return Intent("stop")
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)
-    m = _SESSIONS_RE.fullmatch(low.replace(",", ""))
+    t = _clean(text)
+    low = t.lower()
+    m = _form_hit(_SESSIONS_RE, low.replace(",", ""))
     if m:
         return Intent("sessions", (m["name"] or "").strip(), "ref" if m.group("itref") else "")
     ask = session_request(text)
@@ -297,33 +347,60 @@ def parse(text: str, apps: dict[str, str] | None = None,
     ask = memory_request(text)
     if ask:
         return Intent("memory", ask.action)
-    if _VAULT_SECRETS_RE.fullmatch(low):
+    if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
-    ask = workspace_request(text, workspace_names or ())
+    ask = workspace_request(text, ws_names)
     # An installed app or a site wins over a saved name sharing a word ("open notes").
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
     # Hide first: "get rid of it for now" is temporary, not the final clear.
     for rx, kind in ((_HIDE_RE, "hide"), (_CLEAR_RE, "clear"), (_SHOW_RE, "show"),
                      (_ASIDE_RE, "aside"), (_RESTORE_RE, "restore")):
-        if rx.fullmatch(low):
+        if _form_hit(rx, low):
             return Intent(kind)
-    m = _MOVE_RE.fullmatch(low)
+    ask = card_remove_request(text)
+    # Names-only targets ("close Safari") stay with today's kinds in parse: the service
+    # upgrades them to a card remove only when a card answers to the name.
+    if ask and (ask.pointer or ask.card):
+        return Intent("card_remove", "pointer" if ask.pointer else "target", ask.target)
+    m = _form_hit(_MOVE_RE, low)
     if m:
         arg = m.group(1).replace(" ", "_")
         return Intent("move", {"top": "up", "bottom": "down"}.get(arg, arg))
-    if _TIME_RE.match(low):
-        return Intent("clock", "time")
-    if _DATE_RE.match(low):
-        return Intent("clock", "date")
-    move = _HUNK_MOVE_RE.match(low)
-    if move:
-        arg = "next" if move[1] == "next" else "prev"
-        return Intent("hunk", arg, arg)
-    if _HUNK_NEXT_RE.match(low):
-        return Intent("hunk", "next", "next")
-    if _HUNK_WHY_RE.match(low):
-        return Intent("hunk", "why", "why")
+    if not last:
+        if _form_hit(_TIME_RE, low):
+            return Intent("clock", "time")
+        if _form_hit(_DATE_RE, low):
+            return Intent("clock", "date")
+        move = _form_hit(_HUNK_MOVE_RE, low)
+        if move:
+            arg = "next" if move[1] == "next" else "prev"
+            return Intent("hunk", arg, arg)
+        if _form_hit(_HUNK_NEXT_RE, low):
+            return Intent("hunk", "next", "next")
+        if _form_hit(_HUNK_WHY_RE, low):
+            return Intent("hunk", "why", "why")
+    return None
+
+
+def parse(text: str, apps: dict[str, str] | None = None,
+          workspace_names: tuple[str, ...] | None = None) -> Intent:
+    """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
+
+    Fast-path kinds run on the whole text, then once more on its last sentence
+    (fast_forms); the model kinds always see the whole cleaned transcript.
+    `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
+    to a real installed app before the domain check. `workspace_names` (saved
+    workspace names) lets "open <name>" resolve to a workspace ask.
+    """
+    forms = fast_forms(text)
+    for i, form in enumerate(forms):
+        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0)
+        if intent is not None:
+            return intent
+    t = _WAKE_RE.sub("", text.strip(), count=1).strip()
+    t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
+    low = t.lower()
     # Owner-data work before git_diff so history words win over diff words;
     # deterministic opens win over everything ("open github.com" is a site, not agent work).
     if not low.startswith("open "):
@@ -383,6 +460,42 @@ def _clean(text: str) -> str:
     return _MISHEARD_WAKE_RE.sub("", t, count=1).strip().rstrip(".?!").strip()
 
 
+# Spoken lead-ins before a request ("Okay, can you show me a picture of Saturn"):
+# repeated in any order, each a whole word followed by a comma and/or spaces.
+_LEAD_INS = ("okay", "ok", "alright", "all right", "right", "so", "well", "um", "uh",
+             "hey", "now", "please", "jarvis", "can you", "could you", "would you",
+             "will you", "can we", "could we", "i want you to", "i'd like you to",
+             "i need you to", "go ahead and", "just")
+# Longest first so multi-word leads win; the apostrophe may be either quote.
+_LEAD_RE = re.compile(r"^(?:(?:" + "|".join(
+    p.replace("i'd", "i[''’]?d") for p in sorted(_LEAD_INS, key=len, reverse=True))
+    + r")[\s,]+)+", re.I)
+# Trailing politeness the fixed-phrase wrappers don't cover ("hide sir", "clear now").
+_TAIL_RE = re.compile(r"(?:[\s,]+(?:please|for me|now|sir))+$", re.I)
+
+
+def strip_lead(text: str) -> str:
+    """The text minus its spoken lead-ins ("okay, can you " etc.), case kept; the input
+    itself when nothing would remain ("okay" alone stays "okay")."""
+    stripped = _LEAD_RE.sub("", text, count=1)
+    return stripped if stripped.strip() else text
+
+
+def _strip_tail(text: str) -> str:
+    """The text minus trailing please/for me/now/sir; the input when nothing would remain."""
+    stripped = _TAIL_RE.sub("", text)
+    return stripped if stripped.strip() else text
+
+
+def _match_forms(t: str):
+    """A fixed-phrase matcher's tries: the lead-stripped text, then its tail-stripped form."""
+    lead = strip_lead(t)
+    yield lead
+    tail = _strip_tail(lead)
+    if tail != lead:
+        yield tail
+
+
 def _media_count(amt: str, plural: str, max_count: int) -> int:
     """Image count from the spoken amount: a number (1-6) capped, plural/"some" -> 4, else 1."""
     if amt.isdigit():
@@ -394,65 +507,112 @@ def _media_count(amt: str, plural: str, max_count: int) -> int:
     return 1
 
 
-def media_request(text: str) -> MediaAsk | None:
+def _media_ask(kind: str, noun: str, subject: str, plural: str, amt: str) -> MediaAsk:
+    """One matched media request through the shared subject rules (see media_request)."""
+    from mac.voice import media_lookup  # lazy: importing intents must not pull httpx
+    if not subject:
+        return MediaAsk(kind, "", 0)
+    count = 1 if kind == "video" else _media_count(amt, plural, media_lookup.MAX_COUNT)
+    s = subject
+    while True:  # trailing qualifiers ("as a test", "please") and commas/spaces off
+        s = s.strip(" ,")
+        tail = next((q for q in _MEDIA_TAILS if s == q or s.endswith(" " + q)), "")
+        if not tail:
+            break
+        s = s[:-len(tail)].rstrip(" ,")
+    article = ""
+    lead = _MEDIA_ARTICLE_RE.match(s)
+    if lead:
+        article, s = lead[1], s[lead.end():]
+    s = media_lookup.clean_query(s)
+    if kind == "image" and noun == "diagram" and s:
+        s += " diagram"  # the cap below counts it
+    s = " ".join(s.split()[:6])[:media_lookup.MAX_QUERY].strip()
+    if s and not s.isdigit() and not all(w in _MEDIA_PRIVATE_WORDS for w in s.split()):
+        return MediaAsk(kind, s, count, article)
+    return MediaAsk(kind, "", 0)
+
+
+def media_request(text: str, loose: bool = False) -> MediaAsk | None:
     """The owner's spoken picture/video request, or None. Fixed code, never a model.
 
     Privacy path: when the conversation holds private text, the service may not let a
     model write a search query, so the subject is built only from this transcript — it
     can never contain words the owner didn't say. subject "" (count 0) = a clear ask
     with no searchable subject (deixis, screen words).
+
+    loose=True also picks up "<noun> of <subject>" behind words the strict fullmatch
+    refuses ("so anyway, a picture of a dog"): same subject rules, never a wider net.
     """
     if len(text) > 300:
         return None
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
     t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().lower()
     sentences = [s.rstrip(",").strip() for s in re.split(r"[.?!]+", t) if s.strip()][:3]
-    from mac.voice import media_lookup  # lazy: importing intents must not pull httpx
-
     for sent in sentences:
-        m = _MEDIA_REQUEST_RE.fullmatch(sent) or _MEDIA_OF_RE.fullmatch(sent)
-        if not m:
-            continue
-        kind = "video" if m["noun"] in ("video", "clip") else "image"
-        if not m["subject"]:
-            return MediaAsk(kind, "", 0)
-        count = 1 if kind == "video" else _media_count(m.groupdict().get("amt") or "",
-                                                       m["plural"], media_lookup.MAX_COUNT)
-        s = m["subject"]
-        while True:  # trailing qualifiers ("as a test", "please") and commas/spaces off
-            s = s.strip(" ,")
-            tail = next((q for q in _MEDIA_TAILS if s == q or s.endswith(" " + q)), "")
-            if not tail:
-                break
-            s = s[:-len(tail)].rstrip(" ,")
-        article = ""
-        lead = _MEDIA_ARTICLE_RE.match(s)
-        if lead:
-            article, s = lead[1], s[lead.end():]
-        s = media_lookup.clean_query(s)
-        if kind == "image" and m["noun"] == "diagram" and s:
-            s += " diagram"  # the cap below counts it
-        s = " ".join(s.split()[:6])[:media_lookup.MAX_QUERY].strip()
-        if s and not s.isdigit() and not all(w in _MEDIA_PRIVATE_WORDS for w in s.split()):
-            return MediaAsk(kind, s, count, article)
-        return MediaAsk(kind, "", 0)
+        s = strip_lead(sent)
+        m = _MEDIA_REQUEST_RE.fullmatch(s) or _MEDIA_OF_RE.fullmatch(s)
+        if m:
+            return _media_ask("video" if m["noun"] in ("video", "clip") else "image",
+                              m["noun"], m["subject"], m["plural"],
+                              m.groupdict().get("amt") or "")
+        if loose:
+            m = _MEDIA_LOOSE_RE.search(s)
+            if m:
+                return _media_ask("video" if m["noun"] in ("video", "clip") else "image",
+                                  m["noun"], m["subject"], m["plural"], "")
     return None
+
+
+def _first_sentence(target: str) -> str:
+    """A card target up to its first sentence end: room words after the ask ("enlarge the phone
+    diagram. Yes") are not part of the name. Only the target is cut; the parse kind is not."""
+    return re.split(r"[.?!](?:\s|$)", target, maxsplit=1)[0].strip() or target
 
 
 def card_size_request(text: str) -> CardSizeAsk | None:
     """Card enlarge/restore ask from the whole utterance, or None. Fixed code, never a model."""
     t = _clean(text).lower().replace(",", "")
-    m = _CARD_MAX_RE.fullmatch(t)
-    if m:
-        target = (m["target"] or m["make_target"]).strip()
-        if target.startswith(("on ", "upon ")):
+    for form in _match_forms(t):
+        m = _CARD_MAX_RE.fullmatch(form)
+        if m:
+            target = (m["target"] or m["make_target"]).strip()
+            if target.startswith(("on ", "upon ")):
+                return None
+            target = _CARD_TARGET_LEAD_RE.sub("", _first_sentence(target))
+            if target.endswith(" card"):
+                target = target[:-5]
+            return CardSizeAsk("max", target.strip())
+        if _CARD_RESTORE_RE.fullmatch(form):
+            return CardSizeAsk("restore", "")
+    return None
+
+
+def card_remove_request(text: str) -> CardRemoveAsk | None:
+    """One-card removal ask ("close the phone diagram"), or None. Fixed code, never a model."""
+    t = _clean(text).lower().replace(",", "")
+    # Tail-stripped form first: the target is free text, so "remove that please" would
+    # otherwise match with "that please" as the target.
+    for form in reversed(list(_match_forms(t))):
+        m = _CARD_REMOVE_RE.fullmatch(form)
+        if not m:
+            continue
+        target = (m["t1"] or m["t2"] or "").strip()
+        card = "card" in target.split() or any(w in KIND_WORDS for w in target.split())
+        if target in _CARD_REMOVE_POINTERS:
+            return CardRemoveAsk(target, True, card)
+        if target.startswith(("on ", "upon ")) or set(target.split()) & _CARD_REMOVE_BLOCKED:
             return None
-        target = _CARD_TARGET_LEAD_RE.sub("", target)
+        cut = _first_sentence(target)
+        if set(cut.split()) & _CARD_REMOVE_BLOCKED:  # "close the window. Yes" is not a card
+            return None
+        # Never a pointer or a bare filler from a cut: "close it. yes" must not become one.
+        if cut in _CARD_REMOVE_POINTERS or not set(card_words(cut)) - _CARD_FILLERS:
+            cut = target
+        target = _CARD_TARGET_LEAD_RE.sub("", cut)
         if target.endswith(" card"):
             target = target[:-5]
-        return CardSizeAsk("max", target.strip())
-    if _CARD_RESTORE_RE.fullmatch(t):
-        return CardSizeAsk("restore", "")
+        return CardRemoveAsk(target.strip(), False, card)
     return None
 
 
@@ -470,7 +630,7 @@ def session_request(text: str) -> SessionAsk | None:
     """The owner's spoken session ask (start/stop/answer), or None. Fixed code, never a model."""
     if len(text) > 300:
         return None
-    t = _clean(text)
+    t = strip_lead(_clean(text))
     m = _SESSION_START_RE.fullmatch(t)
     if m:
         dev = _SESSION_DEVICES.get((m["dev"] or "mini pc").lower().replace(" ", ""), "mini_pc")
@@ -501,7 +661,7 @@ def memory_request(text: str) -> MemoryAsk | None:
     """The owner's spoken remember/forget ask, or None. Fixed code, never a model."""
     if len(text) > 300:
         return None
-    t = _clean(text)
+    t = strip_lead(_clean(text))
     for rx in _MEMORY_ADD_RES:
         m = rx.fullmatch(t)
         if m:
@@ -538,7 +698,7 @@ def workspace_request(text: str, names: tuple[str, ...] = ()) -> WorkspaceAsk | 
     """The owner's spoken save/open/list/delete workspace ask, or None. Fixed code, never a model."""
     if len(text) > 300:
         return None
-    t = _clean(text)
+    t = strip_lead(_clean(text))
     m = _WORKSPACE_SAVE_RE.fullmatch(t)
     if m:
         return WorkspaceAsk("save", _ws_name(m["name"]))
@@ -601,6 +761,44 @@ def match_card(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) -> tu
     return (hits[0][0], "title") if hits else None
 
 
+def card_matches(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) \
+        -> tuple[str, list[str]] | None:
+    """(how, ids) for every card a spoken target may mean, ids newest first; None = no card
+    answers to it. match_card's logic over lists, for a removal that must show its picks."""
+    by_id: dict[str, tuple[str, str, tuple[str, ...]]] = {}
+    for c in cards:  # a duplicate id counts once, at its newest position and state
+        by_id.pop(c[0], None)
+        by_id[c[0]] = c
+    cards = list(by_id.values())
+    words = [w for w in card_words(target)
+             if w not in _CARD_FILLERS and w not in ("last", "newest")]
+    kind: set[str] = set()
+    for w in words:
+        kind |= KIND_WORDS.get(w, frozenset())
+    names = [w for w in words if w not in KIND_WORDS]
+    if not names:
+        if not kind:
+            return ("newest", [cards[-1][0]]) if cards else None
+        typed = [c for c in reversed(cards) if c[1] in kind]
+        titled = [c for c in typed if any(t in words for t in c[2])]
+        if len(titled) == 1:
+            return ("title", [titled[0][0]])
+        if len(typed) == 1:
+            return ("kind", [typed[0][0]])
+        if typed:
+            return ("kind", [c[0] for c in (titled if titled else typed)])
+        return None
+    # A name of 4+ letters may end a compound title word ("phone" names "Smartphone block
+    # diagram"); a spoken kind is a preference, not a requirement.
+    hits = [c for c in reversed(cards)
+            if all(any(t == w or (len(w) >= 4 and t.endswith(w)) for t in c[2]) for w in names)]
+    if kind:
+        typed = [c for c in hits if c[1] in kind]
+        if typed:
+            hits = typed
+    return ("title", [c[0] for c in hits]) if hits else None
+
+
 def _answer(text: str) -> str:
     """Whole-utterance form for yes/no/cancel: cleaned, lower case, punctuation as spaces."""
     t = re.sub(r"[,;:.!?]+", " ", _clean(text).casefold().replace("’", "'"))
@@ -614,22 +812,22 @@ def is_confirm(text: str) -> bool:
 
 def is_cancel(text: str) -> bool:
     """Whole utterance cancels the agent's work."""
-    return bool(_CANCEL_RE.fullmatch(_answer(text)))
+    return any(_CANCEL_RE.fullmatch(f) for f in _match_forms(_answer(text)))
 
 
 def is_stop(text: str) -> bool:
     """Whole utterance stops the turn: silence, a cancel, or both."""
-    return bool(_STOP_RE.fullmatch(_answer(text)))
+    return any(_STOP_RE.fullmatch(f) for f in _match_forms(_answer(text)))
 
 
 def is_no(text: str) -> bool:
     """Whole utterance says no to the agent's confirmation question."""
-    return bool(_NO_RE.fullmatch(_answer(text)))
+    return any(_NO_RE.fullmatch(f) for f in _match_forms(_answer(text)))
 
 
 def is_hunk_back(text: str) -> bool:
     """Whole utterance is a hunk-walk "go back" (applied only with a change list)."""
-    return bool(HUNK_BACK_RE.fullmatch(_clean(text).lower()))
+    return any(HUNK_BACK_RE.fullmatch(f) for f in _match_forms(_clean(text).lower()))
 
 
 def tail_hunk(text: str) -> str | None:
@@ -640,13 +838,14 @@ def tail_hunk(text: str) -> str | None:
     """
     sentences = re.split(r"[.!?]\s+", _clean(text).lower())
     s = sentences[-1].strip().rstrip(".?!").strip()
-    words = s.split()
-    for k in range(2, 6):
-        if k > len(words):
-            break
-        m = _HUNK_MOVE_RE.fullmatch(" ".join(words[-k:]))
-        if m and (len(words) - k <= 3 or (len(sentences) > 1 and len(words) == k)):
-            return "next" if m[1] == "next" else "prev"
+    for form in _match_forms(s):
+        words = form.split()
+        for k in range(2, 6):
+            if k > len(words):
+                break
+            m = _HUNK_MOVE_RE.fullmatch(" ".join(words[-k:]))
+            if m and (len(words) - k <= 3 or (len(sentences) > 1 and len(words) == k)):
+                return "next" if m[1] == "next" else "prev"
     return None
 
 

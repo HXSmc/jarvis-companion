@@ -9,12 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from mac.voice import acks, media_lookup
-from mac.voice.intents import (SESSION_WORDS_MAX, STOP_PHRASES, Intent, MemoryAsk,
-                               WorkspaceAsk, card_size_request, card_words, is_cancel,
+from mac.voice.intents import (SESSION_WORDS_MAX, STOP_PHRASES, CardRemoveAsk, Intent,
+                               MemoryAsk, WorkspaceAsk, card_matches, card_remove_request,
+                               card_size_request, card_words, first_form, is_cancel,
                                is_confirm, is_hunk_back, is_no, is_stop, list_apps,
                                media_request, match_card, memory_request, noise_words,
-                               open_app, open_site, parse, session_request, tail_hunk,
-                               workspace_request)
+                               open_app, open_site, parse, session_request, strip_lead,
+                               tail_hunk, workspace_request)
 from mac.voice.lean import Conversations, lean_argv
 
 
@@ -658,3 +659,140 @@ def test_round7_live_phrasings():
         assert parse(text, apps={"notes": "Notes"}).kind == "vault_secrets", text
     for text in ("what is the secret of success", "tell me a secret"):
         assert parse(text, apps={}).kind != "vault_secrets", text
+
+
+LEAD_INS = ("okay", "ok", "alright", "all right", "right", "so", "well", "um", "uh",
+            "hey", "now", "please", "jarvis", "can you", "could you", "would you",
+            "will you", "can we", "could we", "i want you to", "i'd like you to",
+            "i need you to", "go ahead and", "just")
+LEAD_PAIRS = ("okay so", "hey jarvis could you please", "alright, can you", "um, just",
+              "go ahead and")
+
+
+def test_strip_lead_table():
+    """Lead-ins come off whole-word before every fast path; nothing would remain -> unchanged."""
+    for lead in LEAD_INS:
+        assert strip_lead(lead) == lead, lead  # "okay" alone stays "okay"
+    phrases = ("stop", "enlarge that", "make it smaller", "remove that one", "hide",
+               "show them", "clear", "next change", "previous change",
+               "what are my sessions doing", "start a session to fix the build",
+               "remember that I park on level 3", "forget that",
+               "what workspaces do I have")
+    for lead in LEAD_INS + LEAD_PAIRS:
+        for phrase in phrases:
+            assert parse(lead + " " + phrase, apps=()) == parse(phrase, apps=()), \
+                lead + " " + phrase
+        ask = media_request(lead + " show me a picture of saturn")
+        assert (ask.kind, ask.subject, ask.count) == ("image", "saturn", 1), lead
+    # Trailing please/for me/now/sir after the fixed-phrase commands keeps the kind.
+    for text, kind in (("hide please", "hide"), ("hide for me", "hide"), ("hide now", "hide"),
+                       ("hide sir", "hide"), ("clear please", "clear"), ("clear for me", "clear"),
+                       ("clear now", "clear"), ("clear sir", "clear"),
+                       ("show them please", "show"), ("show them for me", "show"),
+                       ("show them now", "show"),
+                       ("enlarge that please", "card_size"), ("enlarge that for me", "card_size"),
+                       ("enlarge that now", "card_size"), ("enlarge that sir", "card_size")):
+        assert parse(text, apps=()).kind == kind, text
+
+
+def test_lead_in_cases():
+    """The round-8 phrasings that missed their fast path (F6 Saturn, lead-ins everywhere)."""
+    ask = media_request("Okay, can you show me a picture of Saturn")
+    assert (ask.kind, ask.subject, ask.count) == ("image", "saturn", 1)
+    assert parse("can you enlarge that", apps=()).kind == "card_size"
+    assert parse("okay stop", apps=()).kind == "stop"
+    assert media_request("That's nice. Can you show me a picture of Saturn").subject == "saturn"
+    assert parse("That's nice. Clear", apps=()).kind == "clear"
+    # Clock and hunk stay whole-utterance: a clock question after small talk is a question.
+    assert parse("Hi, I'm stuck. What time is it", apps=()).kind == "answer"
+    assert first_form("That's nice. Remember that I park on level 3", memory_request) is not None
+
+
+def test_filler_mid_sentence_unchanged():
+    """Fillers mid-sentence are content: the model kinds still see the whole transcript."""
+    for text in ("what is so special about Saturn", "is it right to say now or never",
+                 "how well does it work", "right click the button"):
+        assert parse(text, apps=()) == Intent("answer", text), text
+
+
+def test_stripper_never_makes_a_yes():
+    """Politeness stripping never manufactures a confirmation."""
+    for text in ("okay yes", "right yes", "alright", "okay", "so yes", "yes okay"):
+        assert not is_confirm(text), text
+    assert is_confirm("yes please")
+    assert is_no("okay no")
+    assert is_stop("okay stop")
+    assert is_cancel("um, cancel that")
+
+
+def test_card_remove_collisions():
+    """One-card removal never steals another kind's phrases (base kinds hard-coded)."""
+    for text in ("clear", "clear everything", "dismiss them", "dismiss everything",
+                 "close everything", "remove the cards", "get rid of the cards",
+                 "dismiss it", "dismiss that", "close it", "close that", "close this"):
+        assert parse(text, apps=()).kind == "clear", text
+    for text in ("get rid of it", "hide", "put it away"):
+        assert parse(text, apps=()).kind == "hide", text
+    for text in ("show them", "bring them back"):
+        assert parse(text, apps=()).kind == "show", text
+    for text in ("remove that", "remove it", "remove that one", "close this card",
+                 "dismiss that card", "get rid of that one", "take that away"):
+        assert parse(text, apps=()) .kind == "card_remove", text
+        assert parse(text, apps=()).arg == "pointer", text
+    for text, target in (("remove the dog picture", "dog picture"),
+                         ("close the phone diagram", "phone diagram"),
+                         ("get rid of the changes card", "changes"),
+                         ("take away the picture", "picture")):
+        intent = parse(text, apps=())
+        assert (intent.kind, intent.arg, intent.sub) == ("card_remove", "target", target), text
+    # A trailing please/for me/now/sir never becomes part of the target.
+    for text in ("remove that please", "remove it please", "remove that for me",
+                 "remove that now", "remove that card please", "dismiss that card please",
+                 "close this card sir"):
+        assert parse(text, apps=()).kind == "card_remove", text
+        assert parse(text, apps=()).arg == "pointer", text
+    intent = parse("remove the dog picture for me", apps=())
+    assert (intent.kind, intent.arg, intent.sub) == ("card_remove", "target", "dog picture")
+    assert parse("forget that", apps=()).kind == "memory"
+    assert parse("delete the battery research", apps=(),
+                 workspace_names=("battery research",)).kind == "workspace"
+    assert parse("stop the voice-test session", apps=()).kind == "session"
+    for text in ("make it smaller", "restore it"):
+        assert parse(text, apps=()).kind == "card_size", text
+    # Targets owned by today's kinds keep them (base kinds measured, hard-coded).
+    assert parse("remove the highlight", apps=()) == Intent("look", "remove the highlight")
+    for text in ("remove the highlights", "remove the boxes", "close the notes app"):
+        assert parse(text, apps=()) == Intent("answer", text), text
+    # A names-only target ("close Safari") is NOT card_remove in parse (base kind kept);
+    # card_remove_request still returns the ask so the service can upgrade it later.
+    assert parse("close Safari", apps=()) == Intent("answer", "close Safari")
+    assert card_remove_request("close Safari") == CardRemoveAsk("safari", False, False)
+
+
+def test_card_remove_match_order():
+    """card_matches: match_card's logic over lists, ids newest first, duplicate ids once."""
+    cards = [("a1", "flow", ("smartphone", "block", "diagram")),
+             ("b2", "image", ("dog",)), ("c3", "bar", ("changes",))]
+    assert card_matches("the dog picture", cards) == ("title", ["b2"])
+    assert card_matches("the phone diagram", cards) == ("title", ["a1"])
+    assert card_matches("the picture", cards) == ("kind", ["b2"])
+    assert card_matches("that one", cards) == ("newest", ["c3"])
+    assert card_matches("the changes card", cards) == ("title", ["c3"])
+    assert card_matches("the cat", cards) is None
+    images = [("i1", "image", ("dog",)), ("i2", "image", ("dog", "park"))]
+    assert card_matches("the dog picture", images) == ("title", ["i2", "i1"])
+    assert card_matches("the picture", images) == ("kind", ["i2", "i1"])
+    dup = [("i2", "image", ("cat",)), ("i1", "image", ("dog",)), ("i2", "image", ("dog", "park"))]
+    assert card_matches("the dog picture", dup) == ("title", ["i2", "i1"])
+    assert match_card("the changes card", cards) == ("c3", "kind")  # unchanged
+
+
+def test_card_remove_leaves_place_and_topic_asks_alone():
+    """A target with a place or topic stays today's kind (base kinds measured at 2d585fc)."""
+    assert parse("remove the picture from my notes", apps=()).kind == "agent"
+    assert parse("remove the photo from my email draft", apps=()).kind == "agent"
+    assert parse("dismiss the card about my calendar", apps=()).kind == "agent"
+    for text in ("close the diagram in Preview", "remove the image from the slide",
+                 "take down the diagram on the website"):
+        assert parse(text, apps=()).kind == "answer", text
+    assert parse("close the picture of the dog", apps=()).kind == "card_remove"
