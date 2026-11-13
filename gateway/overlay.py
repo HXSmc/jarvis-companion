@@ -1992,6 +1992,14 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         intent = intents.parse(body.text, apps=apps, workspace_names=ws_names)
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
+        # A1: a remove hidden behind small talk ("Sure. Take the diagram card off") re-parses raw
+        # speech; it only becomes card_remove when a card this conv already holds matches.
+        if intent.kind == "answer" and not joined:
+            rm_ask = intents.first_form(raw_text, intents.card_remove_request)
+            if (rm_ask is not None and intents.card_matches(
+                    rm_ask.target, list(_card_index.get(body.conv_id, ()))) is not None):
+                intent = intents.Intent("card_remove",
+                                        "pointer" if rm_ask.pointer else "target", rm_ask.target)
         intent = _hunk_rewrite(intent, body.text, body.conv_id, on_step)
         # A3: owner words only. The action re-parses raw_text (before any continuation join);
         # a join that hid the request is a plain answer turn, never an ask.
@@ -2121,6 +2129,71 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append(acks.PHRASES["restored"])
             if on_step:
                 on_step("card_size", action=intent.arg, card=card_id, match=how)
+
+        elif intent.kind == "card_remove":
+            # A2: fixed code; ids come only from this conv's _card_index, never model text.
+            # Confirm guard: the preflight skips a host ask on barge-in, so it may still be here.
+            ask = _host_ask.get(body.conv_id)
+            pending_confirm = False
+            if ask is not None:  # a remove never confirms a pending host ask
+                with _confirm_lock:
+                    _host_ask.pop(body.conv_id, None)
+                step, word = _HOST_ROWS[ask.kind]
+                yield _settled_card(ask.summary, "Not done")
+                if on_step:
+                    on_step(step, detail=f"{word} cancelled".strip())
+                pending_confirm = True
+            else:
+                run = _take_confirm(body.conv_id)
+                if run is not None:  # or the agent tier's waiting confirmation
+                    if on_step:
+                        on_step("agent_confirm", state="denied")
+                    await asyncio.to_thread(_deny_and_drop, run, deps)
+                    yield _settled_card(run.confirm_summary, "Not done")
+                    pending_confirm = True
+            if pending_confirm:
+                async for ev in _line("not_confirmed", deps):
+                    yield ev
+                said.append(acks.PHRASES.get("not_confirmed", ""))
+            else:
+                cards = list(_card_index.get(body.conv_id, ()))
+                if intent.arg == "pointer":
+                    hit = ("newest", [cards[-1][0]]) if cards else None
+                else:
+                    hit = intents.card_matches(intent.sub, cards)
+                card_id = hit[1][0] if hit is not None and len(hit[1]) == 1 else None
+                if card_id is not None:
+                    assert card_id != _CONFIRM_CARD_ID  # a remove never drops the Confirm card
+                    drop = _drop_saved_cards(body.conv_id, [card_id])
+                    if _enlarged.get(body.conv_id) == card_id:
+                        _enlarged.pop(body.conv_id, None)
+                    if card_id == "gd-list":  # its change list is the conv's cursor: gone with it
+                        nav = _hunks.pop(body.conv_id, None)
+                        if nav is not None and nav.boxes:
+                            yield _lines_event(str(nav.repo / nav.rel), [])
+                    if drop is not None:
+                        yield drop
+                    async for ev in _line("removed", deps):
+                        yield ev
+                    said.append(acks.PHRASES["removed"])
+                    if on_step:
+                        on_step("card_remove", card=card_id, match=hit[0])
+                elif hit is not None:  # two or more matched: name them, remove nothing
+                    names = ["the " + " ".join(
+                        next(c for c in reversed(cards) if c[0] == i)[2][:4]) for i in hit[1][:3]]
+                    which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
+                    line = f"Which one: {which}? {ASK_AGAIN}"
+                    async for ev in _speak(line, deps):
+                        yield ev
+                    said.append(line)
+                    if on_step:
+                        on_step("card_remove", detail="refused reason=ambiguous")
+                else:
+                    async for ev in _line("no_card", deps):
+                        yield ev
+                    said.append(acks.PHRASES["no_card"])
+                    if on_step:
+                        on_step("card_remove", detail="refused reason=none")
 
         elif intent.kind in ("open_app", "open_site"):
             opener = intents.open_app if intent.kind == "open_app" else intents.open_site
@@ -2461,7 +2534,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         else:  # answer
             escalate: list[bool] = []
             async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
-                                            escalate=escalate, failed=failed, on_step=on_step):
+                                            escalate=escalate, failed=failed, on_step=on_step,
+                                            owner_text=None if joined else raw_text):
                 yield event
             if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
                 if on_step:
@@ -2727,6 +2801,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        screen_ref: bool = False, escalate: list | None = None,
                        failed: list | None = None, look: dict | None = None,
                        extra_untrusted: str | None = None,
+                       owner_text: str | None = None,
                        on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
@@ -2801,6 +2876,12 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if media_seen:
             return
         media_seen = True
+        if owner_text is not None:  # B9: a lead-in ask the strict fullmatch missed, owner words only
+            ask = intents.media_request(owner_text, loose=True)
+            if ask is not None:
+                async for ev in _owner_media(ask, body.conv_id, deps, said, on_step):
+                    yield ev
+                return
         # A change-list cursor alone does not block "clear" (clear drops it), so it keeps the clear line.
         agent_held = _holds_agent_state(body.conv_id, deps, cursor=False)
         line = AGENT_MEDIA_LINE if agent_held else QUIET_MEDIA_LINE
@@ -3213,6 +3294,16 @@ def _settled_card(summary: str, outcome: str) -> dict:
     return {"type": "card", "card": card}
 
 
+def _is_card_remove(text: str, conv_id: str) -> bool:
+    """A one-card remove ask (A3): parse says card_remove, or a names-only target that a card
+    this conv holds answers to (the dispatch's A1 upgrade)."""
+    if intents.parse(text, apps={}).kind == "card_remove":
+        return True
+    ask = intents.first_form(text, intents.card_remove_request)
+    return ask is not None and intents.card_matches(
+        ask.target, list(_card_index.get(conv_id, ()))) is not None
+
+
 async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, said: list[str],
                            start: float, on_step) -> AsyncIterator[dict]:
     """Settle a pending confirmation and refuse a second request while the agent works.
@@ -3269,6 +3360,12 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         yield _settled_card(ask.summary, "Not done")
         if on_step:
             on_step(step, detail=f"{word} cancelled".strip())
+        if _is_card_remove(body.text, body.conv_id):
+            # A3: removing a card is not an answer to the ask; the turn ends, nothing is removed.
+            async for ev in _line("not_confirmed", deps):
+                yield ev
+            said.append(acks.PHRASES.get("not_confirmed", ""))
+            yield _finish(body, deps, metrics, said, start)
         return
     for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
         run = _take_confirm(other)
@@ -3315,6 +3412,10 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
             yield _finish(body, deps, metrics, said, start)
             return
         if intents.is_cancel(body.text) or intents.is_no(body.text):
+            yield _finish(body, deps, metrics, said, start)
+            return
+        if _is_card_remove(body.text, body.conv_id):
+            # A3: the "Very well, I won't." above already settled it; the remove never runs.
             yield _finish(body, deps, metrics, said, start)
             return
         return  # anything else: told it was dropped, then handled as a normal utterance (no `done`)

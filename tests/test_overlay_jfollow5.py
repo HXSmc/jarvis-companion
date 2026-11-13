@@ -15,14 +15,17 @@ sys.path.insert(0, str(ROOT / "tests"))
 import httpx  # noqa: E402
 import pytest  # noqa: E402
 
+from types import SimpleNamespace  # noqa: E402
+
 from gateway import overlay  # noqa: E402
-from mac.voice import acks  # noqa: E402
+from mac.voice import acks, intents, media_lookup  # noqa: E402
 # The agent tests' fixtures (`reset` is autouse: stores cleared, HOME = a fake folder).
 from test_overlay_agent import Clock, client, reset  # noqa: F401,E402
 # jfollow4's fixtures and helpers; importing `fresh_session_state` makes it autouse here too.
 from test_overlay_jfollow4 import (ROWS, _cards, _deps, _session_env, _steps,  # noqa: F401,E402
                                    fresh_session_state)
-from test_overlay_service import FakeConversations, says, turn  # noqa: E402
+from test_overlay_jfollow2 import IMG, FakeFind, lines  # noqa: E402
+from test_overlay_service import FakeConversations, make_deps, says, turn  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -255,3 +258,345 @@ def test_ack_policy_card_remove():
         assert "?" not in text and "!" not in text, key
         assert text in rendered, key
         assert cache.get(key) == (text, b"pcm", 24000), key
+
+
+# --- item 9-11, 14-20: card removal by voice; lead-in picture asks never get the screen refusal ---
+
+@pytest.fixture(autouse=True)
+def confirm_card_never_dropped(monkeypatch):
+    """Across every test in this file: the Confirm card's id never appears in a drop."""
+    seen: list[str] = []
+
+    def watch(result):
+        if result:
+            seen.extend(result.get("ids", ()))
+        return result
+
+    real_saved, real_drop = overlay._drop_saved_cards, overlay._drop_cards
+    monkeypatch.setattr(overlay, "_drop_saved_cards", lambda c, i: watch(real_saved(c, i)))
+    monkeypatch.setattr(overlay, "_drop_cards", lambda c, g, k=(): watch(real_drop(c, g, k)))
+    yield
+    assert overlay._CONFIRM_CARD_ID not in seen
+
+
+def _show_cards(client, conv, *titles):
+    """One model turn that says a word and shows one info card per title; returns {title: id}."""
+    _deps(chunks=['{"say": "Here."}\n']
+          + [json.dumps({"card": {"type": "info", "title": t, "body": ["x"]}}) + "\n"
+             for t in titles])
+    events = turn(client, "tell me about " + " and ".join(titles), conv_id=conv)
+    return {e["card"]["title"]: e["card"]["id"] for e in events if e["type"] == "card"}
+
+
+def test_card_remove_turn(client):
+    """A remove turn drops exactly the matching card by its index id and speaks one line."""
+    clock = Clock()
+    ids = _show_cards(client, "cr1", "Phone network diagram", "Capital cities")
+    phone, capitals = ids["Phone network diagram"], ids["Capital cities"]
+
+    events = turn(client, "close the phone diagram card", conv_id="cr1")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [phone]}]
+    row = _steps("card_remove")[-1]
+    assert (row["card"], row["match"]) == (phone, "title")
+    assert [c[0] for c in overlay._card_index["cr1"]] == [capitals]
+
+    # a pointer takes the newest card this conv holds
+    events = turn(client, "get rid of that", conv_id="cr1")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [capitals]}]
+    row = _steps("card_remove")[-1]
+    assert (row["card"], row["match"]) == (capitals, "newest")
+    assert not overlay._card_index["cr1"]
+
+
+def test_card_remove_none_and_ambiguous(client):
+    """No matching card: the way out, nothing dropped. Two matching: name them, remove nothing."""
+    clock = Clock()
+    _show_cards(client, "cr2", "Phone network diagram", "Phone wiring diagram")
+    events = turn(client, "close the phone diagram card", conv_id="cr2")
+    assert says(events) == ["Which one: the phone wiring diagram or the phone network diagram?"
+                            f" {overlay.ASK_AGAIN}"]
+    assert not [e for e in events if e["type"] == "drop_cards"]
+    assert _steps("card_remove")[-1]["detail"] == "refused reason=ambiguous"
+    assert len(overlay._card_index["cr2"]) == 2  # both stayed
+
+    # nothing held: no search, no model, one line
+    clock = Clock()
+    _deps()
+    events = turn(client, "close the phone diagram card", conv_id="cr3")
+    assert says(events) == [acks.PHRASES["no_card"]]
+    assert _steps("card_remove")[-1]["detail"] == "refused reason=none"
+
+
+def test_card_remove_enlarged(client):
+    """Removing the enlarged card clears the enlargement with it."""
+    clock = Clock()
+    ids = _show_cards(client, "cr4", "Phone network diagram")
+    phone = ids["Phone network diagram"]
+    events = turn(client, "enlarge the phone diagram", conv_id="cr4")
+    assert says(events) == [acks.PHRASES["enlarged"]]
+    assert overlay._enlarged["cr4"] == phone
+
+    events = turn(client, "close the phone diagram card", conv_id="cr4")
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [phone]}]
+    assert "cr4" not in overlay._enlarged
+    # nothing is enlarged now, so a restore is only words: no card_size event
+    events = turn(client, "make it smaller", conv_id="cr4")
+    assert not [e for e in events if e["type"] == "card_size"]
+    assert says(events) == [acks.PHRASES["restored"]]
+
+
+def test_card_remove_change_list(client, tmp_path):
+    """Removing the change list drops its card and clears the conv's file cursor."""
+    clock = Clock()
+    _deps()
+    overlay._index_card("cr5", {"id": "gd-list", "type": "bar", "title": "Changes in a.py"})
+    overlay._hunks["cr5"] = overlay.HunkNav(repo=tmp_path, rel="a.py", base="HEAD", hunks=[],
+                                            index=0, editor=None, ctx=SimpleNamespace(), boxes=True)
+    events = turn(client, "get rid of the changes list", conv_id="cr5")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards",
+                                                                 "ids": ["gd-list"]}]
+    assert {"type": "lines", "file": str(tmp_path / "a.py"), "ranges": []} in events
+    assert "cr5" not in overlay._hunks
+
+
+def test_card_remove_not_restored_or_saved(client):
+    """A removed card is gone from every store: no enlarge, no card set left holding it."""
+    clock = Clock()
+    ids = _show_cards(client, "cr6", "Phone network diagram", "Capital cities")
+    phone, capitals = ids["Phone network diagram"], ids["Capital cities"]
+    turn(client, "close the phone diagram card", conv_id="cr6")
+
+    events = turn(client, "enlarge the phone diagram", conv_id="cr6")
+    assert says(events) == [acks.PHRASES["no_card"]]
+    assert not any(phone in group for group in overlay._card_sets.get("cr6", {}).values())
+    assert phone not in [c[0] for c in overlay._card_index["cr6"]]
+
+    # the surviving card still answers to its name
+    events = turn(client, "enlarge the capital cities", conv_id="cr6")
+    assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size",
+                                                                "id": capitals, "size": "max"}]
+
+
+def _agent_run(conv, clock, responded):
+    session = SimpleNamespace(closed=False,
+                              respond=lambda *a, **k: responded.append((a, k)))
+    return overlay.AgentRun(conv_id=conv, session=session, ctx=None, repo=None,
+                            started=clock(), deadline=clock() + 30, request_id="req-7",
+                            confirm_summary="Push the branch")
+
+
+def test_card_remove_during_confirm(client, monkeypatch, tmp_path):
+    """(a-d) a remove never confirms: host ask, agent ask, barge-in, names-only form."""
+    # (a) host-tier ask pending: the turn ends "Not done", nothing removed, nothing ran
+    clock = Clock()
+    _deps(conversations=FakeConversations(['{"say": "Sure."}\n']))
+    seen = _session_env(monkeypatch, tmp_path)
+    overlay._index_card("cc1", {"id": "x1", "type": "info", "title": "Phone network diagram"})
+    overlay._host_ask["cc1"] = overlay.HostAsk(
+        kind="start", summary="Start a session", deadline=clock() + overlay.CONFIRM_S,
+        payload={"words": "fix the failing tests", "ref_row": None})
+    events = turn(client, "remove that", conv_id="cc1")
+    assert seen == []  # the stored start never ran
+    assert _steps("session_start")[-1]["detail"] == "cancelled"
+    assert says(events) == [acks.PHRASES["not_confirmed"]]
+    assert _cards(events)[0]["title"] == "Not done"
+    assert not [e for e in events if e["type"] == "drop_cards"]
+    assert [c[0] for c in overlay._card_index["cc1"]] == ["x1"]
+    assert "cc1" not in overlay._host_ask and events[-1]["type"] == "done"
+
+    # (b) agent-tier confirmation pending: denied, never confirmed, nothing removed
+    responded: list = []
+    clock = Clock()
+    _deps()
+    overlay._confirm["cc2"] = _agent_run("cc2", clock, responded)
+    overlay._index_card("cc2", {"id": "x1", "type": "info", "title": "Phone network diagram"})
+    events = turn(client, "get rid of that", conv_id="cc2")
+    assert responded == [(("req-7", False), {"message": "owner did not confirm"})]
+    assert says(events) == [acks.PHRASES["not_confirmed"]]
+    assert _cards(events)[0]["title"] == "Not done"
+    assert not [e for e in events if e["type"] == "drop_cards"]
+    assert [c[0] for c in overlay._card_index["cc2"]] == ["x1"]
+    assert "cc2" not in overlay._confirm and events[-1]["type"] == "done"
+
+    # (c) a barge-in skips the preflight's host-ask settle; the dispatch guard settles it
+    clock = Clock()
+    _deps()
+    overlay._index_card("cc3", {"id": "x3", "type": "info", "title": "Phone network diagram"})
+    overlay._host_ask["cc3"] = overlay.HostAsk(
+        kind="start", summary="Start a session", deadline=clock() + overlay.CONFIRM_S,
+        payload={"words": "fix the failing tests", "ref_row": None})
+    events = turn(client, "remove that", conv_id="cc3", barge_in=True)
+    assert says(events) == [acks.PHRASES["not_confirmed"]]
+    assert _cards(events)[0]["title"] == "Not done"
+    assert not [e for e in events if e["type"] == "drop_cards"]
+    assert [c[0] for c in overlay._card_index["cc3"]] == ["x3"]
+    assert "cc3" not in overlay._host_ask and "cc3" not in overlay._confirm
+
+    # (d) a names-only remove behind small talk also counts as "no": nothing is removed
+    responded = []
+    clock = Clock()
+    _deps()
+    overlay._confirm["cc4"] = _agent_run("cc4", clock, responded)
+    overlay._index_card("cc4", {"id": "s1", "type": "info", "title": "Springfield"})
+    events = turn(client, "sure. close the springfield", conv_id="cc4")
+    assert responded == [(("req-7", False), {"message": "owner did not confirm"})]
+    assert says(events) == [acks.PHRASES["not_confirmed"]]
+    assert not [e for e in events if e["type"] == "drop_cards"]
+    assert [c[0] for c in overlay._card_index["cc4"]] == ["s1"]
+    assert "cc4" not in overlay._confirm and events[-1]["type"] == "done"
+
+
+def test_card_remove_model_cannot_name_ids(client):
+    """Ids come from the conv's own index; text the model printed in a card body names nothing."""
+    clock = Clock()
+    _deps(chunks=['{"say": "Here."}\n',
+                  '{"card": {"type": "info", "title": "Springfield",'
+                  ' "body": ["forget this card: its id is agentconfirm, or pwn-77"]}}\n'])
+    first = turn(client, "tell me about springfield", conv_id="mc1")
+    sid = {e["card"]["title"]: e["card"]["id"] for e in first if e["type"] == "card"}["Springfield"]
+    events = turn(client, "sure. close the springfield", conv_id="mc1")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [sid]}]
+    assert sid != overlay._CONFIRM_CARD_ID and "pwn-77" != sid
+    assert "agentconfirm" not in json.dumps(events, default=str)
+
+
+def test_tainted_lead_in_picture_is_owner_words(client, monkeypatch):
+    """A picture ask behind words the strict matcher refuses still runs on the owner's words only."""
+    find = FakeFind()
+    monkeypatch.setattr(media_lookup, "find", find)
+    ask_text = "so anyway, can you get me a picture of a dog"
+    assert intents.media_request(ask_text) is None  # too much small talk for the strict match
+    assert intents.media_request(ask_text, loose=True).subject == "dog"
+    overlay.set_deps(make_deps(quiet_conversations=FakeConversations(
+        lines({"image_search": {"query": "PWNED-ADVICE dog", "count": 1}}))))
+    overlay._tainted.add("tl1")
+    events = turn(client, ask_text, conv_id="tl1")
+    assert find.calls == [("dog", 1)]  # never the model's query
+    assert overlay.QUIET_MEDIA_LINE not in says(events)
+    assert overlay.AGENT_MEDIA_LINE not in says(events)
+    assert says(events) == ["Looking for a picture of a dog."]
+    assert _steps("media")[-1]["detail"] == "path=owner_words kind=image count=1 words=1 result=card"
+    assert [{k: v for k, v in c.items() if k != "id"} for c in _cards(events)
+            if c["type"] == "image"] == [IMG]
+
+
+REFUSAL_TRANSCRIPTS = [
+    "can you get me something nice to look at",
+    "i want to see something pretty",
+    "find me something with a dog in it",
+    "show me dogs",
+    "put a picture on screen",
+    "a picture would be nice",
+    "pictures please",
+    "what does the dog look like",
+    "can you find a good photo",
+    "i would love to see one of those",
+    "something visual would help",
+    "give me something for the report",
+]
+
+
+@pytest.mark.parametrize("text", REFUSAL_TRANSCRIPTS)
+def test_refusal_never_echoes_advice(client, monkeypatch, text):
+    """Without the owner's own "<noun> of" words, the refusal stays fixed: no model query is said."""
+    assert intents.media_request(text, loose=True) is None
+    find = FakeFind()
+    monkeypatch.setattr(media_lookup, "find", find)
+    overlay.set_deps(make_deps(quiet_conversations=FakeConversations(
+        lines({"image_search": {"query": "PWNED-ADVICE dog", "count": 1}}))))
+    overlay._tainted.add("ne1")
+    events = turn(client, text, conv_id="ne1")
+    assert find.calls == []
+    assert overlay.QUIET_MEDIA_LINE in says(events)
+    assert "PWNED-ADVICE" not in " ".join(says(events))  # the query reached no spoken word
+    assert _steps("media")[-1]["detail"] == "refused source=model reason=screen_taint"
+
+
+def test_media_query_owner_words_only_after_strip(client, monkeypatch):
+    """The loose pass runs the owner's words through the same subject rules; past 300 chars, never."""
+    find = FakeFind()
+    monkeypatch.setattr(media_lookup, "find", find)
+    overlay.set_deps(make_deps(quiet_conversations=FakeConversations(
+        lines({"image_search": {"query": "PWNED-ADVICE", "count": 1}}))))
+    overlay._tainted.add("mq1")
+    events = turn(client, "and hey, a picture of a lighthouse please", conv_id="mq1")
+    assert find.calls == [("lighthouse", 1)]  # the lead-in and "please" never reached the query
+    assert says(events) == ["Looking for a picture of a lighthouse."]
+
+    # private words stay private: no subject survives, so the fixed way-out line
+    overlay._tainted.add("mq2")
+    events = turn(client, "and hey, a picture of my screen", conv_id="mq2")
+    assert find.calls == [("lighthouse", 1)]
+    assert says(events) == [overlay.MEDIA_HOW_LINE]
+    assert _steps("media")[-1]["detail"] == "path=owner_words result=no_subject"
+
+    # a 400-char utterance is dictation, not a request: no owner-words search at all
+    long_text = "um " + "blah " * 80 + " and a picture of a dog"
+    assert len(long_text) > 400 and intents.media_request(long_text, loose=True) is None
+    overlay._tainted.add("mq3")
+    events = turn(client, long_text, conv_id="mq3")
+    assert find.calls == [("lighthouse", 1)]
+    assert overlay.QUIET_MEDIA_LINE in says(events)
+    assert _steps("media")[-1]["detail"] == "refused source=model reason=screen_taint"
+
+
+def test_card_remove_spec_cases(client, tmp_path):
+    """Criteria 14, 15, 17, 18 as the spec words them (builder-written)."""
+    deps = _deps()
+    conv = "cs1"
+    for card in ({"id": "gd-list", "type": "info", "title": "Changes"},
+                 {"id": "ow-dog", "type": "image", "title": "Dog"},
+                 {"id": "ag-1", "type": "info", "title": "Inbox summary"}):
+        overlay._index_card(conv, card)
+    overlay._card_sets.setdefault(conv, {})["git"] = ["gd-list", "gd-stat"]
+    events = turn(client, "remove the dog picture", conv_id=conv)
+    assert says(events) == ["Removed, sir."]  # no thinking ack before the line
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards",
+                                                                 "ids": ["ow-dog"]}]
+    row = _steps("card_remove")[-1]
+    assert (row["card"], row["match"]) == ("ow-dog", "title")
+    assert [c[0] for c in overlay._card_index[conv]] == ["gd-list", "ag-1"]
+    assert conv not in deps.conversations.sessions  # the model was never asked
+
+    # 18: the removed card is named by nothing later
+    assert says(turn(client, "enlarge the dog picture", conv_id=conv)) == [acks.PHRASES["no_card"]]
+    drop = overlay._drop_cards(conv, "git")
+    assert drop is None or "ow-dog" not in drop["ids"]
+
+    # 15: no such card; a names-only target with a matching card; an app name
+    events = turn(client, "remove the cat picture", conv_id=conv)
+    assert says(events) == [acks.PHRASES["no_card"]]
+    assert _steps("card_remove")[-1]["detail"] == "refused reason=none"
+    assert not [e for e in events if e["type"] == "drop_cards"]
+    assert says(turn(client, "remove the unicorn card", conv_id=conv)) == [acks.PHRASES["no_card"]]
+    overlay._index_card(conv, {"id": "b-1", "type": "flow", "title": "Battery"})
+    events = turn(client, "remove the battery", conv_id=conv)
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": ["b-1"]}]
+    _deps(chunks=['{"say": "I can only show cards."}\n'])
+    events = turn(client, "close Safari", conv_id=conv)
+    assert acks.PHRASES["no_card"] not in says(events)
+    assert not [e for e in events if e["type"] == "drop_cards"]
+
+    # 17: the change-list card takes its cursor and boxes; other gd-* cards go alone
+    _deps()
+    conv = "cs2"
+    overlay._index_card(conv, {"id": "gd-stat", "type": "bar", "title": "Lines changed"})
+    overlay._index_card(conv, {"id": "gd-list", "type": "info", "title": "Changes"})
+    nav = overlay.HunkNav(repo=tmp_path, rel="a.py", base="HEAD", hunks=[], index=0,
+                          editor=None, ctx=SimpleNamespace(), boxes=True)
+    overlay._hunks[conv] = nav
+    events = turn(client, "remove the lines changed card", conv_id=conv)
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards",
+                                                                 "ids": ["gd-stat"]}]
+    assert not [e for e in events if e["type"] == "lines"] and overlay._hunks[conv] is nav
+    events = turn(client, "get rid of the changes card", conv_id=conv)
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards",
+                                                                 "ids": ["gd-list"]}]
+    assert [e for e in events if e["type"] == "lines"] == [
+        {"type": "lines", "file": str(tmp_path / "a.py"), "ranges": []}]
+    assert conv not in overlay._hunks
+    assert says(turn(client, "next change", conv_id=conv))[-1] == acks.PHRASES["no_hunks"]

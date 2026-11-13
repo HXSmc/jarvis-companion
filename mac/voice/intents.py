@@ -205,6 +205,9 @@ _MEDIA_REQUEST_RE = re.compile(r"(?:(?:can|could|would|will) you |please |jarvis
                                + r"(?: of (?P<subject>.+))?")
 # Bare form "a picture of a dog": _MEDIA_NOUN carries the verb's leading space, so strip it.
 _MEDIA_OF_RE = re.compile(r"(?:an? )?" + _MEDIA_NOUN.lstrip() + r" of (?P<subject>.+)")
+# loose=True's net: any "<noun> of <subject>" inside a sentence that didn't fullmatch.
+_MEDIA_LOOSE_RE = re.compile(
+    r"\b(?P<noun>picture|photo|image|video|diagram|clip)(?P<plural>s)? of (?P<subject>.+)")
 # Subject tails that are politeness/timing, not search words.
 _MEDIA_TAILS = ("as a test", "please", "for me", "right now", "now", "again",
                 "jarvis", "sir", "thanks", "thank you")
@@ -501,49 +504,60 @@ def _media_count(amt: str, plural: str, max_count: int) -> int:
     return 1
 
 
-def media_request(text: str) -> MediaAsk | None:
+def _media_ask(kind: str, noun: str, subject: str, plural: str, amt: str) -> MediaAsk:
+    """One matched media request through the shared subject rules (see media_request)."""
+    from mac.voice import media_lookup  # lazy: importing intents must not pull httpx
+    if not subject:
+        return MediaAsk(kind, "", 0)
+    count = 1 if kind == "video" else _media_count(amt, plural, media_lookup.MAX_COUNT)
+    s = subject
+    while True:  # trailing qualifiers ("as a test", "please") and commas/spaces off
+        s = s.strip(" ,")
+        tail = next((q for q in _MEDIA_TAILS if s == q or s.endswith(" " + q)), "")
+        if not tail:
+            break
+        s = s[:-len(tail)].rstrip(" ,")
+    article = ""
+    lead = _MEDIA_ARTICLE_RE.match(s)
+    if lead:
+        article, s = lead[1], s[lead.end():]
+    s = media_lookup.clean_query(s)
+    if kind == "image" and noun == "diagram" and s:
+        s += " diagram"  # the cap below counts it
+    s = " ".join(s.split()[:6])[:media_lookup.MAX_QUERY].strip()
+    if s and not s.isdigit() and not all(w in _MEDIA_PRIVATE_WORDS for w in s.split()):
+        return MediaAsk(kind, s, count, article)
+    return MediaAsk(kind, "", 0)
+
+
+def media_request(text: str, loose: bool = False) -> MediaAsk | None:
     """The owner's spoken picture/video request, or None. Fixed code, never a model.
 
     Privacy path: when the conversation holds private text, the service may not let a
     model write a search query, so the subject is built only from this transcript — it
     can never contain words the owner didn't say. subject "" (count 0) = a clear ask
     with no searchable subject (deixis, screen words).
+
+    loose=True also picks up "<noun> of <subject>" behind words the strict fullmatch
+    refuses ("so anyway, a picture of a dog"): same subject rules, never a wider net.
     """
     if len(text) > 300:
         return None
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
     t = _MISHEARD_WAKE_RE.sub("", t, count=1).strip().lower()
     sentences = [s.rstrip(",").strip() for s in re.split(r"[.?!]+", t) if s.strip()][:3]
-    from mac.voice import media_lookup  # lazy: importing intents must not pull httpx
-
     for sent in sentences:
         s = strip_lead(sent)
         m = _MEDIA_REQUEST_RE.fullmatch(s) or _MEDIA_OF_RE.fullmatch(s)
-        if not m:
-            continue
-        kind = "video" if m["noun"] in ("video", "clip") else "image"
-        if not m["subject"]:
-            return MediaAsk(kind, "", 0)
-        count = 1 if kind == "video" else _media_count(m.groupdict().get("amt") or "",
-                                                       m["plural"], media_lookup.MAX_COUNT)
-        s = m["subject"]
-        while True:  # trailing qualifiers ("as a test", "please") and commas/spaces off
-            s = s.strip(" ,")
-            tail = next((q for q in _MEDIA_TAILS if s == q or s.endswith(" " + q)), "")
-            if not tail:
-                break
-            s = s[:-len(tail)].rstrip(" ,")
-        article = ""
-        lead = _MEDIA_ARTICLE_RE.match(s)
-        if lead:
-            article, s = lead[1], s[lead.end():]
-        s = media_lookup.clean_query(s)
-        if kind == "image" and m["noun"] == "diagram" and s:
-            s += " diagram"  # the cap below counts it
-        s = " ".join(s.split()[:6])[:media_lookup.MAX_QUERY].strip()
-        if s and not s.isdigit() and not all(w in _MEDIA_PRIVATE_WORDS for w in s.split()):
-            return MediaAsk(kind, s, count, article)
-        return MediaAsk(kind, "", 0)
+        if m:
+            return _media_ask("video" if m["noun"] in ("video", "clip") else "image",
+                              m["noun"], m["subject"], m["plural"],
+                              m.groupdict().get("amt") or "")
+        if loose:
+            m = _MEDIA_LOOSE_RE.search(s)
+            if m:
+                return _media_ask("video" if m["noun"] in ("video", "clip") else "image",
+                                  m["noun"], m["subject"], m["plural"], "")
     return None
 
 
