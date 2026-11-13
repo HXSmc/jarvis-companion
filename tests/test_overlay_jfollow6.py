@@ -629,3 +629,30 @@ def test_stop_row_words_zero_is_the_start_field():
     from mac.voice import intents
     ask = intents.session_request("stop the voice-test session")
     assert (ask.action, ask.ref, ask.name, ask.words) == ("stop", "name", "voice-test", "")
+
+
+def test_start_lookup_path_echo_title(client, monkeypatch, tmp_path):
+    """31c on the timed-out start: the lookup's row title is the cut prompt too -> owner's words."""
+    import json
+    import time
+    from test_overlay_jfollow5 import _slow_env
+    overlay._voice_started.clear()
+    overlay._voice_started_words.clear()
+    overlay._session_calls.clear()
+    _deps(Clock())
+    rows: list = []
+
+    def post(request):
+        prompt = json.loads(request.read())["text"]
+        rows[:] = [{"session_id": "new-7", "state": "working", "device": "Mini PC",
+                    "title": prompt[:40], "task": prompt, "last_activity_at": "2026-11-13T22:09:00Z"}]
+        time.sleep(overlay.FEEDBACK_S + 0.3)
+        raise httpx.ReadTimeout("slow", request=request)
+
+    _slow_env(monkeypatch, tmp_path, get=lambda: httpx.Response(200, json=rows), post=post)
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 0.2)
+    turn(client, "start a session to fix the failing tests", conv_id="lk1")
+    events = turn(client, "yes", conv_id="lk1")
+    assert says(events) == [acks.PHRASES["session_waiting"], acks.PHRASES["session_started_it"]]
+    assert [e["card"]["title"] for e in events if e["type"] == "card"][-1] == "fix the failing tests"
+    assert _steps("session_start")[-1]["detail"] == "confirmed id=new-7 via=lookup"

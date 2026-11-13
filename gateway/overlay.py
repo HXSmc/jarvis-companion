@@ -976,7 +976,7 @@ def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
                 continue
             title = str(item.get("title", ""))[:80]
             started = _voice_started_words.get(sid)
-            if started and _echoes_prompt(title, started[1]):
+            if started and started[0] and _echoes_prompt(title, started[1]):
                 title = _cut40(started[0])  # the owner's own words, never the cut prompt
             rows.append({"id": sid,
                          "device": str(item.get("device", ""))[:24],
