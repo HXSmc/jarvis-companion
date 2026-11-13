@@ -10,11 +10,13 @@ import pytest
 
 from mac.voice import acks, media_lookup
 from mac.voice.intents import (SESSION_WORDS_MAX, STOP_PHRASES, CardRemoveAsk, Intent,
-                               MemoryAsk, WorkspaceAsk, card_matches, card_remove_request,
-                               card_size_request, card_words, first_form, is_cancel,
+                               MemoryAsk, WorkspaceAsk, card_matches, card_pick,
+                               card_remove_request, card_size_request, card_words,
+                               claims_overlay_change, first_form, is_cancel,
                                is_confirm, is_hunk_back, is_no, is_stop, list_apps,
-                               media_request, match_card, memory_request, noise_words,
-                               open_app, open_site, parse, session_request, strip_lead,
+                               media_request, match_card, memory_request, names_one_card,
+                               noise_words, open_app, open_site, parse, pick_shaped,
+                               session_request, strip_lead,
                                tail_hunk, workspace_request)
 from mac.voice.lean import Conversations, lean_argv
 
@@ -780,10 +782,12 @@ def test_card_remove_match_order():
     assert card_matches("the changes card", cards) == ("title", ["c3"])
     assert card_matches("the cat", cards) is None
     images = [("i1", "image", ("dog",)), ("i2", "image", ("dog", "park"))]
-    assert card_matches("the dog picture", images) == ("title", ["i2", "i1"])
+    # jfollow6: the ranked title branch keeps only the best tier, so the exact
+    # "dog" title beats the longer "dog park" one (pinned test changed with the default).
+    assert card_matches("the dog picture", images) == ("title", ["i1"])
     assert card_matches("the picture", images) == ("kind", ["i2", "i1"])
     dup = [("i2", "image", ("cat",)), ("i1", "image", ("dog",)), ("i2", "image", ("dog", "park"))]
-    assert card_matches("the dog picture", dup) == ("title", ["i2", "i1"])
+    assert card_matches("the dog picture", dup) == ("title", ["i1"])
     assert match_card("the changes card", cards) == ("c3", "kind")  # unchanged
 
 
@@ -796,3 +800,166 @@ def test_card_remove_leaves_place_and_topic_asks_alone():
                  "take down the diagram on the website"):
         assert parse(text, apps=()).kind == "answer", text
     assert parse("close the picture of the dog", apps=()).kind == "card_remove"
+
+
+def test_card_matches_rank():
+    """jfollow6: the title branch ranks hits; only the best (suffix_hits, extra_words)
+    tier survives, newest-first inside it (parent criterion 5)."""
+    nested = [("j1", "info", ("jarvis", "companion", "capabilities")),
+              ("j2", "info", ("jarvis", "capabilities"))]
+    # (a) "jarvis capabilities": the exact title "jarvis capabilities" wins over the longer
+    # nested one ("companion" is an extra word nobody said).
+    assert card_matches("jarvis capabilities", nested) == ("title", ["j2"])
+    assert card_matches("jarvis capabilities", list(reversed(nested))) == ("title", ["j2"])
+    assert match_card("jarvis capabilities", nested) == ("j2", "title")
+    # (b) A word only the longer title has picks it alone.
+    assert card_matches("the companion capabilities", nested) == ("title", ["j1"])
+    assert match_card("the companion capabilities", nested) == ("j1", "title")
+    # (c) A word both titles share keeps both (newest first).
+    assert card_matches("jarvis", nested) == ("title", ["j2"])
+    assert match_card("jarvis", nested) == ("j2", "title")
+    # (d) An exact name word beats a 4-letter suffix hit ("smartphone" ends with "phone").
+    phones = [("p1", "flow", ("phone", "main", "components")),
+              ("p2", "flow", ("smartphone", "architecture"))]
+    assert card_matches("the phone diagram", phones) == ("title", ["p1"])
+    assert match_card("the phone diagram", phones) == ("p1", "title")
+    # (e) Equal-rank titles both stay, newest first (and match_card takes the newest).
+    equal = [("e1", "info", ("jarvis", "companion", "capabilities")),
+             ("e2", "info", ("jarvis", "overlay", "capabilities"))]
+    assert card_matches("the jarvis capabilities", equal) == ("title", ["e2", "e1"])
+    assert match_card("the jarvis capabilities", equal) == ("e2", "title")
+    # Advice negative: titles differing only before a shared suffix stay ambiguous.
+    wired = [("n1", "flow", ("phone", "network", "diagram")),
+             ("n2", "flow", ("phone", "wiring", "diagram"))]
+    assert card_matches("the phone diagram", wired) == ("title", ["n2", "n1"])
+
+
+def test_clear_verb_one_card():
+    """jfollow6: "clear" removes one NAMED card; its pointer and whole-overlay forms
+    stay the plural clear (parent criterion 9)."""
+    assert parse("clear the capabilities card", apps=()) == Intent(
+        "card_remove", "target", "capabilities")
+    for text in ("remove the jarvis capabilities card from the overlay",
+                 "clear the jarvis capabilities card from the screen"):
+        assert parse(text, apps=()) == Intent(
+            "card_remove", "target", "jarvis capabilities"), text
+    for text in ("clear", "clear the card", "clear the cards", "clear everything",
+                 "clear the screen", "clear the overlay", "clear it"):
+        assert parse(text, apps=()).kind == "clear", text
+    for text in ("clear that", "clear this card"):
+        assert parse(text, apps=()).kind == "answer", text
+    assert card_remove_request("clear that") is None
+    assert card_remove_request("clear this card") is None
+    assert parse("remove the picture from my notes", apps=()).kind != "card_remove"
+
+
+def test_card_pick_table():
+    """jfollow6: card_pick/pick_shaped over a two-card pick (parent criterion 10)."""
+    names = [("jarvis", "companion", "capabilities"), ("jarvis", "overlay", "capabilities")]
+    for text, want in (("the companion one", [0]),
+                       ("the jarvis overlay capabilities card", [1]),
+                       ("the second one", [1]), ("second", [1]),
+                       ("number two", [1]), ("the last one", [1]),
+                       ("the first one", [0]),
+                       ("both", [0, 1]), ("both of them", [0, 1]), ("all of them", [0, 1]),
+                       ("okay, the companion one please", [0]),
+                       ("the purple one", None), ("yes", None),
+                       ("what time is it", None), ("jarvis capabilities", None),
+                       ("the fourth one", None)):
+        assert card_pick(text, names) == want, text
+    for text, want in (("the purple one", True), ("the third card", True),
+                       ("the fourth one", True), ("both", True),
+                       ("yes", False), ("what time is it", False),
+                       ("jarvis capabilities", False)):
+        assert pick_shaped(text) is want, text
+
+
+def test_claims_overlay_change():
+    """jfollow6: a model line claiming an overlay change it cannot make (criterion 17)."""
+    for line in ("Understood, sir, clearing the capabilities card from the overlay now.",
+                 "I've removed the card.", "Closing that card now.",
+                 "Done, the card is gone, sir.", "Hiding the cards now, sir.",
+                 "I'll enlarge the diagram card."):
+        assert claims_overlay_change(line) is True, line
+    for line in ("I can't remove cards myself.", "Say remove, then the card's name.",
+                 "The card shows the removed lines.",
+                 "Clearing up the confusion: Saturn has 146 moons.",
+                 "I removed the duplicate line from your file."):
+        assert claims_overlay_change(line) is False, line
+
+
+def test_names_one_card():
+    """jfollow6: names_one_card sees one card in an ask, not the overlay (criterion 19)."""
+    for text in ("remove the jarvis thing", "clear the capabilities card from the overlay",
+                 "the jarvis capabilities card"):
+        assert names_one_card(text) is True, text
+    for text in ("close the overlay", "dismiss the overlay", "remove these",
+                 "clear everything", "remove the cards"):
+        assert names_one_card(text) is False, text
+
+
+def test_names_one_card_whole_overlay():
+    """jfollow6 round 2: a whole-overlay ask with a modifier or particle names no one card,
+    so C3 never drops the model clear it asked for; "clear every ..." stays a model ask."""
+    for text in ("clear the whole screen", "clear up the screen", "clear the entire overlay",
+                 "dismiss the whole overlay", "close down the overlay", "clear every single card",
+                 "remove every card", "close each card", "clear both cards"):
+        assert names_one_card(text) is False, text
+    for text in ("clear every single card", "clear each card", "clear the whole overlay"):
+        assert parse(text, apps={}).kind == "answer", text  # base kind: never a one-card remove
+    # a whole-set word is no name, but it never hides the name next to it (C3 still guards)
+    for text in ("remove the whole jarvis thing", "clear the whole foods card"):
+        assert names_one_card(text) is True, text
+
+
+def test_card_help_parse():
+    """jfollow6: "can you remove a single card" is a how-to question (criterion 16)."""
+    for text in ("Can you not remove a single card", "can you remove one card",
+                 "can you remove a single card", "can't you remove one card",
+                 "how do I remove a card", "Hey Jarvis, could you remove one card?",
+                 "is there a way to remove a card from the overlay"):
+        assert parse(text, apps=()) == Intent("card_help"), text
+    assert parse("can you remove the cat card", apps=()) == Intent(
+        "card_remove", "target", "cat")
+    assert parse("can you remove cards", apps=()).kind != "card_help"
+    assert parse("remove one card", apps=()) == Intent("card_remove", "target", "one")
+
+
+def test_sessions_topic_table():
+    """jfollow6: wider read-only sessions questions (criterion 21, Design D)."""
+    for text in ("what are my sessions doing", "what's running on my Jarvis Companion",
+                 "what sessions are on my driver's companion",
+                 "sessions on my drivers companion",
+                 "how are the sessions on my Jarvis Companion",
+                 "any sessions running", "show me my sessions",
+                 "what's the status of my sessions",
+                 "Hey Jarvis, what's running on the mini PC"):
+        assert parse(text, apps=()) == Intent("sessions", "", ""), text
+    for text, want in (("start a new session about my sessions list", "session"),
+                       ("stop the voice-test session", "session"),
+                       ("remember that my sessions start at nine", "memory"),
+                       ("what is a session cookie", "answer"),
+                       ("how do sessions work in flask", "answer"),
+                       ("what's running in this terminal", "answer")):
+        assert parse(text, apps=()).kind == want, text
+
+
+def test_claims_overlay_change_pronoun_object():
+    """Mac live 30: the card word sat in the sentence before "I'll clear them"."""
+    claims = claims_overlay_change
+    assert claims("My apologies, sir, two cards landed on top of each other. "
+                  "I'll clear them and put up just one.")
+    assert claims("The cards overlapped. Clearing them now.")
+    assert claims("Two cards stacked up, sir. They are gone now.")
+    assert not claims("The card lists your tasks. I'll explain them.")
+    assert not claims("I removed it from your file.")  # no card word anywhere
+    assert not claims("The card shows the diff. I can't remove them myself.")
+
+
+def test_card_pick_by_the_name_as_heard():
+    """The voice drops the wake word from titles: a reply naming what was heard still picks."""
+    names = [("jarvis", "capabilities"), ("overlay", "capabilities")]
+    assert card_pick("the capabilities one", names) == [0]
+    assert card_pick("the overlay capabilities", names) == [1]
+    assert card_pick("the jarvis capabilities card", names) == [0]
+    assert card_pick("the purple one", names) is None

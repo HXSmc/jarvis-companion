@@ -93,6 +93,11 @@ PHRASES = {
     "removed": "Removed, sir.",
     "session_waiting": "Asking the mini PC now.",
     "session_unsure": "Asked the mini PC. No answer yet.",
+    # jfollow6: pick replies and the one-card help lines.
+    "removed_both": "Removed both, sir.",
+    "one_at_a_time": "I can enlarge one at a time.",
+    "card_help": "Yes: say remove the cat card.",
+    "card_hint": "Say: remove, then the card's name.",
 }
 
 # Thinking lines said while the model works: (key, text, tag). "look" = an answer/lookup is
@@ -140,7 +145,7 @@ ACK_POLICY: dict[str, str | None] = {
     "agent": "agent",
     "sessions": "sessions",
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
-    "card_remove": None,
+    "card_remove": None, "card_help": None,
     "answer": "answer",
 }
 

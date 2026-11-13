@@ -585,6 +585,7 @@ def _forget(conv_id: str) -> None:
         store.pop(conv_id, None)
     _session_ref.pop(conv_id, None)
     _host_ask.pop(conv_id, None)
+    _card_pick.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
     _tainted.discard(conv_id)
 
@@ -607,6 +608,7 @@ def _forget_cards(conv_id: str) -> None:
     """After a `clear` the app holds no cards: none can be named or restored by a card_size ask."""
     _card_index.pop(conv_id, None)
     _enlarged.pop(conv_id, None)
+    _card_pick.pop(conv_id, None)
 
 
 def _index_card(conv_id: str, card: dict) -> None:
@@ -633,11 +635,14 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     The card index and the enlarged id stay: the app still shows those cards (Mac live run 5, 37a).
     Their title words only feed intents.match_card (fixed code), never a model prompt."""
     cards, enlarged = _card_index.get(conv_id), _enlarged.get(conv_id)
+    pick = _card_pick.get(conv_id)  # within its 30 s, "Hey Jarvis, the companion one" still picks
     _forget(conv_id)
     if cards is not None:
         _card_index[conv_id] = cards
     if enlarged is not None:
         _enlarged[conv_id] = enlarged
+    if pick is not None:
+        _card_pick[conv_id] = pick
     deps.conversations.drop(conv_id)
     deps.quiet_conversations.drop(conv_id)
     _resets[conv_id] = _resets.get(conv_id, 0) + 1
@@ -856,13 +861,24 @@ async def _speak(text: str, deps: OverlayDeps) -> AsyncIterator[dict]:
         yield audio
 
 
+# The wake word said aloud on speakers wakes the Mac's own listener (Mac live run: a "Which one"
+# line naming "Jarvis ..." cards scored 0.996): the voice drops the name, the caption keeps it.
+_WAKE_WORD_RE = re.compile(r"\bjarvis(?:['’]s?)?(?!\w)[:,]?\s*", re.IGNORECASE)
+
+
+def _voice_text(text: str) -> str:
+    """The words the synth reads: `text` without the wake word."""
+    return _WAKE_WORD_RE.sub("", text).strip()
+
+
 async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     """Synthesized say line, or None when there is no voice / synth fails."""
-    if deps.synth is None:
+    voice = _voice_text(text.replace("`", ""))
+    if deps.synth is None or not re.search(r"\w", voice):  # a name-only line: caption only
         return None
     try:
         # Answers quote code in backticks (the "why" line): the caption keeps them, the voice doesn't.
-        pcm, rate = await asyncio.to_thread(deps.synth, text.replace("`", ""))
+        pcm, rate = await asyncio.to_thread(deps.synth, voice)
     except Exception:
         return None
     return {"type": "audio", "text": text, "rate": rate,
@@ -958,10 +974,14 @@ def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
             sid = str(item.get("session_id") or "")
             if not _SESSION_ID_RE.fullmatch(sid):  # a bad id can never be called back
                 continue
+            title = str(item.get("title", ""))[:80]
+            started = _voice_started_words.get(sid)
+            if started and started[0] and _echoes_prompt(title, started[1]):
+                title = _cut40(started[0])  # the owner's own words, never the cut prompt
             rows.append({"id": sid,
                          "device": str(item.get("device", ""))[:24],
                          "state": str(item.get("state", ""))[:24],
-                         "title": str(item.get("title", ""))[:80],
+                         "title": title,
                          "doing": str(item.get("doing", ""))[:120],
                          "health": str(item.get("health") or "")[:16],
                          "needs_owner": item.get("state") == "needs_input",
@@ -1050,7 +1070,7 @@ def _name_words(text: str) -> set[str]:
     return set(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split()) - _NAME_FILLER
 
 
-ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line: no pending pick
+ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line (or a _card_pick reply)
 
 
 def session_prompt(words: str, ref_row: dict | None = None) -> str:
@@ -1088,6 +1108,16 @@ _SENT_ERRORS = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.WriteError, httpx.R
 # Session ids this process already reported as started by voice: the lookup skips them, so one
 # timed-out start is never claimed twice. Written by fixed code only, bounded.
 _voice_started: deque[str] = deque(maxlen=64)
+# Those sessions' (owner words, prompt sent): the stop by the owner's words and the cut-prompt
+# title check read it. Written by fixed code only, bounded like _voice_started.
+_voice_started_words: dict[str, tuple[str, str]] = {}
+
+
+def _echoes_prompt(title: str, prompt: str) -> bool:
+    """True when a host title is only a prefix of the prompt we sent: the host answered before its
+    titler ran (Mac run 31c: 'Started by voice from the Mac overlay. T')."""
+    t = " ".join(str(title or "").split()).rstrip(".… ").casefold()
+    return bool(t) and " ".join(str(prompt or "").split()).casefold().startswith(t)
 
 
 def _companion_call(method: str, path: str, json: dict | None = None,
@@ -1132,6 +1162,59 @@ class HostAsk:
 # conv -> HostAsk, under _confirm_lock like the agent tier's _confirm; no watchdog thread:
 # expiry is judged on the owner's next utterance.
 _host_ask: dict[str, HostAsk] = {}
+
+
+@dataclass
+class CardPick:
+    """A "Which one" line the card tier spoke: the owner's next words may pick among its cards."""
+
+    action: str  # "remove" | "enlarge"
+    ids: list[str]  # the ids the line named, in spoken order (max 3)
+    names: list[tuple[str, ...]]  # their title words, same order (intents.card_pick ranks these)
+    deadline: float
+
+
+CARD_PICK_S = 30
+# conv -> CardPick, under _confirm_lock like _host_ask; expiry is judged on the next utterance.
+# Ids only ever come from the conv's _card_index via the line; a reply can only choose among them.
+_card_pick: dict[str, CardPick] = {}
+
+
+def _live_pick(conv_id: str, deps: OverlayDeps) -> CardPick | None:
+    """conv_id's pending card pick, or None; an expired one is dropped here."""
+    with _confirm_lock:
+        pick = _card_pick.get(conv_id)
+        if pick is not None and deps.clock() >= pick.deadline:
+            _card_pick.pop(conv_id, None)
+            pick = None
+    return pick
+
+
+def _drop_pick(conv_id: str) -> None:
+    with _confirm_lock:
+        _card_pick.pop(conv_id, None)
+
+
+def _which_one(conv_id: str, action: str, hit_ids: list[str], cards: list, deps: OverlayDeps) -> str:
+    """The "Which one" line for 2+ matching cards (first 4 title words each, max 3 names); it sets
+    the conv's pick to exactly the ids it names. The caller has checked 2+ distinct names."""
+    ids: list[str] = []
+    names: list[str] = []
+    titles: list[tuple[str, ...]] = []
+    for i in hit_ids:
+        title = next(c for c in reversed(cards) if c[0] == i)[2]
+        name = "the " + " ".join(title[:4])
+        if name in names:  # a same-name twin: the newest (first) one stands for it
+            continue
+        ids.append(i)
+        names.append(name)
+        titles.append(tuple(title))
+        if len(ids) == 3:
+            break
+    with _confirm_lock:
+        _card_pick[conv_id] = CardPick(action, ids, titles, deps.clock() + CARD_PICK_S)
+    which = ", ".join(names[:-1]) + f" or {names[-1]}"
+    return f"Which one: {which}? {ASK_AGAIN}"
 
 
 async def _session_failed(action: str, reason: str, deps: OverlayDeps, said: list[str],
@@ -1193,19 +1276,25 @@ def _lookup_started(prompt: str) -> tuple[str, str] | None:
 
 
 async def _session_started(conv_id: str, sid: str, raw_title: object, deps: OverlayDeps,
-                           said: list[str]) -> AsyncIterator[dict]:
+                           said: list[str], words: str = "", prompt: str = "") -> AsyncIterator[dict]:
     """The start's tail, shared by the direct answer and the lookup: the id joins the
     voice-started set, the conversation is tainted, the line is spoken, the card shown."""
     if _SESSION_ID_RE.fullmatch(sid):
         _voice_started.append(sid)
+        _voice_started_words[sid] = (words, prompt)
+        while len(_voice_started_words) > 64:
+            _voice_started_words.pop(next(iter(_voice_started_words)))
     _tainted.add(conv_id)  # the host's title is untrusted text going into _history
     title = " ".join(str(raw_title or "").split())[:60]
+    if _echoes_prompt(title, prompt):  # no title yet: never speak the prompt back as one
+        title = ""
     line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
     async for ev in _speak(line, deps):
         yield ev
     said.append(line)
     card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
-                              "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
+                              "title": title or _cut40(words) or "Session",
+                              "body": ["Mini PC", "Started by voice"]})
     if card:
         seen = _card_ids.setdefault(conv_id, set())
         if card["id"] in seen:  # a host id: only a collision renames it
@@ -1235,7 +1324,8 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
                 on_step("session_start", detail=f"confirmed id={new_id}")
         elif on_step:
             on_step("session_start", detail="confirmed")
-        async for ev in _session_started(body.conv_id, new_id, out.get("title"), deps, said):
+        async for ev in _session_started(body.conv_id, new_id, out.get("title"), deps, said,
+                                         str(payload.get("words") or ""), req["text"]):
             yield ev
         return
     if status == 0:  # sent, no answer in time: the router may have started it anyway
@@ -1245,7 +1335,8 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
             _set_session_ref(body.conv_id, [sid])
             if on_step:
                 on_step("session_start", detail=f"confirmed id={sid} via=lookup")
-            async for ev in _session_started(body.conv_id, sid, title, deps, said):
+            async for ev in _session_started(body.conv_id, sid, title, deps, said,
+                                             str(payload.get("words") or ""), req["text"]):
                 yield ev
             return
         async for ev in _session_unsure("start", deps, said, on_step):
@@ -1861,7 +1952,10 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
         rows = held["rows"]
         if ask.ref == "name" and ask.name:
             want = _name_words(ask.name)
-            hits = [r for r in rows if want and want <= _name_words(r["title"])]
+            # the title, or the owner's own start words for a session this overlay started
+            hits = [r for r in rows if want and (
+                want <= _name_words(r["title"])
+                or want <= _name_words(_voice_started_words.get(r["id"], ("", ""))[0]))]
             if not hits:
                 async for ev in _line("session_none_named", deps):
                     yield ev
@@ -1927,6 +2021,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     # preflight settles it.
     owner_answer_due = (body.conv_id in _confirm or body.conv_id in _expired
                         or body.conv_id in _agent_busy or body.conv_id in _host_ask)
+    if owner_answer_due:  # the preflight owns this turn: a pick never settles or skips a Confirm
+        _drop_pick(body.conv_id)
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
@@ -1936,6 +2032,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         yield ev
     if handled:
         return
+    # B: the owner's own words (before any continuation join) against only the cards the last
+    # "Which one" line named. A pick reply stays an `answer` kind: the level gate below applies.
+    pick = _live_pick(body.conv_id, deps)
+    pick_hit = intents.card_pick(body.text, pick.names) if pick is not None else None
+    # A reply shaped like a pick ("the purple one") answers the line too: never room noise.
+    pick_reply = pick is not None and (pick_hit is not None or intents.pick_shaped(body.text))
     if body.followup and not owner_answer_due:
         # Room talk is not the owner: a quiet or unsure follow-up is dropped before it can join a
         # pending head or reach a model. A known command ("next change", "clear", "stop") never is.
@@ -1971,7 +2073,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             on_step("conversation", detail="fresh: wake")
     # "who changed this file last" ends on a trailing word but is a complete agent request;
     # so does a bare "next" (the hunk walk).
-    if intents.looks_incomplete(body.text) and intents.parse(body.text, apps={}).kind not in ("agent", "hunk"):
+    if (not pick_reply and intents.looks_incomplete(body.text)
+            and intents.parse(body.text, apps={}).kind not in ("agent", "hunk")):
         # Trails off ("show me the last, uh"): say nothing, the app keeps the mic open.
         _pending[body.conv_id] = (body.text, deps.clock())
         if on_step:
@@ -1979,7 +2082,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         metrics["total_s"] = round(deps.clock() - start, 3)
         yield {"type": "done", "metrics": metrics, "error": None}
         return
-    if body.followup and not joined and not owner_answer_due:
+    if body.followup and not joined and not owner_answer_due and not pick_reply:
         words = intents.noise_words(body.text)
         if words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
                                                body.conv_id, None).kind == "answer":
@@ -1996,6 +2099,17 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         intent = intents.parse(body.text, apps=apps, workspace_names=ws_names)
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
+        pick_ids: list[str] | None = None  # set: this turn answers the conv's "Which one" line
+        if pick is not None:
+            _drop_pick(body.conv_id)  # any reply settles it (an enlarge "both" puts it back)
+            if intent.kind == "answer":
+                if pick_hit is not None:
+                    pick_ids = [pick.ids[i] for i in pick_hit]
+                elif intents.pick_shaped(raw_text):
+                    pick_ids = []  # names no card the line offered: no_card, never the model
+                if pick_ids is not None:
+                    intent = (intents.Intent("card_remove", "pick", "") if pick.action == "remove"
+                              else intents.Intent("card_size", "max", ""))
         # A1: a remove hidden behind small talk ("Sure. Take the diagram card off") re-parses raw
         # speech; it only becomes card_remove when a card this conv already holds matches.
         if intent.kind == "answer" and not joined:
@@ -2111,9 +2225,34 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             # C2: fixed code over the cards this conv already holds (the _card_index), never the model.
             card_id: str | None = None
             how = "none"
-            hit = (intents.match_card(intent.sub, list(_card_index.get(body.conv_id, ())))
-                   if intent.arg == "max" else None)
-            if hit is not None:
+            cards = list(_card_index.get(body.conv_id, ()))
+            refused = ""
+            hit = None
+            if pick_ids is not None:  # a reply to an enlarge "Which one": only the ids it named
+                if len(pick_ids) > 1:
+                    refused = "both"
+                elif pick_ids and any(c[0] == pick_ids[0] for c in cards):
+                    hit = (pick_ids[0], "pick")
+            elif intent.arg == "max":
+                hit = intents.match_card(intent.sub, cards)
+                if hit is not None and hit[1] == "title":  # an equal title tie between names: ask
+                    tie = intents.card_matches(intent.sub, cards)
+                    if tie is not None and len({next(c for c in reversed(cards) if c[0] == i)[2][:4]
+                                                for i in tie[1][:3]}) > 1:
+                        hit, refused = None, "ambiguous"
+            if refused == "both":
+                with _confirm_lock:
+                    _card_pick[body.conv_id] = pick  # still open: the owner names one of them
+                async for ev in _line("one_at_a_time", deps):
+                    yield ev
+                said.append(acks.PHRASES["one_at_a_time"])
+            elif refused:
+                line = _which_one(body.conv_id, "enlarge", tie[1][:3], cards, deps)
+                _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+            elif hit is not None:
                 card_id, how = hit
                 _enlarged[body.conv_id] = card_id
                 yield {"type": "card_size", "id": card_id, "size": "max"}
@@ -2131,8 +2270,16 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 async for ev in _line("restored", deps):
                     yield ev
                 said.append(acks.PHRASES["restored"])
-            if on_step:
+            if on_step and refused:
+                on_step("card_size", detail=f"refused reason={refused}")
+            elif on_step:
                 on_step("card_size", action=intent.arg, card=card_id, match=how)
+
+        elif intent.kind == "card_help":
+            # C1: how to name a card is a fixed line: no model, no ack, nothing changes.
+            async for ev in _line("card_help", deps):
+                yield ev
+            said.append(acks.PHRASES["card_help"])
 
         elif intent.kind == "card_remove":
             # A2: fixed code; ids come only from this conv's _card_index, never model text.
@@ -2161,12 +2308,15 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append(acks.PHRASES.get("not_confirmed", ""))
             else:
                 cards = list(_card_index.get(body.conv_id, ()))
-                if intent.arg == "pointer":
+                if pick_ids is not None:  # B: only ids the "Which one" line named, each still held
+                    held = {c[0] for c in cards}
+                    hit = ("pick", pick_ids) if pick_ids and all(i in held for i in pick_ids) else None
+                elif intent.arg == "pointer":
                     hit = ("newest", [cards[-1][0]]) if cards else None
                 else:
                     hit = intents.card_matches(intent.sub, cards)
                 names: list[str] = []
-                if hit is not None and len(hit[1]) > 1:
+                if hit is not None and len(hit[1]) > 1 and pick_ids is None:
                     names = list(dict.fromkeys("the " + " ".join(
                         next(c for c in reversed(cards) if c[0] == i)[2][:4]) for i in hit[1][:3]))
                     # Mac live run 1 (30, 33): the index outlives the screen (idle clear), so an
@@ -2177,26 +2327,29 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         hit = (hit[0], [enlarged])
                     elif len(names) == 1:
                         hit = (hit[0], hit[1][:1])
-                card_id = hit[1][0] if hit is not None and len(hit[1]) == 1 else None
-                if card_id is not None:
-                    assert card_id != _CONFIRM_CARD_ID  # a remove never drops the Confirm card
-                    drop = _drop_saved_cards(body.conv_id, [card_id])
-                    if _enlarged.get(body.conv_id) == card_id:
+                drop_ids = (hit[1] if hit is not None and (len(hit[1]) == 1 or pick_ids is not None)
+                            else [])
+                if drop_ids:
+                    assert _CONFIRM_CARD_ID not in drop_ids  # a remove never drops the Confirm card
+                    drop = _drop_saved_cards(body.conv_id, drop_ids)
+                    if _enlarged.get(body.conv_id) in drop_ids:
                         _enlarged.pop(body.conv_id, None)
-                    if card_id == "gd-list":  # its change list is the conv's cursor: gone with it
+                    if "gd-list" in drop_ids:  # its change list is the conv's cursor: gone with it
                         nav = _hunks.pop(body.conv_id, None)
                         if nav is not None and nav.boxes:
                             yield _lines_event(str(nav.repo / nav.rel), [])
                     if drop is not None:
                         yield drop
-                    async for ev in _line("removed", deps):
+                    key = "removed_both" if len(drop_ids) == 2 else "removed"
+                    async for ev in _line(key, deps):
                         yield ev
-                    said.append(acks.PHRASES["removed"])
-                    if on_step:
-                        on_step("card_remove", card=card_id, match=hit[0])
-                elif hit is not None:  # two or more matched: name them, remove nothing
-                    which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
-                    line = f"Which one: {which}? {ASK_AGAIN}"
+                    said.append(acks.PHRASES[key])
+                    if on_step and len(drop_ids) == 1:
+                        on_step("card_remove", card=drop_ids[0], match=hit[0])
+                    elif on_step:
+                        on_step("card_remove", cards=len(drop_ids), match=hit[0])
+                elif hit is not None:  # two or more names matched: name them, remove nothing
+                    line = _which_one(body.conv_id, "remove", hit[1][:3], cards, deps)
                     _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
                     async for ev in _speak(line, deps):
                         yield ev
@@ -2550,6 +2703,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             escalate: list[bool] = []
             async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
                                             escalate=escalate, failed=failed, on_step=on_step,
+                                            pick_open=pick is not None,
                                             owner_text=None if joined else raw_text):
                 yield event
             if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
@@ -2816,7 +2970,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        screen_ref: bool = False, escalate: list | None = None,
                        failed: list | None = None, look: dict | None = None,
                        extra_untrusted: str | None = None,
-                       owner_text: str | None = None,
+                       owner_text: str | None = None, pick_open: bool = False,
                        on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
@@ -2884,6 +3038,39 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     directives: list[str] = []  # clear/layout events sent this reply, capped at MAX_DIRECTIVES
     cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
     gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
+    held: str | None = None  # a say line claiming an overlay change, held until a directive lands
+
+    async def speak_say(say_text: str) -> AsyncIterator[dict]:
+        yield _say(say_text)
+        said.append(say_text)
+        audio = await _audio(say_text, deps)
+        if audio is not None:
+            yield audio
+        if metrics["first_answer_audio_s"] is None:
+            metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+
+    async def honest_reply() -> AsyncIterator[dict]:
+        nonlocal produced
+        produced = True  # the honest line is the answer: not an empty reply
+        if OVERLAY_UNCHANGED_LINE not in said:
+            async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
+                yield ev
+            said.append(OVERLAY_UNCHANGED_LINE)
+        # once per reply: a C3 clear drop and the reply-end claim drop can both land here
+        if intents.names_one_card(text) and acks.PHRASES["card_hint"] not in said:
+            async for ev in _speak(acks.PHRASES["card_hint"], deps):
+                yield ev
+            said.append(acks.PHRASES["card_hint"])
+
+    async def drop_claim() -> AsyncIterator[dict]:
+        nonlocal held
+        if held is None:
+            return
+        held = None  # the claimed change never happened: never speak the claim
+        if on_step:
+            on_step("answer", claim="dropped")
+        async for ev in honest_reply():
+            yield ev
 
     async def media_refused() -> AsyncIterator[dict]:
         nonlocal media_seen, produced
@@ -2950,7 +3137,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         said.append(line)
 
     async def flush_line(line: str) -> AsyncIterator[dict]:
-        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at
+        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held
         line = line.strip()
         if not line:
             return
@@ -2965,6 +3152,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         if escalate is not None and (escalate or obj.get("agent") is True):
             escalate.append(True)  # hand over: nothing else from this reply is spoken or shown
             produced = True
+            async for ev in drop_claim():
+                yield ev
             return
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
             if metrics.get("ack_ms") is not None:  # an ack was already spoken: own the cut-off too
@@ -2975,19 +3164,17 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             produced = True
             if on_step:
                 on_step("incomplete", detail="model: waiting for the rest")
+            async for ev in drop_claim():
+                yield ev
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
             say_text = obj["say"].strip()
             produced = True
-            yield _say(say_text)
-            said.append(say_text)
-            audio = await _audio(say_text, deps)
-            if audio is not None:
-                yield audio
-                if metrics["first_answer_audio_s"] is None:
-                    metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
-            elif metrics["first_answer_audio_s"] is None:
-                metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+            if intents.claims_overlay_change(say_text):
+                held = say_text  # spoken only if this reply really changes the overlay
+            else:
+                async for ev in speak_say(say_text):
+                    yield ev
         if isinstance(obj.get("open"), str):
             async for ev in model_open(obj["open"]):
                 yield ev
@@ -3053,14 +3240,27 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             gate_dropped.append(mode)
             produced = True  # the honest line is the answer: not an empty reply
             mode = None
+        if mode == "clear" and (pick_open or intents.names_one_card(text)):
+            # C3: one card the owner named (or an open pick) must survive a whole-screen wipe.
+            if on_step:
+                on_step("layout", mode="clear", state="dropped", reason="one_card")
+            async for ev in honest_reply():
+                yield ev
+            gate_dropped.append(mode)
+            mode = None
         if mode and len(directives) < MAX_DIRECTIVES:
             directives.append(mode)
             produced = True
             if on_step:
                 on_step("layout", mode=mode)
+            if held is not None:  # the claim came true: speak it right before the change it described
+                claim, held = held, None
+                async for ev in speak_say(claim):
+                    yield ev
             if mode == "clear":
                 _forget_cards(body.conv_id)
             yield {"type": "clear"} if mode == "clear" else {"type": "layout", "mode": mode}
+        # a held claim is dropped only at the reply's end: a later object may still apply it
 
     fail_reason: str | None = None
     fail_detail = ""
@@ -3088,6 +3288,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 yield event
         if fail_reason is None and buf.strip():
             async for event in flush_line(buf):
+                yield event
+        if fail_reason is None and held is not None:  # the reply ended with the claim still held
+            async for event in drop_claim():
                 yield event
         if fail_reason is None:
             try:
@@ -3931,11 +4134,18 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         obj = {"say": line}
     if isinstance(obj.get("say"), str) and obj["say"].strip():
         text = obj["say"].strip()
-        async for ev in _speak(text, deps):
-            yield ev
-        said.append(text)
-        if metrics.get("first_answer_audio_s") is None:
-            metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
+        if intents.claims_overlay_change(text):
+            # C4: the agent tier never changes the overlay: a claim to that effect is never spoken.
+            if OVERLAY_UNCHANGED_LINE not in said:
+                async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
+                    yield ev
+                said.append(OVERLAY_UNCHANGED_LINE)
+        else:
+            async for ev in _speak(text, deps):
+                yield ev
+            said.append(text)
+            if metrics.get("first_answer_audio_s") is None:
+                metrics["first_answer_audio_s"] = round(deps.clock() - start, 3)
     card = hud.validate_card(obj.get("card")) if "card" in obj else None
     if card and card["type"] in media_lookup.MEDIA_TYPES:  # web pictures/videos come only from the fast tier
         logger.info("media card dropped: agent tier")
