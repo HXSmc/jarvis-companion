@@ -590,7 +590,10 @@ def test_wake_barge_turn_drops_the_cut_reply():
     assert "BargeWords.wakeTurnText(final: heardText, reply: echoOf)" in wake
     # Round 4: the follow-up window checks the reply it follows for an echoed answer.
     assert "let echoOf = followUp ? replyTexts : cutReply" in wake
-    assert "followUp ? BargeWords.dropEchoAnswer(heardText, reply: echoOf)" in wake
+    # jfollow4 round 6: through followUpText, whose every non-timed path is that same token rule.
+    assert "BargeWords.followUpText(heardText, reply: echoOf" in wake
+    timed = _swift_func(APP_SRC.parent / "OverlayCore" / "BargeIn.swift", "followUpText")
+    assert "return dropEchoAnswer(text, reply: reply)" in timed
     barge = _swift_func(APP_SRC / "AppController.swift", "bargeIn")
     assert "stream_open=" in barge
 
