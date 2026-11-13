@@ -861,13 +861,23 @@ async def _speak(text: str, deps: OverlayDeps) -> AsyncIterator[dict]:
         yield audio
 
 
+# The wake word said aloud on speakers wakes the Mac's own listener (Mac live run: a "Which one"
+# line naming "Jarvis ..." cards scored 0.996): the voice drops the name, the caption keeps it.
+_WAKE_WORD_RE = re.compile(r"\bjarvis(?:['’]s?)?(?!\w)[:,]?\s*", re.IGNORECASE)
+
+
+def _voice_text(text: str) -> str:
+    """The words the synth reads: `text` without the wake word."""
+    return _WAKE_WORD_RE.sub("", text).strip()
+
+
 async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     """Synthesized say line, or None when there is no voice / synth fails."""
     if deps.synth is None:
         return None
     try:
         # Answers quote code in backticks (the "why" line): the caption keeps them, the voice doesn't.
-        pcm, rate = await asyncio.to_thread(deps.synth, text.replace("`", ""))
+        pcm, rate = await asyncio.to_thread(deps.synth, _voice_text(text.replace("`", "")))
     except Exception:
         return None
     return {"type": "audio", "text": text, "rate": rate,

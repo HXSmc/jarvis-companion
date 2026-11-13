@@ -942,3 +942,15 @@ def test_sessions_topic_table():
                        ("how do sessions work in flask", "answer"),
                        ("what's running in this terminal", "answer")):
         assert parse(text, apps=()).kind == want, text
+
+
+def test_claims_overlay_change_pronoun_object():
+    """Mac live 30: the card word sat in the sentence before "I'll clear them"."""
+    claims = claims_overlay_change
+    assert claims("My apologies, sir, two cards landed on top of each other. "
+                  "I'll clear them and put up just one.")
+    assert claims("The cards overlapped. Clearing them now.")
+    assert claims("Two cards stacked up, sir. They are gone now.")
+    assert not claims("The card lists your tasks. I'll explain them.")
+    assert not claims("I removed it from your file.")  # no card word anywhere
+    assert not claims("The card shows the diff. I can't remove them myself.")

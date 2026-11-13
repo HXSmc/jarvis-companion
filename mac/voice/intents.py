@@ -931,13 +931,19 @@ _CLAIM_RE = re.compile(
     re.I)  # "I've" arrives capitalized
 _CLAIM_SUBJECT_RE = re.compile(r"\b(?:card|cards|overlay)\b", re.I)
 _CLAIM_NEG_RE = re.compile(r"\b(?:can't|cannot|won't|don't|didn't|not)\s+$", re.I)
+# "Two cards overlapped. I'll clear them." (Mac live run): a pronoun carries the card word over.
+_CLAIM_PRONOUN_RE = re.compile(r"\b(?:it|them|they|those|these|both)\b", re.I)
 
 
 def claims_overlay_change(line: str) -> bool:
     """True when a model line claims an overlay change ("Clearing the cards"): per
-    sentence, a card/overlay word plus a claim form; a negator before the verb isn't."""
-    for sent in re.split(r"[.!?]", line.replace("’", "'")):
-        if not _CLAIM_SUBJECT_RE.search(sent):
+    sentence, a card/overlay word (or a pronoun when another sentence has one) plus a
+    claim form; a negator before the verb isn't."""
+    line = line.replace("’", "'")
+    named = bool(_CLAIM_SUBJECT_RE.search(line))
+    for sent in re.split(r"[.!?]", line):
+        sent = sent.strip()  # a later sentence's "Clearing ..." starts at ^ too
+        if not (_CLAIM_SUBJECT_RE.search(sent) or named and _CLAIM_PRONOUN_RE.search(sent)):
             continue
         for m in _CLAIM_RE.finditer(sent):
             verb_at = next(m.start(g) for g in ("v1", "v2", "v3", "v4", "v5", "v6")

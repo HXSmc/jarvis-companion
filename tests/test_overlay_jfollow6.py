@@ -459,3 +459,37 @@ def test_claim_and_one_card_clear_say_hint_once(client):
     assert "Clearing the card from the overlay now." not in spoken
     assert spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
     assert spoken.count(acks.PHRASES["card_hint"]) == 1
+
+
+# --- Round 3 (Mac live run): the voice never says the wake word ---
+
+def test_voice_never_says_wake_word(client):
+    """Mac live 28: the Which-one line read "jarvis" titles aloud and the Mac woke on its own
+    speech, which ate the owner's pick. The caption keeps the titles; the voice drops the name."""
+    ids = _show_cards(client, "ww", *EQUAL)
+    heard: list[str] = []
+    clock = Clock()
+    loud = FakeConversations(lines({"say": "Model answer."}))
+    _deps(clock, conversations=loud, quiet_conversations=loud,
+          synth=lambda t: (heard.append(t), (b"\0\0", 24000))[1])
+    events = turn(client, "remove the jarvis capabilities card", conv_id="ww")
+    assert "jarvis" in says(events)[0]  # the caption names the cards as before
+    assert heard and not any("jarvis" in h.lower() for h in heard), heard
+    which = [h for h in heard if h.startswith("Which one")]
+    assert len(which) == 1, heard
+    assert "the companion capabilities" in which[0] and "the overlay capabilities" in which[0]
+    events = turn(client, "the companion one", conv_id="ww", followup=True, levels=NEAR)
+    assert _drops(events) == [[ids["Jarvis companion capabilities"]]]
+
+
+@pytest.mark.parametrize("line, voice", [
+    ("Two are active: the hardware mode remodel and Jarvis overlay session.",
+     "Two are active: the hardware mode remodel and overlay session."),
+    ("Jarvis: Companion Capabilities is up, sir.", "Companion Capabilities is up, sir."),
+    ("Jarvis's cards, sir.", "cards, sir."),
+    ("JARVIS, at your service.", "at your service."),
+    ("No name here.", "No name here."),
+])
+def test_voice_text_drops_wake_word(line, voice):
+    assert overlay._voice_text(line) == voice
+    assert all("jarvis" not in p.lower() for p in acks.PHRASES.values())
