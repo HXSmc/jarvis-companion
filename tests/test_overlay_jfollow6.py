@@ -521,3 +521,15 @@ def test_name_only_line_has_no_voice():
     assert asyncio.run(overlay._audio("Jarvis.", deps)) is None
     assert asyncio.run(overlay._audio("Jarvis' cards.", deps))["text"] == "Jarvis' cards."
     assert heard == ["cards."]
+
+
+def test_pick_by_the_name_as_heard_turn(client):
+    """The voice said "the capabilities or the overlay capabilities": "the capabilities one" picks."""
+    ids = _show_cards(client, "ah", "Jarvis capabilities", "Overlay capabilities")
+    loud, quiet = _model_deps(Clock())
+    events = turn(client, "remove the capabilities card", conv_id="ah")
+    assert says(events)[0].startswith("Which one: ")
+    events = turn(client, "the capabilities one", conv_id="ah", followup=True, levels=NEAR)
+    assert _drops(events) == [[ids["Jarvis capabilities"]]]
+    assert says(events) == ["Removed, sir."]
+    assert _model_calls(loud, quiet) == 0

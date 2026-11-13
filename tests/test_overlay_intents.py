@@ -954,3 +954,12 @@ def test_claims_overlay_change_pronoun_object():
     assert not claims("The card lists your tasks. I'll explain them.")
     assert not claims("I removed it from your file.")  # no card word anywhere
     assert not claims("The card shows the diff. I can't remove them myself.")
+
+
+def test_card_pick_by_the_name_as_heard():
+    """The voice drops the wake word from titles: a reply naming what was heard still picks."""
+    names = [("jarvis", "capabilities"), ("overlay", "capabilities")]
+    assert card_pick("the capabilities one", names) == [0]
+    assert card_pick("the overlay capabilities", names) == [1]
+    assert card_pick("the jarvis capabilities card", names) == [0]
+    assert card_pick("the purple one", names) is None

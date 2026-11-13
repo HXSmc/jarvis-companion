@@ -911,9 +911,11 @@ def card_pick(text: str, names: list[tuple[str, ...]]) -> list[int] | None:
         return [i] if 0 <= i < len(names) else None
     if not words:
         return None
-    m = card_matches(t, [(str(i), "", n) for i, n in enumerate(names)])
-    if m and m[0] == "title" and len(m[1]) == 1:
-        return [int(m[1][0])]
+    for ns in (names, [tuple(w for w in n if w != "jarvis") for n in names]):
+        # second pass: the names as the voice said them (it never speaks the wake word)
+        m = card_matches(t, [(str(i), "", n) for i, n in enumerate(ns)])
+        if m and m[0] == "title" and len(m[1]) == 1:
+            return [int(m[1][0])]
     return None
 
 
