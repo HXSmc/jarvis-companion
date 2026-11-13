@@ -31,6 +31,7 @@ final class SpeechInput {
     struct Heard {
         var levels: [Double]
         var conf: Double?
+        var audioFrom: Date? = nil  // capture time of the first audio the recogniser was fed
     }
 
     init() {}
@@ -227,7 +228,8 @@ final class SpeechInput {
         log.debug("final \(text, privacy: .private)")
         let levels = LevelBlocks.blocks(tap.levelSamples(), from: turn.levelFrom, to: end.addingTimeInterval(0.3))
         turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end,
-                      Heard(levels: Array(levels.suffix(LevelBlocks.maxSent)), conf: turn.confidence.mean))
+                      Heard(levels: Array(levels.suffix(LevelBlocks.maxSent)), conf: turn.confidence.mean,
+                            audioFrom: turn.stats.firstAt))
     }
 
     /// Drops everything up to a "jarvis" near the start, and stray punctuation.
@@ -370,7 +372,8 @@ final class SpeechInput {
         }
         // shortcut: the converter is used from the audio thread only after the ring
         // snapshot below has been fed, so it stays single-threaded.
-        let feed: @Sendable (AVAudioPCMBuffer, Date) -> Void = { buffer, _ in
+        let feed: @Sendable (AVAudioPCMBuffer, Date) -> Void = { buffer, at in
+            stats.stamp(at)
             let out = Self.convert(converter: converter, from: buffer, to: target)
             stats.fed(converted: out.map { Int($0.frameLength) })
             if let out {
@@ -449,6 +452,7 @@ final class SpeechInput {
         }
         turn.cancelHandler = { task.cancel() }
         for chunk in tap.ringSnapshot() where !turn.followUp {
+            stats.stamp(chunk.at)
             request.append(chunk.buffer)
         }
         if turn.followUp {
@@ -457,9 +461,13 @@ final class SpeechInput {
             let snapshot = tap.ringSnapshot()
             let playable = TurnEndpointer.replayable(stamps: snapshot.map { $0.at },
                                                      drainedAt: turn.replayFrom)
-            for (chunk, ok) in zip(snapshot, playable) where ok { request.append(chunk.buffer) }
+            for (chunk, ok) in zip(snapshot, playable) where ok {
+                stats.stamp(chunk.at)
+                request.append(chunk.buffer)
+            }
         }
-        tap.setSink { [weak request] buffer, _ in
+        tap.setSink { [weak request] buffer, at in
+            stats.stamp(at)
             stats.fed(converted: Int(buffer.frameLength))
             request?.append(buffer)
         }
@@ -513,6 +521,18 @@ private final class FeedStats: @unchecked Sendable {
     private var frames = 0
     private var results = 0
     private var error: String?
+    private var first: Date?
+
+    /// Capture time of the first chunk fed (follow-up echo timing, BargeWords.followUpText).
+    func stamp(_ at: Date) {
+        lock.lock(); defer { lock.unlock() }
+        if first == nil { first = at }
+    }
+
+    var firstAt: Date? {
+        lock.lock(); defer { lock.unlock() }
+        return first
+    }
 
     func fed(converted: Int?) {
         lock.lock(); defer { lock.unlock() }

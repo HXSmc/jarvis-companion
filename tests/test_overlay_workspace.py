@@ -201,7 +201,7 @@ def test_save_asks_before_replacing(client, ws_dir):
     workspaces.save("battery research", [{"id": "old", "type": "info", "title": "Old"}], [], None)
     gate = {"id": "c1", "type": "info", "title": "Gate", "body": ["code 4471"]}
     events = save_turn(client, "save this as battery research", cards=[{"card": gate}])
-    assert says(events) == ["Replace battery research?"]
+    assert says(events) == ["Replace battery research. Shall I?"]
     (card,) = [e["card"] for e in events if e["type"] == "card"]
     assert card["id"] == overlay._CONFIRM_CARD_ID and card["title"] == "Confirm"
     events = turn(client, "yes")
@@ -246,7 +246,7 @@ def test_delete_needs_the_host_confirm(client, ws_dir):
     _deps()
     workspaces.save("battery research", [], [], None)
     events = turn(client, "delete the battery research")
-    assert says(events) == ["Delete battery research?"]
+    assert says(events) == ["Delete battery research. Shall I?"]
     (card,) = [e["card"] for e in events if e["type"] == "card"]
     assert card["title"] == "Confirm"
     events = turn(client, "yes")

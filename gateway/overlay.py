@@ -1467,7 +1467,7 @@ async def _workspace_save_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: 
     if slug and await asyncio.to_thread(workspaces.exists, slug):
         shown = workspaces.display_name(ask.name)
         async for ev in _ask_host(body.conv_id, "workspace_replace", f"Replace {shown}",
-                                  f"Replace {shown}?",
+                                  _confirm_question(f"Replace {shown}"),
                                   {"name": ask.name, "cards": cards, "pages": pages,
                                    "enlarged": enlarged}, deps):
             yield ev
@@ -1609,7 +1609,7 @@ async def _workspace_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: Overl
             return
         name = await asyncio.to_thread(_ws_display, slugs[0], ask.name)
         async for ev in _ask_host(body.conv_id, "workspace_delete", f"Delete {name}",
-                                  f"Delete {name}?", {"slug": slugs[0]}, deps):
+                                  _confirm_question(f"Delete {name}"), {"slug": slugs[0]}, deps):
             yield ev
 
 
@@ -1627,6 +1627,13 @@ _HOST_ROWS: dict[str, tuple[str, str]] = {"start": ("session_start", ""),
                                           "memory_forget_all": ("memory", "forget_all"),
                                           "workspace_delete": ("workspace", "delete"),
                                           "workspace_replace": ("workspace", "replace")}
+
+
+def _confirm_question(summary: str) -> str:
+    """The spoken Confirm question for an action phrase that may end in the owner's or the model's
+    words: the line always ends in the fixed "Shall I?", so the owner's yes / no / stop / cancel is
+    never the question's own last word (the tail most likely to be heard back as echo)."""
+    return f"{summary[:1].upper()}{summary[1:]}. Shall I?"
 
 
 async def _ask_host(conv_id: str, kind: str, summary: str, question: str,
@@ -1744,21 +1751,24 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
                 return
             ref_row = hits[0]
     title40 = _cut40(ref_row["title"]) if ref_row else ""
-    if action == "start":
-        question = (f"Start a session on the mini PC to fix why {title40} went quiet?" if ref_row
-                    else f"Start a session on the mini PC: {_cut40(ask.words)}?")
+    if action == "start":  # with a ref the line ends in fixed words; owner words never end it
+        summary = (f"Start a session on the mini PC to fix why {title40} went quiet" if ref_row
+                   else f"Start a session on the mini PC: {_cut40(ask.words)}")
+        question = f"{summary}?" if ref_row else _confirm_question(summary)
         payload = {"words": ask.words, "ref_row": ref_row}
     elif action == "stop":
-        question = f"Stop the {title40} session?"
+        summary = f"Stop the {title40} session"
+        question = f"{summary}?"
         payload = {"id": ref_row["id"], "title": title40}
     else:
         shown = {"approve": "approve", "yes": "yes", "no": "no"}.get(ask.answer)
         if not shown:
             shown = '"' + _cut40(ask.words) + '"'
-        question = f"Send to {title40}: {shown}?"
+        summary = f"Send {shown} to {title40}"
+        question = _confirm_question(summary)
         payload = {"id": ref_row["id"], "title": title40, "answer": ask.answer, "words": ask.words,
                    "need_id": (ref_row.get("need") or {}).get("id")}  # the card open at ask time
-    async for ev in _ask_host(body.conv_id, action, question.rstrip("?"), question, payload, deps):
+    async for ev in _ask_host(body.conv_id, action, summary, question, payload, deps):
         yield ev
     said.append(question)
 
@@ -3586,7 +3596,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     with _confirm_lock:
                         _confirm[run.conv_id] = run
                     threading.Thread(target=_confirm_watchdog, args=(run, deps), daemon=True).start()
-                    question = f"Shall I {decision.summary}?"
+                    question = _confirm_question(decision.summary)
                     async for out in _speak(question, deps):
                         yield out
                     said.append(question)

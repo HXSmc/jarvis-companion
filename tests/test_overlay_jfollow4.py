@@ -158,7 +158,7 @@ def test_session_words_sanitised(client, monkeypatch, tmp_path):
     spoken = says(events)
     assert len(spoken) == 1
     assert spoken[0] == ("Start a session on the mini PC: "
-                         "fix fix fix fix fix fix fix fix fix fix?")  # 15 said, cut at 40 chars
+                         "fix fix fix fix fix fix fix fix fix fix. Shall I?")  # 15 said, cut at 40 chars
     card = _cards(events)[0]
     assert card["title"] == "Confirm" and card["id"] == overlay._CONFIRM_CARD_ID
 
@@ -195,7 +195,7 @@ def test_session_stop_and_answer_routes(client, monkeypatch, tmp_path):
     assert _steps("session_stop")[-1]["detail"] == "confirmed id=s2"
     # a card answer: the need id and the button, nothing else
     events = turn(client, "tell the build runner session to go ahead", conv_id="t2")
-    assert says(events) == ["Send to build runner: approve?"]
+    assert says(events) == ["Send approve to build runner. Shall I?"]
     events = turn(client, "yes", conv_id="t2")
     assert says(events) == ["Sent."]
     assert (seen[-1][0], seen[-1][1]) == ("POST", "http://127.0.0.1:8788/central/cards/s2/answer")
@@ -203,7 +203,7 @@ def test_session_stop_and_answer_routes(client, monkeypatch, tmp_path):
     assert sent == {"msg_id": sent["msg_id"], "need_id": "def456abc123", "answer": "Approve"}
     # a free-text answer goes as a message on the session
     events = turn(client, "tell the build runner session: ship it now", conv_id="t3")
-    assert says(events) == ['Send to build runner: "ship it now"?']
+    assert says(events) == ['Send "ship it now" to build runner. Shall I?']
     turn(client, "yes", conv_id="t3")
     assert (seen[-1][0], seen[-1][1]) == ("POST", "http://127.0.0.1:8788/central/sessions/s2/message")
     assert json.loads(seen[-1][3])["text"] == "ship it now"
@@ -560,7 +560,7 @@ def test_session_answer_with_no_open_card_sends_a_message(client, monkeypatch, t
     seen = _session_env(monkeypatch, tmp_path, rows=rows)
     overlay._session_ref["g1"] = ["s2"]
     events = turn(client, "tell it: use the second option", conv_id="g1")
-    assert says(events) == ['Send to build runner: "use the second option"?']
+    assert says(events) == ['Send "use the second option" to build runner. Shall I?']
     events = turn(client, "yes", conv_id="g1")
     assert says(events) == ["Sent."]
     assert (seen[-1][0], seen[-1][1]) == ("POST", "http://127.0.0.1:8788/central/sessions/s2/message")
@@ -665,3 +665,97 @@ def test_stuck_policy_checks_use_their_own_pool(client, monkeypatch):
     assert "Nothing found." in says(events)
     assert _steps("done")
     assert threads and all(t.startswith("policy") for t in threads)
+
+
+# --- round 6: no Confirm question ends in the owner's answer word; the Swift table pins them ------
+
+CONFIRM_WORDS = ("yes", "no", "stop", "cancel")
+BARGE_TESTS = ROOT / "mac/overlay/Tests/OverlayCoreTests/BargeInTests.swift"
+
+
+def _ask(client, text, conv_id):
+    """The one Confirm question a turn speaks (and its Confirm card)."""
+    events = turn(client, text, conv_id=conv_id)
+    cards = [c for c in _cards(events) if c["id"] == overlay._CONFIRM_CARD_ID]
+    assert cards and cards[-1]["title"] == "Confirm", (text, says(events))
+    return says(events)[-1]
+
+
+def _confirm_questions(client, monkeypatch, tmp_path, word):
+    """(template, question) for every Confirm template, with `word` as the owner's (or model's) text
+    wherever the template carries free text."""
+    from mac.voice import workspaces
+    from test_overlay_workspace import save_turn
+
+    out = []
+    clock = Clock()
+    _deps(clock)
+    rows = [dict(ROWS[1], title="build runner"), dict(ROWS[1], session_id="s7", title=f"{word} job")]
+    _session_env(monkeypatch, tmp_path, rows=rows)
+    out.append(("session start words", _ask(client, f"start a session on the mini PC to {word}", "q1")))
+    overlay._session_ref["q2"] = ["s7"]
+    out.append(("session start ref",
+                _ask(client, "start a new session and fix why this session has been going quiet", "q2")))
+    out.append(("session stop", _ask(client, f"stop the {word} job session", "q3")))
+    if word in ("yes", "no"):
+        out.append(("session answer button", _ask(client, f"tell the build runner session {word}", "q4")))
+    out.append(("session answer words", _ask(client, f"tell the build runner session: {word}", "q5")))
+    monkeypatch.setenv("OVERLAY_WORKSPACE_DIR", str(tmp_path / f"ws-{word}"))
+    workspaces.save(word, [{"id": "old", "type": "info", "title": "Old"}], [], None)
+    gate = {"id": "c1", "type": "info", "title": "Gate", "body": ["x"]}
+    events = save_turn(client, f"save this as {word}", cards=[{"card": gate}], conv_id="q6")
+    out.append(("workspace replace", says(events)[-1]))
+    out.append(("workspace delete", _ask(client, f"delete the {word} workspace", "q7")))
+    from mac.voice import memory
+    monkeypatch.setenv("OVERLAY_MEMORY_FILE", str(tmp_path / f"mem-{word}.jsonl"))
+    memory.add(f"remember {word}")
+    out.append(("memory forget all", _ask(client, "forget everything", "q8")))
+    for template, tool, tool_input in (
+            ("agent mail", "mcp__mail__send_email", {"to": "a@example.com", "subject": word}),
+            ("agent mcp", "mcp__calendar__create_event", {"title": word})):
+        setup(clock, lambda tool=tool, tool_input=tool_input: FakeAgent(
+            clock, script=[can_use("r1", tool, tool_input)],
+            after={"deny": [result({"say": "Understood."})]}))
+        out.append((template, _ask(client, "commit and push my changes", f"q9{template}")))
+    return out
+
+
+def _last_word(question):
+    return "".join(ch for ch in question.split()[-1].lower() if ch.isalpha())
+
+
+@pytest.mark.parametrize("word", CONFIRM_WORDS)
+def test_no_confirm_question_ends_in_an_answer_word(client, monkeypatch, tmp_path, word):
+    """Round 6 (glm-cross 1): 'Send to Research: yes?' made the owner's real follow-up 'yes' look like
+    the question's echo. Every Confirm template ends in fixed words that are no answer, and the app's
+    BargeInTests table holds each question exactly (the timing rule is tested there)."""
+    from mac.voice import intents
+
+    questions = _confirm_questions(client, monkeypatch, tmp_path, word)
+    templates = {t for t, _q in questions}
+    assert len(templates) == len(questions) >= 9
+    swift = BARGE_TESTS.read_text()
+    for template, question in questions:
+        last = _last_word(question)
+        assert last != word and last not in CONFIRM_WORDS, (template, question)
+        tail = " ".join(question.split()[-2:])
+        assert not (intents.is_confirm(tail) or intents.is_cancel(tail) or intents.is_no(tail)
+                    or intents.is_stop(tail)), (template, question)
+        assert f'"{question}"' in swift.replace('\\"', '"'), (template, question)
+
+
+def test_follow_up_echo_drop_is_timed_when_a_confirm_is_pending():
+    """Round 6: the follow-up window judges echo by capture time (BargeWords.followUpText) while the
+    Confirm card is open; wake and level barge keep the token rule (BargeInTests table)."""
+    app = (ROOT / "mac/overlay/Sources/JarvisOverlay/AppController.swift").read_text()
+    assert "BargeWords.confirmPending(model.cards)" in app
+    assert "let drainedAt = followUp ? audio.lastDrainAt : nil" in app
+    assert ("BargeWords.followUpText(heardText, reply: echoOf, confirmPending: confirmPending,\n"
+            "                                              audioFrom: heard.audioFrom, drainedAt: drainedAt)") in app
+    assert "BargeWords.dropEchoAnswer(heardText" not in app
+    speech = (ROOT / "mac/overlay/Sources/JarvisOverlay/SpeechInput.swift").read_text()
+    assert "audioFrom: turn.stats.firstAt" in speech
+    assert speech.count("stats.stamp(") == 4  # analyzer feed; legacy ring, follow-up replay, live sink
+    core = (ROOT / "mac/overlay/Sources/OverlayCore/BargeIn.swift").read_text()
+    assert "audioFrom >= TurnEndpointer.replayStart(drainedAt: drainedAt)" in core
+    assert "func testConfirmAnswerTimingTable()" in BARGE_TESTS.read_text()

@@ -413,6 +413,9 @@ final class AppController {
         let listenStart = Date()
         // The reply this turn's audio may echo: the one just finished (follow-up) or the one cut.
         let echoOf = followUp ? replyTexts : cutReply
+        // A follow-up after a Confirm question: its echo is judged by capture time against the drain.
+        let confirmPending = followUp && BargeWords.confirmPending(model.cards)
+        let drainedAt = followUp ? audio.lastDrainAt : nil
         speech.listenAfterWake(
             followUp: followUp,
             replayFrom: replayFrom,
@@ -423,8 +426,11 @@ final class AppController {
             onFinal: { [weak self] heardText, sttFinalMs, endOfSpeech, heard in
                 let heardUntil = Date()  // every ring chunk before this went to this turn
                 // A wake that cut a reply: drop that reply's echo and a misheard wake word. A
-                // follow-up: an answer made only of the reply's words is its echo, not the owner's.
-                let text = followUp ? BargeWords.dropEchoAnswer(heardText, reply: echoOf)
+                // follow-up: an answer made only of the reply's words is its echo, unless a Confirm
+                // is pending and the audio was captured after the drain + echo tail (the owner's).
+                let text = followUp
+                    ? BargeWords.followUpText(heardText, reply: echoOf, confirmPending: confirmPending,
+                                              audioFrom: heard.audioFrom, drainedAt: drainedAt)
                     : echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil

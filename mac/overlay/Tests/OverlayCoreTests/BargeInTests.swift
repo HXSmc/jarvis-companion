@@ -226,6 +226,98 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(BargeWords.dropEchoAnswer("Yes.", reply: []), "Yes.")
         XCTAssertEqual(BargeWords.dropEchoAnswer("", reply: confirmQuestion), "")
     }
+    // MARK: Round 6 (glm-cross 1): the owner's genuine answer after a Confirm question always lands
+
+    /// Every Confirm question template (gateway/overlay.py: session start / start with a ref / stop /
+    /// answer, workspace replace / delete, forget everything, agent mail / tool), with the owner's or
+    /// model's text set to each answer word. tests/test_overlay_jfollow4.py
+    /// `test_no_confirm_question_ends_in_an_answer_word` fails when one of these drifts from the service.
+    private let confirmTable: [(word: String, question: String)] = [
+        ("yes", "Start a session on the mini PC: yes. Shall I?"),
+        ("yes", "Start a session on the mini PC to fix why yes job went quiet?"),
+        ("yes", "Stop the yes job session?"),
+        ("yes", "Send yes to build runner. Shall I?"),
+        ("yes", "Replace yes. Shall I?"),
+        ("yes", "Delete yes. Shall I?"),
+        ("yes", "Forget the one thing I remember?"),
+        ("yes", "Send an email to a@example.com with subject yes. Shall I?"),
+        ("yes", "Use create_event on calendar (title=yes). Shall I?"),
+        ("no", "Start a session on the mini PC: no. Shall I?"),
+        ("no", "Start a session on the mini PC to fix why no job went quiet?"),
+        ("no", "Stop the no job session?"),
+        ("no", "Send no to build runner. Shall I?"),
+        ("no", "Replace no. Shall I?"),
+        ("no", "Delete no. Shall I?"),
+        ("no", "Forget the one thing I remember?"),
+        ("no", "Send an email to a@example.com with subject no. Shall I?"),
+        ("no", "Use create_event on calendar (title=no). Shall I?"),
+        ("stop", "Start a session on the mini PC: stop. Shall I?"),
+        ("stop", "Start a session on the mini PC to fix why stop job went quiet?"),
+        ("stop", "Stop the stop job session?"),
+        ("stop", "Send \"stop\" to build runner. Shall I?"),
+        ("stop", "Replace stop. Shall I?"),
+        ("stop", "Delete stop. Shall I?"),
+        ("stop", "Forget the one thing I remember?"),
+        ("stop", "Send an email to a@example.com with subject stop. Shall I?"),
+        ("stop", "Use create_event on calendar (title=stop). Shall I?"),
+        ("cancel", "Start a session on the mini PC: cancel. Shall I?"),
+        ("cancel", "Start a session on the mini PC to fix why cancel job went quiet?"),
+        ("cancel", "Stop the cancel job session?"),
+        ("cancel", "Send \"cancel\" to build runner. Shall I?"),
+        ("cancel", "Replace cancel. Shall I?"),
+        ("cancel", "Delete cancel. Shall I?"),
+        ("cancel", "Forget the one thing I remember?"),
+        ("cancel", "Send an email to a@example.com with subject cancel. Shall I?"),
+        ("cancel", "Use create_event on calendar (title=cancel). Shall I?"),
+    ]
+
+    /// For each template and word: the owner's word spoken 0.5 s after the question drained reaches
+    /// the service; the same word heard inside the playback window (follow-up audio captured before
+    /// the drain + echo tail, a level barge or a wake barge over the question) is dropped whenever it
+    /// is a word of the question. Before round 6 the follow-up path dropped the genuine answer too.
+    func testConfirmAnswerTimingTable() {
+        let drain = Date(timeIntervalSince1970: 1_000)
+        let genuine = drain.addingTimeInterval(0.5)
+        let inPlayback = drain.addingTimeInterval(-0.5)
+        let inTail = drain.addingTimeInterval(TurnEndpointer.echoTail / 2)
+        for (word, question) in confirmTable {
+            let reply = [question]
+            let echoed = question.lowercased().split(whereSeparator: { !$0.isLetter })
+                .contains { $0 == Substring(word) }
+            XCTAssertEqual(BargeWords.followUpText(word, reply: reply, confirmPending: true,
+                                                   audioFrom: genuine, drainedAt: drain), word, question)
+            let dropped = echoed ? "" : word
+            for early in [inPlayback, inTail] {
+                XCTAssertEqual(BargeWords.followUpText(word, reply: reply, confirmPending: true,
+                                                       audioFrom: early, drainedAt: drain), dropped, question)
+            }
+            // timing unknown, or no Confirm pending: the token rule, fail closed
+            XCTAssertEqual(BargeWords.followUpText(word, reply: reply, confirmPending: true,
+                                                   audioFrom: nil, drainedAt: drain), dropped, question)
+            XCTAssertEqual(BargeWords.followUpText(word, reply: reply, confirmPending: true,
+                                                   audioFrom: genuine, drainedAt: nil), dropped, question)
+            XCTAssertEqual(BargeWords.followUpText(word, reply: reply, confirmPending: false,
+                                                   audioFrom: genuine, drainedAt: drain), dropped, question)
+            // over the question itself: level barge and wake barge keep the token rule
+            XCTAssertEqual(BargeWords.turnText(final: word, reply: reply, confirmed: true),
+                           echoed ? nil : word, question)
+            XCTAssertEqual(BargeWords.wakeTurnText(final: "Hey Jarvis, \(word).", reply: reply),
+                           echoed ? "" : "Hey Jarvis, \(word)", question)
+            // the line never ends in the answer word
+            let last = question.lowercased().split(whereSeparator: { !$0.isLetter }).last.map(String.init)
+            XCTAssertNotEqual(last, word, question)
+        }
+    }
+
+    func testConfirmPendingReadsTheOpenConfirmCardOnly() {
+        let open = HUDCard.info(InfoCard(id: ScatterLayout.confirmCardID, title: "Confirm", body: ["x"]))
+        let settled = HUDCard.info(InfoCard(id: ScatterLayout.confirmCardID, title: "Going ahead", body: ["x"]))
+        let other = HUDCard.info(InfoCard(id: "c1", title: "Confirm", body: ["x"]))
+        XCTAssertTrue(BargeWords.confirmPending([other, open]))
+        XCTAssertFalse(BargeWords.confirmPending([settled, other]))
+        XCTAssertFalse(BargeWords.confirmPending([]))
+    }
+
     // MARK: Round 5 (Mac live run 2): misheard echo words confirmed 5 self-interrupts
 
     /// Each pair = the reply Jarvis was speaking and the barge text STT heard from its own echo
