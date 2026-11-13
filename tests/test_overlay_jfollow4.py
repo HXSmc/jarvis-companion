@@ -258,6 +258,9 @@ def test_session_rate_counts_timed_out_calls(client, monkeypatch, tmp_path):
     turn(client, "stop the build runner session", conv_id="t1")
     turn(client, "yes", conv_id="t1")
     assert len(overlay._session_calls["stop"]) == 1
+    turn(client, "tell the build runner session yes", conv_id="t1")
+    turn(client, "yes", conv_id="t1")
+    assert len(overlay._session_calls["answer"]) == 1
 
 
 def test_session_token_never_leaks(client, monkeypatch, tmp_path):
