@@ -3020,7 +3020,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
                 yield ev
             said.append(OVERLAY_UNCHANGED_LINE)
-        if intents.names_one_card(text):
+        # once per reply: a C3 clear drop and the reply-end claim drop can both land here
+        if intents.names_one_card(text) and acks.PHRASES["card_hint"] not in said:
             async for ev in _speak(acks.PHRASES["card_hint"], deps):
                 yield ev
             said.append(acks.PHRASES["card_hint"])

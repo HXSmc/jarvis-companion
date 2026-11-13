@@ -421,3 +421,18 @@ def test_sessions_variants_turn(client, monkeypatch, tmp_path):
     assert deps.conversations.sessions == {}  # loud pool untouched
     assert not made  # no agent run
 
+
+
+def test_claim_and_one_card_clear_say_hint_once(client):
+    """Round 1 (glm-cross re-check): a held claim plus a C3-dropped clear in one reply runs the
+    honest lines twice (C3 drop, then reply end); each line is still spoken only once."""
+    clock = Clock()
+    loud = FakeConversations(lines({"say": "Clearing the card from the overlay now."}, {"clear": True}))
+    _deps(clock, conversations=loud, quiet_conversations=FakeConversations())
+    overlay._card_index["ch"] = deque([("k1", "info", ("weather", "report"))], maxlen=12)
+    events = turn(client, "remove the jarvis thing", conv_id="ch")
+    spoken = says(events)
+    assert not [e for e in events if e["type"] == "clear"]
+    assert "Clearing the card from the overlay now." not in spoken
+    assert spoken.count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+    assert spoken.count(acks.PHRASES["card_hint"]) == 1
