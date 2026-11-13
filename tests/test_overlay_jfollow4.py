@@ -810,11 +810,11 @@ def test_agent_confirm_never_reads_the_vault_path_aloud(client, monkeypatch):
     """Mac run r2, F4: "Run grep -n -m12 '^##' '<home>/<vault>/Personal/Gym Plan.md'. Shall I?"
     read the full vault path aloud (and into the spoke row). The spoken question names the vault
     as "your notes"; the Confirm card keeps the exact command."""
-    vault = Path(os.environ["HOME"]) / "Vault"
-    (vault / "Personal").mkdir(parents=True)
-    note = vault / "Personal" / "Gym Plan.md"
-    note.write_text("## Monday\n")
-    monkeypatch.setenv("OVERLAY_VAULT", str(vault))
+    # A short vault path: the policy refuses a Confirm summary over 120 chars, and the CI
+    # runner's tmp home alone is longer than that.
+    vault = "/Vault-r7"
+    note = f"{vault}/Personal/Gym Plan.md"
+    monkeypatch.setenv("OVERLAY_VAULT", vault)
     clock = Clock()
     setup(clock, lambda: FakeAgent(
         clock, script=[can_use("r1", "Bash", {"command": f"grep -n -m12 '^##' '{note}'"})],
@@ -822,8 +822,11 @@ def test_agent_confirm_never_reads_the_vault_path_aloud(client, monkeypatch):
     events = turn(client, "search my notes for gym plan", conv_id="r7n")
     question = says(events)[-1]
     assert question.endswith(". Shall I?") and "your notes/Personal/Gym Plan.md" in question
-    assert str(vault) not in question and os.environ["HOME"] not in question
+    assert vault not in question
     card = [c for c in _cards(events) if c["id"] == "agentconfirm"][0]
-    assert str(note) in card["body"][0]  # the exact command stays on screen
-    spoke = " ".join(s.get("text", "") for s in _steps("spoke"))
-    assert str(vault) not in spoke
+    assert note in card["body"][0]  # the exact command stays on screen
+    spoke = " ".join(str(s.get("text", "")) for s in _steps("spoke"))
+    assert vault not in spoke
+    # The home folder reads as "home" too.
+    home = os.environ["HOME"]
+    assert overlay._spoken_paths(f"run ls {home}/Desktop") == "run ls home/Desktop"
