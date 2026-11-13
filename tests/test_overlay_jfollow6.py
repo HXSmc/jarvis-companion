@@ -493,3 +493,31 @@ def test_voice_never_says_wake_word(client):
 def test_voice_text_drops_wake_word(line, voice):
     assert overlay._voice_text(line) == voice
     assert all("jarvis" not in p.lower() for p in acks.PHRASES.values())
+
+
+def test_pronoun_claim_dropped_turn(client):
+    """Mac live 30: a self-woken "overlapped" turn; the model's "I'll clear them" (card word in
+    the sentence before) was spoken, then its clear was dropped. Now the claim never sounds."""
+    claim = ("My apologies, sir, two cards landed on top of each other. "
+             "I'll clear them and put up just one.")
+    clock = Clock()
+    objs = ({"say": claim}, {"clear": True},
+            {"card": {"type": "info", "title": "Sessions", "body": ["x"]}})
+    loud, quiet = FakeConversations(lines(*objs)), FakeConversations(lines(*objs))
+    _deps(clock, conversations=loud, quiet_conversations=quiet)
+    events = turn(client, "overlapped", conv_id="pc1")
+    assert claim not in str(events)
+    assert says(events).count(overlay.OVERLAY_UNCHANGED_LINE) == 1
+    assert not [e for e in events if e["type"] == "clear"]
+    assert [e["card"]["title"] for e in events if e["type"] == "card"] == ["Sessions"]
+    assert _steps("answer")[-1]["claim"] == "dropped"
+
+
+def test_name_only_line_has_no_voice():
+    import asyncio
+    from types import SimpleNamespace
+    heard: list[str] = []
+    deps = SimpleNamespace(synth=lambda t: (heard.append(t), (b"\0\0", 24000))[1])
+    assert asyncio.run(overlay._audio("Jarvis.", deps)) is None
+    assert asyncio.run(overlay._audio("Jarvis' cards.", deps))["text"] == "Jarvis' cards."
+    assert heard == ["cards."]

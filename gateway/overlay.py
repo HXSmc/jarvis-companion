@@ -873,11 +873,12 @@ def _voice_text(text: str) -> str:
 
 async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     """Synthesized say line, or None when there is no voice / synth fails."""
-    if deps.synth is None:
+    voice = _voice_text(text.replace("`", ""))
+    if deps.synth is None or not re.search(r"\w", voice):  # a name-only line: caption only
         return None
     try:
         # Answers quote code in backticks (the "why" line): the caption keeps them, the voice doesn't.
-        pcm, rate = await asyncio.to_thread(deps.synth, _voice_text(text.replace("`", "")))
+        pcm, rate = await asyncio.to_thread(deps.synth, voice)
     except Exception:
         return None
     return {"type": "audio", "text": text, "rate": rate,
