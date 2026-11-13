@@ -948,23 +948,22 @@ def claims_overlay_change(line: str) -> bool:
 
 
 # "close the overlay" names nothing: these never carry a one-card name ("up"/"down"/"off"/
-# "out" are verb particles: "close down the overlay").
-_CARD_NAME_STOP = frozenset({"overlay", "screen", "these", "those", "them", "everything",
-                             "all", "cards", "up", "down", "off", "out"})
+# "out" are verb particles: "close down the overlay"; "the whole overlay" is no name either).
+_CARD_NAME_STOP = frozenset({"overlay", "screen", "these", "those", "them", "cards",
+                             "up", "down", "off", "out"}) | _WHOLE_SET
 
 
 def names_one_card(text: str) -> bool:
     """True when an ask names exactly one card to act on (Design C3)."""
-    toks = card_words(_clean(text).lower())
-    if set(toks) & _WHOLE_SET:  # "the whole screen", "every card": a wipe ask, never one card
-        return False
     ask = first_form(text, card_remove_request)
     if ask and not ask.pointer:
         left = [w for w in card_words(ask.target)
                 if w not in _CARD_FILLERS and w not in KIND_WORDS and w not in _CARD_NAME_STOP]
         if left:
             return True
-    return "card" in toks and "cards" not in toks
+    toks = card_words(_clean(text).lower())
+    return "card" in toks and not any(
+        w in toks for w in ("cards", "everything", "all", "every", "each", "both"))
 
 
 def _answer(text: str) -> str:

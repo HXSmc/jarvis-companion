@@ -397,6 +397,14 @@ def test_model_clear_whole_overlay_asks_still_wipe(client):
         events = turn(client, phrase, conv_id=f"cwo{j}")
         assert len([e for e in events if e["type"] == "clear"]) == 1, phrase
         assert overlay.OVERLAY_UNCHANGED_LINE not in says(events), phrase
+    # a named card next to a whole-set word still survives a model wipe
+    loud = FakeConversations(lines({"say": "Done."}, {"clear": True}))
+    _deps(clock, conversations=loud, quiet_conversations=FakeConversations())
+    overlay._card_index["cwn"] = deque([("k1", "info", ("weather", "report"))], maxlen=12)
+    events = turn(client, "remove the whole jarvis thing", conv_id="cwn")
+    assert not [e for e in events if e["type"] == "clear"]
+    row = _steps("layout")[-1]
+    assert (row["mode"], row["state"], row["reason"]) == ("clear", "dropped", "one_card")
 
 
 def test_agent_claim_dropped(client):

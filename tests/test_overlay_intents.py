@@ -907,6 +907,9 @@ def test_names_one_card_whole_overlay():
         assert names_one_card(text) is False, text
     for text in ("clear every single card", "clear each card", "clear the whole overlay"):
         assert parse(text, apps={}).kind == "answer", text  # base kind: never a one-card remove
+    # a whole-set word is no name, but it never hides the name next to it (C3 still guards)
+    for text in ("remove the whole jarvis thing", "clear the whole foods card"):
+        assert names_one_card(text) is True, text
 
 
 def test_card_help_parse():
