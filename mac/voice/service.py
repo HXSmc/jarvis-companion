@@ -15,6 +15,7 @@ import os
 import sys
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -23,6 +24,34 @@ from gateway.overlay import debug_log, get_deps, overlay_token, router
 logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
+
+# The installer writes these to the repo's gitignored .env; launchd gives the service only PATH.
+# Only these keys load: the agent's claude child inherits os.environ, so other .env keys stay out.
+SETUP_KEYS = ("OVERLAY_VAULT", "OVERLAY_COMPANION_URL")
+ENV_FILE = Path(os.environ.get("OVERLAY_ENV_FILE", str(Path(__file__).resolve().parents[2] / ".env")))
+
+
+def load_setup_env(path: Path = ENV_FILE) -> list[str]:
+    """Copy SETUP_KEYS from `path` into os.environ (the real env wins); returns the keys set."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    loaded = []
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or key not in SETUP_KEYS or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if value:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
+load_setup_env()
 
 
 def _start_wake_thread() -> None:

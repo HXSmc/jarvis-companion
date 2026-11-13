@@ -18,10 +18,11 @@ Steps: tool checks (swift, brew, ffmpeg, espeak-ng, claude) -> brew install ffmp
    "JarvisOverlay Local Signing" (scripts/mac-overlay-sign.sh), so TCC grants survive reinstalls
 (the service still mints its own dedicated overlay token on first start; the only token
 file this script writes is the Companion sessions one, after the gateway answers a probe)
--> render launchd/ templates into $HOME/Library/LaunchAgents and bootstrap them
 -> set OVERLAY_VAULT in .env from Obsidian's vault list (only when exactly one vault)
 -> set up Companion sessions access: companion-token (0600) from the vault ios_token after
    the gateway answers an authorized probe, then OVERLAY_COMPANION_URL in .env
+-> render launchd/ templates into $HOME/Library/LaunchAgents and bootstrap them (last, so the
+   service starts with the .env keys above)
 -> refuse a taken OVERLAY_PORT -> print the TCC permissions to grant.
 EOF
 }
@@ -48,7 +49,7 @@ run() {
 }
 
 # append_env KEY VALUE: add a KEY=VALUE line to $REPO/.env (the gitignored file the
-# service reads via common.config.load_env_file); create it owner-only (600) when missing,
+# service loads its setup keys from at start: mac/voice/service.py load_setup_env); create it owner-only (600) when missing,
 # and keep it parseable when it lacks a trailing newline.
 append_env() {
   (
@@ -238,22 +239,6 @@ echo "agent MCP setup:"
 (cd "$REPO" && "${AGENT_SETUP[@]}") \
   || echo "install-mac-overlay: agent MCP setup failed (the agent tier starts without mail/calendar MCP); rerun later"
 
-# (i) LaunchAgents: render the templates, then reload each agent
-run mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
-for PLIST in com.jarvis.overlay.plist com.jarvis.overlay.service.plist; do
-  DST="$HOME/Library/LaunchAgents/$PLIST"
-  if (( DRY_RUN )); then
-    echo "would: sed __HOME__ __REPO__ __PYTHON__ __APP__ launchd/$PLIST > $DST"
-    echo "would: launchctl bootout gui/\$(id -u) $DST"
-    echo "would: launchctl bootstrap gui/\$(id -u) $DST"
-  else
-    sed -e "s|__HOME__|$HOME|g" -e "s|__REPO__|$REPO|g" -e "s|__PYTHON__|$PY|g" -e "s|__APP__|$APP|g" \
-      "$REPO/launchd/$PLIST" > "$DST"
-    launchctl bootout "gui/$(id -u)" "$DST" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$DST"
-  fi
-done
-
 # (i2) setup checks (one line each): the editor CLI on the service's PATH; the notes vault
 # (set from Obsidian below when unambiguous)
 SVC_PLIST="$HOME/Library/LaunchAgents/com.jarvis.overlay.service.plist"
@@ -353,6 +338,23 @@ except Exception:
     *) echo "Sessions access: the gateway on 127.0.0.1:$GATEWAY_PORT did not answer, not set" ;;
   esac
 fi
+
+# (i) LaunchAgents: render the templates, then reload each agent. Last of the setup steps:
+# the service reads OVERLAY_VAULT / OVERLAY_COMPANION_URL from .env only when it starts.
+run mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+for PLIST in com.jarvis.overlay.plist com.jarvis.overlay.service.plist; do
+  DST="$HOME/Library/LaunchAgents/$PLIST"
+  if (( DRY_RUN )); then
+    echo "would: sed __HOME__ __REPO__ __PYTHON__ __APP__ launchd/$PLIST > $DST"
+    echo "would: launchctl bootout gui/\$(id -u) $DST"
+    echo "would: launchctl bootstrap gui/\$(id -u) $DST"
+  else
+    sed -e "s|__HOME__|$HOME|g" -e "s|__REPO__|$REPO|g" -e "s|__PYTHON__|$PY|g" -e "s|__APP__|$APP|g" \
+      "$REPO/launchd/$PLIST" > "$DST"
+    launchctl bootout "gui/$(id -u)" "$DST" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$DST"
+  fi
+done
 
 # (j) permissions to grant once, with deep links to the right System Settings pane
 cat <<'EOF'
