@@ -410,7 +410,7 @@ def test_log_has_no_screen_text_on_no_pin(client, caplog):
 def test_no_pin_silent_on_incomplete_and_action_only(client):
     """A cut-off ({"incomplete": true}) keeps the mic open in silence; an action-only reply adds nothing."""
     events, _ = fallback(client, lambda p: ['{"incomplete": true}'], conv="r1")
-    assert says(events)[1:] == ["I didn't catch the end of that, sir."] and shapes(events) == []  # jfollow4 E
+    assert says(events)[1:] == ["I missed the end of that."] and shapes(events) == []  # jfollow4 E
     assert "r1" in overlay._pending
     events, _ = fallback(client, lambda p: ['{"open": "Nonexistent App"}'], conv="r2")
     assert overlay.NO_PIN_LINE not in says(events) and "I can't see it on screen." not in says(events)

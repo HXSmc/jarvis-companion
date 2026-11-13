@@ -151,7 +151,7 @@ def test_handover_and_incomplete_are_not_failures(client, caplog):
     events, _ = run(client, ScriptedSession(chunks=['{"incomplete": true}\n']))
     spoken = says(events)
     assert len(spoken) == 2 and spoken[0] in POOL and cards(events) == []  # jfollow4 E: ack, then the cut-off line
-    assert spoken[1] == "I didn't catch the end of that, sir."
+    assert spoken[1] == "I missed the end of that."
     assert done(events)["error"] is None
 
 
