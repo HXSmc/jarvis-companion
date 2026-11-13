@@ -238,6 +238,8 @@ _CARD_REMOVE_RE = re.compile(r"(?:(?:remove|close|dismiss|get rid of|take away|t
 _CARD_PLACE_RE = re.compile(r"[ ](?:from|off|on) (?:the|my) (?:overlay|screen)$")
 # "clear" never names one card with these alone: the whole-overlay and pointer forms.
 _CLEAR_STOP = frozenset({"overlay", "screen", "last", "newest"})
+# Words that make an ask about many or all cards ("clear the whole screen", "every card").
+_WHOLE_SET = frozenset({"whole", "entire", "every", "each", "all", "both", "everything"})
 _CARD_REMOVE_POINTERS = frozenset({"that", "this", "it", "that one", "this one", "that card",
                                     "this card", "the card", "the last card",
                                     "the newest card", "the last one"})
@@ -634,6 +636,8 @@ def card_remove_request(text: str) -> CardRemoveAsk | None:
         cut_place = _CARD_PLACE_RE.sub("", target).strip()
         if cut_place:
             target = cut_place
+        if clear_verb and set(target.split()) & _WHOLE_SET:
+            return None  # "clear every single card": many cards, the model's ask as at base
         card = "card" in target.split() or any(w in KIND_WORDS for w in target.split())
         if target in _CARD_REMOVE_POINTERS:
             if clear_verb:  # "clear that" never one-card-removes, whatever calls this
@@ -943,21 +947,24 @@ def claims_overlay_change(line: str) -> bool:
     return False
 
 
-# "close the overlay" names nothing: these never carry a one-card name.
+# "close the overlay" names nothing: these never carry a one-card name ("up"/"down"/"off"/
+# "out" are verb particles: "close down the overlay").
 _CARD_NAME_STOP = frozenset({"overlay", "screen", "these", "those", "them", "everything",
-                             "all", "cards"})
+                             "all", "cards", "up", "down", "off", "out"})
 
 
 def names_one_card(text: str) -> bool:
     """True when an ask names exactly one card to act on (Design C3)."""
+    toks = card_words(_clean(text).lower())
+    if set(toks) & _WHOLE_SET:  # "the whole screen", "every card": a wipe ask, never one card
+        return False
     ask = first_form(text, card_remove_request)
     if ask and not ask.pointer:
         left = [w for w in card_words(ask.target)
                 if w not in _CARD_FILLERS and w not in KIND_WORDS and w not in _CARD_NAME_STOP]
         if left:
             return True
-    toks = card_words(_clean(text).lower())
-    return "card" in toks and not any(w in toks for w in ("cards", "everything", "all"))
+    return "card" in toks and "cards" not in toks
 
 
 def _answer(text: str) -> str:

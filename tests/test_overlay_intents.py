@@ -898,6 +898,17 @@ def test_names_one_card():
         assert names_one_card(text) is False, text
 
 
+def test_names_one_card_whole_overlay():
+    """jfollow6 round 2: a whole-overlay ask with a modifier or particle names no one card,
+    so C3 never drops the model clear it asked for; "clear every ..." stays a model ask."""
+    for text in ("clear the whole screen", "clear up the screen", "clear the entire overlay",
+                 "dismiss the whole overlay", "close down the overlay", "clear every single card",
+                 "remove every card", "close each card", "clear both cards"):
+        assert names_one_card(text) is False, text
+    for text in ("clear every single card", "clear each card", "clear the whole overlay"):
+        assert parse(text, apps={}).kind == "answer", text  # base kind: never a one-card remove
+
+
 def test_card_help_parse():
     """jfollow6: "can you remove a single card" is a how-to question (criterion 16)."""
     for text in ("Can you not remove a single card", "can you remove one card",

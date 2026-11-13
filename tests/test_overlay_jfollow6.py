@@ -384,6 +384,21 @@ def test_model_clear_never_wipes_for_one_card(client):
         assert len([e for e in events if e["type"] == "clear"]) == 1
 
 
+def test_model_clear_whole_overlay_asks_still_wipe(client):
+    """Round 2: whole-overlay asks with a modifier or particle reach the model (as at base) and
+    its clear still applies once: C3 only spares a card the owner named."""
+    clock = Clock()
+    for j, phrase in enumerate(("clear the whole screen", "clear up the screen",
+                                "clear the entire overlay", "dismiss the whole overlay",
+                                "close down the overlay", "clear every single card")):
+        loud = FakeConversations(lines({"say": "Done."}, {"clear": True}))
+        _deps(clock, conversations=loud, quiet_conversations=FakeConversations())
+        overlay._card_index[f"cwo{j}"] = deque([("k1", "info", ("weather", "report"))], maxlen=12)
+        events = turn(client, phrase, conv_id=f"cwo{j}")
+        assert len([e for e in events if e["type"] == "clear"]) == 1, phrase
+        assert overlay.OVERLAY_UNCHANGED_LINE not in says(events), phrase
+
+
 def test_agent_claim_dropped(client):
     """C4 / criterion 20: the agent tier has no overlay directive, so its claims are false."""
     clock = Clock()
