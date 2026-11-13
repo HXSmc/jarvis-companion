@@ -187,6 +187,10 @@ async function tick() {
 }
 tick();
 setInterval(tick, 1500);
+// Safari slows timers in a background tab: a tab brought back after an install showed the old
+// setup rows until a reload (Mac run r2, F7). Read the service again the moment it is shown.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+window.addEventListener("pageshow", tick);
 </script>
 </body>
 </html>

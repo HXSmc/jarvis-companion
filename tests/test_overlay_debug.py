@@ -180,3 +180,10 @@ def test_code_cli_setup_finds_the_bundled_cli(client, monkeypatch, tmp_path):
     assert resp.json()["setup"]["code_cli"] is True and str(tmp_path) not in resp.text
     monkeypatch.setattr(gitdiff, "EDITOR_CANDIDATES", {"code": (str(tmp_path / "none"),), "cursor": ()})
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["code_cli"] is False
+
+
+def test_debug_page_reads_the_service_when_shown_again(client):
+    """Mac run r2, F7: after an install the background tab kept old setup rows until a reload."""
+    page = client.get("/overlay/debug").text
+    assert 'document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });' in page
+    assert 'window.addEventListener("pageshow", tick);' in page
