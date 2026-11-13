@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 from gateway import overlay  # noqa: E402
@@ -533,3 +534,98 @@ def test_pick_by_the_name_as_heard_turn(client):
     assert _drops(events) == [[ids["Jarvis capabilities"]]]
     assert says(events) == ["Removed, sir."]
     assert _model_calls(loud, quiet) == 0
+
+
+# --- Round 4 (Mac live 31c): the host may answer a start with the prompt itself as the title ---
+
+def _echo_start(client, monkeypatch, tmp_path, cut, conv="vs1", sid="dd49a076-9af4"):
+    """Start by voice; the host answers before its titler ran: the title is the prompt cut at `cut`."""
+    overlay._voice_started.clear()
+    overlay._voice_started_words.clear()
+    overlay._session_calls.clear()  # the hourly start cap is per process: each test starts afresh
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 5.0)  # exact says() lists: no wall-clock filler line
+    _deps(Clock())
+    words = "say hello in a file called voice-test"
+    title = overlay.session_prompt(words)[:cut]
+    rows: list[dict] = [{"session_id": "s2", "state": "running", "device": "mini PC",
+                         "title": "build runner", "last_activity_at": "2026-11-13T22:00:00Z"}]
+
+    def post(request):
+        if request.url.path == "/chat":
+            rows.append({"session_id": sid, "state": "idle", "device": "mini PC", "title": title,
+                         "last_activity_at": "2026-11-13T22:09:00Z"})
+            return httpx.Response(200, json={"session_id": sid, "title": title})
+        return httpx.Response(200, json={"ok": True})
+
+    seen = _session_env(monkeypatch, tmp_path, rows=rows, post=post)
+    turn(client, f"start a new session and {words}", conv_id=conv)
+    events = turn(client, "yes", conv_id=conv)
+    return events, seen, title, rows
+
+
+@pytest.mark.parametrize("cut", [7, 16, 40, 55, 200])
+def test_start_title_echoing_the_prompt_is_never_spoken(client, monkeypatch, tmp_path, cut):
+    """31c: a title that is any prefix of the prompt we sent is not a title: the owner's words are."""
+    events, _seen, title, _rows = _echo_start(client, monkeypatch, tmp_path, cut)
+    assert title and "Started by voice"[:cut] in title
+    spoken = says(events)
+    assert spoken[-1] == acks.PHRASES["session_started_it"]
+    assert not any("by voice" in s or f"Started {title}" in s for s in spoken)
+    card = [e["card"] for e in events if e["type"] == "card"][-1]
+    assert card["title"] == "say hello in a file called voice-test"
+    assert card["body"] == ["Mini PC", "Started by voice"]
+
+
+def test_start_real_title_still_spoken(client, monkeypatch, tmp_path):
+    """A host title that is not the prompt (the titler ran) is spoken as before."""
+    overlay._voice_started.clear()
+    overlay._voice_started_words.clear()
+    overlay._session_calls.clear()  # the hourly start cap is per process: each test starts afresh
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 5.0)  # exact says() lists: no wall-clock filler line
+    _deps(Clock())
+
+    def post(request):
+        return httpx.Response(200, json={"session_id": "ns9", "title": "Started hello file"})
+
+    _session_env(monkeypatch, tmp_path, post=post)
+    turn(client, "start a session to fix the failing tests", conv_id="rt1")
+    events = turn(client, "yes", conv_id="rt1")
+    assert says(events) == ["Started Started hello file on the mini PC, sir."]
+
+
+def test_stop_by_the_owner_start_words(client, monkeypatch, tmp_path):
+    """31c: "stop the voice-test session" finds the session this overlay started with those words,
+    names it by the owner's words, and still goes through the Confirm and the live list."""
+    _events, seen, title, rows = _echo_start(client, monkeypatch, tmp_path, 40)
+    events = turn(client, "stop the voice-test session", conv_id="vs2")
+    assert says(events) == ["Stop the say hello in a file called voice-test session?"]
+    assert not [u for m, u, _a, _b in seen if u.endswith("/stop")]  # nothing sent before yes
+    events = turn(client, "yes", conv_id="vs2")
+    assert says(events) == ["Stopped."]
+    assert (seen[-1][0], seen[-1][1]) == (
+        "POST", "http://127.0.0.1:8788/central/sessions/dd49a076-9af4/stop")
+    # gone from the live list -> never stoppable by those words, even though this overlay started it
+    rows.pop()
+    events = turn(client, "stop the voice test session", conv_id="vs3")
+    assert says(events) == [acks.PHRASES["session_none_named"]]
+    assert _steps("session_stop")[-1]["detail"] == "refused reason=none_named"
+
+
+def test_stop_words_never_match_a_session_this_overlay_did_not_start(client, monkeypatch, tmp_path):
+    """The start words widen nothing: another session with the same echo title is not matched."""
+    overlay._voice_started.clear()
+    overlay._voice_started_words.clear()
+    overlay._session_calls.clear()  # the hourly start cap is per process: each test starts afresh
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 5.0)  # exact says() lists: no wall-clock filler line
+    _deps(Clock())
+    title = overlay.session_prompt("say hello in a file called voice-test")[:40]
+    _session_env(monkeypatch, tmp_path, rows=[{"session_id": "o1", "state": "idle", "title": title}])
+    events = turn(client, "stop the voice-test session", conv_id="vs4")
+    assert says(events) == [acks.PHRASES["session_none_named"]]
+
+
+def test_stop_row_words_zero_is_the_start_field():
+    """Round 4 item 4: a stop keeps its name in `name`; `words` is the start's own field (0 by design)."""
+    from mac.voice import intents
+    ask = intents.session_request("stop the voice-test session")
+    assert (ask.action, ask.ref, ask.name, ask.words) == ("stop", "name", "voice-test", "")

@@ -974,10 +974,14 @@ def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
             sid = str(item.get("session_id") or "")
             if not _SESSION_ID_RE.fullmatch(sid):  # a bad id can never be called back
                 continue
+            title = str(item.get("title", ""))[:80]
+            started = _voice_started_words.get(sid)
+            if started and _echoes_prompt(title, started[1]):
+                title = _cut40(started[0])  # the owner's own words, never the cut prompt
             rows.append({"id": sid,
                          "device": str(item.get("device", ""))[:24],
                          "state": str(item.get("state", ""))[:24],
-                         "title": str(item.get("title", ""))[:80],
+                         "title": title,
                          "doing": str(item.get("doing", ""))[:120],
                          "health": str(item.get("health") or "")[:16],
                          "needs_owner": item.get("state") == "needs_input",
@@ -1104,6 +1108,16 @@ _SENT_ERRORS = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.WriteError, httpx.R
 # Session ids this process already reported as started by voice: the lookup skips them, so one
 # timed-out start is never claimed twice. Written by fixed code only, bounded.
 _voice_started: deque[str] = deque(maxlen=64)
+# Those sessions' (owner words, prompt sent): the stop by the owner's words and the cut-prompt
+# title check read it. Written by fixed code only, bounded like _voice_started.
+_voice_started_words: dict[str, tuple[str, str]] = {}
+
+
+def _echoes_prompt(title: str, prompt: str) -> bool:
+    """True when a host title is only a prefix of the prompt we sent: the host answered before its
+    titler ran (Mac run 31c: 'Started by voice from the Mac overlay. T')."""
+    t = " ".join(str(title or "").split()).rstrip(".… ").casefold()
+    return bool(t) and " ".join(str(prompt or "").split()).casefold().startswith(t)
 
 
 def _companion_call(method: str, path: str, json: dict | None = None,
@@ -1262,19 +1276,25 @@ def _lookup_started(prompt: str) -> tuple[str, str] | None:
 
 
 async def _session_started(conv_id: str, sid: str, raw_title: object, deps: OverlayDeps,
-                           said: list[str]) -> AsyncIterator[dict]:
+                           said: list[str], words: str = "", prompt: str = "") -> AsyncIterator[dict]:
     """The start's tail, shared by the direct answer and the lookup: the id joins the
     voice-started set, the conversation is tainted, the line is spoken, the card shown."""
     if _SESSION_ID_RE.fullmatch(sid):
         _voice_started.append(sid)
+        _voice_started_words[sid] = (words, prompt)
+        while len(_voice_started_words) > 64:
+            _voice_started_words.pop(next(iter(_voice_started_words)))
     _tainted.add(conv_id)  # the host's title is untrusted text going into _history
     title = " ".join(str(raw_title or "").split())[:60]
+    if _echoes_prompt(title, prompt):  # no title yet: never speak the prompt back as one
+        title = ""
     line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
     async for ev in _speak(line, deps):
         yield ev
     said.append(line)
     card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
-                              "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
+                              "title": title or _cut40(words) or "Session",
+                              "body": ["Mini PC", "Started by voice"]})
     if card:
         seen = _card_ids.setdefault(conv_id, set())
         if card["id"] in seen:  # a host id: only a collision renames it
@@ -1304,7 +1324,8 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
                 on_step("session_start", detail=f"confirmed id={new_id}")
         elif on_step:
             on_step("session_start", detail="confirmed")
-        async for ev in _session_started(body.conv_id, new_id, out.get("title"), deps, said):
+        async for ev in _session_started(body.conv_id, new_id, out.get("title"), deps, said,
+                                         str(payload.get("words") or ""), req["text"]):
             yield ev
         return
     if status == 0:  # sent, no answer in time: the router may have started it anyway
@@ -1314,7 +1335,8 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
             _set_session_ref(body.conv_id, [sid])
             if on_step:
                 on_step("session_start", detail=f"confirmed id={sid} via=lookup")
-            async for ev in _session_started(body.conv_id, sid, title, deps, said):
+            async for ev in _session_started(body.conv_id, sid, title, deps, said,
+                                             str(payload.get("words") or ""), req["text"]):
                 yield ev
             return
         async for ev in _session_unsure("start", deps, said, on_step):
@@ -1930,7 +1952,10 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
         rows = held["rows"]
         if ask.ref == "name" and ask.name:
             want = _name_words(ask.name)
-            hits = [r for r in rows if want and want <= _name_words(r["title"])]
+            # the title, or the owner's own start words for a session this overlay started
+            hits = [r for r in rows if want and (
+                want <= _name_words(r["title"])
+                or want <= _name_words(_voice_started_words.get(r["id"], ("", ""))[0]))]
             if not hits:
                 async for ev in _line("session_none_named", deps):
                     yield ev
