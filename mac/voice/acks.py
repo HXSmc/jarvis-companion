@@ -89,6 +89,10 @@ PHRASES = {
     "vault_off_limits": "That folder's off limits.",
     "cut_off": "I missed the end of that.",
     "vault_unset": "Notes vault not set, sir.",
+    # jfollow5: remove one card; a session call that was sent but got no answer in time.
+    "removed": "Removed, sir.",
+    "session_waiting": "Asking the mini PC now.",
+    "session_unsure": "Asked the mini PC. No answer yet.",
 }
 
 # Thinking lines said while the model works: (key, text, tag). "look" = an answer/lookup is
@@ -136,6 +140,7 @@ ACK_POLICY: dict[str, str | None] = {
     "agent": "agent",
     "sessions": "sessions",
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
+    "card_remove": None,
     "answer": "answer",
 }
 
