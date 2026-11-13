@@ -104,6 +104,7 @@ KIND_FIXTURE = [
     ("session status", {}, "sessions"),
     ("tell me a joke", {}, "answer"),
     ("what is the capital of France", {}, "answer"),
+    ("open the note projects in the secrets folder", {}, "vault_secrets"),
 ]
 
 
@@ -114,7 +115,7 @@ def test_ack_policy_covers_parse_kinds():
         assert intent.kind == kind, (text, intent)
         seen.add(intent.kind)
     # Every kind parse can return is in ACK_POLICY; "media" never comes from parse.
-    assert seen == set(acks.ACK_POLICY) - {"media"}, seen
+    assert seen | {"session", "memory", "workspace"} == set(acks.ACK_POLICY) - {"media"}, seen  # jfollow4 kinds: tests/test_overlay_intents.py
     for kind in ("clock", "media", "stop", "card_size", "open_app", "open_site"):
         assert acks.ack_key(kind) is None, kind
     assert acks.ack_key("agent", "git") == "agent_git"
@@ -363,7 +364,7 @@ def test_sessions_turn_is_untrusted_and_read_only(client, monkeypatch, tmp_path)
     token = tmp_path / "companion-token"
     token.chmod(0o644)
     events = turn(client, "what are my sessions doing", conv_id="ss2")
-    assert says(events) == ["I can't reach your sessions from here."]
+    assert says(events) == ["I can't reach your sessions."]
     assert len(seen) == 2  # refused before any fetch
     assert "ss2" not in overlay._tainted
     assert _steps("sessions")[-1]["detail"].startswith("result=no_access")
@@ -384,7 +385,9 @@ def test_sessions_with_no_rows_say_a_fixed_line(client, monkeypatch, tmp_path):
 
 
 def test_health_has_barge_switches(client, monkeypatch):
-    """A6 + hub amendment R6: barge-in is off unless OVERLAY_BARGE_IN=1; AEC only with it on."""
+    """A6; jfollow4 D2 DECISION 2C replaces hub amendment R6's "off unless OVERLAY_BARGE_IN=1":
+    the default is headphones only (barge_in true, the app gates it on the output route), AEC only
+    with OVERLAY_BARGE_IN=1, and OVERLAY_BARGE_IN=0 still turns it all off."""
     overlay.set_deps(make_deps())
     monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
     monkeypatch.delenv("OVERLAY_BARGE_AEC", raising=False)
@@ -392,9 +395,9 @@ def test_health_has_barge_switches(client, monkeypatch):
     def health():
         return client.get("/overlay/health", headers=AUTH_HEADER).json()
 
-    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+    assert (health()["barge_in"], health()["barge_aec"], health()["barge_mode"]) == (True, False, "headphones")
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
-    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+    assert (health()["barge_in"], health()["barge_aec"]) == (True, False)
     monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
     assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "0")
@@ -405,8 +408,9 @@ def test_health_has_barge_switches(client, monkeypatch):
 
 def test_barge_in_off_by_default_turn_is_not_a_barge(client, monkeypatch):
     """Hub amendment R6: with the switch off a barge_in turn never cancels a running agent turn
-    quietly; it is an ordinary follow-up during a busy turn (the busy line), as on ci-ipa."""
-    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    quietly; it is an ordinary follow-up during a busy turn (the busy line), as on ci-ipa.
+    (jfollow4 2C: off is now OVERLAY_BARGE_IN=0; the default is headphones only.)"""
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     clock = Clock()
     never = lambda: FakeAgent(clock, script=[], tick=0.0, sleep=0.02)  # noqa: E731
     pool, deps = setup(clock, never)
@@ -427,20 +431,21 @@ def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
     stops the audio (no barge_in row), and the setup rows say how to turn it on."""
     ctl = (APP_SRC / "AppController.swift").read_text()
     assert "private var bargeInEnabled = false" in ctl
-    assert "bargeInEnabled = health.bargeIn ?? false" in ctl
-    assert "?? true" not in ctl.split("bargeInEnabled = health.bargeIn")[1].split("\n")[0]
+    # jfollow4 D2: the mode comes from health (off / headphones only / echo canceller); speakers never barge.
+    assert "BargeMode.from(health:" in ctl
+    assert "case .headphones: bargeInEnabled = routeIsHeadphones" in ctl
     wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
     gated = wake.index("if bargeInEnabled {")
     assert gated < wake.index("bargeIn(reason: .wake)") < wake.index("audio.stop()", gated)
     start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
     assert "guard bargeInEnabled," in start
     assert ctl.count("bargeIn(reason:") == 3  # the def, the gated wake and the run's onConfirmed
-    assert 'rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)")' in overlay.DEBUG_PAGE
+    assert 'rows.push(["barge-in: off (OVERLAY_BARGE_IN=0 in the repo .env)", false])' in overlay.DEBUG_PAGE
     assert "ok.barge_in === false" in overlay.DEBUG_PAGE
     overlay.set_deps(make_deps())
-    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["barge_in"] is False
-    monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)  # 2C default: headphones only
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["barge_in"] is True
 
 
@@ -589,7 +594,10 @@ def test_wake_barge_turn_drops_the_cut_reply():
     assert "BargeWords.wakeTurnText(final: heardText, reply: echoOf)" in wake
     # Round 4: the follow-up window checks the reply it follows for an echoed answer.
     assert "let echoOf = followUp ? replyTexts : cutReply" in wake
-    assert "followUp ? BargeWords.dropEchoAnswer(heardText, reply: echoOf)" in wake
+    # jfollow4 round 6: through followUpText, whose every non-timed path is that same token rule.
+    assert "BargeWords.followUpText(heardText, reply: echoOf" in wake
+    timed = _swift_func(APP_SRC.parent / "OverlayCore" / "BargeIn.swift", "followUpText")
+    assert "return dropEchoAnswer(text, reply: reply)" in timed
     barge = _swift_func(APP_SRC / "AppController.swift", "bargeIn")
     assert "stream_open=" in barge
 
@@ -677,8 +685,11 @@ def test_model_path_picture_can_be_enlarged(client, monkeypatch):
 
 def test_brain_incomplete_leaves_a_debug_row(client):
     """Mac live run 5 (33 side note): a cut-off request heard an ack and then nothing, with no row
-    saying why. The model's {"incomplete": true} keeps the mic open; the debug page now says so."""
+    saying why. The model's {"incomplete": true} keeps the mic open; the debug page now says so,
+    and the fixed cut_off line follows the ack (jfollow4)."""
     overlay.set_deps(make_deps(chunks=['{"incomplete": true}\n']))
     events = turn(client, "out loud and with no cards, tell me the history of the Roman", conv_id="i1")
-    assert len(says(events)) == 1 and says(events)[0] in POOL_TEXTS
+    spoken = says(events)
+    assert len(spoken) == 2 and spoken[0] in POOL_TEXTS
+    assert spoken[1] == acks.PHRASES["cut_off"]
     assert _steps("incomplete")[-1]["detail"] == "model: waiting for the rest"

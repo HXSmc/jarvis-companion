@@ -10,6 +10,9 @@ import OverlayCore
 @MainActor
 final class SpeechInput {
     private let engine = AVAudioEngine()
+    /// Read-only view of `engine`: the AEC path (barge_mode aec) attaches AudioOut's player to
+    /// it before start(), so the mic's voice processing also cancels the reply audio.
+    var audioEngine: AVAudioEngine { engine }
     private let tap = MicTap()
     private var isRunning = false
     private var currentTurn: Turn?
@@ -28,6 +31,7 @@ final class SpeechInput {
     struct Heard {
         var levels: [Double]
         var conf: Double?
+        var audioFrom: Date? = nil  // capture time of the first audio the recogniser was fed
     }
 
     init() {}
@@ -224,7 +228,8 @@ final class SpeechInput {
         log.debug("final \(text, privacy: .private)")
         let levels = LevelBlocks.blocks(tap.levelSamples(), from: turn.levelFrom, to: end.addingTimeInterval(0.3))
         turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end,
-                      Heard(levels: Array(levels.suffix(LevelBlocks.maxSent)), conf: turn.confidence.mean))
+                      Heard(levels: Array(levels.suffix(LevelBlocks.maxSent)), conf: turn.confidence.mean,
+                            audioFrom: turn.stats.firstAt))
     }
 
     /// Drops everything up to a "jarvis" near the start, and stray punctuation.
@@ -257,12 +262,15 @@ final class SpeechInput {
                 turn.endNote = " (room words after the request dropped)"
                 return .endOfSpeech
             } else if let end = turn.endOfSpeech,
-                      TurnEndpointer.shouldEnd(text: turn.lastText, lastTextAt: end,
-                                               lastVoiceAt: tap.lastVoicedAt, now: now) {
+                      let rule = TurnEndpointer.endRule(text: turn.lastText, lastTextAt: end,
+                                                        lastVoiceAt: tap.lastVoicedAt, now: now) {
                 // Not on partial-text silence alone: partials lag the audio and people pause
                 // after "the last, uh" (owner, 02:18). Voiced audio and a trailing word hold it open.
-                let wait = TurnEndpointer.silence(after: turn.lastText)
-                turn.endNote = wait > TurnEndpointer.fast ? " (trailed off: waited \(wait) s)" : ""
+                // The note names the rule and the gaps (numbers only), so a cut request says why.
+                let voiceGap = tap.lastVoicedAt.map { String(format: "%.2f", now.timeIntervalSince($0)) } ?? "none"
+                let words = TurnEndpointer.stripWake(turn.lastText).split(separator: " ").count
+                let textGap = String(format: "%.2f", now.timeIntervalSince(end))
+                turn.endNote = " (rule \(rule): text quiet \(textGap) s, voice quiet \(voiceGap) s, words \(words))"
                 return .endOfSpeech
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -367,7 +375,8 @@ final class SpeechInput {
         }
         // shortcut: the converter is used from the audio thread only after the ring
         // snapshot below has been fed, so it stays single-threaded.
-        let feed: @Sendable (AVAudioPCMBuffer, Date) -> Void = { buffer, _ in
+        let feed: @Sendable (AVAudioPCMBuffer, Date) -> Void = { buffer, at in
+            stats.stamp(at)
             let out = Self.convert(converter: converter, from: buffer, to: target)
             stats.fed(converted: out.map { Int($0.frameLength) })
             if let out {
@@ -446,6 +455,7 @@ final class SpeechInput {
         }
         turn.cancelHandler = { task.cancel() }
         for chunk in tap.ringSnapshot() where !turn.followUp {
+            stats.stamp(chunk.at)
             request.append(chunk.buffer)
         }
         if turn.followUp {
@@ -454,9 +464,13 @@ final class SpeechInput {
             let snapshot = tap.ringSnapshot()
             let playable = TurnEndpointer.replayable(stamps: snapshot.map { $0.at },
                                                      drainedAt: turn.replayFrom)
-            for (chunk, ok) in zip(snapshot, playable) where ok { request.append(chunk.buffer) }
+            for (chunk, ok) in zip(snapshot, playable) where ok {
+                stats.stamp(chunk.at)
+                request.append(chunk.buffer)
+            }
         }
-        tap.setSink { [weak request] buffer, _ in
+        tap.setSink { [weak request] buffer, at in
+            stats.stamp(at)
             stats.fed(converted: Int(buffer.frameLength))
             request?.append(buffer)
         }
@@ -510,6 +524,18 @@ private final class FeedStats: @unchecked Sendable {
     private var frames = 0
     private var results = 0
     private var error: String?
+    private var first: Date?
+
+    /// Capture time of the first chunk fed (follow-up echo timing, BargeWords.followUpText).
+    func stamp(_ at: Date) {
+        lock.lock(); defer { lock.unlock() }
+        if first == nil { first = at }
+    }
+
+    var firstAt: Date? {
+        lock.lock(); defer { lock.unlock() }
+        return first
+    }
 
     func fed(converted: Int?) {
         lock.lock(); defer { lock.unlock() }

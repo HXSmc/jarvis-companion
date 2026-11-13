@@ -132,4 +132,25 @@ final class EventDecodeTests: XCTestCase {
         XCTAssertEqual(TurnEvent.decode(line: Data(#"{"type":"end_listening"}"#.utf8)),
                        .control(.endListening))
     }
+
+    func testWorkspaceSaveAndOpenPages() {
+        XCTAssertEqual(ControlEvent.decode(line: Data(#"{"type":"workspace_save","nonce":"0123456789abcdef"}"#.utf8)),
+                       .workspaceSave(nonce: "0123456789abcdef"))
+        XCTAssertEqual(TurnEvent.decode(line: Data(#"{"type":"workspace_save","nonce":"0123456789abcdef"}"#.utf8)),
+                       .control(.workspaceSave(nonce: "0123456789abcdef")))
+        // Bad nonce (short, uppercase, non-hex): no control event, and OverlayEvent sees .unknown.
+        for nonce in ["short", "0123456789ABCDEF", "0123456789abcdeg"] {
+            let line = #"{"type":"workspace_save","nonce":"\#(nonce)"}"#
+            XCTAssertNil(ControlEvent.decode(line: Data(line.utf8)), nonce)
+            XCTAssertEqual(decode(line), .unknown, nonce)
+        }
+        // Only openable URLs survive; a javascript: URL is dropped.
+        XCTAssertEqual(ControlEvent.decode(line: Data(
+            #"{"type":"open_pages","urls":["https://a.example/x","javascript:alert(1)","no url at all"]}"#.utf8)),
+            .openPages(urls: [URL(string: "https://a.example/x")!]))
+        // An empty result still decodes.
+        XCTAssertEqual(ControlEvent.decode(line: Data(#"{"type":"open_pages","urls":["javascript:alert(1)"]}"#.utf8)),
+                       .openPages(urls: []))
+        XCTAssertNil(ControlEvent.decode(line: Data(#"{"type":"open_pages"}"#.utf8)))
+    }
 }

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -26,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import urllib.parse
 import time
 import sys
 import uuid
@@ -42,7 +44,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import hud
-from mac.voice import acks, agent, agent_policy, gitdiff, ground, intents, lean, media_lookup
+from mac.voice import (acks, agent, agent_policy, gitdiff, ground, intents, lean, media_lookup,
+                       memory, workspaces)
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +487,8 @@ _card_text: dict[str, deque] = {}
 _card_index: dict[str, deque] = {}
 # conv_id -> the id of the card a `card_size` turn enlarged, until a restore (or _forget).
 _enlarged: dict[str, str] = {}
+# conv_id -> the page URLs of the last opened workspace ("open the pages"), urls only; _forget drops it.
+_ws_pages: dict[str, list[str]] = {}
 _apps_cache: tuple[float, dict] | None = None
 # conv_id -> (cut-off text, clock): the user trailed off; the next follow-up utterance continues it.
 _pending: dict[str, tuple[str, float]] = {}
@@ -526,7 +531,7 @@ def _tunable(name: str, default: float) -> float:
 # percentile block of his last wake turn in the conversation (it carries the mic gain and distance).
 LEVEL_BLOCK_MS = 100  # the app's block width (LevelBlocks.width)
 # A follow-up block counts as near-field voice at this share of the owner's wake level (0.5 = -6 dB).
-FOLLOWUP_LEVEL_RATIO = _tunable("OVERLAY_FOLLOWUP_LEVEL_RATIO", 0.5)
+FOLLOWUP_LEVEL_RATIO = _tunable("OVERLAY_FOLLOWUP_LEVEL_RATIO", 0.4)
 # ...and never below this absolute RMS (quiet room peaks in the runs: 0.002-0.03 peak sample).
 FOLLOWUP_MIN_LEVEL = _tunable("OVERLAY_FOLLOWUP_MIN_LEVEL", 0.01)
 # Near-field voice needed in a follow-up: shorter is a cough, a door or a far voice.
@@ -535,7 +540,7 @@ FOLLOWUP_MIN_VOICED_MS = _tunable("OVERLAY_FOLLOWUP_MIN_VOICED_MS", 300)
 FOLLOWUP_MIN_CONF = _tunable("OVERLAY_FOLLOWUP_MIN_CONF", 0.35)
 # App side (sent on /health): after a complete wake request, new words quieter than this share of
 # the turn's own loudest voice are the room, and the turn ends with the request as it was.
-TAIL_LEVEL_RATIO = _tunable("OVERLAY_TAIL_LEVEL_RATIO", 0.5)
+TAIL_LEVEL_RATIO = _tunable("OVERLAY_TAIL_LEVEL_RATIO", 0.6)  # = TailGate.defaultRatio (app uses this)
 _owner_level: dict[str, float] = {}  # conv_id -> 90th percentile block of the last wake turn
 
 
@@ -578,6 +583,9 @@ def _forget(conv_id: str) -> None:
     for store in (_history, _notes, _card_text, _pending, _last_reply, _card_sets,
                   _card_index, _enlarged):
         store.pop(conv_id, None)
+    _session_ref.pop(conv_id, None)
+    _host_ask.pop(conv_id, None)
+    _ws_pages.pop(conv_id, None)
     _tainted.discard(conv_id)
 
 
@@ -652,7 +660,8 @@ def _holds_agent_state(conv_id: str, deps: OverlayDeps, cursor: bool = True) -> 
     """True while the agent tier holds anything for conv_id (a session, a pending or expired yes, a
     running turn, with `cursor` a change-list cursor): its read text and pending questions are not
     ours to drop, so no fresh start."""
-    if conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy or (cursor and conv_id in _hunks):
+    if (conv_id in _confirm or conv_id in _expired or conv_id in _agent_busy
+            or conv_id in _host_ask or (cursor and conv_id in _hunks)):
         return True
     pool = deps.agent_conversations
     if pool is None:
@@ -900,9 +909,27 @@ def _sessions_access() -> tuple[str, str] | None:
     return (url, token) if token else None
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def _session_need(item: dict) -> dict | None:
+    """The row's open card need as {id, kind, options}; None when absent or already answered."""
+    card = item.get("card") if isinstance(item.get("card"), dict) else {}
+    need = card.get("need") if isinstance(card.get("need"), dict) else None
+    if not need or need.get("answered"):
+        return None
+    options = [str(o)[:40] for o in need.get("options") or [] if isinstance(o, str)]
+    return {"id": str(need.get("id") or "")[:64], "kind": str(need.get("kind") or "")[:16],
+            "options": options[:8]}
+
+
+SESSIONS_SCAN_MAX = 2000  # rows read from one /central/sessions answer before sorting
+
+
 def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
     """GET {url}/central/sessions -> (rows | None, status; 0 = unreachable). GET only, never a
-    redirect. Rows carry device/state/title/doing/needs_owner/updated, at most 20."""
+    redirect. Rows carry device/state/title/doing/needs_owner/updated plus id/health/need for the
+    voice session actions, at most 20."""
     try:
         with httpx.Client(timeout=5.0, follow_redirects=False, transport=_sessions_transport) as client:
             resp = client.get(f"{url}/central/sessions",
@@ -917,17 +944,40 @@ def _fetch_sessions(url: str, token: str) -> tuple[list[dict] | None, int]:
         return None, resp.status_code
     rows: list[dict] = []
     if isinstance(body, list):
-        for item in body[:20]:
-            if not isinstance(item, dict):
+        # The gateway lists every session oldest first (Mac run r2: 400 rows, today's past the first
+        # 20): open sessions first, newest first inside each group, then the cap.
+        items = sorted((i for i in body[:SESSIONS_SCAN_MAX] if isinstance(i, dict)),
+                       key=lambda i: (i.get("state") not in ("done", "stopped", "failed"),
+                                      str(i.get("last_activity_at") or i.get("updated_at") or "")),
+                       reverse=True)
+        for item in items[:20]:
+            sid = str(item.get("session_id") or "")
+            if not _SESSION_ID_RE.fullmatch(sid):  # a bad id can never be called back
                 continue
-            rows.append({"device": str(item.get("device", ""))[:24],
+            rows.append({"id": sid,
+                         "device": str(item.get("device", ""))[:24],
                          "state": str(item.get("state", ""))[:24],
                          "title": str(item.get("title", ""))[:80],
                          "doing": str(item.get("doing", ""))[:120],
+                         "health": str(item.get("health") or "")[:16],
                          "needs_owner": item.get("state") == "needs_input",
+                         "need": _session_need(item),
                          "updated": str(item.get("last_activity_at")
                                         or item.get("updated_at") or "")[:40]})
     return rows, 200
+
+
+# The session a "what is it doing" refers to (conv -> host ids); set only by fixed code,
+# never the model. Bounded like _history: oldest conversations drop first.
+_session_ref: dict[str, list[str]] = {}
+
+
+def _set_session_ref(conv_id: str, ids: list[str]) -> None:
+    _session_ref[conv_id] = ids
+    for oldest in [c for c in _session_ref if c != conv_id]:
+        if len(_session_ref) <= 64:
+            break
+        _session_ref.pop(oldest, None)
 
 
 def _sessions_note(rows: list[dict]) -> str:
@@ -938,6 +988,809 @@ def _sessions_note(rows: list[dict]) -> str:
                    + (f" (doing: {r['doing']})" if r["doing"] else "")
                    + (f", updated {r['updated']}" if r["updated"] else ""))
     return "\n".join(out)
+
+
+# A3-A7: start/stop/answer a Companion session by voice. Every prompt and answer the gateway
+# receives is built from the owner's own words (intents.session_request), never the model, the
+# rows or the screen; the owner confirms through the host-tier Confirm before anything is sent.
+SESSION_PROMPT_MAX = 600
+VOICE_SESSION_STARTS_PER_HOUR = 3
+VOICE_SESSION_STOPS_PER_HOUR = 6
+VOICE_SESSION_SENDS_PER_HOUR = 10
+_SESSION_RATES = {"start": VOICE_SESSION_STARTS_PER_HOUR, "stop": VOICE_SESSION_STOPS_PER_HOUR,
+                  "answer": VOICE_SESSION_SENDS_PER_HOUR}
+_session_calls: dict[str, list[float]] = {}  # action -> send times, sliding 3600 s on deps.clock()
+
+
+def _session_rate_ok(action: str, now: float) -> bool:
+    """True when action is under its hourly limit; checked before the Confirm, never after."""
+    hits = [t for t in _session_calls.get(action, ()) if now - t < 3600.0]
+    _session_calls[action] = hits
+    return len(hits) < _SESSION_RATES.get(action, 3)
+
+
+def _session_rate_sent(action: str, now: float) -> None:
+    """Count one confirmed call, before it is attempted (a timeout may still have arrived)."""
+    times = _session_calls.setdefault(action, [])
+    times.append(now)
+    _session_calls[action] = [t for t in times if now - t < 3600.0]
+
+
+def _cut40(text: str) -> str:
+    """First 40 chars cut back to a word boundary, one line."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= 40:
+        return text
+    cut = text[:40]
+    return cut[:cut.rfind(" ")].rstrip() if " " in cut.rstrip() else cut.rstrip()
+
+
+FEEDBACK_S = 0.3  # UX: feedback within 400 ms, so a wait past this gets a spoken line
+
+
+async def _say_if_slow(task: asyncio.Future, key: str, deps: OverlayDeps,
+                       said: list[str]) -> AsyncIterator[dict]:
+    """Speak PHRASES[key] only when `task` is still running after FEEDBACK_S."""
+    done, _pending = await asyncio.wait({task}, timeout=FEEDBACK_S)
+    if not done:
+        async for ev in _line(key, deps):
+            yield ev
+        said.append(acks.PHRASES[key])
+
+
+_NAME_FILLER = frozenset({"the", "session", "my"})
+
+
+def _name_words(text: str) -> set[str]:
+    """A2: lower case, punctuation off ("voice-test" -> voice test), filler words dropped."""
+    return set(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split()) - _NAME_FILLER
+
+
+ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line: no pending pick
+
+
+def session_prompt(words: str, ref_row: dict | None = None) -> str:
+    """The new session's first message: owner words plus, with a ref, a fixed fix-it line."""
+    prompt = f'Started by voice from the Mac overlay. The owner said: "{words}"'
+    if ref_row:
+        title = " ".join(str(ref_row.get("title") or "").split())[:60]
+        prompt += (f" Investigate why session {title} ({ref_row['id']}) went quiet and fix it;"
+                   " read its transcript and state first.")
+    return prompt[:SESSION_PROMPT_MAX]
+
+
+def _companion_allowed(method: str, path: str) -> bool:
+    """The exact set of calls voice may make; an id that fails the pattern is refused unheard."""
+    if (method, path) in (("GET", "/central/sessions"), ("POST", "/chat")):
+        return True
+    if method != "POST":
+        return False
+    m = re.fullmatch(r"/central/sessions/([A-Za-z0-9-]{1,64})/(stop|message)", path)
+    if m:
+        return True
+    return bool(re.fullmatch(r"/central/cards/([A-Za-z0-9-]{1,64})/answer", path))
+
+
+def _companion_call(method: str, path: str, json: dict | None = None) -> tuple[int | None, dict | None]:
+    """One allow-listed call to the companion gateway -> (status, parsed JSON); (None, None) when
+    unreachable. follow_redirects off; the token goes in the Authorization header only."""
+    if not _companion_allowed(method, path):
+        raise ValueError("call not allowed")  # before any request: a bad id is never sent
+    access = _sessions_access()
+    if access is None:
+        return None, None
+    url, token = access
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=False, transport=_sessions_transport) as client:
+            resp = client.request(method, f"{url}{path}", json=json,
+                                  headers={"Authorization": f"Bearer {token}"})
+    except Exception:  # unreachable, TLS, timeout: the message never carries the token
+        return None, None
+    try:
+        return resp.status_code, (resp.json() if isinstance(resp.json(), dict) else None)
+    except ValueError:
+        return resp.status_code, None
+
+
+_NEED_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
+@dataclass
+class HostAsk:
+    """A question the host tier asked the owner; only her next spoken words settle it."""
+
+    kind: str
+    summary: str
+    deadline: float
+    payload: dict
+
+
+# conv -> HostAsk, under _confirm_lock like the agent tier's _confirm; no watchdog thread:
+# expiry is judged on the owner's next utterance.
+_host_ask: dict[str, HostAsk] = {}
+
+
+async def _session_failed(action: str, reason: str, deps: OverlayDeps, said: list[str],
+                          on_step) -> AsyncIterator[dict]:
+    async for ev in _line("session_failed", deps):
+        yield ev
+    said.append(acks.PHRASES["session_failed"])
+    if on_step:
+        on_step(f"session_{action}", detail=f"refused reason={reason}")
+
+
+async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: POST /chat with the fixed start body; the prompt was built at ask time."""
+    now = deps.clock()
+    req = {"msg_id": uuid.uuid4().hex, "thread_id": "ov-" + uuid.uuid4().hex[:8],
+           "text": session_prompt(str(payload.get("words") or ""), payload.get("ref_row")),
+           "new_session": True}
+    _session_rate_sent("start", now)  # counted before the call: a timeout may still have reached the router
+    status, out = await asyncio.to_thread(_companion_call, "POST", "/chat", req)
+    if not (isinstance(status, int) and 200 <= status < 300 and isinstance(out, dict)):
+        async for ev in _session_failed("start", "unreachable" if status is None else f"http_{status}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    new_id = str(out.get("session_id") or "")
+    if _SESSION_ID_RE.fullmatch(new_id):
+        _set_session_ref(body.conv_id, [new_id])
+        if on_step:
+            on_step("session_start", detail=f"confirmed id={new_id}")
+    elif on_step:
+        on_step("session_start", detail="confirmed")
+    _tainted.add(body.conv_id)  # the host's title is untrusted text going into _history
+    title = " ".join(str(out.get("title") or "").split())[:60]
+    line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
+    async for ev in _speak(line, deps):
+        yield ev
+    said.append(line)
+    card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
+                              "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
+    if card:
+        seen = _card_ids.setdefault(body.conv_id, set())
+        if card["id"] in seen:  # a host id: only a collision renames it
+            card["id"] = "sv-" + uuid.uuid4().hex[:8]
+        seen.add(card["id"])
+        yield {"type": "card", "card": card}
+
+
+async def _session_stop_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                               said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: POST the allow-listed stop for the stored id."""
+    now = deps.clock()
+    sid = str(payload.get("id") or "")
+    _session_rate_sent("stop", now)
+    status, _out = await asyncio.to_thread(_companion_call, "POST", f"/central/sessions/{sid}/stop")
+    if not (isinstance(status, int) and 200 <= status < 300):
+        async for ev in _session_failed("stop", "unreachable" if status is None else f"http_{status}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    async for ev in _line("stopped", deps):
+        yield ev
+    said.append(acks.PHRASES["stopped"])
+    if on_step:
+        on_step("session_stop", detail=f"confirmed id={sid}")
+
+
+async def _session_answer_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                 said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: re-check the ask is still open, then a card button or a plain message."""
+    now = deps.clock()
+    sid = str(payload.get("id") or "")
+    access = _sessions_access()
+    if access is None:
+        async for ev in _session_failed("answer", "no_access", deps, said, on_step):
+            yield ev
+        return
+    rows, st = await asyncio.to_thread(_fetch_sessions, *access)
+    if rows is None:
+        async for ev in _session_failed("answer", "unreachable" if st == 0 else f"http_{st}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    row = next((r for r in rows if r["id"] == sid), None)
+    asked = payload.get("need_id")  # the card the owner heard about must still be the open one
+    if row is None or (asked and (row["need"] or {}).get("id") != asked):
+        # answered by hand, or the session is gone: no call leaves here
+        async for ev in _line("session_ask_gone", deps):
+            yield ev
+        said.append(acks.PHRASES["session_ask_gone"])
+        if on_step:
+            on_step("session_answer", detail="refused reason=ask_gone")
+        return
+    # No card at ask time: a message, even if a card opened since (the owner never heard that one).
+    need = (row["need"] if asked else None) or {"id": "", "kind": "", "options": []}
+    words = str(payload.get("words") or "")
+    answer = str(payload.get("answer") or "")
+    button = {"approve": "Approve", "yes": "Yes", "no": "No"}.get(answer, "")
+    if not button:  # the owner's own words: the one option whose words they all contain, else text
+        low = words.lower()
+        hits = [o for o in need["options"] if o.strip() and all(w in low for w in o.lower().split())]
+        if len(hits) == 1:
+            button = hits[0]
+    # The gateway's own rule (cards.valid_answer, read-only): approve/yesno take fixed buttons,
+    # choice takes its options; anything else goes as the owner's words.
+    allowed = {"approve": ("Approve",), "yesno": ("Yes", "No"),
+               "choice": tuple(need["options"])}.get(need.get("kind"), ())
+    if button and button in allowed and len(button) <= 40 and _NEED_ID_RE.fullmatch(need["id"]):
+        path, req = (f"/central/cards/{sid}/answer",
+                     {"msg_id": uuid.uuid4().hex, "need_id": need["id"], "answer": button})
+    else:
+        path, req = f"/central/sessions/{sid}/message", {"msg_id": uuid.uuid4().hex,
+                                                         "text": (words or answer)[:300]}
+    _session_rate_sent("answer", now)
+    status, _out = await asyncio.to_thread(_companion_call, "POST", path, req)
+    if not (isinstance(status, int) and 200 <= status < 300):
+        async for ev in _session_failed("answer", "unreachable" if status is None else f"http_{status}",
+                                        deps, said, on_step):
+            yield ev
+        return
+    async for ev in _line("session_sent", deps):
+        yield ev
+    said.append(acks.PHRASES["session_sent"])
+    if on_step:
+        on_step("session_answer", detail=f"confirmed id={sid}")
+
+
+# --- B: remember things / C: saved workspaces. Owner words only, fixed code; rows carry
+# counts and ids, never a remembered fact, a workspace name, a title or a URL. ---
+
+def _memory_block() -> str:
+    """The owner's remembered things for the prompt; "" when there are none or the store is broken."""
+    try:
+        return memory.prompt_block(memory.load())
+    except (memory.MemoryModeError, OSError):
+        return ""
+
+
+def _fact(text: str, cap: int) -> str:
+    """A fact cut to `cap` chars at a word boundary, for a spoken line."""
+    return text[:cap].rsplit(maxsplit=1)[0] if len(text) > cap else text
+
+
+async def _memory_turn(body: TurnBody, ask: intents.MemoryAsk, deps: OverlayDeps,
+                       said: list[str], on_step) -> AsyncIterator[dict]:
+    """Remember/list/forget in fixed code; the words come from the owner's own transcript."""
+    try:
+        if ask.action == "add":
+            entry = await asyncio.to_thread(memory.add, ask.text)
+            line = f"I'll remember: {_fact(entry['text'], 80)}, sir."
+            async for ev in _speak(line, deps):
+                yield ev
+            said.append(line)
+            if on_step:
+                on_step("memory", detail=f"add id={entry['id']} words={len(entry['text'].split())}")
+        elif ask.action == "list":
+            entries = await asyncio.to_thread(memory.load)
+            if entries:
+                line = (f"I remember {'one thing' if len(entries) == 1 else f'{len(entries)} things'},"
+                        " sir.")
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+                card = hud.validate_card({"id": "mr" + uuid.uuid4().hex[:6], "type": "info",
+                                          "title": "Remembered",
+                                          "body": [f"{e.get('at', '')}: {e.get('text', '')}"[:80]
+                                                   for e in list(reversed(entries))[:8]]})
+                if card:
+                    yield {"type": "card", "card": card}
+            else:
+                async for ev in _line("memory_empty", deps):
+                    yield ev
+                said.append(acks.PHRASES["memory_empty"])
+            if on_step:
+                on_step("memory", detail=f"list count={len(entries)}")
+        elif ask.action == "forget_last":
+            entry = await asyncio.to_thread(memory.forget_last)
+            key = "memory_empty" if entry is None else "memory_forgot"
+            async for ev in _line(key, deps):
+                yield ev
+            said.append(acks.PHRASES[key])
+            if on_step:
+                on_step("memory", detail=f"forget id={entry['id'] if entry else 'none'}")
+        elif ask.action == "forget_about":
+            entry = await asyncio.to_thread(memory.forget_about, ask.text)
+            if entry is None:
+                async for ev in _line("memory_none", deps):
+                    yield ev
+                said.append(acks.PHRASES["memory_none"])
+            else:
+                line = f"Forgotten: {_fact(entry['text'], 60)}, sir."
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+            if on_step:
+                on_step("memory", detail=f"forget id={entry['id'] if entry else 'none'}")
+        else:  # forget_all: the only destructive one, host Confirm first
+            count = len(await asyncio.to_thread(memory.load))
+            if count == 0:  # nothing to forget: no Confirm for a no-op
+                async for ev in _line("memory_empty", deps):
+                    yield ev
+                said.append(acks.PHRASES["memory_empty"])
+                return
+            question = ("Forget the one thing I remember?" if count == 1
+                        else f"Forget all {count} things I remember?")
+            async for ev in _ask_host(body.conv_id, "memory_forget_all",
+                                      "Forget everything I remember", question, {}, deps):
+                yield ev
+    except memory.MemoryModeError:
+        async for ev in _line("memory_failed", deps):
+            yield ev
+        said.append(acks.PHRASES["memory_failed"])
+        if on_step:
+            on_step("memory", detail="error reason=mode")
+    except OSError:
+        async for ev in _line("memory_failed", deps):
+            yield ev
+        said.append(acks.PHRASES["memory_failed"])
+        if on_step:
+            on_step("memory", detail="error reason=io")
+
+
+async def _memory_forget_all_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                    said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: empty the memory store."""
+    await asyncio.to_thread(memory.forget_all)
+    async for ev in _line("memory_forgot_all", deps):
+        yield ev
+    said.append(acks.PHRASES["memory_forgot_all"])
+    if on_step:
+        on_step("memory", detail="forget_all confirmed")
+
+
+WORKSPACE_SNAPSHOT_WAIT_S = 8  # the app has this long to POST the cards/pages snapshot
+_WS_NONCE_S = 10  # a snapshot nonce older than this is dead, known or not
+# nonce -> (conv_id, created, the event the waiting turn sleeps on, the snapshot slot)
+_ws_nonces: dict[str, tuple[str, float, threading.Event, dict]] = {}
+
+
+def _ws_names() -> tuple[str, ...]:
+    """Saved workspace names, for intents.parse to recognise open/delete names."""
+    try:
+        return tuple(item["name"] for item in workspaces.list_all())
+    except OSError:
+        return ()
+
+
+def _register_ws_nonce(conv_id: str) -> tuple[str, threading.Event, dict]:
+    """Hand out a snapshot nonce; old ones die and only 8 are ever alive."""
+    now = time.monotonic()
+    for dead in [n for n, e in _ws_nonces.items() if now - e[1] > _WS_NONCE_S]:
+        _ws_nonces.pop(dead, None)
+    nonce = secrets.token_hex(8)
+    event, slot = threading.Event(), {}
+    _ws_nonces[nonce] = (conv_id, now, event, slot)
+    while len(_ws_nonces) > 8:
+        _ws_nonces.pop(min(_ws_nonces, key=lambda n: _ws_nonces[n][1]))
+    return nonce, event, slot
+
+
+def _drop_saved_cards(conv_id: str, ids: list[str]) -> dict | None:
+    """After a save the app hides the snapshot's cards: forget them so no later turn names them."""
+    gone = {i for i in ids if i != _CONFIRM_CARD_ID}
+    if not gone:
+        return None
+    for group_ids in _card_sets.get(conv_id, {}).values():
+        group_ids[:] = [i for i in group_ids if i not in gone]
+    index = _card_index.get(conv_id)
+    if index is not None:
+        _card_index[conv_id] = deque((c for c in index if c[0] not in gone), maxlen=12)
+    return {"type": "drop_cards", "ids": [i for i in ids if i in gone][-MAX_DROP_IDS:]}
+
+
+def _ws_display(slug: str, fallback: str) -> str:
+    """The saved display name of a slug, `fallback` when it is gone."""
+    for item in workspaces.list_all():
+        if item["slug"] == slug:
+            return item["name"]
+    return fallback
+
+
+async def _ws_which(slugs: list[str], word: str, deps: OverlayDeps, said: list[str],
+                    on_step) -> AsyncIterator[dict]:
+    """Two or more workspaces match: the owner says which one; nothing changes."""
+    by_slug = {i["slug"]: i["name"] for i in await asyncio.to_thread(workspaces.list_all)}
+    names = [by_slug.get(s, s) for s in slugs[:3]]
+    which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
+    line = f"Which one: {which}? {ASK_AGAIN}"
+    async for ev in _speak(line, deps):
+        yield ev
+    said.append(line)
+    if on_step:
+        on_step("workspace", detail=f"{word} ambiguous count={len(slugs)}")
+
+
+async def _workspace_save_finish(body: TurnBody, name: str, cards: list, pages: list,
+                                 enlarged: str | None, deps: OverlayDeps, said: list[str],
+                                 on_step) -> AsyncIterator[dict]:
+    """Store the snapshot, say it, show the card, drop the saved cards. Used fresh and on Replace."""
+    try:
+        doc = await asyncio.to_thread(workspaces.save, name, cards, pages, enlarged)
+    except workspaces.WorkspaceError as exc:
+        key = "workspace_full" if exc.reason == "full" else "workspace_failed"
+        async for ev in _line(key, deps):
+            yield ev
+        said.append(acks.PHRASES[key])
+        if on_step:
+            on_step("workspace", detail=f"save failed reason={exc.reason}")
+        return
+    shown = doc["name"]
+    line = f"Saved as {shown}, sir. Say open {shown} to bring it back."
+    async for ev in _speak(line, deps):
+        yield ev
+    said.append(line)
+    card = hud.validate_card({"id": "wsv" + uuid.uuid4().hex[:6], "type": "info", "title": shown,
+                              "body": [f"{len(doc['cards'])} cards, {len(doc['pages'])} pages",
+                                       "Positions and boxes are not saved."]})
+    if card:
+        yield {"type": "card", "card": card}
+    drop = _drop_saved_cards(body.conv_id, [c.get("id", "") for c in doc["cards"]])
+    if drop:
+        yield drop
+    if on_step:
+        on_step("workspace", detail=f"save name_words={len(name.split())}"
+                                    f" cards={len(doc['cards'])} pages={len(doc['pages'])}")
+
+
+async def _workspace_save_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: OverlayDeps,
+                               said: list[str], on_step) -> AsyncIterator[dict]:
+    """Save the current cards and pages as a named workspace; the app POSTs the snapshot."""
+    nonce, event, slot = await asyncio.to_thread(_register_ws_nonce, body.conv_id)
+    yield {"type": "workspace_save", "nonce": nonce}
+    waited = asyncio.ensure_future(asyncio.to_thread(event.wait, WORKSPACE_SNAPSHOT_WAIT_S))
+    async for ev in _say_if_slow(waited, "generic", deps, said):
+        yield ev
+    if not await waited:
+        async for ev in _line("workspace_failed", deps):
+            yield ev
+        said.append(acks.PHRASES["workspace_failed"])
+        if on_step:
+            on_step("workspace", detail="save failed reason=timeout")
+        return
+    snap = slot.get("body") or {}
+    cards: list = []
+    enlarged = None
+    for item in snap.get("cards") or []:
+        card = hud.validate_card(item.get("card")) if isinstance(item, dict) else None
+        if not card:
+            continue
+        cards.append(card)
+        if item.get("enlarged"):
+            enlarged = card["id"]
+    pages = [{"url": p.get("url"), "title": str(p.get("title", ""))[:120]}
+             for p in snap.get("pages") or []
+             if isinstance(p, dict) and workspaces.safe_page(p.get("url"))]
+    if not cards and not pages:
+        async for ev in _line("workspace_empty", deps):
+            yield ev
+        said.append(acks.PHRASES["workspace_empty"])
+        if on_step:
+            on_step("workspace", detail=f"save name_words={len(ask.name.split())} cards=0 pages=0")
+        return
+    slug = workspaces.slug(ask.name)
+    if slug and await asyncio.to_thread(workspaces.exists, slug):
+        shown = workspaces.display_name(ask.name)
+        async for ev in _ask_host(body.conv_id, "workspace_replace", f"Replace {shown}",
+                                  _confirm_question(f"Replace {shown}"),
+                                  {"name": ask.name, "cards": cards, "pages": pages,
+                                   "enlarged": enlarged}, deps):
+            yield ev
+        return
+    async for ev in _workspace_save_finish(body, ask.name, cards, pages, enlarged, deps,
+                                           said, on_step):
+        yield ev
+
+
+async def _workspace_replace_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                    said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: overwrite the saved workspace with the snapshot taken at ask time."""
+    async for ev in _workspace_save_finish(body, str(payload.get("name") or ""),
+                                           payload.get("cards") or [], payload.get("pages") or [],
+                                           payload.get("enlarged"), deps, said, on_step):
+        yield ev
+
+
+async def _workspace_open_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: OverlayDeps,
+                               said: list[str], on_step) -> AsyncIterator[dict]:
+    """Bring a saved workspace back: cards re-sent in saved order, each with a fresh id."""
+    slugs = await asyncio.to_thread(workspaces.match, ask.name)
+    if not slugs:
+        async for ev in _line("workspace_none", deps):
+            yield ev
+        said.append(acks.PHRASES["workspace_none"])
+        return
+    if len(slugs) > 1:
+        async for ev in _ws_which(slugs, "open", deps, said, on_step):
+            yield ev
+        return
+    try:
+        doc = await asyncio.to_thread(workspaces.load, slugs[0])
+    except workspaces.WorkspaceError:
+        doc = None
+    if not doc:
+        async for ev in _line("workspace_failed", deps):
+            yield ev
+        said.append(acks.PHRASES["workspace_failed"])
+        return
+    _tainted.add(body.conv_id)  # saved card text is model text: the conv stays on the quiet pool
+    mapping: dict[str, str] = {}
+    for saved in doc.get("cards") or []:
+        card = hud.validate_card(dict(saved))
+        if not card:
+            continue
+        fresh = "ws" + secrets.token_hex(3)
+        mapping[card.get("id", "")] = fresh
+        card["id"] = fresh
+        yield _keep_card(body.conv_id, "workspace", card)
+    if doc.get("enlarged") in mapping:
+        _enlarged[body.conv_id] = mapping[doc["enlarged"]]
+        yield {"type": "card_size", "id": mapping[doc["enlarged"]], "size": "max"}
+    pages = [p for p in doc.get("pages") or []
+             if isinstance(p, dict) and workspaces.safe_page(p.get("url"))][:12]
+    if pages:
+        card = hud.validate_card({"id": "wsp" + uuid.uuid4().hex[:6], "type": "info",
+                                  "title": "Saved pages",
+                                  "body": [f"{str(p.get('title', ''))[:60]}"
+                                           f" · {urllib.parse.urlsplit(p['url']).netloc}"
+                                           for p in pages]})
+        if card:
+            yield _keep_card(body.conv_id, "workspace", card)
+    if len(_ws_pages) > 64:
+        for old in list(_ws_pages)[:len(_ws_pages) - 64]:
+            _ws_pages.pop(old, None)
+    _ws_pages[body.conv_id] = [p["url"] for p in pages]
+    line = f"Here is {doc.get('name') or ask.name}, sir."
+    async for ev in _speak(line, deps):
+        yield ev
+    said.append(line)
+    if on_step:
+        on_step("workspace", detail=f"open cards={len(doc.get('cards') or [])} pages={len(pages)}")
+
+
+async def _workspace_delete_action(payload: dict, body: TurnBody, deps: OverlayDeps,
+                                   said: list[str], on_step) -> AsyncIterator[dict]:
+    """Yes said: delete the workspace file."""
+    gone = await asyncio.to_thread(workspaces.delete, str(payload.get("slug") or ""))
+    key = "workspace_deleted" if gone else "workspace_failed"
+    async for ev in _line(key, deps):
+        yield ev
+    said.append(acks.PHRASES[key])
+    if on_step:
+        on_step("workspace", detail="delete confirmed" if gone else "delete failed")
+
+
+async def _workspace_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: OverlayDeps,
+                          said: list[str], on_step) -> AsyncIterator[dict]:
+    """Save/open/open the pages/list/delete workspaces in fixed code."""
+    if ask.action == "save":
+        async for ev in _workspace_save_turn(body, ask, deps, said, on_step):
+            yield ev
+    elif ask.action == "open":
+        async for ev in _workspace_open_turn(body, ask, deps, said, on_step):
+            yield ev
+    elif ask.action == "open_pages":
+        urls = [u for u in _ws_pages.get(body.conv_id) or [] if workspaces.safe_page(u)][:12]
+        if not urls:
+            async for ev in _line("workspace_no_pages", deps):
+                yield ev
+            said.append(acks.PHRASES["workspace_no_pages"])
+            return
+        yield {"type": "open_pages", "urls": urls}
+        async for ev in _speak("Opening them.", deps):
+            yield ev
+        said.append("Opening them.")
+        if on_step:
+            on_step("workspace", detail=f"pages opened={len(urls)}")
+    elif ask.action == "list":
+        items = await asyncio.to_thread(workspaces.list_all)
+        if not items:
+            async for ev in _line("workspace_none_saved", deps):
+                yield ev
+            said.append(acks.PHRASES["workspace_none_saved"])
+        else:
+            line = f"You have {len(items)} saved: {', '.join(i['name'] for i in items[:5])}."
+            async for ev in _speak(line, deps):
+                yield ev
+            said.append(line)
+            card = hud.validate_card({"id": "wsl" + uuid.uuid4().hex[:6], "type": "info",
+                                      "title": "Saved",
+                                      "body": [f"{i['name'][:60]} · {i['saved_at'][:10]}"
+                                               for i in items[:12]]})
+            if card:
+                yield {"type": "card", "card": card}
+        if on_step:
+            on_step("workspace", detail=f"list count={len(items)}")
+    else:  # delete: host Confirm first, the file only goes on a yes
+        slugs = await asyncio.to_thread(workspaces.match, ask.name)
+        if not slugs:
+            async for ev in _line("workspace_none", deps):
+                yield ev
+            said.append(acks.PHRASES["workspace_none"])
+            return
+        if len(slugs) > 1:
+            async for ev in _ws_which(slugs, "delete", deps, said, on_step):
+                yield ev
+            return
+        name = await asyncio.to_thread(_ws_display, slugs[0], ask.name)
+        async for ev in _ask_host(body.conv_id, "workspace_delete", f"Delete {name}",
+                                  _confirm_question(f"Delete {name}"), {"slug": slugs[0]}, deps):
+            yield ev
+
+
+# kind -> the action run once on the owner's yes; it sees only the stored payload.
+_HOST_ACTIONS: dict[str, Callable] = {"start": _session_start_action,
+                                      "stop": _session_stop_action,
+                                      "answer": _session_answer_action,
+                                      "memory_forget_all": _memory_forget_all_action,
+                                      "workspace_delete": _workspace_delete_action,
+                                      "workspace_replace": _workspace_replace_action}
+# kind -> (debug step, cancel word) for the H settle rows; session rows keep their exact shape.
+_HOST_ROWS: dict[str, tuple[str, str]] = {"start": ("session_start", ""),
+                                          "stop": ("session_stop", ""),
+                                          "answer": ("session_answer", ""),
+                                          "memory_forget_all": ("memory", "forget_all"),
+                                          "workspace_delete": ("workspace", "delete"),
+                                          "workspace_replace": ("workspace", "replace")}
+
+
+def _confirm_question(summary: str) -> str:
+    """The spoken Confirm question for an action phrase that may end in the owner's or the model's
+    words: the line always ends in the fixed "Shall I?", so the owner's yes / no / stop / cancel is
+    never the question's own last word (the tail most likely to be heard back as echo)."""
+    return f"{summary[:1].upper()}{summary[1:]}. Shall I?"
+
+
+def _spoken_paths(summary: str) -> str:
+    """The spoken form of a Confirm summary: the vault folder reads as "your notes" and the home
+    folder as "home" (Mac run r2, F4: the full vault path was read aloud and logged in the spoke
+    row). The card keeps the exact summary, so what runs is still on screen word for word."""
+    out = summary
+    vault = os.environ.get("OVERLAY_VAULT", "").rstrip("/")
+    for root, name in ((vault, "your notes"), (os.path.realpath(vault) if vault else "", "your notes"),
+                       (str(Path.home()).rstrip("/"), "home")):
+        if len(root) > 1:
+            out = out.replace(root, name)
+    return out
+
+
+async def _ask_host(conv_id: str, kind: str, summary: str, question: str,
+                    payload: dict, deps: OverlayDeps) -> AsyncIterator[dict]:
+    """Ask the owner in this turn's stream, then show the Confirm card; the next utterance settles."""
+    with _confirm_lock:
+        _host_ask[conv_id] = HostAsk(kind=kind, summary=summary,
+                                     deadline=deps.clock() + CONFIRM_S, payload=payload)
+    async for ev in _speak(question, deps):  # in the turn stream: the app's echo drop sees it
+        yield ev
+    card = hud.validate_card({"id": _CONFIRM_CARD_ID, "type": "info", "title": "Confirm",
+                              "body": [summary, "Say yes to go ahead, or no."]})
+    if card:
+        yield {"type": "card", "card": card}
+
+
+async def _session_rows(action: str, conv_id: str, deps: OverlayDeps, said: list[str],
+                        on_step, held: dict) -> AsyncIterator[dict]:
+    """The session list for resolving a name or "this"; rows land in held["rows"],
+    None -> the failed line was already said."""
+    access = _sessions_access()
+    rows, reason = None, "no_access"
+    if access is not None:
+        task = asyncio.ensure_future(asyncio.to_thread(_fetch_sessions, *access))
+        async for ev in _say_if_slow(task, "sessions", deps, said):
+            yield ev
+        rows, st = await task
+        if rows is None:
+            reason = "unreachable" if st == 0 else f"http_{st}"
+        else:  # host titles reach speech and _history from here: the conv leaves the tool pool
+            _tainted.add(conv_id)
+    if rows is None:
+        async for ev in _session_failed(action, reason, deps, said, on_step):
+            yield ev
+    held["rows"] = rows
+
+
+async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
+                               said: list[str], on_step) -> AsyncIterator[dict]:
+    """A start/stop/answer request: checks, resolve the target, then the host-tier Confirm."""
+    action = ask.action
+
+    def refused(reason: str) -> None:
+        if on_step:
+            on_step(f"session_{action}", detail=f"refused reason={reason}")
+
+    if action == "start" and ask.device != "mini_pc":
+        async for ev in _line("session_device", deps):
+            yield ev
+        said.append(acks.PHRASES["session_device"])
+        refused("device")
+        return
+    if _sessions_access() is None:
+        async for ev in _line("no_sessions_access", deps):
+            yield ev
+        said.append(acks.PHRASES["no_sessions_access"])
+        refused("no_access")
+        return
+    if not _session_rate_ok(action, deps.clock()):  # before the Confirm: over is over
+        async for ev in _line("session_limit", deps):
+            yield ev
+        said.append(acks.PHRASES["session_limit"])
+        refused("rate_limit")
+        return
+    ref_row: dict | None = None
+    if action == "start":
+        if ask.ref == "this":
+            held: dict = {}
+            async for ev in _session_rows(action, body.conv_id, deps, said, on_step, held):
+                yield ev
+            if held["rows"] is None:
+                return
+            hits = [r for r in held["rows"] if r["id"] in (_session_ref.get(body.conv_id) or [])]
+            if len(hits) != 1:
+                line = f"Which session, sir? {ASK_AGAIN}"
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+                refused("ambiguous")
+                return
+            ref_row = hits[0]
+    else:  # stop / answer need a target row
+        held = {}
+        async for ev in _session_rows(action, body.conv_id, deps, said, on_step, held):
+            yield ev
+        if held["rows"] is None:
+            return
+        rows = held["rows"]
+        if ask.ref == "name" and ask.name:
+            want = _name_words(ask.name)
+            hits = [r for r in rows if want and want <= _name_words(r["title"])]
+            if not hits:
+                async for ev in _line("session_none_named", deps):
+                    yield ev
+                said.append(acks.PHRASES["session_none_named"])
+                refused("none_named")
+                return
+            if len(hits) > 1:
+                titles = [_cut40(r["title"]) or r["id"] for r in hits[:3]]
+                line = f"Which one: {', '.join(titles[:-1])} or {titles[-1]}? {ASK_AGAIN}"
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+                refused("ambiguous")
+                return
+            ref_row = hits[0]
+        else:  # "this" (or nothing): the session this conv last touched
+            hits = [r for r in rows if r["id"] in (_session_ref.get(body.conv_id) or [])]
+            if len(hits) != 1:
+                line = f"Which session, sir? {ASK_AGAIN}"
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+                refused("ambiguous")
+                return
+            ref_row = hits[0]
+    title40 = _cut40(ref_row["title"]) if ref_row else ""
+    if action == "start":  # with a ref the line ends in fixed words; owner words never end it
+        summary = (f"Start a session on the mini PC to fix why {title40} went quiet" if ref_row
+                   else f"Start a session on the mini PC: {_cut40(ask.words)}")
+        question = f"{summary}?" if ref_row else _confirm_question(summary)
+        payload = {"words": ask.words, "ref_row": ref_row}
+    elif action == "stop":
+        summary = f"Stop the {title40} session"
+        question = f"{summary}?"
+        payload = {"id": ref_row["id"], "title": title40}
+    else:
+        shown = {"approve": "approve", "yes": "yes", "no": "no"}.get(ask.answer)
+        if not shown:
+            shown = '"' + _cut40(ask.words) + '"'
+        summary = f"Send {shown} to {title40}"
+        question = _confirm_question(summary)
+        payload = {"id": ref_row["id"], "title": title40, "answer": ask.answer, "words": ask.words,
+                   "need_id": (ref_row.get("need") or {}).get("id")}  # the card open at ask time
+    async for ev in _ask_host(body.conv_id, action, summary, question, payload, deps):
+        yield ev
+    said.append(question)
 
 
 async def _run_turn(body: TurnBody, deps: OverlayDeps,
@@ -955,7 +1808,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     agent_state = _holds_agent_state(body.conv_id, deps, cursor=False)
     # A yes/no the agent tier waits for (or a turn it runs) is never stray speech: read before the
     # preflight settles it.
-    owner_answer_due = body.conv_id in _confirm or body.conv_id in _expired or body.conv_id in _agent_busy
+    owner_answer_due = (body.conv_id in _confirm or body.conv_id in _expired
+                        or body.conv_id in _agent_busy or body.conv_id in _host_ask)
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
@@ -1021,10 +1875,26 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
-        intent = intents.parse(body.text, apps=apps)
+        ws_names = await asyncio.to_thread(_ws_names)
+        intent = intents.parse(body.text, apps=apps, workspace_names=ws_names)
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
         intent = _hunk_rewrite(intent, body.text, body.conv_id, on_step)
+        # A3: owner words only. The action re-parses raw_text (before any continuation join);
+        # a join that hid the request is a plain answer turn, never an ask.
+        sess_ask = intents.session_request(raw_text) if intent.kind == "session" else None
+        if intent.kind == "session" and sess_ask is None:
+            intent = intents.Intent("answer", intents._clean(body.text))
+        mem_ask: intents.MemoryAsk | None = None
+        ws_ask: intents.WorkspaceAsk | None = None
+        if intent.kind == "memory":
+            mem_ask = intents.memory_request(raw_text)
+        elif intent.kind == "workspace":
+            ws_ask = intents.workspace_request(raw_text, ws_names)
+        if intent.kind == "memory" and mem_ask is None:
+            intent = intents.Intent("answer", intents._clean(body.text))
+        if intent.kind == "workspace" and ws_ask is None:
+            intent = intents.Intent("answer", intents._clean(body.text))
         media_ask: intents.MediaAsk | None = None
         if (intent.kind == "answer" and not joined
                 and (body.conv_id in _tainted or _holds_agent_state(body.conv_id, deps, cursor=False))):
@@ -1034,12 +1904,22 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             if media_ask is not None:
                 intent = intents.Intent("media", media_ask.kind)
         if on_step:
-            on_step("intent", kind=intent.kind, arg=intent.arg)
+            if sess_ask is not None:  # A7: the session row carries the action's own fields
+                detail = (f"device={sess_ask.device or 'none'} ref={sess_ask.ref or 'none'}"
+                          f" words={len(sess_ask.words.split())}"
+                          + (f" answer={sess_ask.answer}" if sess_ask.action == "answer" else ""))
+                on_step("intent", kind=f"session_{sess_ask.action}", detail=detail)
+            else:
+                on_step("intent", kind=intent.kind, arg=intent.arg)
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         ack_phrase_key = acks.ack_key(intent.kind, intent.sub)
+        # A notes search with no vault set would start the file agent in some repo: say it is unset.
+        notes_unset = intent.kind == "agent" and intent.sub == "notes" and not os.environ.get("OVERLAY_VAULT")
         if intent.kind == "sessions" and _sessions_access() is None:
             ack_phrase_key = None  # no gateway access: the no_sessions_access line is the whole speech
+        elif notes_unset:
+            ack_phrase_key = None  # the vault_unset line is the whole speech
         elif (intent.kind == "answer"
               and (body.conv_id in _tainted or _holds_agent_state(body.conv_id, deps, cursor=False))
               and _MEDIA_NOUN_RE.search(body.text)):
@@ -1089,6 +1969,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             if on_step:
                 on_step("layout", mode=mode)
             yield {"type": "layout", "mode": mode}
+
+        elif intent.kind == "vault_secrets":
+            # D1: fixed code names the vault's Secrets folder; no model, tool or file read runs.
+            async for ev in _line("vault_off_limits", deps):
+                yield ev
+            said.append(acks.PHRASES["vault_off_limits"])
 
         elif intent.kind == "clock":
             line = _clock_line(intent.arg, deps.now())
@@ -1389,7 +2275,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 else:
                     rows = fetched
                     result = "ok"
-            if intent.arg:  # "what went wrong with X": only X's rows, by title
+            if intent.sub == "ref":  # "what is it doing": the session this conv last touched
+                ids = _session_ref.get(body.conv_id) or []
+                rows = [r for r in rows if r["id"] in ids]
+            elif intent.arg:  # "what went wrong with X": only X's rows, by title
                 rows = [r for r in rows if intent.arg.lower() in r["title"].lower()]
             if on_step:
                 on_step("sessions", detail=f"result={result}" + (f" rows={len(rows)}" if rows else ""))
@@ -1398,11 +2287,22 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield ev
                 said.append(acks.PHRASES["no_sessions_access"])
             elif not rows:  # nothing to read: a fixed line, so the model cannot make sessions up
-                key = "no_session_named" if intent.arg else "no_sessions"
+                key = "no_session_named" if (intent.arg or intent.sub == "ref") else "no_sessions"
                 async for ev in _line(key, deps):
                     yield ev
                 said.append(acks.PHRASES[key])
             else:
+                # Fixed code picks what "it" will mean next, never the model: the one row the
+                # name filter left, else the one carded needs_owner row, else the only quiet one.
+                if len(rows) == 1 and intent.arg:
+                    _set_session_ref(body.conv_id, [rows[0]["id"]])
+                else:
+                    needing = [r for r in rows if r["needs_owner"]]
+                    quiet = [r for r in rows if r["health"] in ("quiet", "attention", "failed")]
+                    if len(needing) == 1:
+                        _set_session_ref(body.conv_id, [needing[0]["id"]])
+                    elif len(quiet) == 1:
+                        _set_session_ref(body.conv_id, [quiet[0]["id"]])
                 _tainted.add(body.conv_id)  # before the model call: the rows are untrusted data
                 for row in [r for r in rows if r["needs_owner"]][:4]:  # fixed code, never the model
                     card = hud.validate_card({"type": "info", "title": row["title"][:60],
@@ -1420,6 +2320,25 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                                 start, failed=failed, on_step=on_step,
                                                 extra_untrusted=_sessions_note(rows)):
                     yield event
+
+        elif intent.kind == "session":
+            async for ev in _session_action_turn(body, sess_ask, deps, said, on_step):
+                yield ev
+
+        elif intent.kind == "memory":
+            async for ev in _memory_turn(body, mem_ask, deps, said, on_step):
+                yield ev
+
+        elif intent.kind == "workspace":
+            async for ev in _workspace_turn(body, ws_ask, deps, said, on_step):
+                yield ev
+
+        elif notes_unset:
+            if on_step:
+                on_step("agent", detail="refused reason=vault_unset")
+            async for ev in _line("vault_unset", deps):
+                yield ev
+            said.append(acks.PHRASES["vault_unset"])
 
         elif intent.kind == "agent":
             async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step,
@@ -1728,6 +2647,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     if extra_untrusted is not None:  # e.g. the companion sessions view: same wrapper, quiet pool
         untrusted = True
         parts.append(f'<context untrusted="true">\n{_scrub(extra_untrusted)}\n</context>')
+    block = await asyncio.to_thread(_memory_block)
+    if block:
+        parts.append(block)
     parts.append(local)
     prompt = "\n\n".join(parts)
 
@@ -1834,6 +2756,10 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             produced = True
             return
         if obj.get("incomplete") is True:  # the brain judged it cut off: keep listening
+            if metrics.get("ack_ms") is not None:  # an ack was already spoken: own the cut-off too
+                async for ev in _speak(acks.PHRASES["cut_off"], deps):
+                    yield ev
+                said.append(acks.PHRASES["cut_off"])
             _pending[body.conv_id] = (body.text, deps.clock())
             produced = True
             if on_step:
@@ -2011,14 +2937,20 @@ AGENT_WALL_S = 120  # hard limit per agent turn
 AGENT_TICK_S = 1.0  # how often the stream loop wakes up to check the clock
 KEEPALIVE_S = 15  # the app's URLSession idles out at 90 s; stay far below
 PROGRESS_GAP_S = 4  # at most one templated progress line per 4 s
+POLICY_CHECK_S = 10.0  # one tool call's policy check (path walks, git) normally takes milliseconds
+POLICY_TIMEOUT_REASON = "that location did not answer in time; search a narrower folder"
+# Its own small pool: stuck checks must not fill asyncio's default pool, which runs every turn's
+# to_thread calls. When all four are stuck, queued checks time out and are denied (fail closed).
+_POLICY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="policy")
 FIRST_PROGRESS_S = 1.5  # no tool call yet this long after the agent started: speak the sub's progress line
 CONFIRM_S = 30  # a confirmation dies (deny) after 30 s
 CONFIRM_POLL_S = 0.5
 EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told it came too late
 _CONFIRM_CARD_ID = "agentconfirm"  # one id per conv, so the HUD replaces the card once settled
 # Every card id prefix the host issues: Confirm, the git/hunk cards (gitdiff + _hunk_card "gd-..."),
-# the owner-words media card ("ow" + sha256). A new host-issued id must get its prefix here.
-_HOST_CARD_PREFIXES = (_CONFIRM_CARD_ID, "gd-", "ow")
+# the owner-words media card ("ow" + sha256), the session card ("sv-"), the memory card ("mr") and
+# reopened workspace cards ("ws"). A new host-issued id must get its prefix here.
+_HOST_CARD_PREFIXES = (_CONFIRM_CARD_ID, "gd-", "ow", "sv-", "mr", "ws")
 
 
 def _host_card_id(card_id: str) -> bool:
@@ -2043,6 +2975,7 @@ class AgentRun:
     confirm_label: str = ""  # log label of the tool call waiting for a yes
     confirm_summary: str = ""  # what the owner was asked, for the card that replaces the Confirm card
     cancelled: bool = False
+    vault_denied: bool = False  # a tool call hit the vault: the fixed line replaces the reply
     opening_key: str | None = None  # progress line the 1.5 s timer speaks once if no tool call came first
     opening_said: str | None = None  # the line it spoke; a tool's progress line never repeats it
     screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
@@ -2174,6 +3107,56 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
     Ends with a `done` event when it answered the turn; otherwise the utterance goes on through the
     normal pipeline (after any "Very well, I won't." it yielded for a dropped confirmation).
     """
+    # H: a pending host-tier ask settles first, on the raw transcript (before the continuation
+    # join): only the owner's spoken words can say yes, and a barge-in never confirms.
+    for other in [c for c in list(_host_ask) if c != body.conv_id]:  # a new conversation: deny
+        with _confirm_lock:
+            other_ask = _host_ask.pop(other, None)
+        if other_ask is not None:
+            yield _settled_card(other_ask.summary, "Not done")
+    ask = None if body.barge_in else _host_ask.get(body.conv_id)
+    if ask is not None:
+        with _confirm_lock:
+            _host_ask.pop(body.conv_id, None)
+        if intents.is_confirm(body.text) and deps.clock() < ask.deadline:
+            yield _settled_card(ask.summary, "Going ahead")
+            async for ev in _HOST_ACTIONS[ask.kind](ask.payload, body, deps, said, on_step):
+                yield ev
+            yield _finish(body, deps, metrics, said, start)
+            return
+        step, word = _HOST_ROWS[ask.kind]  # session rows keep their exact shape (jfollow4 pins them)
+        late = intents.is_confirm(body.text)  # a yes after the deadline: it expired unseen
+        if late:
+            yield _settled_card(ask.summary, "Not done: it timed out")
+            async for ev in _line("expired", deps):
+                yield ev
+            said.append(acks.PHRASES.get("expired", ""))
+            if on_step:
+                on_step(step, detail="refused reason=expired")
+            yield _finish(body, deps, metrics, said, start)
+            return
+        if intents.is_stop(body.text):
+            yield _settled_card(ask.summary, "Not done")
+            async for ev in _line("stop", deps):
+                yield ev
+            said.append(acks.PHRASES["stop"])
+            yield {"type": "end_listening"}
+            yield _finish(body, deps, metrics, said, start)
+            return
+        if intents.is_no(body.text) or intents.is_cancel(body.text):
+            yield _settled_card(ask.summary, "Not done")
+            if on_step:
+                on_step(step, detail=f"{word} cancelled".strip())
+            async for ev in _line("not_confirmed", deps):
+                yield ev
+            said.append(acks.PHRASES.get("not_confirmed", ""))
+            yield _finish(body, deps, metrics, said, start)
+            return
+        # anything else: dropped, the utterance goes on as a normal turn (no `done`)
+        yield _settled_card(ask.summary, "Not done")
+        if on_step:
+            on_step(step, detail=f"{word} cancelled".strip())
+        return
     for other in [c for c in list(_confirm) if c != body.conv_id]:  # a new conversation: deny
         run = _take_confirm(other)
         if run is not None:
@@ -2493,6 +3476,9 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     vault = os.environ.get("OVERLAY_VAULT")
     if vault:
         parts.append(f"The owner's Obsidian notes vault: {vault}")
+    block = await asyncio.to_thread(_memory_block)
+    if block:
+        parts.append(block)
     parts.append(await asyncio.to_thread(_local_context, deps, body.screen))
 
     session = await asyncio.to_thread(pool.get, body.conv_id)
@@ -2586,10 +3572,16 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 rid = str(ev.get("request_id", ""))
                 name = str(req.get("tool_name") or "")
                 tool_input = req.get("input") if isinstance(req.get("input"), dict) else {}
-                # git subprocesses and tree walks: never on the event loop
-                decision = await asyncio.to_thread(agent_policy.decide, name, tool_input, run.ctx)
+                # git subprocesses and tree walks: never on the event loop, and never unbounded: a walk
+                # stuck on a macOS privacy prompt (iCloud Drive) parked this loop with no keepalive.
+                try:
+                    decision, family = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                        _POLICY_POOL, lambda: (agent_policy.decide(name, tool_input, run.ctx),
+                                               agent_policy.kind_of(name, tool_input, run.ctx))),
+                        POLICY_CHECK_S)
+                except asyncio.TimeoutError:  # fail closed; the stuck thread is left to finish on its own
+                    decision, family = agent_policy.Deny(POLICY_TIMEOUT_REASON), "file"
                 label = agent_policy.log_label(name, tool_input)
-                family = await asyncio.to_thread(agent_policy.kind_of, name, tool_input, run.ctx)
                 now = deps.clock()
                 run.opening_key = None  # a tool call came first: its own progress rules apply
                 if metrics.get("agent_first_tool_s") is None:
@@ -2613,6 +3605,8 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     run.tool = (label, deps.clock(), family)
                     await asyncio.to_thread(run.session.respond, rid, True, decision.updated_input)
                 elif isinstance(decision, agent_policy.Deny):
+                    if agent_policy.reason_code(decision.reason) == "vault":
+                        run.vault_denied = True
                     if on_step:
                         on_step("agent_tool", tool=label, decision="deny", kind=family,
                                 reason=agent_policy.reason_code(decision.reason), ms=None)
@@ -2628,7 +3622,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     with _confirm_lock:
                         _confirm[run.conv_id] = run
                     threading.Thread(target=_confirm_watchdog, args=(run, deps), daemon=True).start()
-                    question = f"Shall I {decision.summary}?"
+                    question = _confirm_question(_spoken_paths(decision.summary))
                     async for out in _speak(question, deps):
                         yield out
                     said.append(question)
@@ -2644,9 +3638,14 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 if metrics.get("agent_first_progress_s") is None:
                     metrics["agent_first_progress_s"] = metrics["agent_total_s"]
                 spoke = len(said)
-                for line in str(ev.get("result") or "").splitlines():
-                    async for out in _agent_flush(line, run, deps, metrics, said, start, on_step):
+                if run.vault_denied:  # D1: the fixed line replaces the model's own say and cards
+                    async for out in _line("vault_off_limits", deps):
                         yield out
+                    said.append(acks.PHRASES["vault_off_limits"])
+                else:
+                    for line in str(ev.get("result") or "").splitlines():
+                        async for out in _agent_flush(line, run, deps, metrics, said, start, on_step):
+                            yield out
                 if run.screen_file:  # "what changed" in the file on screen: the host's card and lines
                     card, lines, nav = await asyncio.to_thread(_last_change, run)
                     if card:  # the change list (gd-list): it replaces the conv's earlier git cards
@@ -2736,6 +3735,26 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
 
 
 # --- Routes ---
+
+
+class WorkspaceSnapshotBody(BaseModel):
+    """The app's snapshot answer to a workspace_save control event."""
+    cards: list[dict] = Field(default_factory=list, max_length=40)
+    pages: list[dict] = Field(default_factory=list, max_length=40)
+
+
+@router.post("/workspace/{nonce}", dependencies=_LOOP_DEPS)
+async def post_workspace_snapshot(nonce: str, body: WorkspaceSnapshotBody) -> dict:
+    """The app POSTs the cards/pages it holds; the waiting save turn gets them and finishes."""
+    entry = _ws_nonces.get(nonce) if re.fullmatch(r"[0-9a-f]{16}", nonce or "") else None
+    if entry is None or time.monotonic() - entry[1] > _WS_NONCE_S:
+        _ws_nonces.pop(nonce, None)
+        raise HTTPException(404)
+    _ws_nonces.pop(nonce, None)
+    entry[3]["body"] = body.model_dump()
+    entry[2].set()
+    return {"ok": True}
+
 
 @router.post("/utterance", dependencies=_LOOP_DEPS)
 async def post_utterance(body: TurnBody) -> StreamingResponse:
@@ -2845,9 +3864,14 @@ _off_view_said: float | None = None
 @router.get("/debug/turns", dependencies=_LOOP_DEPS)
 async def get_debug_turns() -> dict:
     # Setup the owner must fix (booleans only, never a path): no `code` CLI = the editor never scrolls.
-    return {**debug_log.snapshot(), "setup": {"code_cli": gitdiff.editor_path("code") is not None,
-                                              "vault": bool(os.environ.get("OVERLAY_VAULT")),
-                                              "barge_in": barge_in_on()},
+    vault = bool(os.environ.get("OVERLAY_VAULT"))
+    return {**debug_log.snapshot(),
+            "setup": {"code_cli": gitdiff.editor_path("code") is not None,
+                      "vault": vault,
+                      **({"vault_excluded": list(agent_policy.VAULT_EXCLUDED_DIRS)} if vault else {}),
+                      "barge_in": barge_in_on(),
+                      "barge_mode": barge_mode(),
+                      "sessions_access": _sessions_access() is not None},
             "speech_gate": _gate_setup()}  # numbers the owner can tune, shown under the setup rows
 
 
@@ -2880,10 +3904,19 @@ def _app_commit() -> str | None:
     return commit if isinstance(commit, str) and _COMMIT_RE.fullmatch(commit) else None
 
 
+def barge_mode() -> str:
+    """D2 DECISION 2C: "headphones" by default (the app barges in only while the output is a
+    headphones route, never on speakers); "off" with OVERLAY_BARGE_IN set to anything but "1";
+    "aec" only with OVERLAY_BARGE_IN=1 and OVERLAY_BARGE_AEC=1 (the unproven 2B path, opt-in)."""
+    flag = os.environ.get("OVERLAY_BARGE_IN", "")
+    if flag not in ("", "1"):
+        return "off"
+    return "aec" if flag == "1" and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1" else "headphones"
+
+
 def barge_in_on() -> bool:
-    """The one barge-in switch (app reads it from /health): off unless OVERLAY_BARGE_IN=1.
-    Off since Mac live run 3 (self-cuts, no plain-speech barge at speaker volume)."""
-    return os.environ.get("OVERLAY_BARGE_IN", "0") == "1"
+    """Any barge-in mode but "off" (app reads it from /health)."""
+    return barge_mode() != "off"
 
 
 @router.get("/health", dependencies=_LOOP_DEPS)
@@ -2893,6 +3926,7 @@ async def get_health() -> dict:
             "brain": shutil.which("claude") is not None,
             "tail_level_ratio": TAIL_LEVEL_RATIO,
             # A6: the barge-in switches and the installed bundle's commit, read at request time.
+            "barge_mode": barge_mode(),
             "barge_in": barge_in_on(),
-            "barge_aec": barge_in_on() and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1",
+            "barge_aec": barge_mode() == "aec",
             "commit": _app_commit()}

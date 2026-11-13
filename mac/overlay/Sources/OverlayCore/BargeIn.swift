@@ -276,6 +276,30 @@ public enum BargeWords {
         return heard.allSatisfy(replyWords.contains) ? "" : text
     }
 
+    /// A Confirm question is open: the `agentconfirm` card still titled "Confirm" (the settled or
+    /// expired card keeps the id and carries its outcome as the title).
+    public static func confirmPending(_ cards: [HUDCard]) -> Bool {
+        cards.contains {
+            if case .info(let card) = $0 { return card.id == ScatterLayout.confirmCardID && card.title == "Confirm" }
+            return false
+        }
+    }
+
+    /// The follow-up window's text. With a Confirm pending, echo is judged by WHEN the heard audio
+    /// was captured, not by its words: the question may hold the owner's own answer word ("Send yes
+    /// to Research. Shall I?"), and a token match would swallow the owner's real yes. Audio captured
+    /// at or after the reply's drain plus `TurnEndpointer.echoTail` is the owner's and passes whole.
+    /// Earlier audio, an unknown capture or drain time, or no Confirm pending: `dropEchoAnswer`
+    /// (fail closed).
+    public static func followUpText(_ text: String, reply: [String], confirmPending: Bool,
+                                    audioFrom: Date?, drainedAt: Date?) -> String {
+        if confirmPending, let audioFrom, let drainedAt,
+           audioFrom >= TurnEndpointer.replayStart(drainedAt: drainedAt) {
+            return text
+        }
+        return dropEchoAnswer(text, reply: reply)
+    }
+
     /// A wake turn that cut a reply (A4) replays ring audio holding the reply's echo before and
     /// after the wake word, which STT may mishear ("the overlay, sir. Hey, John. The overlay. So"):
     /// drop the echo lead, a misheard wake, then the echo lead again; an answer made only of the

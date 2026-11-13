@@ -237,7 +237,7 @@ def test_push_refused_without_spoken_yes(client):
     pool, deps = setup(clock, push_script(clock))
     events = turn(client, "commit and push my changes", conv_id="p1")
     first = pool.made[0]
-    assert any(t.startswith("Shall I") for t in says(events))
+    assert any(t.endswith(". Shall I?") for t in says(events))
     assert any(e["type"] == "card" and e["card"]["title"] == "Confirm" for e in events)
     assert events[-1]["type"] == "done"
     assert first.responses == []  # the CLI is still waiting: nothing answered yet
@@ -382,7 +382,7 @@ def test_second_request_while_busy_gets_still_working(client):
             break
         time.sleep(0.01)
     events = turn(client, "and my calendar", conv_id="b1")
-    assert "Still on the last one, I'm afraid." in says(events)
+    assert "Still on the last one." in says(events)
     turn(client, "stop", conv_id="b1")
     t.join(5)
 
@@ -487,7 +487,7 @@ def test_taint_persists_across_turns(client):
     session = pool.made[0]
     assert [r["behavior"] for r in session.responses] == ["allow"]
     events = turn(client, "check github for me", conv_id="tp1")
-    assert any(t.startswith("Shall I") for t in says(events))
+    assert any(t.endswith(". Shall I?") for t in says(events))
     assert len(session.responses) == 1  # second call waits for a spoken yes, not allowed
 
 
@@ -499,7 +499,7 @@ def test_gh_gated_after_local_read_in_turn(client):
     pool, deps = setup(clock, lambda: FakeAgent(clock, script=script))
     events = turn(client, "what changed in the last commit", conv_id="gl1")
     assert [r["behavior"] for r in pool.made[0].responses] == ["allow"]
-    assert any(t.startswith("Shall I") for t in says(events))
+    assert any(t.endswith(". Shall I?") for t in says(events))
 
 
 def test_repo_origin_is_trusted_for_gh(client):
@@ -667,7 +667,7 @@ def test_confirm_turn_event_sequence_for_the_app(client):
     assert kinds[0] == "audio" and events[0]["text"] == overlay.acks.PHRASES["agent_git"]
     assert "clear" not in kinds  # nothing may wipe the HUD in a confirm turn
     asked = next(i for i, e in enumerate(events) if e["type"] in ("say", "audio")
-                 and e["text"].startswith("Shall I"))
+                 and e["text"].endswith(". Shall I?"))
     card = next(i for i, e in enumerate(events) if e["type"] == "card")
     assert asked < card == len(events) - 2 and kinds[-1] == "done"
     assert events[card]["card"] == {"id": "agentconfirm", "type": "info", "title": "Confirm",

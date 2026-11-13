@@ -550,9 +550,9 @@ def test_speech_gate_is_tunable_and_shown(client, monkeypatch, tmp_path):
     assert "SOME_TOKEN" not in os.environ
     _deps()
     gate = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["speech_gate"]
-    assert gate == {"followup_level_ratio": 0.5, "followup_min_level": 0.01, "followup_min_voiced_ms": 300,
-                    "followup_min_conf": 0.35, "tail_level_ratio": 0.5}
-    assert client.get("/overlay/health", headers=AUTH_HEADER).json()["tail_level_ratio"] == 0.5
+    assert gate == {"followup_level_ratio": 0.4, "followup_min_level": 0.01, "followup_min_voiced_ms": 300,
+                    "followup_min_conf": 0.35, "tail_level_ratio": 0.6}
+    assert client.get("/overlay/health", headers=AUTH_HEADER).json()["tail_level_ratio"] == 0.6
     page = overlay.DEBUG_PAGE
     for name in ("OVERLAY_FOLLOWUP_LEVEL_RATIO", "OVERLAY_FOLLOWUP_MIN_LEVEL", "OVERLAY_FOLLOWUP_MIN_VOICED_MS",
                  "OVERLAY_FOLLOWUP_MIN_CONF", "OVERLAY_TAIL_LEVEL_RATIO", 'case "followup_dropped"'):
@@ -602,7 +602,8 @@ def test_tail_gate_strips_the_same_misheard_wake():
 # One real id per host prefix: the Confirm card, the git cards, the owner-words media card
 # (sha256(b"image|1|dog")[:10], the id the dog picture gets).
 HOST_IDS = ["agentconfirm", "gd-stat", "gd-bar", "gd-where", "gd-list",
-            "ow" + hashlib.sha256(b"image|1|dog").hexdigest()[:10]]
+            "ow" + hashlib.sha256(b"image|1|dog").hexdigest()[:10], "ws1a2b3c",  # ws: jfollow4 reopened cards
+            "sv-1a2b3c4d", "mr1a2b3c"]  # jfollow4 session and memory cards
 
 
 def test_host_card_ids_are_reserved_for_both_tiers(client):

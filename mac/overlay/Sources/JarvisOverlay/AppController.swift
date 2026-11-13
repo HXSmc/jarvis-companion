@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import Foundation
 import OverlayCore
 
@@ -35,8 +36,18 @@ final class AppController {
     private var turnToken = 0
     /// True while a turn's utterance stream is open; a wake during it barge-ins too.
     private var turnStreaming = false
-    /// Barge-in wanted (health barge_in; off unless the service's OVERLAY_BARGE_IN=1).
+    /// Barge-in wanted right now (barge_mode + the AEC probe + the output route; see
+    /// updateBargeInEnabled). The wake path and the barge run read this.
     private var bargeInEnabled = false
+    /// Health barge_mode: .aec shares one engine with the mic's voice processing, .headphones
+    /// allows barge-in only on a headphones output route, .off never barges in.
+    private var bargeMode: BargeMode = .off
+    /// True while the default output device is a headphones route (CoreAudio read).
+    private var routeIsHeadphones = false
+    /// Device the data-source listener sits on (the default-device listener is on the system object).
+    private var listenedDevice: AudioDeviceID = 0
+    /// Route listeners installed (.headphones mode only).
+    private var routeListenersInstalled = false
     /// The barge listening run of the current turn, nil while its audio is not playing.
     private var bargeRun: BargeRun?
     /// The reply texts a wake cut (A4): stripped from that wake turn's text.
@@ -88,10 +99,21 @@ final class AppController {
     private func launch() async {
         await requestPermissionsIfNeeded()
         do {
-            // AEC is probed before the engine starts, so health is read once here for it.
-            if let health = try? await client.health() { speech.aecEnabled = health.bargeAec ?? false }
+            // Engine wiring is decided before start(): .aec mode plays through SpeechInput's
+            // engine, so the input's voice processing also cancels the reply audio.
+            let health = try? await client.health()
+            bargeMode = BargeMode.from(health: health?.bargeMode, bargeIn: health?.bargeIn,
+                                       bargeAec: health?.bargeAec)
+            if bargeMode == .headphones { installOutputRouteListeners() }
+            if bargeMode == .aec {
+                speech.aecEnabled = true
+                audio.shareEngine(speech.audioEngine)
+            }
             try speech.start()
             if speech.aecEnabled && !speech.aecActive { aecFailed() }
+            refreshOutputRoute()
+            updateBargeInEnabled()
+            noteBargeMode()
         } catch {
             if speech.aecEnabled && !speech.aecActive { aecFailed() }
             model.orb = .error
@@ -102,10 +124,110 @@ final class AppController {
         await runEventsLoop()
     }
 
-    /// The AEC probe did not stick: continue with AEC off (plain two-engine path, default margin).
+    /// The AEC probe did not stick: back to the app's own engine (today's two-engine path),
+    /// barge-in off (only a headphones route or a healthy AEC gates it).
     private func aecFailed() {
         speech.aecEnabled = false
+        audio.useOwnEngine()
+        bargeMode = .off
+        bargeInEnabled = false
         client.debugNote(step: "barge_aec", detail: "failed")
+    }
+
+    // MARK: - Barge mode and output route
+
+    /// A barge_mode verdict from a later health read (a service restart may change it); the
+    /// engines stay as launch wired them — sharing is decided once, before start().
+    private func applyBargeMode(_ mode: BargeMode) {
+        guard mode != bargeMode else { return }
+        bargeMode = mode
+        if mode == .headphones { installOutputRouteListeners() }
+        refreshOutputRoute()
+        updateBargeInEnabled()
+    }
+
+    /// Barge-in allowed right now: .aec with the voice-processing probe stuck, or .headphones
+    /// while the default output device is a headphones route; .off never.
+    private func updateBargeInEnabled() {
+        switch bargeMode {
+        case .off: bargeInEnabled = false
+        case .headphones: bargeInEnabled = routeIsHeadphones
+        case .aec: bargeInEnabled = speech.aecActive
+        }
+    }
+
+    /// One fixed-words note of the mode and the current route: at launch and on route changes.
+    private func noteBargeMode() {
+        client.debugNote(step: "barge_mode",
+                         detail: "\(bargeMode.rawValue)/\(routeIsHeadphones ? "headphones" : "speakers")")
+    }
+
+    private func installOutputRouteListeners() {
+        guard !routeListenersInstalled else { return }
+        routeListenersInstalled = true
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListener(AudioObjectID(kAudioObjectSystemObject), &address,
+                                       outputRouteChangedProc, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    /// Reads the default output device's transport (and, on built-in devices, its data source);
+    /// AudioRoute decides headphones. Returns true when the verdict changed.
+    @discardableResult
+    private func refreshOutputRoute() -> Bool {
+        var device: AudioDeviceID = 0
+        guard Self.readAudioProperty(AudioObjectID(kAudioObjectSystemObject),
+                                     kAudioHardwarePropertyDefaultOutputDevice,
+                                     kAudioObjectPropertyScopeGlobal, &device) else { return false }
+        if routeListenersInstalled, device != listenedDevice {
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+            Self.toggleDataSourceListener(on: listenedDevice, client: selfPtr, add: false)
+            Self.toggleDataSourceListener(on: device, client: selfPtr, add: true)
+        }
+        listenedDevice = device
+        var transport: UInt32 = 0
+        guard Self.readAudioProperty(device, kAudioDevicePropertyTransportType,
+                                     kAudioDevicePropertyScopeOutput, &transport) else { return false }
+        var dataSource: UInt32?
+        if transport == kAudioDeviceTransportTypeBuiltIn {
+            var source: UInt32 = 0
+            if Self.readAudioProperty(device, kAudioDevicePropertyDataSource,
+                                      kAudioDevicePropertyScopeOutput, &source) { dataSource = source }
+        }
+        let headphones = AudioRoute.isHeadphones(transport: transport, dataSource: dataSource)
+        let changed = headphones != routeIsHeadphones
+        routeIsHeadphones = headphones
+        return changed
+    }
+
+    /// The default device or its data source changed: re-read the route, re-gate, re-note.
+    fileprivate func outputRouteChanged() {
+        guard refreshOutputRoute() else { return }
+        updateBargeInEnabled()
+        noteBargeMode()
+    }
+
+    private static func toggleDataSourceListener(on device: AudioDeviceID,
+                                                 client: UnsafeMutableRawPointer, add: Bool) {
+        guard device != 0 else { return }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDataSource,
+                                                 mScope: kAudioDevicePropertyScopeOutput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        if add {
+            AudioObjectAddPropertyListener(device, &address, outputRouteChangedProc, client)
+        } else {
+            AudioObjectRemovePropertyListener(device, &address, outputRouteChangedProc, client)
+        }
+    }
+
+    /// One scalar CoreAudio property (default device id, transport type, data source).
+    private static func readAudioProperty<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                                             _ scope: AudioObjectPropertyScope, _ value: inout T) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<T>.size)
+        return AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value) == noErr
     }
 
     private func requestPermissionsIfNeeded() async {
@@ -163,8 +285,9 @@ final class AppController {
                 let health = try await client.health()
                 serviceVoice = health.voice
                 speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
-                bargeInEnabled = health.bargeIn ?? false
-                speech.aecEnabled = health.bargeAec ?? false  // takes effect on the next start()
+                applyBargeMode(BargeMode.from(health: health.bargeMode, bargeIn: health.bargeIn,
+                                               bargeAec: health.bargeAec))
+                speech.aecEnabled = bargeMode == .aec  // takes effect on the next start()
                 endOutage()
                 for try await event in client.events() {
                     endOutage()
@@ -290,6 +413,9 @@ final class AppController {
         let listenStart = Date()
         // The reply this turn's audio may echo: the one just finished (follow-up) or the one cut.
         let echoOf = followUp ? replyTexts : cutReply
+        // A follow-up after a Confirm question: its echo is judged by capture time against the drain.
+        let confirmPending = followUp && BargeWords.confirmPending(model.cards)
+        let drainedAt = followUp ? audio.lastDrainAt : nil
         speech.listenAfterWake(
             followUp: followUp,
             replayFrom: replayFrom,
@@ -300,8 +426,11 @@ final class AppController {
             onFinal: { [weak self] heardText, sttFinalMs, endOfSpeech, heard in
                 let heardUntil = Date()  // every ring chunk before this went to this turn
                 // A wake that cut a reply: drop that reply's echo and a misheard wake word. A
-                // follow-up: an answer made only of the reply's words is its echo, not the owner's.
-                let text = followUp ? BargeWords.dropEchoAnswer(heardText, reply: echoOf)
+                // follow-up: an answer made only of the reply's words is its echo, unless a Confirm
+                // is pending and the audio was captured after the drain + echo tail (the owner's).
+                let text = followUp
+                    ? BargeWords.followUpText(heardText, reply: echoOf, confirmPending: confirmPending,
+                                              audioFrom: heard.audioFrom, drainedAt: drainedAt)
                     : echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
@@ -497,7 +626,8 @@ final class AppController {
     }
 
     /// Control events steer the overlay itself: end_listening closes the follow-up window for
-    /// this turn (B3), card_size draws one card enlarged or restores it (C3).
+    /// this turn (B3), card_size draws one card enlarged or restores it (C3), workspace_save
+    /// answers with the current snapshot and open_pages opens saved pages in the browser (C).
     private func handleControl(_ event: ControlEvent) {
         switch event {
         case .endListening:
@@ -506,6 +636,13 @@ final class AppController {
             guard model.cards.contains(where: { $0.id == id }) else { return }
             if max { _ = model.enlarge.max(id) } else { model.enlarge.restore() }
             model.activity()  // a restored card gets a fresh idle countdown, not the old one's end
+        case .workspaceSave(let nonce):
+            let body = Workspace.snapshotBody(cards: model.workspaceSnapshot(),
+                                              pages: ScreenContext.browserPages())
+            Task { await client.postWorkspace(nonce: nonce, body: body) }
+        case .openPages(let urls):
+            // Checked again here: the service already filtered, but the line could be stale.
+            for url in urls where Workspace.openable(url) { NSWorkspace.shared.open(url) }
         }
     }
 
@@ -775,6 +912,16 @@ final class AppController {
                                                                         heardUntil: self.lastHeardUntil))
         }
     }
+}
+
+/// CoreAudio listener (runs off the main thread): just re-reads the route on the main actor.
+private func outputRouteChangedProc(_ object: AudioObjectID, _ count: UInt32,
+                                    _ addresses: UnsafePointer<AudioObjectPropertyAddress>,
+                                    _ clientData: UnsafeMutableRawPointer?) -> OSStatus {
+    guard let clientData else { return noErr }
+    let controller = Unmanaged<AppController>.fromOpaque(clientData).takeUnretainedValue()
+    Task { @MainActor in controller.outputRouteChanged() }
+    return noErr
 }
 
 /// One add's outcome: its result, its own budget, or a cut by a later add, whichever is first.

@@ -9,10 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from mac.voice import acks, media_lookup
-from mac.voice.intents import (STOP_PHRASES, Intent, card_size_request, card_words, is_cancel,
+from mac.voice.intents import (SESSION_WORDS_MAX, STOP_PHRASES, Intent, MemoryAsk,
+                               WorkspaceAsk, card_size_request, card_words, is_cancel,
                                is_confirm, is_hunk_back, is_no, is_stop, list_apps,
-                               media_request, match_card, noise_words, open_app, open_site,
-                               parse, tail_hunk)
+                               media_request, match_card, memory_request, noise_words,
+                               open_app, open_site, parse, session_request, tail_hunk,
+                               workspace_request)
 from mac.voice.lean import Conversations, lean_argv
 
 
@@ -472,3 +474,187 @@ def test_sessions_intent():
         intent = parse(s, apps={})
         assert (intent.kind, intent.arg) == ("sessions", arg), (s, intent)
     assert parse("what's the status of the order", apps={}).kind != "sessions"
+
+
+def test_session_request_parent_cases():
+    ask = session_request("start a new session and fix why this session has been going quiet")
+    assert (ask.action, ask.ref, ask.words) == ("start", "this",
+                                                "fix why this session has been going quiet")
+    ask = session_request("start a session on the mini PC to say hello in a file called voice-test")
+    assert (ask.action, ask.device, ask.words) == ("start", "mini_pc",
+                                                   "say hello in a file called voice-test")
+    ask = session_request("open a new session about the login bug")
+    assert ask.action == "start"
+    ask = session_request("start a session on the Mac to x")
+    assert (ask.action, ask.device) == ("start", "mac")
+    ask = session_request("stop the jarvis overlay session")
+    assert (ask.action, ask.ref, ask.name) == ("stop", "name", "jarvis overlay")
+    ask = session_request("tell the jarvis overlay session yes")
+    assert (ask.action, ask.ref, ask.name, ask.answer) == ("answer", "name", "jarvis overlay", "yes")
+    ask = session_request("approve the overlay session")
+    assert (ask.action, ask.ref, ask.name, ask.answer) == ("answer", "name", "overlay", "approve")
+    ask = session_request("tell it: use the second option")
+    assert (ask.action, ask.ref, ask.name, ask.answer, ask.words) == ("answer", "this", "", "text",
+                                                                      "use the second option")
+    for s in ("stop", "stop it", "stop the server", "what are my sessions doing",
+              "start the timer"):
+        assert parse(s, apps={}).kind != "session", s
+    assert session_request("x" * 400) is None
+    ask = session_request("Hey Jarvis, start a session and fix why this session has been going quiet")
+    assert (ask.action, ask.ref, ask.words) == ("start", "this",
+                                                "fix why this session has been going quiet")
+    ask = session_request("start a session and one\ntwo\x07three")
+    assert ask.words == "one two three"
+    ask = session_request("start a session and " + "x" * 500)
+    assert ask is None or len(ask.words) <= SESSION_WORDS_MAX
+    # "what is it doing" follows a session: sessions intent with the ref sub.
+    intent = parse("what is it doing", apps={})
+    assert (intent.kind, intent.arg, intent.sub) == ("sessions", "", "ref")
+
+
+def test_memory_request_parent_cases():
+    ask = memory_request("remember that the side gate is locked")
+    assert (ask.action, ask.text) == ("add", "the side gate is locked")
+    ask = memory_request("remember this: the wifi password is on the router")
+    assert (ask.action, ask.text) == ("add", "the wifi password is on the router")
+    ask = memory_request("remember, the printer is out of toner")
+    assert (ask.action, ask.text) == ("add", "the printer is out of toner")
+    ask = memory_request("from now on I test before pushing")
+    assert (ask.action, ask.text) == ("add", "From now on I test before pushing")
+    ask = memory_request("note that the printer is out of toner")
+    assert (ask.action, ask.text) == ("add", "the printer is out of toner")
+    for s in ("what do you remember", "what have you remembered"):
+        assert memory_request(s).action == "list", s
+    assert memory_request("forget that").action == "forget_last"
+    ask = memory_request("forget what I said about the battery")
+    assert (ask.action, ask.text) == ("forget_about", "the battery")
+    for s in ("forget everything", "forget everything you remember"):
+        assert memory_request(s).action == "forget_all", s
+    ask = memory_request("remember that when I say notes I mean the Obsidian vault")
+    assert ask.text == "when I say notes I mean the Obsidian vault"
+    for s in ("can you remember the capital of France", "remember the milk"):
+        assert memory_request(s) is None, s
+        assert parse(s, apps={}).kind != "memory", s
+
+
+def test_workspace_request_parent_cases():
+    ask = workspace_request("save these pages and overlays as our battery research")
+    assert (ask.action, ask.name) == ("save", "battery research")
+    ask = workspace_request("open the battery research")
+    assert (ask.action, ask.name) == ("open", "battery research")
+    ask = workspace_request("open battery", names=("battery research",))
+    assert (ask.action, ask.name) == ("open", "battery")
+    assert workspace_request("open battery") is None
+    assert parse("open battery", apps={}).kind != "workspace"
+    ask = workspace_request("open the pages")
+    assert ask.action == "open_pages"
+    assert parse("open the pages", apps={}).kind == "workspace"
+    assert workspace_request("what have I saved").action == "list"
+    ask = workspace_request("delete the battery research")
+    assert (ask.action, ask.name) == ("delete", "battery research")
+    assert workspace_request("open Safari") is None
+    assert parse("open Safari", apps={"safari": "Safari"}).kind == "open_app"
+
+
+def test_session_request():
+    # Parent criterion 8 cases.
+    ask = session_request("start a new session and fix why this session has been going quiet")
+    assert (ask.action, ask.device, ask.ref, ask.name) == ("start", "mini_pc", "this", "")
+    assert ask.words == "fix why this session has been going quiet"
+    ask = session_request("start a session on the mini PC to say hello in a file called voice-test")
+    assert (ask.action, ask.device, ask.ref) == ("start", "mini_pc", None)
+    assert ask.words == "say hello in a file called voice-test"
+    ask = session_request("open a new session about the login bug")
+    assert (ask.action, ask.words) == ("start", "the login bug")
+    ask = session_request("start a session on the Mac to x")
+    assert (ask.action, ask.device, ask.words) == ("start", "mac", "x")
+    ask = session_request("stop the jarvis overlay session")
+    assert (ask.action, ask.ref, ask.name, ask.words) == ("stop", "name", "jarvis overlay", "")
+    ask = session_request("tell the jarvis overlay session yes")
+    assert (ask.action, ask.ref, ask.name, ask.answer) == ("answer", "name", "jarvis overlay", "yes")
+    ask = session_request("approve the overlay session")
+    assert (ask.action, ask.ref, ask.name, ask.answer) == ("answer", "name", "overlay", "approve")
+    ask = session_request("tell it: use the second option")
+    assert (ask.action, ask.ref, ask.name, ask.answer) == ("answer", "this", "", "text")
+    assert ask.words == "use the second option"
+    for s in ("stop", "stop it", "stop the server", "what are my sessions doing",
+              "start the timer"):
+        assert parse(s, apps={}).kind != "session", s
+    assert session_request("start a session about " + "x" * 400) is None
+    # Wake word stripped, original case of the words kept.
+    ask = session_request("Hey Jarvis, start a session about Fix the Login Bug")
+    assert (ask.action, ask.words) == ("start", "Fix the Login Bug")
+    # Newlines and control chars collapse to one clean line of words.
+    ask = session_request("start a session about fix the\nbattery\x07drain now")
+    assert ask.words == "fix the battery drain now"
+    # A 500-char words value cannot pass the 300-char input cap; the cap constant stands.
+    assert session_request("start a session about " + "x" * 500) is None
+    assert SESSION_WORDS_MAX == 300
+
+
+def test_memory_request():
+    ask = memory_request("remember that when I say notes I mean the Obsidian vault")
+    assert (ask.action, ask.text) == ("add", "when I say notes I mean the Obsidian vault")
+    assert memory_request("remember this: the gate code is 2517").text == "the gate code is 2517"
+    assert memory_request("remember this, the gate code is 2517").text == "the gate code is 2517"
+    assert memory_request("remember, the bakery closes at noon").text == "the bakery closes at noon"
+    assert memory_request("from now on spell check my notes") == MemoryAsk(
+        "add", "From now on spell check my notes")
+    assert memory_request("note that the wifi is flaky upstairs").text == "the wifi is flaky upstairs"
+    assert memory_request("what do you remember").action == "list"
+    assert memory_request("what have you remembered").action == "list"
+    assert memory_request("forget that").action == "forget_last"
+    ask = memory_request("forget what I said about the gate code")
+    assert (ask.action, ask.text) == ("forget_about", "the gate code")
+    assert memory_request("forget everything").action == "forget_all"
+    assert memory_request("forget everything you remember").action == "forget_all"
+    for s in ("can you remember the capital of France", "remember the milk"):
+        assert memory_request(s) is None, s
+        assert parse(s, apps={}).kind != "memory", s
+
+
+def test_open_app_wins_over_saved_workspace_word():
+    apps = {"notes": "Notes", "safari": "Safari"}
+    names = ("battery notes",)
+    assert parse("open notes", apps=apps, workspace_names=names) == Intent("open_app", "notes")
+    assert parse("open github.com", apps=apps, workspace_names=("github.com research",)).kind == "open_site"
+    # no installed app of that name: the subset rule still asks which workspace
+    assert parse("open battery", apps=apps, workspace_names=names) == Intent("workspace", "open")
+    assert parse("open the battery notes", apps=apps, workspace_names=names).kind == "workspace"
+
+
+def test_workspace_request():
+    ask = workspace_request("save these pages and overlays as our battery research")
+    assert (ask.action, ask.name) == ("save", "battery research")
+    ask = workspace_request("open the battery research")
+    assert (ask.action, ask.name) == ("open", "battery research")
+    ask = workspace_request("open battery", ("battery research",))
+    assert (ask.action, ask.name) == ("open", "battery")
+    assert workspace_request("open battery") is None
+    assert parse("open battery", apps={}).kind != "workspace"
+    ask = workspace_request("open the pages")
+    assert (ask.action, ask.name) == ("open_pages", "")
+    assert parse("open the pages", apps={}).kind == "workspace"
+    assert workspace_request("what have I saved") == WorkspaceAsk("list", "")
+    ask = workspace_request("delete the battery research")
+    assert (ask.action, ask.name) == ("delete", "battery research")
+    assert workspace_request("open Safari") is None
+    assert parse("open Safari", apps=APPS).kind != "workspace"
+
+
+def test_round7_live_phrasings():
+    """Mac run r2 transcripts that missed their fixed path (F6, 41 stop, 49 Secrets)."""
+    from mac.voice.intents import parse
+    for text in ("Hi, everything", "Hide the gods", "hi the cards", "hide, everything"):
+        assert parse(text, apps={}).kind == "hide", text
+    for text in ("Hi", "hi there", "hi Jarvis how are you"):
+        assert parse(text, apps={}).kind != "hide", text
+    ask = session_request("Stop the session called Voice Test, write hello")
+    assert (ask.action, ask.ref, ask.name) == ("stop", "name", "voice test, write hello")
+    assert session_request("stop session named build runner").name == "build runner"
+    for text in ("Open the note Projects in the Secrets folder",
+                 "Read my note called Projects, in the Secrets folder of my notes",
+                 "show me my secrets note", "what's in my secrets"):
+        assert parse(text, apps={"notes": "Notes"}).kind == "vault_secrets", text
+    for text in ("what is the secret of success", "tell me a secret"):
+        assert parse(text, apps={}).kind != "vault_secrets", text

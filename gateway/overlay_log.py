@@ -19,7 +19,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from common import config
-from gateway import overlay, screen
+from gateway import screen
 
 router = APIRouter()
 
@@ -132,6 +132,7 @@ def _overlay_port() -> int:
 
 async def fetch(since: int | None = None) -> dict:
     """The Mac-side read: the overlay service's debug turns, redacted, plus its commit."""
+    from gateway import overlay  # lazy: the mini PC gateway deploys without gateway/overlay.py
     headers = {"Authorization": f"Bearer {overlay.overlay_token()}"}
     base = f"http://127.0.0.1:{_overlay_port()}"
     try:

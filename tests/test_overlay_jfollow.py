@@ -138,7 +138,7 @@ def test_merge_fallback_shows_what_the_merge_changed(client, tmp_path, monkeypat
     monkeypatch.setenv("OVERLAY_GIT_REPO", str(plain))
     events = turn(client, "what changed", conv_id="m2")
     assert acks.PHRASES["diff_none_auto"] in says(events)
-    assert "No uncommitted changes, and this repository has no merge commits yet." in says(events)
+    assert "No changes here." in says(events)
     assert not _lines(events) and not _cards(events)
 
 

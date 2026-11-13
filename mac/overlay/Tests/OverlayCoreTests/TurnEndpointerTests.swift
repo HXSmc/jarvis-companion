@@ -27,6 +27,42 @@ final class TurnEndpointerTests: XCTestCase {
                                                now: t0.addingTimeInterval(0.75)))
     }
 
+    /// jfollow4 E: a 20-word request with natural 0.6 s pauses was cut by the fast window. Partials
+    /// trail the voice, so mid-pause the text and the voice flag both sit ~0.75 s old while the
+    /// request is still growing; a long unpunctuated partial gets the extended window.
+    func testLongRequestPausesDoNotEndTheTurnEarly() {
+        let t0 = Date()
+        let request = ("please show me the weather in paris tomorrow morning and then the news "
+            + "for the day after that as well plus the time")
+            .split(separator: " ").map(String.init)
+        XCTAssertGreaterThanOrEqual(request.count, 20)
+        var text = ""
+        for w in request.indices {
+            text = request[...w].joined(separator: " ")
+            // Natural pauses inside the request, after words 10, 13, 16 and 19.
+            if w + 1 >= 10, (w + 1 - 10) % 3 == 0, w < request.count - 1 {
+                // Mid-pause, 0.75 s since the last partial and its voice: not the end.
+                XCTAssertFalse(TurnEndpointer.shouldEnd(text: text,
+                                                        lastTextAt: t0,
+                                                        lastVoiceAt: t0,
+                                                        now: t0.addingTimeInterval(0.75)),
+                               "cut at word \(w + 1): \(text)")
+            }
+        }
+        // The finished short command stays fast.
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: "Open Safari", lastTextAt: t0, lastVoiceAt: t0,
+                                               now: t0.addingTimeInterval(0.75)))
+        // The long request does end: after the last word, 2.7 s of quiet (or 4 s of stuck text).
+        let last = t0.addingTimeInterval(Double(request.count) * 0.4)
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: text, lastTextAt: last,
+                                                lastVoiceAt: last, now: last.addingTimeInterval(2.0)))
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: text, lastTextAt: last,
+                                               lastVoiceAt: last, now: last.addingTimeInterval(2.8)))
+        XCTAssertTrue(TurnEndpointer.shouldEnd(text: text, lastTextAt: last,
+                                               lastVoiceAt: last.addingTimeInterval(4),
+                                               now: last.addingTimeInterval(4)))  // stuck text
+    }
+
     func testStillVoicedKeepsListeningWhilePartialsLag() {
         let t0 = Date()
         // Text stalled for 1 s but the mic heard voice 0.2 s ago: the user is still talking.
@@ -97,9 +133,13 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertFalse(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
                                                  lastVoiceAt: t0.addingTimeInterval(1.4),
                                                  now: t0.addingTimeInterval(1.4)))
+        // Room voice with a gap (TV between lines): the hold ends it; voice heard right now does not.
         XCTAssertTrue(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
-                                                lastVoiceAt: t0.addingTimeInterval(1.6),
+                                                lastVoiceAt: t0.addingTimeInterval(1.0),
                                                 now: t0.addingTimeInterval(1.55)))
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
+                                                 lastVoiceAt: t0.addingTimeInterval(1.6),
+                                                 now: t0.addingTimeInterval(1.55)))
         XCTAssertFalse(TurnEndpointer.shouldEnd(text: "show me the last", lastTextAt: t0,
                                                  lastVoiceAt: t0.addingTimeInterval(1.6),
                                                  now: t0.addingTimeInterval(2.0)))
@@ -117,6 +157,113 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(TurnEndpointer.replayable(stamps: stamps, drainedAt: d),
                        [false, false, false, true, true])
         XCTAssertEqual(TurnEndpointer.replayable(stamps: [d], drainedAt: nil), [false])
+    }
+
+    /// jfollow4 D4: the owner's follow-up onset 0.2-1.0 s after the reply's drain must be replayed;
+    /// only chunks stamped before drain + echoTail are the reply's echo.
+    func testFollowUpOnsetKept() {
+        let t = Date(timeIntervalSince1970: 2000)
+        let stamps = (0...30).map { t.addingTimeInterval(Double($0) * 0.1) }  // ring stamps every 0.1 s
+        let flags = TurnEndpointer.replayable(stamps: stamps, drainedAt: t)
+        for (i, onset) in [0.2, 0.5, 1.0].enumerated() {
+            XCTAssertTrue(flags[[2, 5, 10][i]], "onset \(onset) s after the drain must replay")
+        }
+        for (i, flag) in flags.enumerated() where Double(i) * 0.1 < TurnEndpointer.echoTail {
+            XCTAssertFalse(flag, "chunk \(i * 100) ms after the drain is the reply's echo")
+        }
+    }
+
+    /// Mac run r2, criterion 53 (0 of 3) and 41/44/47/48: requests were cut after ~8 words at
+    /// the owner's pause ("Can you tell me when you have a moment", "...in a file called") while
+    /// the owner went on talking. A long complete-looking partial no longer ends on 1.5 s of text
+    /// silence while voice is still heard; it still ends on stuck text or on real quiet.
+    func testLongRequestIsNotCutWhileTheOwnerStillTalks() {
+        let t0 = Date()
+        for text in ["Hey Jarvis, can you tell me, when you have a moment.",
+                     "Can you tell me when you have a moment",
+                     "Remember that when I say notes, I mean",
+                     "Save these pages and overlays as our best"] {
+            XCTAssertNil(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.5),
+                                                now: t0.addingTimeInterval(1.6)), text)
+            XCTAssertEqual(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                  lastVoiceAt: t0.addingTimeInterval(4),
+                                                  now: t0.addingTimeInterval(4)), "stuck", text)
+        }
+        // Real quiet after the last word still ends it fast.
+        XCTAssertEqual(TurnEndpointer.endRule(text: "Can you tell me when you have a moment", lastTextAt: t0,
+                                              lastVoiceAt: t0, now: t0.addingTimeInterval(0.75)), "fast")
+        // A short command still ends on text silence over room voice.
+        XCTAssertEqual(TurnEndpointer.endRule(text: "Hey Jarvis, highlight the changes.", lastTextAt: t0,
+                                              lastVoiceAt: t0.addingTimeInterval(1.0),
+                                              now: t0.addingTimeInterval(1.55)), "hold")
+        // "called" / "named" trail off: the name is still coming.
+        XCTAssertTrue(TurnEndpointer.looksIncomplete("Start a new session and say hello in a file called"))
+        XCTAssertTrue(TurnEndpointer.looksIncomplete("stop the session named"))
+        XCTAssertEqual(TurnEndpointer.endRule(text: "say hello in a file called", lastTextAt: t0,
+                                              lastVoiceAt: t0, now: t0.addingTimeInterval(1.0)), nil)
+    }
+
+    /// Mac run r3, F8 (53 tries 2-3, 43 try 1): `rule hold: text quiet 1.52 s, voice quiet 0.06 s,
+    /// words 4` / `0.01 s, words 3`, yet the transcript held 11 words. The note counts the last
+    /// PARTIAL; the transcript is the final flush. SpeechAnalyzer's partials stalled at a short
+    /// complete-looking prefix ("Hey Jarvis, can you tell me") for 1.5 s while the owner went on
+    /// talking, and the hold fired on text silence with voice still heard. The hold now waits for
+    /// the voice to go quiet too.
+    func testHoldNeverCutsWhileTheOwnerIsStillHeard() {
+        let t0 = Date()
+        // The stalled prefixes (4 and 3 words after the wake) and the full transcripts, as logged.
+        for (text, voiceQuiet) in [("Hey Jarvis, can you tell me", 0.06),
+                                   ("Start a new", 0.01),
+                                   ("Start a new session", 0.01),
+                                   ("Start a session", 0.01),
+                                   ("can you tell me, when you have a moment, what the weather", 0.06),
+                                   ("Start a new session and fix why the session has been", 0.01)] {
+            XCTAssertNil(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.52 - voiceQuiet),
+                                                now: t0.addingTimeInterval(1.52)), text)
+            // Talking on with stalled partials until the stuck cap: still not the hold.
+            XCTAssertNil(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(3.7),
+                                                now: t0.addingTimeInterval(3.9)), text)
+        }
+        // The 20-word request through its comma pauses (run 2): every partial stays open.
+        let words = "Hey Jarvis, can you tell me, when you have a moment, what the weather will be like in Riyadh tomorrow afternoon and evening"
+            .split(separator: " ").map(String.init)
+        for n in 1..<words.count {
+            let partial = words[..<n].joined(separator: " ")
+            XCTAssertNil(TurnEndpointer.endRule(text: partial, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.4),
+                                                now: t0.addingTimeInterval(1.6)), partial)
+        }
+        // The cut-off half stays open through a 2 s pause, then ends as trailing off.
+        let cutOff = "Hey Jarvis, can you show me the last"
+        XCTAssertNil(TurnEndpointer.endRule(text: cutOff, lastTextAt: t0, lastVoiceAt: t0,
+                                            now: t0.addingTimeInterval(2.0)))
+        XCTAssertEqual(TurnEndpointer.endRule(text: cutOff, lastTextAt: t0, lastVoiceAt: t0,
+                                              now: t0.addingTimeInterval(2.75)), "extended")
+        // Short commands still end fast on real quiet, and by the hold over a gappy room voice.
+        for cmd in ["Next change", "Hide", "Stop", "Enlarge the picture", "Hey Jarvis, previous change"] {
+            XCTAssertEqual(TurnEndpointer.endRule(text: cmd, lastTextAt: t0, lastVoiceAt: t0,
+                                                  now: t0.addingTimeInterval(0.75)), "fast", cmd)
+            XCTAssertEqual(TurnEndpointer.endRule(text: cmd, lastTextAt: t0,
+                                                  lastVoiceAt: t0.addingTimeInterval(1.0),
+                                                  now: t0.addingTimeInterval(1.55)), "hold", cmd)
+        }
+    }
+
+    /// Mac run r2: 100 ms mic buffers of one talker over a reverberant floor at a third of the
+    /// speech level; the softer syllables (0.05) were not "voiced", so gaps over 0.7 s opened
+    /// inside a sentence. Near the recent peak they count; the quiet room still does not.
+    func testSofterSyllablesOfTheSameTalkerAreVoiced() {
+        var vad = VoiceActivity()
+        for _ in 0..<20 { _ = vad.isVoiced(rms: 0.03) }  // reverberant room between words
+        XCTAssertTrue(vad.isVoiced(rms: 0.1))             // a loud syllable
+        XCTAssertTrue(vad.isVoiced(rms: 0.05))            // a softer one, 0.5 of the peak
+        XCTAssertFalse(vad.isVoiced(rms: 0.032))          // the room again: under the floor margin
+        var quiet = VoiceActivity()
+        for _ in 0..<100 { XCTAssertFalse(quiet.isVoiced(rms: 0.002)) }
+        XCTAssertFalse(quiet.isVoiced(rms: 0.007))        // no peak: the floor margin rules
     }
 
     func testVoiceActivityTracksTheNoiseFloor() {
@@ -150,6 +297,25 @@ final class TurnEndpointerTests: XCTestCase {
         let text = "Highlight the changes. What are you people"
         XCTAssertNil(gate.cut(text: text, now: t0.addingTimeInterval(2.9)))  // owner quiet < 1.5 s
         XCTAssertEqual(gate.cut(text: text, now: t0.addingTimeInterval(3.05)), "Highlight the changes.")
+    }
+
+    /// jfollow4 E: room speech at 55% of the owner's peak glued its words onto his request under the
+    /// old half-peak bar; only 0.6 of the peak still counts as him.
+    func testRoomSpeechJustOverHalfHisPeakIsCut() {
+        let t0 = Date()
+        var gate = TailGate()
+        feed(&gate, 0.12, from: t0, seconds: 1.5)                          // the owner's request
+        gate.partial("Show me the last merge.", at: t0.addingTimeInterval(1.6))
+        feed(&gate, 0.066, from: t0.addingTimeInterval(1.5), seconds: 3)   // the room at 0.55 of his peak
+        gate.partial("Show me the last merge. And the one before", at: t0.addingTimeInterval(3.2))
+        XCTAssertEqual(gate.cut(text: "Show me the last merge. And the one before",
+                                now: t0.addingTimeInterval(3.05)), "Show me the last merge.")
+        // He himself keeps the turn at 0.85 of his peak, still over the bar.
+        var softer = TailGate()
+        feed(&softer, 0.12, from: t0, seconds: 1.5)
+        feed(&softer, 0.102, from: t0.addingTimeInterval(1.5), seconds: 1.0)  // trailing off
+        softer.partial("Show me the last merge. Please.", at: t0.addingTimeInterval(2.9))
+        XCTAssertEqual(softer.kept, "Show me the last merge. Please.")
     }
 
     func testOwnerContinuingAtHisLevelIsKept() {

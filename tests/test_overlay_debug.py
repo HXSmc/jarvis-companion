@@ -125,18 +125,38 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     """jtools2 item 4: the page shows a red row when the `code` CLI is not on the service PATH."""
     monkeypatch.setattr(overlay.shutil, "which", lambda name: None)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
-    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
-    assert data["setup"] == {"code_cli": False, "vault": False, "barge_in": False}
+    assert data["setup"] == {"code_cli": False, "vault": False, "barge_in": False,
+                             "barge_mode": "off", "sessions_access": False}
     monkeypatch.setattr(overlay.shutil, "which", lambda name: str(tmp_path / name))
     monkeypatch.setenv("OVERLAY_VAULT", str(tmp_path))
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"] == {"code_cli": True,
                                                                                         "vault": True,
-                                                                                        "barge_in": False}
+                                                                                        "vault_excluded": ["Secrets"],
+                                                                                        "barge_in": False,
+                                                                                        "barge_mode": "off",
+                                                                                        "sessions_access": False}
     page = client.get("/overlay/debug").text
     assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
     assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
     assert "vault === false" in page and "Notes vault not set" in page
+
+
+def test_debug_setup_vault_row_names_only(client, monkeypatch, tmp_path):
+    """jfollow4 H: a set vault says which dirs are excluded by NAME; no path ever reaches the JSON."""
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    monkeypatch.setenv("OVERLAY_VAULT", str(tmp_path))
+    data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
+    assert data["setup"]["vault"] is True and data["setup"]["vault_excluded"] == ["Secrets"]
+    assert str(tmp_path) not in data["setup"]  # booleans and names only, never the vault path
+    page = client.get("/overlay/debug").text
+    assert "Notes vault set; excluded:" in page
+    assert "run the installer" in page  # sessions access not set: the page says how to fix it
+    # design R1-1: a healthy row is dim, only a missing setup is red; no "set" row without a vault flag
+    assert "#setup .ok { color: var(--dim); }" in page
+    assert '`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`, true]' in page
+    assert "else if (ok.vault) rows.push" in page
 
 
 def test_setup_rows_have_page_padding(client):
@@ -160,3 +180,10 @@ def test_code_cli_setup_finds_the_bundled_cli(client, monkeypatch, tmp_path):
     assert resp.json()["setup"]["code_cli"] is True and str(tmp_path) not in resp.text
     monkeypatch.setattr(gitdiff, "EDITOR_CANDIDATES", {"code": (str(tmp_path / "none"),), "cursor": ()})
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["code_cli"] is False
+
+
+def test_debug_page_reads_the_service_when_shown_again(client):
+    """Mac run r2, F7: after an install the background tab kept old setup rows until a reload."""
+    page = client.get("/overlay/debug").text
+    assert 'document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });' in page
+    assert 'window.addEventListener("pageshow", tick);' in page

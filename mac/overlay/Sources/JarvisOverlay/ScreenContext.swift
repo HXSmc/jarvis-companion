@@ -112,6 +112,34 @@ enum ScreenContext {
         return out
     }
 
+    /// Saved-workspace pages (C): each Safari/Chrome window's shown page (its AXDocument, else
+    /// the AXURL of its web area) and title, read through AX the way walkFrontApp does (no
+    /// AppleScript, no new permission). One page per window: the front tab.
+    /// Main actor: NSWorkspace; the per-app messaging timeout keeps a hung browser short.
+    @MainActor
+    static func browserPages() -> [(url: String, title: String)] {
+        var out: [(url: String, title: String)] = []
+        for app in NSWorkspace.shared.runningApplications {
+            guard let bundle = app.bundleIdentifier,
+                  bundle == "com.apple.Safari" || bundle == "com.google.Chrome"
+            else { continue }
+            let ax = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(ax, 0.25)
+            for window in axElements(ax, kAXWindowsAttribute) {
+                guard let url = Workspace.pageURL(
+                    window: window,
+                    role: { axString($0, kAXRoleAttribute) },
+                    children: { axElements($0, kAXChildrenAttribute) },
+                    document: { axValue($0, kAXDocumentAttribute) },
+                    webURL: { axValue($0, kAXURLAttribute) })
+                else { continue }
+                out.append((url: url.absoluteString, title: axString(window, kAXTitleAttribute) ?? ""))
+                if out.count == Workspace.maxPages { return out }
+            }
+        }
+        return out
+    }
+
     /// Fresh AX frame and element of the same element, or nil when it vanished/moved >400 pt.
     /// Call off the main actor (full AX walk).
     static func recheck(role: String, label: String, near box: CGRect) -> (frame: CGRect, element: AXUIElement)? {
@@ -337,6 +365,20 @@ enum ScreenContext {
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
+    }
+
+    private static func axElements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let list = value as? [AXUIElement] else { return [] }
+        return list
+    }
+
+    private static func axValue(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
+        else { return nil }
+        return value
     }
 
     private static func axString(_ element: AXUIElement, _ attribute: String) -> String? {

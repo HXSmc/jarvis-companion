@@ -4,12 +4,17 @@ import OverlayCore
 /// Plays service PCM clips in order and local fallback speech; reports levels/drain.
 @MainActor
 final class AudioOut {
-    private let engine = AVAudioEngine()
+    /// This app's own engine; `engine` points at it until the AEC path shares SpeechInput's.
+    private let ownEngine = AVAudioEngine()
+    private var engine: AVAudioEngine
     private let player = AVAudioPlayerNode()
     private var synthesizer: AVSpeechSynthesizer?
     private let synthWatcher = SynthWatcher()
     /// Rate of the current player->mixer connection; reconnect when a clip's rate differs.
     private var connectedRate: Int?
+    /// Set while the player lives on SpeechInput's engine: one fixed connection (voice-
+    /// processing engines want the IO formats to match), clips convert to it, no reconnects.
+    private var fixedFormat: AVAudioFormat?
     /// Unplayed buffers right now; barge-in drops them (debug note dropped_sentences).
     private(set) var pendingBuffers = 0
     private var synthSpeaking = false
@@ -32,10 +37,33 @@ final class AudioOut {
     var isBusy: Bool { pendingBuffers > 0 || synthSpeaking }
 
     init() {
+        engine = ownEngine
         engine.attach(player)
         synthWatcher.onFinish = { [weak self] in
             Task { @MainActor in self?.synthFinished() }
         }
+    }
+
+    /// AEC mode (barge_mode aec): the player moves onto SpeechInput's engine — call before it
+    /// starts and before any playback. `format: nil` connects at the engine's own output format
+    /// so the voice-processing IO formats match; clips convert to that format in enqueue.
+    func shareEngine(_ shared: AVAudioEngine) {
+        engine.detach(player)
+        engine = shared
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        fixedFormat = player.outputFormat(forBus: 0)
+        connectedRate = nil
+    }
+
+    /// The AEC probe failed: the player returns to this app's own engine and per-clip rates.
+    func useOwnEngine() {
+        guard fixedFormat != nil else { return }
+        engine.disconnectNodeOutput(player)
+        engine.detach(player)
+        engine = ownEngine
+        fixedFormat = nil
+        connectedRate = nil
     }
 
     /// 16-bit mono little-endian PCM -> float buffer at `rate`, played in schedule order.
@@ -60,7 +88,14 @@ final class AudioOut {
             }
         }
 
-        if connectedRate != rate {
+        var clip = buffer
+        if let fixed = fixedFormat {
+            // Shared voice-processing engine: one fixed connection, clips convert to it.
+            if format.sampleRate != fixed.sampleRate || format.channelCount != fixed.channelCount {
+                guard let converted = Self.convert(buffer, to: fixed) else { return }
+                clip = converted
+            }
+        } else if connectedRate != rate {
             if connectedRate != nil { engine.disconnectNodeOutput(player) }
             engine.connect(player, to: engine.mainMixerNode, format: format)
             connectedRate = rate
@@ -70,7 +105,7 @@ final class AudioOut {
         }
 
         pendingBuffers += 1
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        player.scheduleBuffer(clip, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.pendingBuffers = max(self.pendingBuffers - 1, 0)
@@ -119,6 +154,24 @@ final class AudioOut {
     private func synthFinished() {
         synthSpeaking = false
         if pendingBuffers == 0 { lastDrainAt = Date(); onDrain?() }
+    }
+
+    /// One clip resampled (and channel-mapped) to the shared engine's fixed output format.
+    private static func convert(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let ratio = format.sampleRate / buffer.format.sampleRate
+        guard ratio > 0,
+              let out = AVAudioPCMBuffer(pcmFormat: format,
+                                         frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 128),
+              let converter = AVAudioConverter(from: buffer.format, to: format) else { return nil }
+        var fed = false
+        var error: NSError?
+        let status = converter.convert(to: out, error: &error) { _, inputStatus in
+            if fed { inputStatus.pointee = .endOfStream; return nil }
+            fed = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        return status == .error ? nil : out
     }
 
     private func installTapOnce() {

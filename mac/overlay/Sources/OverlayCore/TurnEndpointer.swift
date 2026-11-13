@@ -3,8 +3,8 @@ import Foundation
 /// Decides when a spoken turn is over. SpeechAnalyzer partials lag the audio, and people pause
 /// mid-sentence ("show me the last, uh ... debugging session"), so a turn ends only after a
 /// silence with neither new text nor voiced audio, and that silence is longer when the words
-/// so far trail off; a complete-looking sentence ends on text silence alone, room "voice"
-/// (fan, TV) cannot hold it open.
+/// so far trail off; a short complete-looking command ends on text silence once the voice has
+/// paused (room "voice" with gaps cannot hold it open), constant voice ends on stuckText.
 public enum TurnEndpointer {
     /// Complete-looking sentence: end fast.
     public static let fast: TimeInterval = 0.7
@@ -12,10 +12,21 @@ public enum TurnEndpointer {
     public static let extended: TimeInterval = 2.7
     /// No new text for this long ends the turn even if the mic still "hears voice" (fan, TV).
     public static let stuckText: TimeInterval = 4
-    /// Text silence this long ends a complete-looking sentence even while the mic hears voice.
+    /// Text silence this long ends a short complete-looking command over room voice that has paused
+    /// for holdVoiceQuiet (it never fires while the owner is heard).
     public static let completeHold: TimeInterval = 1.5
+    /// completeHold applies only to a short command (wake word off): Mac run r2 cut 20-word
+    /// requests at "Can you tell me when you have a moment" while the owner was still talking.
+    /// A longer request with voice still heard ends on 0.7 s of quiet or stuckText instead.
+    public static let completeHoldMaxWords = 4
+    /// The hold also needs this much voice quiet: Mac run r3 (F8) partials stalled at "Hey Jarvis,
+    /// can you tell me" for 1.5 s while the owner went on talking (voice quiet 0.01-0.07 s), and the
+    /// hold cut the request. Above a comma pause; a steady fan is unvoiced (VoiceActivity floor).
+    public static let holdVoiceQuiet: TimeInterval = 0.5
     /// A follow-up replay starts this long after the reply drained: the reply's room echo dies.
     public static let echoTail: TimeInterval = 0.15
+    /// An unpunctuated partial this long (in words) is mid-request, not a finished sentence.
+    public static let longRequestWords = 10  // above the 8-word finished commands of the short-command tests
 
     /// A filler ends a turn as incomplete even when STT punctuates it ("the last, huh?").
     static let fillers: Set<String> = ["uh", "um", "er", "erm", "uhm", "huh", "hm", "hmm", "mm", "ah"]  // Mac STT: "uh" -> "huh"
@@ -25,6 +36,7 @@ public enum TurnEndpointer {
         "and", "or", "but", "so", "because", "if", "than", "then",
         "to", "of", "for", "with", "from", "about", "into", "at", "by", "in", "on",
         "last", "next", "plus", "minus", "times", "is", "are", "was", "what", "which",
+        "called", "named",  // Mac run r2: "say hello in a file called | voice-test"
     ])
 
     public static func looksIncomplete(_ text: String) -> Bool {
@@ -39,6 +51,14 @@ public enum TurnEndpointer {
 
     public static func silence(after text: String) -> TimeInterval {
         looksIncomplete(text) ? extended : fast
+    }
+
+    /// A long partial without terminal punctuation is still growing (final results punctuate),
+    /// so a natural pause inside it is not the end: it gets the extended window.
+    static func midRequest(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = t.last, !".?!".contains(last) else { return false }
+        return t.split { !$0.isLetter && $0 != "'" }.count >= longRequestWords
     }
 
     /// The words after the wake word (moved from SpeechInput unchanged, so tests can pin it).
@@ -66,14 +86,28 @@ public enum TurnEndpointer {
     }
 
     public static func shouldEnd(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> Bool {
-        let needed = silence(after: text)
-        if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return true }
-        // A complete-looking sentence ends on text silence alone; empty text never does.
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !looksIncomplete(text),
-           now.timeIntervalSince(lastTextAt) >= completeHold { return true }
+        endRule(text: text, lastTextAt: lastTextAt, lastVoiceAt: lastVoiceAt, now: now) != nil
+    }
+
+    /// Which rule ends the turn now ("stuck", "hold", "fast", "extended"), or nil to keep
+    /// listening. The name goes into the debug page's STT note so a cut turn says why.
+    public static func endRule(text: String, lastTextAt: Date, lastVoiceAt: Date?, now: Date) -> String? {
+        let mid = midRequest(text)
+        let needed = mid ? extended : silence(after: text)
+        if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return "stuck" }
+        // A short complete-looking command ends on text silence over gappy room voice; empty text
+        // never does, and never while the voice is still heard (stalled partials, F8).
+        let voiceQuiet = now.timeIntervalSince(lastVoiceAt ?? .distantPast)
+        if !mid, holdsComplete(text), now.timeIntervalSince(lastTextAt) >= completeHold,
+           voiceQuiet >= holdVoiceQuiet { return "hold" }
         let quietSince = max(lastTextAt, lastVoiceAt ?? .distantPast)
-        return now.timeIntervalSince(quietSince) >= needed
+        guard now.timeIntervalSince(quietSince) >= needed else { return nil }
+        return needed > fast ? "extended" : "fast"
+    }
+
+    static func holdsComplete(_ text: String) -> Bool {
+        let words = stripWake(text).split { !$0.isLetter && !$0.isNumber && $0 != "'" }.count
+        return words > 0 && words <= completeHoldMaxWords && !looksIncomplete(text)
     }
 
     /// Where follow-up replay begins: anything stamped earlier is the reply's own echo.
@@ -154,16 +188,25 @@ public struct HeldLine<Event> {
 /// Per-buffer voice activity from mic RMS against a tracked noise floor.
 public struct VoiceActivity {
     public private(set) var floor: Double?
+    /// The recent loudest buffer: follows loud levels up at once, decays per buffer.
+    public private(set) var peak: Double = 0
+    static let peakDecay = 0.99
+    /// A buffer this share of the recent peak (about -10 dB) and above the floor's margin is the
+    /// same talker's softer syllable (Mac run r2: 100 ms buffers with a reverberant floor near a
+    /// third of the speech level left gaps over 0.7 s inside one sentence).
+    static let speechShare = 0.3
 
     public init() {}
 
     /// The floor follows quiet levels down at once and creeps up slowly (~10 s at 21 ms buffers),
-    /// so speech never lifts it; voiced = clearly above it.
+    /// so speech never lifts it; voiced = clearly above it, or near the recent peak.
     public mutating func isVoiced(rms: Double) -> Bool {
         let current = floor ?? rms
         let next = rms < current ? rms : current + (rms - current) * 0.002
         floor = next
-        return rms > max(next * 3, next + 0.006)
+        peak = max(rms, peak * Self.peakDecay)
+        if rms > max(next * 3, next + 0.006) { return true }
+        return rms > next + 0.006 && rms >= peak * Self.speechShare
     }
 }
 
@@ -209,9 +252,10 @@ public enum LevelBlocks {
 /// runs 2 and 3: room speech joined a request, or took the turn). Words count as the owner's only
 /// when his voice, at `ratio` of the turn's loudest 100 ms block, was heard up to `lag` before them.
 public struct TailGate {
-    /// Room words are quieter than half the request's loudest voice (-6 dB); the service can change it
+    /// Room words glued onto a request sat within ~6 dB of the owner's loudest voice (jfollow4 E):
+    /// only 0.6 of the request's peak (-4.4 dB) still counts as him. The service can change it
     /// (`OVERLAY_TAIL_LEVEL_RATIO`, sent on /overlay/health).
-    public static let defaultRatio = 0.5
+    public static let defaultRatio = 0.6
     /// Partials trail the audio: a word shows up to this long after it was said.
     public static let lag: TimeInterval = 1.2
     /// Blocks below this RMS are silence, never the owner's voice.

@@ -113,6 +113,8 @@ public enum OverlayEvent: Equatable {
 public enum ControlEvent: Equatable {
     case endListening
     case cardSize(id: String, max: Bool)
+    case workspaceSave(nonce: String)
+    case openPages(urls: [URL])
 
     public static func decode(line: Data) -> ControlEvent? {
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
@@ -131,14 +133,27 @@ public enum ControlEvent: Equatable {
             case "restore": return .cardSize(id: id, max: false)
             default: return nil
             }
+        case "workspace_save":
+            // The nonce names the POST /overlay/workspace/<nonce> answer slot: 16 lowercase hex.
+            guard let nonce = obj["nonce"] as? String, nonce.count == 16,
+                  nonce.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) })
+            else { return nil }
+            return .workspaceSave(nonce: nonce)
+        case "open_pages":
+            guard let raw = obj["urls"] as? [Any] else { return nil }
+            let urls = raw.compactMap { $0 as? String }
+                .compactMap { URL(string: $0) }
+                .filter { Workspace.openable($0) }
+            return .openPages(urls: Array(urls.prefix(Workspace.maxPages)))
         default:
             return nil
         }
     }
 }
 
-/// One NDJSON line during a turn: overlay content or a control event. "end_listening" and
-/// "card_size" lines still decode to `.unknown` in `OverlayEvent` alone.
+/// One NDJSON line during a turn: overlay content or a control event. "end_listening",
+/// "card_size", "workspace_save" and "open_pages" lines still decode to `.unknown` in
+/// `OverlayEvent` alone.
 public enum TurnEvent: Equatable {
     case overlay(OverlayEvent)
     case control(ControlEvent)

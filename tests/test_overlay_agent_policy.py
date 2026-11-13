@@ -581,3 +581,45 @@ def test_glob_pathspec_tails_that_reach_env_denied(env):
         assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Deny), spec
     for spec in ("'*.py'", "'src/*.ts'", "'*.min.js'", "'docs/*.md'"):
         assert isinstance(bash(ctx, f"git -C {r} log -p -- {spec}"), ap.Allow), spec
+
+
+# --- jfollow4 helper C: vault Secrets constant (policy, stricter only) ---
+
+
+def test_vault_excluded_constant(env, tmp_path):
+    """jfollow4: VAULT_EXCLUDED_DIRS names the vault's closed folders (any case, through .. and symlinks)."""
+    ctx, home, vault, _ = env
+    assert ap.VAULT_EXCLUDED_DIRS == ("Secrets",)
+    # clean Notes first: a symlink into Secrets left in a folder closes the folder itself
+    assert isinstance(decide(ctx, "Read", file_path=f"{vault}/Notes/a.md"), ap.Allow)
+    assert isinstance(decide(ctx, "Grep", pattern="pricing", path=str(vault / "Notes")), ap.Allow)
+    os.symlink(vault / "Secrets/a.md", vault / "Notes/link.md")
+    (vault / "Notes2").mkdir()
+    os.symlink(vault / "Secrets", vault / "Notes2/into-secrets", target_is_directory=True)
+    for d in (decide(ctx, "Read", file_path=f"{vault}/Secrets/a.md"),
+              decide(ctx, "Read", file_path=f"{vault}/Notes/../Secrets/a.md"),
+              decide(ctx, "Read", file_path=f"{vault}/Notes/link.md"),
+              decide(ctx, "Glob", pattern="**/*.md", path=str(vault)),
+              decide(ctx, "Grep", pattern="x", path=str(vault / "Notes2"))):
+        assert isinstance(d, ap.Deny), d
+    for i, name in enumerate(("secrets", "SECRETS")):  # one tmp vault per spelling (macOS tmp is case-insensitive)
+        alt = tmp_path / f"vault-alt{i}"
+        (alt / name).mkdir(parents=True)
+        (alt / name / "a.md").write_text("x")
+        (alt / "Notes").mkdir()
+        alt_ctx = ap.Ctx(home=str(home), vault=str(alt), cwd=ctx.cwd)
+        assert isinstance(decide(alt_ctx, "Read", file_path=f"{alt}/{name}/a.md"), ap.Deny), name
+
+
+def test_vault_secrets_reason_code(env):
+    """jfollow4: the vault-excluded deny maps to its own reason code; a secrets folder outside the
+    vault stays 'secret', and the vault-root search deny never lists Secrets as a folder to search."""
+    ctx, home, vault, _ = env
+    d = decide(ctx, "Read", file_path=f"{vault}/Secrets/a.md")
+    assert isinstance(d, ap.Deny) and ap.reason_code(d.reason) == "vault"
+    (home / "other/secrets").mkdir(parents=True)
+    d = decide(ctx, "Read", file_path=str(home / "other/secrets/x.md"))
+    assert isinstance(d, ap.Deny) and ap.reason_code(d.reason) == "secret"
+    reason = decide(ctx, "Grep", pattern="pw", path=str(vault)).reason
+    listed = reason.split("instead: ", 1)[1].split(", ")
+    assert "Secrets" not in listed and "Notes" in listed

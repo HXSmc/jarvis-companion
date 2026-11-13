@@ -16,8 +16,10 @@ struct Health: Decodable {
     var bargeIn: Bool?
     /// AEC-backed barge-in gate wanted; nil from an older service (the app defaults to false).
     var bargeAec: Bool?
+    /// How barge-in may open ("off" | "headphones" | "aec"); nil from an older service.
+    var bargeMode: String?
     private enum CodingKeys: String, CodingKey {
-        case ok, voice, tailLevelRatio = "tail_level_ratio", bargeIn = "barge_in", bargeAec = "barge_aec"
+        case ok, voice, tailLevelRatio = "tail_level_ratio", bargeIn = "barge_in", bargeAec = "barge_aec", bargeMode = "barge_mode"
     }
 }
 
@@ -150,6 +152,21 @@ final class ServiceClient {
         private enum CodingKeys: String, CodingKey {
             case text, convId = "conv_id", sttFinalMs = "stt_final_ms", audioMs = "audio_ms", stt, followup,
                  bargeIn = "barge_in", levels, conf, screen
+        }
+    }
+
+    /// Saved-workspace answer (C): POSTs the snapshot body to /overlay/workspace/<nonce>. The
+    /// service times the nonce out itself, so a failure is one debug note and swallowed.
+    func postWorkspace(nonce: String, body: Data) async {
+        do {
+            var request = try authorizedRequest(path: "/overlay/workspace/\(nonce)", method: "POST")
+            request.timeoutInterval = 5
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+            let (_, response) = try await URLSession.shared.data(for: request)
+            try Self.check(response)
+        } catch {
+            debugNote(step: "workspace", detail: "post_failed")
         }
     }
 }

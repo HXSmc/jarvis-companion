@@ -29,7 +29,9 @@
   q { color: var(--quote); }
   .empty { color: var(--dim); padding: 32px 0; }
   #gate { color: var(--dim); max-width: 980px; margin: 8px auto 0; padding: 0 20px; font-size: 12px; }
-  #setup { color: var(--bad); max-width: 980px; margin: 12px auto 0; padding: 0 20px; white-space: pre-line; }
+  #setup { color: var(--bad); max-width: 980px; margin: 12px auto 0; padding: 0 20px; }
+  #setup span { display: block; }
+  #setup .ok { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -57,6 +59,8 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 incomplete: "waiting for more", continued: "continued after a pause",
                 followup_dropped: "follow-up dropped", followup_closed: "follow-up window closed",
                 card_size: "card size", sessions: "sessions",
+                session_start: "session start", session_stop: "session stop", session_answer: "session answered",
+                memory: "memory", workspace: "workspace",
                 barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate" };
 
 function el(tag, cls, text) {
@@ -81,10 +85,12 @@ function describe(s) {
     case "followup_closed": return s.detail || "no follow-up window left open";
     case "card_size": return `action=${s.action ?? "?"} card=${s.card ?? "none"} match=${s.match ?? "none"}`;
     case "sessions": return s.detail || "";
+    case "session_start": case "session_stop": case "session_answer": case "memory": case "workspace":
+      return s.detail || "";
     case "barge_in": case "barge_aec": case "barge_gate": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
-    case "agent": return (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
+    case "agent": return s.detail || (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
     case "agent_tool": return `${s.tool} · ${s.decision}` + (s.kind ? ` · ${s.kind}` : "") +
                               (s.reason ? ` · ${s.reason}` : "") + (s.ms != null ? ` · ${s.ms} ms` : "");
     case "agent_confirm": return s.state;
@@ -111,12 +117,21 @@ function render(data) {
   lis.style.color = l.state === "listening" ? "var(--ok)" : "var(--bad)";
   const setup = document.getElementById("setup");
   const ok = data.setup || {};
-  const rows = [];
-  if (ok.code_cli === false) rows.push("VS Code command line tool (code) missing: the editor will not scroll");
-  if (ok.vault === false) rows.push("Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes");
-  if (ok.barge_in === false) rows.push("barge-in: off (set OVERLAY_BARGE_IN=1 to try it)");
+  const rows = [];  // [text, healthy]: a working setup is dim, only a missing one is red
+  if (ok.code_cli === false) rows.push(["VS Code command line tool (code) missing: the editor will not scroll", false]);
+  if (ok.vault === false) rows.push(["Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes", false]);
+  else if (ok.vault) rows.push([`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`, true]);
+  if (ok.barge_in === false) rows.push(["barge-in: off (OVERLAY_BARGE_IN=0 in the repo .env)", false]);
+  else if (ok.barge_mode === "aec") rows.push(["barge-in: on (echo canceller)", true]);
+  else if (ok.barge_in) rows.push(["barge-in: on with headphones, off on speakers", true]);
+  if (ok.sessions_access === false) rows.push(["Sessions access: not set (run the installer)", false]);
   setup.hidden = rows.length === 0;
-  setup.textContent = rows.join("\n");
+  setup.replaceChildren(...rows.map(([text, healthy]) => {
+    const line = document.createElement("span");
+    line.textContent = text;
+    if (healthy) line.className = "ok";
+    return line;
+  }));
   const g = data.speech_gate;
   const gate = document.getElementById("gate");
   gate.hidden = !g;
@@ -172,6 +187,10 @@ async function tick() {
 }
 tick();
 setInterval(tick, 1500);
+// Safari slows timers in a background tab: a tab brought back after an install showed the old
+// setup rows until a reload (Mac run r2, F7). Read the service again the moment it is shown.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+window.addEventListener("pageshow", tick);
 </script>
 </body>
 </html>
