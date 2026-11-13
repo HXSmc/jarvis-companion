@@ -705,6 +705,13 @@ def test_room_words_after_a_card_ask(client):
     events = turn(client, "close the phone diagram. Yes", conv_id="r3c")
     assert says(events) == ["Removed, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [phone]}]
+    # a card whose title holds a blocked word is never reached through room words
+    _show_cards(client, "r3e", "Window functions", "Credit cards")
+    for text in ("close the window. Yes", "remove the cards. Yes", "remove these. Yes"):
+        _deps(chunks=['{"say": "Okay."}\n'])
+        events = turn(client, text, conv_id="r3e")
+        assert not [e for e in events if e["type"] == "drop_cards"], text
+    assert len(overlay._card_index["r3e"]) == 2
 
 
 def test_room_words_never_make_a_pointer_or_change_kind():
@@ -714,6 +721,10 @@ def test_room_words_never_make_a_pointer_or_change_kind():
     assert intents.card_remove_request("close it. yes").target == "it. yes"
     assert intents.card_remove_request("remove that. yes").pointer is False
     assert intents.card_remove_request("remove the 3.5 inch drive").target == "3.5 inch drive"
+    # a blocked word or a bare filler before the cut stays out of the card lookup
+    assert intents.card_remove_request("close the window. Yes") is None
+    assert intents.card_remove_request("remove the cards. Yes") is None
+    assert intents.card_remove_request("remove these. Yes").target == "these. yes"
     for text in ("close it. yes", "remove that. yes", "close the phone diagram. Yes"):
         assert intents.parse(text).kind == "answer"
     assert intents.parse("enlarge the phone diagram. Yes").kind == "card_size"

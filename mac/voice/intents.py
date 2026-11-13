@@ -603,8 +603,13 @@ def card_remove_request(text: str) -> CardRemoveAsk | None:
             return CardRemoveAsk(target, True, card)
         if target.startswith(("on ", "upon ")) or set(target.split()) & _CARD_REMOVE_BLOCKED:
             return None
-        cut = _first_sentence(target)  # never a pointer: "close it. yes" must not become one
-        target = _CARD_TARGET_LEAD_RE.sub("", target if cut in _CARD_REMOVE_POINTERS else cut)
+        cut = _first_sentence(target)
+        if set(cut.split()) & _CARD_REMOVE_BLOCKED:  # "close the window. Yes" is not a card
+            return None
+        # Never a pointer or a bare filler from a cut: "close it. yes" must not become one.
+        if cut in _CARD_REMOVE_POINTERS or not set(card_words(cut)) - _CARD_FILLERS:
+            cut = target
+        target = _CARD_TARGET_LEAD_RE.sub("", cut)
         if target.endswith(" card"):
             target = target[:-5]
         return CardRemoveAsk(target.strip(), False, card)
