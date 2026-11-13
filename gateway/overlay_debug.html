@@ -121,7 +121,7 @@ function render(data) {
   if (ok.code_cli === false) rows.push(["VS Code command line tool (code) missing: the editor will not scroll", false]);
   if (ok.vault === false) rows.push(["Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes", false]);
   else if (ok.vault) rows.push([`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`, true]);
-  if (ok.barge_in === false) rows.push(["barge-in: off (set OVERLAY_BARGE_IN=1 to try it)", false]);
+  if (ok.barge_in === false) rows.push(["barge-in: off (OVERLAY_BARGE_IN=0 in the repo .env)", false]);
   else if (ok.barge_mode === "aec") rows.push(["barge-in: on (echo canceller)", true]);
   else if (ok.barge_in) rows.push(["barge-in: on with headphones, off on speakers", true]);
   if (ok.sessions_access === false) rows.push(["Sessions access: not set (run the installer)", false]);

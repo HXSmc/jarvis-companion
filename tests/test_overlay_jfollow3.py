@@ -385,7 +385,9 @@ def test_sessions_with_no_rows_say_a_fixed_line(client, monkeypatch, tmp_path):
 
 
 def test_health_has_barge_switches(client, monkeypatch):
-    """A6 + hub amendment R6: barge-in is off unless OVERLAY_BARGE_IN=1; AEC only with it on."""
+    """A6; jfollow4 D2 DECISION 2C replaces hub amendment R6's "off unless OVERLAY_BARGE_IN=1":
+    the default is headphones only (barge_in true, the app gates it on the output route), AEC only
+    with OVERLAY_BARGE_IN=1, and OVERLAY_BARGE_IN=0 still turns it all off."""
     overlay.set_deps(make_deps())
     monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
     monkeypatch.delenv("OVERLAY_BARGE_AEC", raising=False)
@@ -393,9 +395,9 @@ def test_health_has_barge_switches(client, monkeypatch):
     def health():
         return client.get("/overlay/health", headers=AUTH_HEADER).json()
 
-    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+    assert (health()["barge_in"], health()["barge_aec"], health()["barge_mode"]) == (True, False, "headphones")
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
-    assert (health()["barge_in"], health()["barge_aec"]) == (False, False)
+    assert (health()["barge_in"], health()["barge_aec"]) == (True, False)
     monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
     assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "0")
@@ -406,8 +408,9 @@ def test_health_has_barge_switches(client, monkeypatch):
 
 def test_barge_in_off_by_default_turn_is_not_a_barge(client, monkeypatch):
     """Hub amendment R6: with the switch off a barge_in turn never cancels a running agent turn
-    quietly; it is an ordinary follow-up during a busy turn (the busy line), as on ci-ipa."""
-    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    quietly; it is an ordinary follow-up during a busy turn (the busy line), as on ci-ipa.
+    (jfollow4 2C: off is now OVERLAY_BARGE_IN=0; the default is headphones only.)"""
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     clock = Clock()
     never = lambda: FakeAgent(clock, script=[], tick=0.0, sleep=0.02)  # noqa: E731
     pool, deps = setup(clock, never)
@@ -437,12 +440,12 @@ def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
     start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
     assert "guard bargeInEnabled," in start
     assert ctl.count("bargeIn(reason:") == 3  # the def, the gated wake and the run's onConfirmed
-    assert 'rows.push(["barge-in: off (set OVERLAY_BARGE_IN=1 to try it)", false])' in overlay.DEBUG_PAGE
+    assert 'rows.push(["barge-in: off (OVERLAY_BARGE_IN=0 in the repo .env)", false])' in overlay.DEBUG_PAGE
     assert "ok.barge_in === false" in overlay.DEBUG_PAGE
     overlay.set_deps(make_deps())
-    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["barge_in"] is False
-    monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
+    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)  # 2C default: headphones only
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"]["barge_in"] is True
 
 

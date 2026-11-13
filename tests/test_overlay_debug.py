@@ -125,7 +125,7 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     """jtools2 item 4: the page shows a red row when the `code` CLI is not on the service PATH."""
     monkeypatch.setattr(overlay.shutil, "which", lambda name: None)
     monkeypatch.delenv("OVERLAY_VAULT", raising=False)
-    monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
+    monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
     assert data["setup"] == {"code_cli": False, "vault": False, "barge_in": False,
                              "barge_mode": "off", "sessions_access": False}

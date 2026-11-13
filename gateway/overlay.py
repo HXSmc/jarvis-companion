@@ -3905,14 +3905,17 @@ def _app_commit() -> str | None:
 
 
 def barge_mode() -> str:
-    """"off" (OVERLAY_BARGE_IN not "1"), "aec" (also OVERLAY_BARGE_AEC=1) or "headphones"."""
-    if os.environ.get("OVERLAY_BARGE_IN", "0") != "1":
+    """D2 DECISION 2C: "headphones" by default (the app barges in only while the output is a
+    headphones route, never on speakers); "off" with OVERLAY_BARGE_IN set to anything but "1";
+    "aec" only with OVERLAY_BARGE_IN=1 and OVERLAY_BARGE_AEC=1 (the unproven 2B path, opt-in)."""
+    flag = os.environ.get("OVERLAY_BARGE_IN", "")
+    if flag not in ("", "1"):
         return "off"
-    return "aec" if os.environ.get("OVERLAY_BARGE_AEC", "0") == "1" else "headphones"
+    return "aec" if flag == "1" and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1" else "headphones"
 
 
 def barge_in_on() -> bool:
-    """Any barge-in mode but "off" (app reads it from /health); off by default."""
+    """Any barge-in mode but "off" (app reads it from /health)."""
     return barge_mode() != "off"
 
 
@@ -3925,5 +3928,5 @@ async def get_health() -> dict:
             # A6: the barge-in switches and the installed bundle's commit, read at request time.
             "barge_mode": barge_mode(),
             "barge_in": barge_in_on(),
-            "barge_aec": barge_in_on() and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1",
+            "barge_aec": barge_mode() == "aec",
             "commit": _app_commit()}
