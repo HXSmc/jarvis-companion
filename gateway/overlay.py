@@ -1143,8 +1143,8 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
                               "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
     if card:
         seen = _card_ids.setdefault(body.conv_id, set())
-        if card["id"] in seen or _host_card_id(card["id"]):
-            card["id"] = uuid.uuid4().hex[:8]
+        if card["id"] in seen:  # a host id: only a collision renames it
+            card["id"] = "sv-" + uuid.uuid4().hex[:8]
         seen.add(card["id"])
         yield {"type": "card", "card": card}
 
@@ -2898,8 +2898,9 @@ CONFIRM_POLL_S = 0.5
 EXPIRED_TELL_S = 120  # a "yes" this soon after a confirmation expired is told it came too late
 _CONFIRM_CARD_ID = "agentconfirm"  # one id per conv, so the HUD replaces the card once settled
 # Every card id prefix the host issues: Confirm, the git/hunk cards (gitdiff + _hunk_card "gd-..."),
-# the owner-words media card ("ow" + sha256). A new host-issued id must get its prefix here.
-_HOST_CARD_PREFIXES = (_CONFIRM_CARD_ID, "gd-", "ow", "ws")
+# the owner-words media card ("ow" + sha256), the session card ("sv-"), the memory card ("mr") and
+# reopened workspace cards ("ws"). A new host-issued id must get its prefix here.
+_HOST_CARD_PREFIXES = (_CONFIRM_CARD_ID, "gd-", "ow", "sv-", "mr", "ws")
 
 
 def _host_card_id(card_id: str) -> bool:
