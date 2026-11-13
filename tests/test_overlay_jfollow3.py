@@ -115,7 +115,7 @@ def test_ack_policy_covers_parse_kinds():
         assert intent.kind == kind, (text, intent)
         seen.add(intent.kind)
     # Every kind parse can return is in ACK_POLICY; "media" never comes from parse.
-    assert seen | {"session", "memory", "workspace"} == set(acks.ACK_POLICY) - {"media"}, seen  # jfollow4 kinds: tests/test_overlay_intents.py
+    assert seen | {"session", "memory", "workspace", "card_remove"} == set(acks.ACK_POLICY) - {"media"}, seen  # jfollow4 kinds: tests/test_overlay_intents.py
     for kind in ("clock", "media", "stop", "card_size", "open_app", "open_site"):
         assert acks.ack_key(kind) is None, kind
     assert acks.ack_key("agent", "git") == "agent_git"
