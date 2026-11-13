@@ -585,6 +585,7 @@ def _forget(conv_id: str) -> None:
         store.pop(conv_id, None)
     _session_ref.pop(conv_id, None)
     _host_ask.pop(conv_id, None)
+    _card_pick.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
     _tainted.discard(conv_id)
 
@@ -607,6 +608,7 @@ def _forget_cards(conv_id: str) -> None:
     """After a `clear` the app holds no cards: none can be named or restored by a card_size ask."""
     _card_index.pop(conv_id, None)
     _enlarged.pop(conv_id, None)
+    _card_pick.pop(conv_id, None)
 
 
 def _index_card(conv_id: str, card: dict) -> None:
@@ -633,11 +635,14 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     The card index and the enlarged id stay: the app still shows those cards (Mac live run 5, 37a).
     Their title words only feed intents.match_card (fixed code), never a model prompt."""
     cards, enlarged = _card_index.get(conv_id), _enlarged.get(conv_id)
+    pick = _card_pick.get(conv_id)  # within its 30 s, "Hey Jarvis, the companion one" still picks
     _forget(conv_id)
     if cards is not None:
         _card_index[conv_id] = cards
     if enlarged is not None:
         _enlarged[conv_id] = enlarged
+    if pick is not None:
+        _card_pick[conv_id] = pick
     deps.conversations.drop(conv_id)
     deps.quiet_conversations.drop(conv_id)
     _resets[conv_id] = _resets.get(conv_id, 0) + 1
@@ -1050,7 +1055,7 @@ def _name_words(text: str) -> set[str]:
     return set(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split()) - _NAME_FILLER
 
 
-ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line: no pending pick
+ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line (or a _card_pick reply)
 
 
 def session_prompt(words: str, ref_row: dict | None = None) -> str:
@@ -1132,6 +1137,59 @@ class HostAsk:
 # conv -> HostAsk, under _confirm_lock like the agent tier's _confirm; no watchdog thread:
 # expiry is judged on the owner's next utterance.
 _host_ask: dict[str, HostAsk] = {}
+
+
+@dataclass
+class CardPick:
+    """A "Which one" line the card tier spoke: the owner's next words may pick among its cards."""
+
+    action: str  # "remove" | "enlarge"
+    ids: list[str]  # the ids the line named, in spoken order (max 3)
+    names: list[tuple[str, ...]]  # their title words, same order (intents.card_pick ranks these)
+    deadline: float
+
+
+CARD_PICK_S = 30
+# conv -> CardPick, under _confirm_lock like _host_ask; expiry is judged on the next utterance.
+# Ids only ever come from the conv's _card_index via the line; a reply can only choose among them.
+_card_pick: dict[str, CardPick] = {}
+
+
+def _live_pick(conv_id: str, deps: OverlayDeps) -> CardPick | None:
+    """conv_id's pending card pick, or None; an expired one is dropped here."""
+    with _confirm_lock:
+        pick = _card_pick.get(conv_id)
+        if pick is not None and deps.clock() >= pick.deadline:
+            _card_pick.pop(conv_id, None)
+            pick = None
+    return pick
+
+
+def _drop_pick(conv_id: str) -> None:
+    with _confirm_lock:
+        _card_pick.pop(conv_id, None)
+
+
+def _which_one(conv_id: str, action: str, hit_ids: list[str], cards: list, deps: OverlayDeps) -> str:
+    """The "Which one" line for 2+ matching cards (first 4 title words each, max 3 names); it sets
+    the conv's pick to exactly the ids it names. The caller has checked 2+ distinct names."""
+    ids: list[str] = []
+    names: list[str] = []
+    titles: list[tuple[str, ...]] = []
+    for i in hit_ids:
+        title = next(c for c in reversed(cards) if c[0] == i)[2]
+        name = "the " + " ".join(title[:4])
+        if name in names:  # a same-name twin: the newest (first) one stands for it
+            continue
+        ids.append(i)
+        names.append(name)
+        titles.append(tuple(title))
+        if len(ids) == 3:
+            break
+    with _confirm_lock:
+        _card_pick[conv_id] = CardPick(action, ids, titles, deps.clock() + CARD_PICK_S)
+    which = ", ".join(names[:-1]) + f" or {names[-1]}"
+    return f"Which one: {which}? {ASK_AGAIN}"
 
 
 async def _session_failed(action: str, reason: str, deps: OverlayDeps, said: list[str],
@@ -1927,6 +1985,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     # preflight settles it.
     owner_answer_due = (body.conv_id in _confirm or body.conv_id in _expired
                         or body.conv_id in _agent_busy or body.conv_id in _host_ask)
+    if owner_answer_due:  # the preflight owns this turn: a pick never settles or skips a Confirm
+        _drop_pick(body.conv_id)
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
@@ -1936,6 +1996,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         yield ev
     if handled:
         return
+    # B: the owner's own words (before any continuation join) against only the cards the last
+    # "Which one" line named. A pick reply stays an `answer` kind: the level gate below applies.
+    pick = _live_pick(body.conv_id, deps)
+    pick_hit = intents.card_pick(body.text, pick.names) if pick is not None else None
+    # A reply shaped like a pick ("the purple one") answers the line too: never room noise.
+    pick_reply = pick is not None and (pick_hit is not None or intents.pick_shaped(body.text))
     if body.followup and not owner_answer_due:
         # Room talk is not the owner: a quiet or unsure follow-up is dropped before it can join a
         # pending head or reach a model. A known command ("next change", "clear", "stop") never is.
@@ -1971,7 +2037,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             on_step("conversation", detail="fresh: wake")
     # "who changed this file last" ends on a trailing word but is a complete agent request;
     # so does a bare "next" (the hunk walk).
-    if intents.looks_incomplete(body.text) and intents.parse(body.text, apps={}).kind not in ("agent", "hunk"):
+    if (not pick_reply and intents.looks_incomplete(body.text)
+            and intents.parse(body.text, apps={}).kind not in ("agent", "hunk")):
         # Trails off ("show me the last, uh"): say nothing, the app keeps the mic open.
         _pending[body.conv_id] = (body.text, deps.clock())
         if on_step:
@@ -1979,7 +2046,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         metrics["total_s"] = round(deps.clock() - start, 3)
         yield {"type": "done", "metrics": metrics, "error": None}
         return
-    if body.followup and not joined and not owner_answer_due:
+    if body.followup and not joined and not owner_answer_due and not pick_reply:
         words = intents.noise_words(body.text)
         if words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
                                                body.conv_id, None).kind == "answer":
@@ -1996,6 +2063,17 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         intent = intents.parse(body.text, apps=apps, workspace_names=ws_names)
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
+        pick_ids: list[str] | None = None  # set: this turn answers the conv's "Which one" line
+        if pick is not None:
+            _drop_pick(body.conv_id)  # any reply settles it (an enlarge "both" puts it back)
+            if intent.kind == "answer":
+                if pick_hit is not None:
+                    pick_ids = [pick.ids[i] for i in pick_hit]
+                elif intents.pick_shaped(raw_text):
+                    pick_ids = []  # names no card the line offered: no_card, never the model
+                if pick_ids is not None:
+                    intent = (intents.Intent("card_remove", "pick", "") if pick.action == "remove"
+                              else intents.Intent("card_size", "max", ""))
         # A1: a remove hidden behind small talk ("Sure. Take the diagram card off") re-parses raw
         # speech; it only becomes card_remove when a card this conv already holds matches.
         if intent.kind == "answer" and not joined:
@@ -2111,9 +2189,34 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             # C2: fixed code over the cards this conv already holds (the _card_index), never the model.
             card_id: str | None = None
             how = "none"
-            hit = (intents.match_card(intent.sub, list(_card_index.get(body.conv_id, ())))
-                   if intent.arg == "max" else None)
-            if hit is not None:
+            cards = list(_card_index.get(body.conv_id, ()))
+            refused = ""
+            hit = None
+            if pick_ids is not None:  # a reply to an enlarge "Which one": only the ids it named
+                if len(pick_ids) > 1:
+                    refused = "both"
+                elif pick_ids and any(c[0] == pick_ids[0] for c in cards):
+                    hit = (pick_ids[0], "pick")
+            elif intent.arg == "max":
+                hit = intents.match_card(intent.sub, cards)
+                if hit is not None and hit[1] == "title":  # an equal title tie between names: ask
+                    tie = intents.card_matches(intent.sub, cards)
+                    if tie is not None and len({next(c for c in reversed(cards) if c[0] == i)[2][:4]
+                                                for i in tie[1][:3]}) > 1:
+                        hit, refused = None, "ambiguous"
+            if refused == "both":
+                with _confirm_lock:
+                    _card_pick[body.conv_id] = pick  # still open: the owner names one of them
+                async for ev in _line("one_at_a_time", deps):
+                    yield ev
+                said.append(acks.PHRASES["one_at_a_time"])
+            elif refused:
+                line = _which_one(body.conv_id, "enlarge", tie[1][:3], cards, deps)
+                _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
+                async for ev in _speak(line, deps):
+                    yield ev
+                said.append(line)
+            elif hit is not None:
                 card_id, how = hit
                 _enlarged[body.conv_id] = card_id
                 yield {"type": "card_size", "id": card_id, "size": "max"}
@@ -2131,7 +2234,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 async for ev in _line("restored", deps):
                     yield ev
                 said.append(acks.PHRASES["restored"])
-            if on_step:
+            if on_step and refused:
+                on_step("card_size", detail=f"refused reason={refused}")
+            elif on_step:
                 on_step("card_size", action=intent.arg, card=card_id, match=how)
 
         elif intent.kind == "card_remove":
@@ -2161,12 +2266,15 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append(acks.PHRASES.get("not_confirmed", ""))
             else:
                 cards = list(_card_index.get(body.conv_id, ()))
-                if intent.arg == "pointer":
+                if pick_ids is not None:  # B: only ids the "Which one" line named, each still held
+                    held = {c[0] for c in cards}
+                    hit = ("pick", pick_ids) if pick_ids and all(i in held for i in pick_ids) else None
+                elif intent.arg == "pointer":
                     hit = ("newest", [cards[-1][0]]) if cards else None
                 else:
                     hit = intents.card_matches(intent.sub, cards)
                 names: list[str] = []
-                if hit is not None and len(hit[1]) > 1:
+                if hit is not None and len(hit[1]) > 1 and pick_ids is None:
                     names = list(dict.fromkeys("the " + " ".join(
                         next(c for c in reversed(cards) if c[0] == i)[2][:4]) for i in hit[1][:3]))
                     # Mac live run 1 (30, 33): the index outlives the screen (idle clear), so an
@@ -2177,26 +2285,29 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         hit = (hit[0], [enlarged])
                     elif len(names) == 1:
                         hit = (hit[0], hit[1][:1])
-                card_id = hit[1][0] if hit is not None and len(hit[1]) == 1 else None
-                if card_id is not None:
-                    assert card_id != _CONFIRM_CARD_ID  # a remove never drops the Confirm card
-                    drop = _drop_saved_cards(body.conv_id, [card_id])
-                    if _enlarged.get(body.conv_id) == card_id:
+                drop_ids = (hit[1] if hit is not None and (len(hit[1]) == 1 or pick_ids is not None)
+                            else [])
+                if drop_ids:
+                    assert _CONFIRM_CARD_ID not in drop_ids  # a remove never drops the Confirm card
+                    drop = _drop_saved_cards(body.conv_id, drop_ids)
+                    if _enlarged.get(body.conv_id) in drop_ids:
                         _enlarged.pop(body.conv_id, None)
-                    if card_id == "gd-list":  # its change list is the conv's cursor: gone with it
+                    if "gd-list" in drop_ids:  # its change list is the conv's cursor: gone with it
                         nav = _hunks.pop(body.conv_id, None)
                         if nav is not None and nav.boxes:
                             yield _lines_event(str(nav.repo / nav.rel), [])
                     if drop is not None:
                         yield drop
-                    async for ev in _line("removed", deps):
+                    key = "removed_both" if len(drop_ids) == 2 else "removed"
+                    async for ev in _line(key, deps):
                         yield ev
-                    said.append(acks.PHRASES["removed"])
-                    if on_step:
-                        on_step("card_remove", card=card_id, match=hit[0])
-                elif hit is not None:  # two or more matched: name them, remove nothing
-                    which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
-                    line = f"Which one: {which}? {ASK_AGAIN}"
+                    said.append(acks.PHRASES[key])
+                    if on_step and len(drop_ids) == 1:
+                        on_step("card_remove", card=drop_ids[0], match=hit[0])
+                    elif on_step:
+                        on_step("card_remove", cards=len(drop_ids), match=hit[0])
+                elif hit is not None:  # two or more names matched: name them, remove nothing
+                    line = _which_one(body.conv_id, "remove", hit[1][:3], cards, deps)
                     _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
                     async for ev in _speak(line, deps):
                         yield ev

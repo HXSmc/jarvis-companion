@@ -229,8 +229,15 @@ _CARD_RESTORE_RE = re.compile(_WRAP_LEAD + r"(?:make (?:it|that) smaller|shrink 
                               r"|minimi[sz]e (?:it|that))" + _WRAP_TRAIL)
 _CARD_TARGET_LEAD_RE = re.compile(r"^(?:the|that|this|my) ")
 # Remove ONE card ("close the phone diagram"); fixed code, never a model. Whole utterance.
-_CARD_REMOVE_RE = re.compile(r"(?:(?:remove|close|dismiss|get rid of|take away|take down|lose)"
+# "clear" joins for one NAMED card only (the stop set below refuses its pointer and
+# whole-overlay forms); _CLEAR_RE still wins first in the fast path.
+_CARD_REMOVE_RE = re.compile(r"(?:(?:remove|close|dismiss|get rid of|take away|take down|lose|clear)"
                              r" (?P<t1>.+)|take (?P<t2>.+) (?:away|down))")
+# A trailing overlay/screen place is politeness, not part of the name: cut before the
+# blocked-word check ("from the overlay" would otherwise block the whole ask).
+_CARD_PLACE_RE = re.compile(r"[ ](?:from|off|on) (?:the|my) (?:overlay|screen)$")
+# "clear" never names one card with these alone: the whole-overlay and pointer forms.
+_CLEAR_STOP = frozenset({"overlay", "screen", "last", "newest"})
 _CARD_REMOVE_POINTERS = frozenset({"that", "this", "it", "that one", "this one", "that card",
                                     "this card", "the card", "the last card",
                                     "the newest card", "the last one"})
@@ -249,6 +256,25 @@ _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anythi
                           r"|session status"
                           r"|(?P<itref>what is it doing|how is it going|what's it doing))"
                           + _WRAP_TRAIL)
+# jfollow6 D: a wider net of read-only sessions questions/asks ("what's running on my
+# companion"); matched after session/memory/workspace, before the hide/clear verbs, so
+# their phrases keep their kinds. Whole utterance, commas off.
+_COMPANION = r"(?:(?:\w+(?:'s|s')? )?companion|mini ?pc)"
+_SESSIONS_TOPIC_RE = re.compile(
+    r"(?:what's|whats|what|how's|hows|how|which|are|is|any|show|list|tell me|give me|check)"
+    r"[\w' ]{0,16}?(?:my|the|our) sessions"
+    r"(?: doing| going| running| open| today| right now| now| ok| okay)?"
+    r"(?: on (?:my|the|our) " + _COMPANION + r")?"
+    r"|(?:what's|whats|what|how's|hows|how|which|are|is|any)? ?sessions? (?:are |is )?"
+    r"(?:running|going|open|on (?:my|the|our) " + _COMPANION + r")"
+    r"|what(?:'s| is)? running on (?:my|the|our) " + _COMPANION +
+    r"|status of (?:my|the|our) sessions")
+# jfollow6 C1: "can you remove a single card?" is a how-to question, not a remove.
+_CARD_HELP_RE = re.compile(
+    r"(?:can you|could you|can't you|cannot you|can you not|could you not|how do i|how can i"
+    r"|is there a way to|are you able to) (?:not )?"
+    r"(?:remove|close|dismiss|get rid of|clear) (?:a|one|a single|single|just one) card"
+    r"(?: from the overlay| from the screen| for me| please)?")
 
 # Owner asks over the deterministic session/memory/workspace stores; matched on the
 # cleaned transcript (original case kept for the extracted words), never a model.
@@ -333,6 +359,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
     if is_stop(text):
         return Intent("stop")
+    # First after stop: "can you remove one card" is a how-to question, not a remove.
+    if _CARD_HELP_RE.fullmatch(_clean(text).lower().replace(",", "")):
+        return Intent("card_help")
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)
@@ -353,6 +382,8 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     # An installed app or a site wins over a saved name sharing a word ("open notes").
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
+    if _form_hit(_SESSIONS_TOPIC_RE, low.replace(",", "")):
+        return Intent("sessions", "", "")
     # Hide first: "get rid of it for now" is temporary, not the final clear.
     for rx, kind in ((_HIDE_RE, "hide"), (_CLEAR_RE, "clear"), (_SHOW_RE, "show"),
                      (_ASIDE_RE, "aside"), (_RESTORE_RE, "restore")):
@@ -598,8 +629,15 @@ def card_remove_request(text: str) -> CardRemoveAsk | None:
         if not m:
             continue
         target = (m["t1"] or m["t2"] or "").strip()
+        clear_verb = form.startswith("clear ")
+        # A trailing place is politeness, not part of the name: cut BEFORE the blocked check.
+        cut_place = _CARD_PLACE_RE.sub("", target).strip()
+        if cut_place:
+            target = cut_place
         card = "card" in target.split() or any(w in KIND_WORDS for w in target.split())
         if target in _CARD_REMOVE_POINTERS:
+            if clear_verb:  # "clear that" never one-card-removes, whatever calls this
+                return None
             return CardRemoveAsk(target, True, card)
         if target.startswith(("on ", "upon ")) or set(target.split()) & _CARD_REMOVE_BLOCKED:
             return None
@@ -612,6 +650,9 @@ def card_remove_request(text: str) -> CardRemoveAsk | None:
         target = _CARD_TARGET_LEAD_RE.sub("", cut)
         if target.endswith(" card"):
             target = target[:-5]
+        if clear_verb and not (set(target.split()) - _CARD_FILLERS
+                               - _CARD_REMOVE_POINTERS - _CLEAR_STOP):
+            return None  # "clear the overlay/screen/last card": not a one-card name
         return CardRemoveAsk(target.strip(), False, card)
     return None
 
@@ -736,6 +777,28 @@ _CARD_FILLERS = frozenset({"the", "a", "an", "that", "this", "these", "those", "
                            "card", "please", "it"})
 
 
+def _ranked_title(names: list[str], kind: set[str],
+                  hits: list[tuple[str, str, tuple[str, ...]]]) \
+        -> list[tuple[str, str, tuple[str, ...]]]:
+    """The best tier of title hits, newest-first order kept: lowest (suffix_hits,
+    extra_words). suffix_hits = name words matching no title word exactly; extra_words =
+    title words (minus fillers) no name covers (equals a name word, ends with a 4+ letter
+    name word, or equals a spoken kind word). An exact short title beats a longer one."""
+    best: list[tuple[str, str, tuple[str, ...]]] = []
+    best_key: tuple[int, int] | None = None
+    for c in hits:
+        suffix_hits = sum(1 for w in names if w not in c[2])
+        extras = sum(1 for t in c[2]
+                     if t not in _CARD_FILLERS and t not in names and t not in kind
+                     and not any(len(w) >= 4 and t.endswith(w) for w in names))
+        key = (suffix_hits, extras)
+        if best_key is None or key < best_key:
+            best_key, best = key, [c]
+        elif key == best_key:
+            best.append(c)
+    return best
+
+
 def match_card(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) -> tuple[str, str] | None:
     """(id, how) for a spoken target against (id, type, title_words) cards, oldest first,
     searched newest first; None = no card answers to it."""
@@ -758,7 +821,7 @@ def match_card(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) -> tu
         typed = [c for c in hits if c[1] in kind]
         if typed:
             hits = typed
-    return (hits[0][0], "title") if hits else None
+    return (_ranked_title(names, kind, hits)[0][0], "title") if hits else None
 
 
 def card_matches(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) \
@@ -796,7 +859,105 @@ def card_matches(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) \
         typed = [c for c in hits if c[1] in kind]
         if typed:
             hits = typed
-    return ("title", [c[0] for c in hits]) if hits else None
+    return ("title", [c[0] for c in _ranked_title(names, kind, hits)]) if hits else None
+
+
+# --- jfollow6: pure helpers for the overlay service's pick/claim/name flows (part B/C) ---
+
+_PICK_TAIL_RE = re.compile(r"(?:[\s,]+(?:please|sir|thanks|jarvis))+$")
+_PICK_VERB_RE = re.compile(r"^(?:remove|close|dismiss|clear|enlarge|maximi[sz]e|expand"
+                           r"|get rid of) ")
+_PICK_ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "last": -1}
+_PICK_NUMBERS = {"one": 0, "two": 1, "three": 2}
+_PICK_ALL = frozenset({"both", "both of them", "all", "all of them", "all three",
+                       "all of those"})
+
+
+def _pick_text(text: str) -> str:
+    """A pick reply normalized: cleaned, lower case, commas/lead-ins/tails/verb off."""
+    t = strip_lead(_clean(text).lower().replace(",", ""))
+    t = _PICK_TAIL_RE.sub("", t).strip() or t
+    return _PICK_VERB_RE.sub("", t, count=1).strip()
+
+
+def pick_shaped(text: str) -> bool:
+    """True when the reply is shaped like a pick answer ("the second one", "both")."""
+    t = _pick_text(text)
+    return t in _PICK_ALL or t.rsplit(" ", 1)[-1] in {
+        "one", "card", "cards", "first", "second", "third", "fourth", "last"}
+
+
+def card_pick(text: str, names: list[tuple[str, ...]]) -> list[int] | None:
+    """Indexes into `names` a "Which one" reply picks, or None. Ordinals and both/all
+    first; then a name reference, kept only when the ranking leaves exactly one."""
+    t = _pick_text(text)
+    if t in _PICK_ALL:
+        return list(range(len(names)))
+    words = t.split()
+    if words and words[0] == "the":
+        words = words[1:]
+    if words and words[-1] in ("one", "card"):
+        words = words[:-1]
+    if len(words) == 2 and words[0] == "number":
+        i = _PICK_NUMBERS.get(words[1], len(names))
+        return [i] if 0 <= i < len(names) else None
+    if len(words) == 1 and words[0] in _PICK_ORDINALS:
+        i = _PICK_ORDINALS[words[0]]
+        i = i if i >= 0 else len(names) + i
+        return [i] if 0 <= i < len(names) else None
+    if not words:
+        return None
+    m = card_matches(t, [(str(i), "", n) for i, n in enumerate(names)])
+    if m and m[0] == "title" and len(m[1]) == 1:
+        return [int(m[1][0])]
+    return None
+
+
+_CLAIM_PAST = r"cleared|removed|closed|hid|hidden|dismissed|enlarged|shrank|shrunk|taken away|got rid"
+_CLAIM_BASE = r"clear|remove|close|hide|dismiss|enlarge|shrink|take away|get rid of"
+_CLAIM_ING = r"clearing|removing|closing|hiding|dismissing|enlarging|shrinking|taking away|getting rid"
+_CLAIM_GONE = r"gone|removed|cleared|closed|hidden|dismissed"
+_CLAIM_RE = re.compile(
+    r"\b(?:i've|i have|i)\s+(?P<v1>" + _CLAIM_PAST + r")"
+    r"|\b(?:i'll|i will|(?:i'm|i am) going to)\s+(?P<v2>" + _CLAIM_BASE + r")"
+    r"|\b(?:i'm|i am)\s+(?P<v3>" + _CLAIM_ING + r")"
+    r"|(?:^|,\s*)(?P<v4>" + _CLAIM_ING + r")"
+    r"|\b(?P<v5>is|are|has been|have been)\s+(?:" + _CLAIM_GONE + r")"
+    r"|\bdone\b[^.!?]*\b(?P<v6>is|are|has been|have been)\s+(?:" + _CLAIM_GONE + r")",
+    re.I)  # "I've" arrives capitalized
+_CLAIM_SUBJECT_RE = re.compile(r"\b(?:card|cards|overlay)\b", re.I)
+_CLAIM_NEG_RE = re.compile(r"\b(?:can't|cannot|won't|don't|didn't|not)\s+$", re.I)
+
+
+def claims_overlay_change(line: str) -> bool:
+    """True when a model line claims an overlay change ("Clearing the cards"): per
+    sentence, a card/overlay word plus a claim form; a negator before the verb isn't."""
+    for sent in re.split(r"[.!?]", line.replace("’", "'")):
+        if not _CLAIM_SUBJECT_RE.search(sent):
+            continue
+        for m in _CLAIM_RE.finditer(sent):
+            verb_at = next(m.start(g) for g in ("v1", "v2", "v3", "v4", "v5", "v6")
+                           if m.group(g) is not None)
+            if not _CLAIM_NEG_RE.search(sent[:verb_at]):
+                return True
+    return False
+
+
+# "close the overlay" names nothing: these never carry a one-card name.
+_CARD_NAME_STOP = frozenset({"overlay", "screen", "these", "those", "them", "everything",
+                             "all", "cards"})
+
+
+def names_one_card(text: str) -> bool:
+    """True when an ask names exactly one card to act on (Design C3)."""
+    ask = first_form(text, card_remove_request)
+    if ask and not ask.pointer:
+        left = [w for w in card_words(ask.target)
+                if w not in _CARD_FILLERS and w not in KIND_WORDS and w not in _CARD_NAME_STOP]
+        if left:
+            return True
+    toks = card_words(_clean(text).lower())
+    return "card" in toks and not any(w in toks for w in ("cards", "everything", "all"))
 
 
 def _answer(text: str) -> str:
