@@ -473,3 +473,27 @@ def test_mac_status_reports_focus_lock(gateway_server, fresh_rate_limit):
             assert resp.json()["focus_lock"] is True, resp.text
 
     asyncio.run(run())
+
+
+def test_key_events_accept_chars_and_every_key_maps_on_mac_and_windows():
+    """Letters/digits/punctuation are valid keys (cmd+L, cmd+V, cmd+A) and
+    every _Key literal has a Mac keycode and a Windows VK."""
+    import ast
+    import typing
+
+    for key in ("l", "v", "a", "5", "\\", "/"):
+        screen.ScreenEvent(type="key", key=key, mods=["cmd"])
+    for bad in ("ab", "A", "é"):
+        with pytest.raises(ValueError):
+            screen.ScreenEvent(type="key", key=bad)
+
+    keys = set(typing.get_args(screen._Key))
+    src = (Path(__file__).resolve().parent.parent / "mac/screen/driver.py").read_text()
+    node = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "KEYCODES")
+    mac_codes = ast.literal_eval(node.value)
+    assert keys == set(mac_codes), keys ^ set(mac_codes)
+    assert len(set(mac_codes.values())) == len(mac_codes)  # no duplicate keycodes
+
+    from windows.agent import commands
+    assert keys == set(commands.VK), keys ^ set(commands.VK)

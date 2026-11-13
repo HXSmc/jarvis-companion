@@ -246,6 +246,88 @@ def test_shared_token_question_times_out_gracefully(
     release.set()
 
 
+def test_phone_mention_of_mac_or_pc_does_not_launch_screen(
+    ios_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the owner's bug: the phone must not launch the screen
+    just because the text contains "mac"/"pc"/"screen" — only an exact chip
+    payload does. Everything else still reaches the router."""
+    from gateway import central, screen, siri
+
+    launch_calls: list[str] = []
+
+    async def spy_launch(target: str) -> dict:
+        launch_calls.append(target)
+        return {}
+
+    async def spy_route(*args):
+        return {"action": "answered", "reply": "routed"}
+
+    monkeypatch.setattr(screen, "launch_screen", spy_launch)
+    monkeypatch.setattr(central, "route", spy_route)
+
+    for text in ("fix the screen bug on my mac", "screenshot the mini pc"):
+        resp, _ = _post(ios_token, text)
+        assert resp.status_code == 200, text
+        assert resp.json()["reply"] == "routed", text
+
+    assert launch_calls == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "target", "reply"),
+    [
+        ("Show Mac screen", "mac", "Opening your Mac screen"),
+        ("Show PC screen", "windows", "Opening your PC screen"),
+        ("Show Mini PC screen", "minipc", "Opening your Mini PC screen"),
+    ],
+)
+def test_phone_exact_button_payload_launches_screen(
+    ios_token: str,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+    target: str,
+    reply: str,
+) -> None:
+    from gateway import screen, siri
+
+    launch_calls: list[str] = []
+
+    async def spy_launch(t: str) -> dict:
+        launch_calls.append(t)
+        return {}
+
+    monkeypatch.setattr(screen, "launch_screen", spy_launch)
+
+    resp, _ = _post(ios_token, payload)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"reply": reply}
+    assert launch_calls == [target]
+
+
+def test_shared_token_screen_phrase_still_launches(
+    stubbed_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Siri Shortcut (shared token) keeps today's route() keyword
+    behavior — only the phone (ios_token) gets the exact-payload gate."""
+    from gateway import screen, siri
+
+    launch_calls: list[str] = []
+
+    async def spy_launch(target: str) -> dict:
+        launch_calls.append(target)
+        return {}
+
+    monkeypatch.setattr(screen, "launch_screen", spy_launch)
+
+    resp, _ = _post(stubbed_token, "show my mac screen")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"reply": "Opening your Mac screen"}
+    assert launch_calls == ["mac"]
+
+
 def test_rate_limit_at_20_per_60s(
     ios_token: str, monkeypatch: pytest.MonkeyPatch, fresh_brain_limits: None
 ) -> None:

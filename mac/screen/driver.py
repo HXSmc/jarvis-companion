@@ -161,6 +161,15 @@ KEYCODES = {
     "f10": 109,
     "f11": 103,
     "f12": 111,
+    # US-layout character keys, so cmd+L / cmd+V / cmd+A etc. are possible.
+    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+    "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+    "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37,
+    "j": 38, "k": 40, "n": 45, "m": 46,
+    "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25,
+    "7": 26, "8": 28, "0": 29,
+    "=": 24, "-": 27, "]": 30, "[": 33, "'": 39, ";": 41, "\\": 42,
+    ",": 43, "/": 44, ".": 47, "`": 50,
 }
 
 _FLAG_MASKS = {
@@ -605,12 +614,14 @@ def _type_text(text: str, ev: dict | None = None) -> None:
         buf = ctypes.create_string_buffer(chunk, len(chunk))
         n = len(chunk) // 2
         down = AX.CGEventCreateKeyboardEvent(None, 0, True)
+        AX.CGEventSetFlags(down, 0)  # see _key: never inherit live modifiers
         AX.CGEventKeyboardSetUnicodeString(down, n, buf)
         _guarded_post(ev, down)
         try:
             time.sleep(0.02)
         finally:
             up = AX.CGEventCreateKeyboardEvent(None, 0, False)
+            AX.CGEventSetFlags(up, 0)
             AX.CGEventKeyboardSetUnicodeString(up, n, buf)
             _post_release(up)
         time.sleep(0.02)
@@ -621,11 +632,14 @@ def _key(key: str, mods: list[str], ev: dict | None = None) -> None:
     for m in mods:
         mask |= _FLAG_MASKS[m]
     down = AX.CGEventCreateKeyboardEvent(None, KEYCODES[key], True)
-    if mask:
-        AX.CGEventSetFlags(down, mask)
+    # A NULL-source event copies the live HID modifier state; a stuck
+    # Command there turned every typed char into Cmd+char (nothing typed).
+    AX.CGEventSetFlags(down, mask)
     _guarded_post(ev, down)
     try:
         time.sleep(0.02)
     finally:
-        _post_release(AX.CGEventCreateKeyboardEvent(None, KEYCODES[key], False))
+        up = AX.CGEventCreateKeyboardEvent(None, KEYCODES[key], False)
+        AX.CGEventSetFlags(up, mask)
+        _post_release(up)
     time.sleep(0.02)

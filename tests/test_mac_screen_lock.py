@@ -507,8 +507,10 @@ def _golden() -> list:
     s = ("scroll", 1, 2, 5, -3, 0)
     out += [("new",) + s, ("post",) + s, ("release",) + s]
     hi = "hi".encode("utf-16-le")
-    out += key(0, True, [("unicode", 2, hi)]) + key(0, False, [("unicode", 2, hi)])
-    out += key(48, True, [("flags", 0x100000)]) + key(48, False)
+    # Flags are set on every key down AND up (0 for text): a NULL-source event
+    # would otherwise inherit live modifiers (stuck Cmd turned typing into Cmd+char).
+    out += key(0, True, [("flags", 0), ("unicode", 2, hi)]) + key(0, False, [("flags", 0), ("unicode", 2, hi)])
+    out += key(48, True, [("flags", 0x100000)]) + key(48, False, [("flags", 0x100000)])
     return out
 
 
