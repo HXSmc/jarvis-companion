@@ -200,6 +200,53 @@ final class TurnEndpointerTests: XCTestCase {
                                               lastVoiceAt: t0, now: t0.addingTimeInterval(1.0)), nil)
     }
 
+    /// Mac run r3, F8 (53 tries 2-3, 43 try 1): `rule hold: text quiet 1.52 s, voice quiet 0.06 s,
+    /// words 4` / `0.01 s, words 3`, yet the transcript held 11 words. The note counts the last
+    /// PARTIAL; the transcript is the final flush. SpeechAnalyzer's partials stalled at a short
+    /// complete-looking prefix ("Hey Jarvis, can you tell me") for 1.5 s while the owner went on
+    /// talking, and the hold fired on text silence with voice still heard. The hold now waits for
+    /// the voice to go quiet too.
+    func testHoldNeverCutsWhileTheOwnerIsStillHeard() {
+        let t0 = Date()
+        // The stalled prefixes (4 and 3 words after the wake) and the full transcripts, as logged.
+        for (text, voiceQuiet) in [("Hey Jarvis, can you tell me", 0.06),
+                                   ("Start a new session", 0.01),
+                                   ("Start a session", 0.01),
+                                   ("can you tell me, when you have a moment, what the weather", 0.06),
+                                   ("Start a new session and fix why the session has been", 0.01)] {
+            XCTAssertNil(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.52 - voiceQuiet),
+                                                now: t0.addingTimeInterval(1.52)), text)
+            // Talking on with stalled partials until the stuck cap: still not the hold.
+            XCTAssertNil(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(3.7),
+                                                now: t0.addingTimeInterval(3.9)), text)
+        }
+        // The 20-word request through its comma pauses (run 2): every partial stays open.
+        let words = "Hey Jarvis, can you tell me, when you have a moment, what the weather will be like in Riyadh tomorrow afternoon and evening"
+            .split(separator: " ").map(String.init)
+        for n in 1..<words.count {
+            let partial = words[..<n].joined(separator: " ")
+            XCTAssertNil(TurnEndpointer.endRule(text: partial, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.4),
+                                                now: t0.addingTimeInterval(1.6)), partial)
+        }
+        // The cut-off half stays open through a 2 s pause, then ends as trailing off.
+        let cutOff = "Hey Jarvis, can you show me the last"
+        XCTAssertNil(TurnEndpointer.endRule(text: cutOff, lastTextAt: t0, lastVoiceAt: t0,
+                                            now: t0.addingTimeInterval(2.0)))
+        XCTAssertEqual(TurnEndpointer.endRule(text: cutOff, lastTextAt: t0, lastVoiceAt: t0,
+                                              now: t0.addingTimeInterval(2.75)), "extended")
+        // Short commands still end fast on real quiet, and by the hold over a gappy room voice.
+        for cmd in ["Next change", "Hide", "Stop", "Enlarge the picture", "Hey Jarvis, previous change"] {
+            XCTAssertEqual(TurnEndpointer.endRule(text: cmd, lastTextAt: t0, lastVoiceAt: t0,
+                                                  now: t0.addingTimeInterval(0.75)), "fast", cmd)
+            XCTAssertEqual(TurnEndpointer.endRule(text: cmd, lastTextAt: t0,
+                                                  lastVoiceAt: t0.addingTimeInterval(1.0),
+                                                  now: t0.addingTimeInterval(1.55)), "hold", cmd)
+        }
+    }
+
     /// Mac run r2: 100 ms mic buffers of one talker over a reverberant floor at a third of the
     /// speech level; the softer syllables (0.05) were not "voiced", so gaps over 0.7 s opened
     /// inside a sentence. Near the recent peak they count; the quiet room still does not.
