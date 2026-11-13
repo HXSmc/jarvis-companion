@@ -169,6 +169,51 @@ final class TurnEndpointerTests: XCTestCase {
         }
     }
 
+    /// Mac run r2, criterion 53 (0 of 3) and 41/44/47/48: requests were cut after ~8 words at
+    /// the owner's pause ("Can you tell me when you have a moment", "...in a file called") while
+    /// the owner went on talking. A long complete-looking partial no longer ends on 1.5 s of text
+    /// silence while voice is still heard; it still ends on stuck text or on real quiet.
+    func testLongRequestIsNotCutWhileTheOwnerStillTalks() {
+        let t0 = Date()
+        for text in ["Hey Jarvis, can you tell me, when you have a moment.",
+                     "Can you tell me when you have a moment",
+                     "Remember that when I say notes, I mean",
+                     "Save these pages and overlays as our best"] {
+            XCTAssertNil(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                lastVoiceAt: t0.addingTimeInterval(1.5),
+                                                now: t0.addingTimeInterval(1.6)), text)
+            XCTAssertEqual(TurnEndpointer.endRule(text: text, lastTextAt: t0,
+                                                  lastVoiceAt: t0.addingTimeInterval(4),
+                                                  now: t0.addingTimeInterval(4)), "stuck", text)
+        }
+        // Real quiet after the last word still ends it fast.
+        XCTAssertEqual(TurnEndpointer.endRule(text: "Can you tell me when you have a moment", lastTextAt: t0,
+                                              lastVoiceAt: t0, now: t0.addingTimeInterval(0.75)), "fast")
+        // A short command still ends on text silence over room voice.
+        XCTAssertEqual(TurnEndpointer.endRule(text: "Hey Jarvis, highlight the changes.", lastTextAt: t0,
+                                              lastVoiceAt: t0.addingTimeInterval(1.6),
+                                              now: t0.addingTimeInterval(1.55)), "hold")
+        // "called" / "named" trail off: the name is still coming.
+        XCTAssertTrue(TurnEndpointer.looksIncomplete("Start a new session and say hello in a file called"))
+        XCTAssertTrue(TurnEndpointer.looksIncomplete("stop the session named"))
+        XCTAssertEqual(TurnEndpointer.endRule(text: "say hello in a file called", lastTextAt: t0,
+                                              lastVoiceAt: t0, now: t0.addingTimeInterval(1.0)), nil)
+    }
+
+    /// Mac run r2: 100 ms mic buffers of one talker over a reverberant floor at a third of the
+    /// speech level; the softer syllables (0.05) were not "voiced", so gaps over 0.7 s opened
+    /// inside a sentence. Near the recent peak they count; the quiet room still does not.
+    func testSofterSyllablesOfTheSameTalkerAreVoiced() {
+        var vad = VoiceActivity()
+        for _ in 0..<20 { _ = vad.isVoiced(rms: 0.03) }  // reverberant room between words
+        XCTAssertTrue(vad.isVoiced(rms: 0.1))             // a loud syllable
+        XCTAssertTrue(vad.isVoiced(rms: 0.05))            // a softer one, 0.5 of the peak
+        XCTAssertFalse(vad.isVoiced(rms: 0.032))          // the room again: under the floor margin
+        var quiet = VoiceActivity()
+        for _ in 0..<100 { XCTAssertFalse(quiet.isVoiced(rms: 0.002)) }
+        XCTAssertFalse(quiet.isVoiced(rms: 0.007))        // no peak: the floor margin rules
+    }
+
     func testVoiceActivityTracksTheNoiseFloor() {
         var vad = VoiceActivity()
         for _ in 0..<100 { XCTAssertFalse(vad.isVoiced(rms: 0.002)) }  // quiet room

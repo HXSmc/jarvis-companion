@@ -262,12 +262,15 @@ final class SpeechInput {
                 turn.endNote = " (room words after the request dropped)"
                 return .endOfSpeech
             } else if let end = turn.endOfSpeech,
-                      TurnEndpointer.shouldEnd(text: turn.lastText, lastTextAt: end,
-                                               lastVoiceAt: tap.lastVoicedAt, now: now) {
+                      let rule = TurnEndpointer.endRule(text: turn.lastText, lastTextAt: end,
+                                                        lastVoiceAt: tap.lastVoicedAt, now: now) {
                 // Not on partial-text silence alone: partials lag the audio and people pause
                 // after "the last, uh" (owner, 02:18). Voiced audio and a trailing word hold it open.
-                let wait = TurnEndpointer.silence(after: turn.lastText)
-                turn.endNote = wait > TurnEndpointer.fast ? " (trailed off: waited \(wait) s)" : ""
+                // The note names the rule and the gaps (numbers only), so a cut request says why.
+                let voiceGap = tap.lastVoicedAt.map { String(format: "%.2f", now.timeIntervalSince($0)) } ?? "none"
+                let words = TurnEndpointer.stripWake(turn.lastText).split(separator: " ").count
+                let textGap = String(format: "%.2f", now.timeIntervalSince(end))
+                turn.endNote = " (rule \(rule): text quiet \(textGap) s, voice quiet \(voiceGap) s, words \(words))"
                 return .endOfSpeech
             }
             try? await Task.sleep(nanoseconds: 50_000_000)

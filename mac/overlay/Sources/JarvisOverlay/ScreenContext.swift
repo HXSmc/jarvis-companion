@@ -112,8 +112,9 @@ enum ScreenContext {
         return out
     }
 
-    /// Saved-workspace pages (C): each Safari/Chrome window's URL (kAXDocumentAttribute) and
-    /// title, read through AX the way walkFrontApp does (no AppleScript, no new permission).
+    /// Saved-workspace pages (C): each Safari/Chrome window's shown page (its AXDocument, else
+    /// the AXURL of its web area) and title, read through AX the way walkFrontApp does (no
+    /// AppleScript, no new permission). One page per window: the front tab.
     /// Main actor: NSWorkspace; the per-app messaging timeout keeps a hung browser short.
     @MainActor
     static func browserPages() -> [(url: String, title: String)] {
@@ -125,10 +126,14 @@ enum ScreenContext {
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(ax, 0.25)
             for window in axElements(ax, kAXWindowsAttribute) {
-                guard let doc = axString(window, kAXDocumentAttribute),
-                      let url = URL(string: doc), Workspace.openable(url)
+                guard let url = Workspace.pageURL(
+                    window: window,
+                    role: { axString($0, kAXRoleAttribute) },
+                    children: { axElements($0, kAXChildrenAttribute) },
+                    document: { axValue($0, kAXDocumentAttribute) },
+                    webURL: { axValue($0, kAXURLAttribute) })
                 else { continue }
-                out.append((url: doc, title: axString(window, kAXTitleAttribute) ?? ""))
+                out.append((url: url.absoluteString, title: axString(window, kAXTitleAttribute) ?? ""))
                 if out.count == Workspace.maxPages { return out }
             }
         }
@@ -367,6 +372,13 @@ enum ScreenContext {
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
               let list = value as? [AXUIElement] else { return [] }
         return list
+    }
+
+    private static func axValue(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
+        else { return nil }
+        return value
     }
 
     private static func axString(_ element: AXUIElement, _ attribute: String) -> String? {

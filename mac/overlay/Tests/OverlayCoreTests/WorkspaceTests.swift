@@ -37,4 +37,34 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual((pages[0]["title"] as! String).count, 120)
         XCTAssertTrue(pages.allSatisfy { ($0["url"] as! String).hasPrefix("https://") })
     }
+
+    /// Mac run r2, F5: a save with example.org as the front Safari tab stored pages=0. Safari's
+    /// window gives no AXDocument string; the URL sits on the web area, as a URL value.
+    func testPageURLFindsTheWebAreaOfASafariWindow() {
+        final class Node {
+            let role: String, doc: Any?, url: Any?, kids: [Node]
+            init(_ role: String, doc: Any? = nil, url: Any? = nil, _ kids: [Node] = []) {
+                self.role = role; self.doc = doc; self.url = url; self.kids = kids
+            }
+        }
+        func find(_ w: Node) -> URL? {
+            Workspace.pageURL(window: w, role: { $0.role }, children: { $0.kids },
+                              document: { $0.doc }, webURL: { $0.url })
+        }
+        let web = Node("AXWebArea", url: URL(string: "https://example.org/")!)
+        let tabs = (0..<40).map { _ in Node("AXRadioButton") }
+        let safari = Node("AXWindow", [
+            Node("AXToolbar", [Node("AXWebArea", url: URL(string: "https://toolbar.invalid/")!)]),
+            Node("AXSplitGroup", [Node("AXTabGroup", tabs + [Node("AXGroup", [Node("AXGroup", [
+                Node("AXScrollArea", [web])])])])])])
+        XCTAssertEqual(find(safari), URL(string: "https://example.org/"))
+        // A window whose AXDocument is the page string wins at once; a string AXURL parses too.
+        XCTAssertEqual(find(Node("AXWindow", doc: "https://example.com/a", [])), URL(string: "https://example.com/a"))
+        XCTAssertEqual(find(Node("AXWindow", [Node("AXGroup", [Node("AXWebArea", url: "https://example.net/")])])),
+                       URL(string: "https://example.net/"))
+        // Never a non-web page: file and about pages are skipped.
+        XCTAssertNil(find(Node("AXWindow", doc: "file:///etc/passwd",
+                               [Node("AXScrollArea", [Node("AXWebArea", url: URL(string: "about:blank")!)])])))
+        XCTAssertNil(find(Node("AXWindow", [])))
+    }
 }
