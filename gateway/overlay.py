@@ -1643,6 +1643,19 @@ def _confirm_question(summary: str) -> str:
     return f"{summary[:1].upper()}{summary[1:]}. Shall I?"
 
 
+def _spoken_paths(summary: str) -> str:
+    """The spoken form of a Confirm summary: the vault folder reads as "your notes" and the home
+    folder as "home" (Mac run r2, F4: the full vault path was read aloud and logged in the spoke
+    row). The card keeps the exact summary, so what runs is still on screen word for word."""
+    out = summary
+    vault = os.environ.get("OVERLAY_VAULT", "").rstrip("/")
+    for root, name in ((vault, "your notes"), (os.path.realpath(vault) if vault else "", "your notes"),
+                       (str(Path.home()).rstrip("/"), "home")):
+        if len(root) > 1:
+            out = out.replace(root, name)
+    return out
+
+
 async def _ask_host(conv_id: str, kind: str, summary: str, question: str,
                     payload: dict, deps: OverlayDeps) -> AsyncIterator[dict]:
     """Ask the owner in this turn's stream, then show the Confirm card; the next utterance settles."""
@@ -3609,7 +3622,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     with _confirm_lock:
                         _confirm[run.conv_id] = run
                     threading.Thread(target=_confirm_watchdog, args=(run, deps), daemon=True).start()
-                    question = _confirm_question(decision.summary)
+                    question = _confirm_question(_spoken_paths(decision.summary))
                     async for out in _speak(question, deps):
                         yield out
                     said.append(question)
