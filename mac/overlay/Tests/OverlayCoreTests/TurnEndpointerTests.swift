@@ -133,9 +133,13 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertFalse(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
                                                  lastVoiceAt: t0.addingTimeInterval(1.4),
                                                  now: t0.addingTimeInterval(1.4)))
+        // Room voice with a gap (TV between lines): the hold ends it; voice heard right now does not.
         XCTAssertTrue(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
-                                                lastVoiceAt: t0.addingTimeInterval(1.6),
+                                                lastVoiceAt: t0.addingTimeInterval(1.0),
                                                 now: t0.addingTimeInterval(1.55)))
+        XCTAssertFalse(TurnEndpointer.shouldEnd(text: "Highlight the changes.", lastTextAt: t0,
+                                                 lastVoiceAt: t0.addingTimeInterval(1.6),
+                                                 now: t0.addingTimeInterval(1.55)))
         XCTAssertFalse(TurnEndpointer.shouldEnd(text: "show me the last", lastTextAt: t0,
                                                  lastVoiceAt: t0.addingTimeInterval(1.6),
                                                  now: t0.addingTimeInterval(2.0)))
@@ -191,7 +195,7 @@ final class TurnEndpointerTests: XCTestCase {
                                               lastVoiceAt: t0, now: t0.addingTimeInterval(0.75)), "fast")
         // A short command still ends on text silence over room voice.
         XCTAssertEqual(TurnEndpointer.endRule(text: "Hey Jarvis, highlight the changes.", lastTextAt: t0,
-                                              lastVoiceAt: t0.addingTimeInterval(1.6),
+                                              lastVoiceAt: t0.addingTimeInterval(1.0),
                                               now: t0.addingTimeInterval(1.55)), "hold")
         // "called" / "named" trail off: the name is still coming.
         XCTAssertTrue(TurnEndpointer.looksIncomplete("Start a new session and say hello in a file called"))

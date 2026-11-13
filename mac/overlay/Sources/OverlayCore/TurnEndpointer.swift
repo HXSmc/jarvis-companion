@@ -3,8 +3,8 @@ import Foundation
 /// Decides when a spoken turn is over. SpeechAnalyzer partials lag the audio, and people pause
 /// mid-sentence ("show me the last, uh ... debugging session"), so a turn ends only after a
 /// silence with neither new text nor voiced audio, and that silence is longer when the words
-/// so far trail off; a complete-looking sentence ends on text silence alone, room "voice"
-/// (fan, TV) cannot hold it open.
+/// so far trail off; a short complete-looking command ends on text silence once the voice has
+/// paused (room "voice" with gaps cannot hold it open), constant voice ends on stuckText.
 public enum TurnEndpointer {
     /// Complete-looking sentence: end fast.
     public static let fast: TimeInterval = 0.7
@@ -18,6 +18,10 @@ public enum TurnEndpointer {
     /// requests at "Can you tell me when you have a moment" while the owner was still talking.
     /// A longer request with voice still heard ends on 0.7 s of quiet or stuckText instead.
     public static let completeHoldMaxWords = 4
+    /// The hold also needs this much voice quiet: Mac run r3 (F8) partials stalled at "Hey Jarvis,
+    /// can you tell me" for 1.5 s while the owner went on talking (voice quiet 0.01-0.07 s), and the
+    /// hold cut the request. Above a comma pause; a steady fan is unvoiced (VoiceActivity floor).
+    public static let holdVoiceQuiet: TimeInterval = 0.5
     /// A follow-up replay starts this long after the reply drained: the reply's room echo dies.
     public static let echoTail: TimeInterval = 0.15
     /// An unpunctuated partial this long (in words) is mid-request, not a finished sentence.
@@ -90,8 +94,11 @@ public enum TurnEndpointer {
         let mid = midRequest(text)
         let needed = mid ? extended : silence(after: text)
         if now.timeIntervalSince(lastTextAt) >= max(stuckText, needed) { return "stuck" }
-        // A short complete-looking command ends on text silence alone; empty text never does.
-        if !mid, holdsComplete(text), now.timeIntervalSince(lastTextAt) >= completeHold { return "hold" }
+        // A short complete-looking command ends on text silence over gappy room voice; empty text
+        // never does, and never while the voice is still heard (stalled partials, F8).
+        let voiceQuiet = now.timeIntervalSince(lastVoiceAt ?? .distantPast)
+        if !mid, holdsComplete(text), now.timeIntervalSince(lastTextAt) >= completeHold,
+           voiceQuiet >= holdVoiceQuiet { return "hold" }
         let quietSince = max(lastTextAt, lastVoiceAt ?? .distantPast)
         guard now.timeIntervalSince(quietSince) >= needed else { return nil }
         return needed > fast ? "extended" : "fast"
