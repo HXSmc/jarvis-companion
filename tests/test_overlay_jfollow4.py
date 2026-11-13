@@ -252,8 +252,8 @@ def test_session_rate_counts_timed_out_calls(client, monkeypatch, tmp_path):
     seen = _session_env(monkeypatch, tmp_path, post=timeout)
     turn(client, "start a session to fix the failing tests", conv_id="t1")
     events = turn(client, "yes", conv_id="t1")
-    assert acks.PHRASES["session_failed"] in says(events)
-    assert [m for m, _u, _a, _b in seen] == ["POST"]  # the request did leave
+    assert acks.PHRASES["session_unsure"] in says(events)  # sent, no answer: unsure, never failed
+    assert [m for m, _u, _a, _b in seen] == ["POST", "GET"]  # the request left, then the one lookup
     assert len(overlay._session_calls["start"]) == 1
     turn(client, "stop the build runner session", conv_id="t1")
     turn(client, "yes", conv_id="t1")

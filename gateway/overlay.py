@@ -1071,9 +1071,26 @@ def _companion_allowed(method: str, path: str) -> bool:
     return bool(re.fullmatch(r"/central/cards/([A-Za-z0-9-]{1,64})/answer", path))
 
 
-def _companion_call(method: str, path: str, json: dict | None = None) -> tuple[int | None, dict | None]:
-    """One allow-listed call to the companion gateway -> (status, parsed JSON); (None, None) when
-    unreachable. follow_redirects off; the token goes in the Authorization header only."""
+# A start POST can legitimately outlive the old 10 s client timeout and still succeed on the
+# router (live run: "That didn't go through, sir." over a session that had started), so it
+# gets a longer total; connect stays short so a dead gateway is reported at once.
+SESSION_START_TIMEOUT_S = 30
+
+# httpx errors where the request already left this process: the router may still act on it.
+# Everything else (connect refused/timeout, no access) means nothing was sent.
+_SENT_ERRORS = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.WriteError, httpx.ReadError,
+                httpx.RemoteProtocolError, httpx.PoolTimeout)
+
+# Session ids this process already reported as started by voice: the lookup skips them, so one
+# timed-out start is never claimed twice. Written by fixed code only, bounded.
+_voice_started: deque[str] = deque(maxlen=64)
+
+
+def _companion_call(method: str, path: str, json: dict | None = None,
+                    timeout: float = 10.0) -> tuple[int | None, dict | None]:
+    """One allow-listed call to the companion gateway -> (status, parsed JSON); None = not sent
+    (no access, connect error), 0 = sent but no answer (timeout, dropped). follow_redirects off;
+    the token goes in the Authorization header only."""
     if not _companion_allowed(method, path):
         raise ValueError("call not allowed")  # before any request: a bad id is never sent
     access = _sessions_access()
@@ -1081,10 +1098,13 @@ def _companion_call(method: str, path: str, json: dict | None = None) -> tuple[i
         return None, None
     url, token = access
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=False, transport=_sessions_transport) as client:
+        with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
+                          follow_redirects=False, transport=_sessions_transport) as client:
             resp = client.request(method, f"{url}{path}", json=json,
                                   headers={"Authorization": f"Bearer {token}"})
-    except Exception:  # unreachable, TLS, timeout: the message never carries the token
+    except _SENT_ERRORS:  # the request did leave: it may still be running there
+        return 0, None
+    except Exception:  # not sent (unreachable, TLS): the message never carries the token
         return None, None
     try:
         return resp.status_code, (resp.json() if isinstance(resp.json(), dict) else None)
@@ -1119,6 +1139,77 @@ async def _session_failed(action: str, reason: str, deps: OverlayDeps, said: lis
         on_step(f"session_{action}", detail=f"refused reason={reason}")
 
 
+async def _session_unsure(action: str, deps: OverlayDeps, said: list[str],
+                          on_step) -> AsyncIterator[dict]:
+    """The call was sent but no answer came in time: say so, never "failed", never a retry."""
+    async for ev in _line("session_unsure", deps):
+        yield ev
+    said.append(acks.PHRASES["session_unsure"])
+    if on_step:
+        on_step(f"session_{action}", detail="unsure")
+
+
+def _lookup_started(prompt: str) -> tuple[str, str] | None:
+    """A start POST that got no answer: the newest open session whose task text is exactly this
+    prompt. The task text is compared here and never leaves this function."""
+    access = _sessions_access()
+    if access is None or not _companion_allowed("GET", "/central/sessions"):
+        return None
+    url, token = access
+    try:
+        with httpx.Client(timeout=5.0, follow_redirects=False, transport=_sessions_transport) as client:
+            resp = client.get(f"{url}/central/sessions",
+                              headers={"Authorization": f"Bearer {token}"})
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        rows = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    wanted = " ".join(prompt.split())
+    found: tuple[str, str, str] | None = None  # (activity stamp, id, title); newest stamp wins
+    for item in rows[:SESSIONS_SCAN_MAX]:
+        if not isinstance(item, dict):
+            continue
+        if " ".join(str(item.get("task") or "").split()) != wanted:
+            continue
+        sid = str(item.get("session_id") or "")
+        if not _SESSION_ID_RE.fullmatch(sid) or sid in _voice_started:
+            continue
+        if item.get("state") in ("done", "stopped", "failed"):
+            continue
+        at = str(item.get("last_activity_at") or item.get("updated_at") or "")
+        if found is None or at > found[0]:
+            found = (at, sid, " ".join(str(item.get("title") or "").split())[:60])
+    return None if found is None else (found[1], found[2])
+
+
+async def _session_started(conv_id: str, sid: str, raw_title: object, deps: OverlayDeps,
+                           said: list[str]) -> AsyncIterator[dict]:
+    """The start's tail, shared by the direct answer and the lookup: the id joins the
+    voice-started set, the conversation is tainted, the line is spoken, the card shown."""
+    if _SESSION_ID_RE.fullmatch(sid):
+        _voice_started.append(sid)
+    _tainted.add(conv_id)  # the host's title is untrusted text going into _history
+    title = " ".join(str(raw_title or "").split())[:60]
+    line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
+    async for ev in _speak(line, deps):
+        yield ev
+    said.append(line)
+    card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
+                              "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
+    if card:
+        seen = _card_ids.setdefault(conv_id, set())
+        if card["id"] in seen:  # a host id: only a collision renames it
+            card["id"] = "sv-" + uuid.uuid4().hex[:8]
+        seen.add(card["id"])
+        yield {"type": "card", "card": card}
+
+
 async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps,
                                 said: list[str], on_step) -> AsyncIterator[dict]:
     """Yes said: POST /chat with the fixed start body; the prompt was built at ask time."""
@@ -1127,33 +1218,47 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
            "text": session_prompt(str(payload.get("words") or ""), payload.get("ref_row")),
            "new_session": True}
     _session_rate_sent("start", now)  # counted before the call: a timeout may still have reached the router
-    status, out = await asyncio.to_thread(_companion_call, "POST", "/chat", req)
-    if not (isinstance(status, int) and 200 <= status < 300 and isinstance(out, dict)):
-        async for ev in _session_failed("start", "unreachable" if status is None else f"http_{status}",
-                                        deps, said, on_step):
+    call = asyncio.ensure_future(asyncio.to_thread(_companion_call, "POST", "/chat", req,
+                                                   SESSION_START_TIMEOUT_S))
+    async for ev in _say_if_slow(call, "session_waiting", deps, said):
+        yield ev
+    status, out = await call
+    if isinstance(status, int) and 200 <= status < 300 and isinstance(out, dict):
+        new_id = str(out.get("session_id") or "")
+        if _SESSION_ID_RE.fullmatch(new_id):
+            _set_session_ref(body.conv_id, [new_id])
+            if on_step:
+                on_step("session_start", detail=f"confirmed id={new_id}")
+        elif on_step:
+            on_step("session_start", detail="confirmed")
+        async for ev in _session_started(body.conv_id, new_id, out.get("title"), deps, said):
             yield ev
         return
-    new_id = str(out.get("session_id") or "")
-    if _SESSION_ID_RE.fullmatch(new_id):
-        _set_session_ref(body.conv_id, [new_id])
-        if on_step:
-            on_step("session_start", detail=f"confirmed id={new_id}")
-    elif on_step:
-        on_step("session_start", detail="confirmed")
-    _tainted.add(body.conv_id)  # the host's title is untrusted text going into _history
-    title = " ".join(str(out.get("title") or "").split())[:60]
-    line = f"Started {title[:40]} on the mini PC, sir." if title else acks.PHRASES["session_started_it"]
-    async for ev in _speak(line, deps):
+    if status == 0:  # sent, no answer in time: the router may have started it anyway
+        found = await asyncio.to_thread(_lookup_started, req["text"])
+        if found is not None:
+            sid, title = found
+            _set_session_ref(body.conv_id, [sid])
+            if on_step:
+                on_step("session_start", detail=f"confirmed id={sid} via=lookup")
+            async for ev in _session_started(body.conv_id, sid, title, deps, said):
+                yield ev
+            return
+        async for ev in _session_unsure("start", deps, said, on_step):
+            yield ev
+        card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
+                                  "title": "Session start",
+                                  "body": ["Mini PC", "Ask me what my sessions are doing."]})
+        if card:
+            seen = _card_ids.setdefault(body.conv_id, set())
+            if card["id"] in seen:
+                card["id"] = "sv-" + uuid.uuid4().hex[:8]
+            seen.add(card["id"])
+            yield {"type": "card", "card": card}
+        return
+    async for ev in _session_failed("start", "unreachable" if status is None else f"http_{status}",
+                                    deps, said, on_step):
         yield ev
-    said.append(line)
-    card = hud.validate_card({"id": "sv-" + uuid.uuid4().hex[:8], "type": "info",
-                              "title": title or "Session", "body": ["Mini PC", "Started by voice"]})
-    if card:
-        seen = _card_ids.setdefault(body.conv_id, set())
-        if card["id"] in seen:  # a host id: only a collision renames it
-            card["id"] = "sv-" + uuid.uuid4().hex[:8]
-        seen.add(card["id"])
-        yield {"type": "card", "card": card}
 
 
 async def _session_stop_action(payload: dict, body: TurnBody, deps: OverlayDeps,
@@ -1163,6 +1268,10 @@ async def _session_stop_action(payload: dict, body: TurnBody, deps: OverlayDeps,
     sid = str(payload.get("id") or "")
     _session_rate_sent("stop", now)
     status, _out = await asyncio.to_thread(_companion_call, "POST", f"/central/sessions/{sid}/stop")
+    if status == 0:  # sent, no answer: never claimed stopped, never retried
+        async for ev in _session_unsure("stop", deps, said, on_step):
+            yield ev
+        return
     if not (isinstance(status, int) and 200 <= status < 300):
         async for ev in _session_failed("stop", "unreachable" if status is None else f"http_{status}",
                                         deps, said, on_step):
@@ -1223,6 +1332,10 @@ async def _session_answer_action(payload: dict, body: TurnBody, deps: OverlayDep
                                                          "text": (words or answer)[:300]}
     _session_rate_sent("answer", now)
     status, _out = await asyncio.to_thread(_companion_call, "POST", path, req)
+    if status == 0:  # sent, no answer: never claimed sent, never retried
+        async for ev in _session_unsure("answer", deps, said, on_step):
+            yield ev
+        return
     if not (isinstance(status, int) and 200 <= status < 300):
         async for ev in _session_failed("answer", "unreachable" if status is None else f"http_{status}",
                                         deps, said, on_step):
