@@ -840,6 +840,10 @@ def _clock_line(kind: str, now: datetime) -> str:
     return f"It's {now.hour % 12 or 12}:{now:%M %p}."
 
 
+# A markdown code fence line ("```", "```json") a model wraps its JSON lines in (Mac live run 1).
+_FENCE_RE = re.compile(r"`{3,}\s*[\w-]*")
+
+
 def _say(text: str) -> dict:
     return {"type": "say", "text": text}
 
@@ -2161,6 +2165,18 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     hit = ("newest", [cards[-1][0]]) if cards else None
                 else:
                     hit = intents.card_matches(intent.sub, cards)
+                names: list[str] = []
+                if hit is not None and len(hit[1]) > 1:
+                    names = list(dict.fromkeys("the " + " ".join(
+                        next(c for c in reversed(cards) if c[0] == i)[2][:4]) for i in hit[1][:3]))
+                    # Mac live run 1 (30, 33): the index outlives the screen (idle clear), so an
+                    # unseen twin made the shown card ambiguous. The enlarged card is the one the
+                    # owner is looking at; twins with one spoken name can't be told apart: newest.
+                    enlarged = _enlarged.get(body.conv_id)
+                    if enlarged in hit[1]:
+                        hit = (hit[0], [enlarged])
+                    elif len(names) == 1:
+                        hit = (hit[0], hit[1][:1])
                 card_id = hit[1][0] if hit is not None and len(hit[1]) == 1 else None
                 if card_id is not None:
                     assert card_id != _CONFIRM_CARD_ID  # a remove never drops the Confirm card
@@ -2179,8 +2195,6 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     if on_step:
                         on_step("card_remove", card=card_id, match=hit[0])
                 elif hit is not None:  # two or more matched: name them, remove nothing
-                    names = ["the " + " ".join(
-                        next(c for c in reversed(cards) if c[0] == i)[2][:4]) for i in hit[1][:3]]
                     which = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" or {names[-1]}"
                     line = f"Which one: {which}? {ASK_AGAIN}"
                     _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
@@ -2939,6 +2953,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at
         line = line.strip()
         if not line:
+            return
+        if _FENCE_RE.fullmatch(line):  # a code fence around the JSON lines is not speech
             return
         try:
             obj = json.loads(line)
@@ -3905,7 +3921,7 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
                        start: float, on_step=None) -> AsyncIterator[dict]:
     """One line of the agent's final reply: say / card / shape / lines only (no open, no incomplete)."""
     line = line.strip()
-    if not line:
+    if not line or _FENCE_RE.fullmatch(line):
         return
     try:
         obj = json.loads(line)

@@ -657,3 +657,77 @@ def test_spec_lead_in_asks_reach_owner_words(client, monkeypatch, text, subject)
         assert [q for q, _n in find.calls] == [subject]  # never the model's "PWNED" query
     assert not [s for s in _steps("media") if s["detail"].startswith("refused")]
     assert _steps("media")[-1]["detail"].startswith("path=owner_words")
+
+
+# --- Round 3 (Mac live run 1) ---
+
+def test_card_remove_enlarged_card_wins_a_tie(client):
+    """33: an older twin left the screen (idle clear) but stays indexed; the enlarged card is
+    the one on screen, so "close the phone diagram" removes it instead of asking which."""
+    clock = Clock()
+    ids = _show_cards(client, "r3a", "Smartphone architecture", "Smartphone main components")
+    old = ids["Smartphone architecture"]
+    events = turn(client, "enlarge the smartphone architecture", conv_id="r3a")
+    assert says(events) == [acks.PHRASES["enlarged"]]
+    assert overlay._enlarged["r3a"] == old  # the older one, so this is not just "newest"
+    events = turn(client, "close the phone diagram", conv_id="r3a")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [old]}]
+    assert (_steps("card_remove")[-1]["card"], _steps("card_remove")[-1]["match"]) == (old, "title")
+    assert "r3a" not in overlay._enlarged
+
+
+def test_card_remove_same_name_twins_take_newest(client):
+    """30 first try: "Which one: the dog or the dog?" can't be answered; twins whose spoken
+    names are the same go newest first. Different names still ask (criterion 15)."""
+    clock = Clock()
+    first = _show_cards(client, "r3b", "Dog")["Dog"]
+    second = _show_cards(client, "r3b", "Dog")["Dog"]
+    assert first != second
+    events = turn(client, "remove the dog card", conv_id="r3b")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [second]}]
+    assert [c[0] for c in overlay._card_index["r3b"]] == [first]
+    assert not [s for s in says(events) if s.startswith("Which one")]
+
+
+def test_room_words_after_a_card_ask(client):
+    """33 clean: "enlarge the phone diagram. Yes" (room words after the ask) found no card."""
+    clock = Clock()
+    ids = _show_cards(client, "r3c", "Phone network diagram", "Capital cities")
+    phone = ids["Phone network diagram"]
+    events = turn(client, "enlarge the phone diagram. Yes", conv_id="r3c")
+    assert says(events) == [acks.PHRASES["enlarged"]]
+    assert overlay._enlarged["r3c"] == phone
+    events = turn(client, "enlarge the phone diagram. You get through in a bag with it, look",
+                  conv_id="r3c")
+    assert says(events) == [acks.PHRASES["enlarged"]]
+    events = turn(client, "close the phone diagram. Yes", conv_id="r3c")
+    assert says(events) == ["Removed, sir."]
+    assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [phone]}]
+
+
+def test_room_words_never_make_a_pointer_or_change_kind():
+    """Only the target is cut: "close it. yes" is not a pointer remove; parse kinds stay."""
+    assert intents.card_size_request("enlarge the phone diagram. Yes").target == "phone diagram"
+    assert intents.card_remove_request("close it. yes").pointer is False
+    assert intents.card_remove_request("close it. yes").target == "it. yes"
+    assert intents.card_remove_request("remove that. yes").pointer is False
+    assert intents.card_remove_request("remove the 3.5 inch drive").target == "3.5 inch drive"
+    for text in ("close it. yes", "remove that. yes", "close the phone diagram. Yes"):
+        assert intents.parse(text).kind == "answer"
+    assert intents.parse("enlarge the phone diagram. Yes").kind == "card_size"
+
+
+def test_code_fence_lines_are_not_spoken(client):
+    """c31b turn 60e60897: a model reply wrapped in a code fence spoke a "```" row."""
+    clock = Clock()
+    _deps(chunks=['```json\n', '{"say": "Bringing the cards back now, sir."}\n', '```\n'])
+    events = turn(client, "tell me about the cards", conv_id="r3d")
+    assert says(events)[-1] == "Bringing the cards back now, sir."
+    assert not [s for s in says(events) if "`" in s]
+    assert not [r for r in _steps("spoke") if "`" in (r.get("text") or "")]
+    for line in ("```", "```json", "````", "``` json"):
+        assert overlay._FENCE_RE.fullmatch(line)
+    for line in ("`code` is fine", "```print(1)```"):
+        assert not overlay._FENCE_RE.fullmatch(line)

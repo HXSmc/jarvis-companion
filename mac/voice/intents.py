@@ -564,6 +564,12 @@ def media_request(text: str, loose: bool = False) -> MediaAsk | None:
     return None
 
 
+def _first_sentence(target: str) -> str:
+    """A card target up to its first sentence end: room words after the ask ("enlarge the phone
+    diagram. Yes") are not part of the name. Only the target is cut; the parse kind is not."""
+    return re.split(r"[.?!](?:\s|$)", target, maxsplit=1)[0].strip() or target
+
+
 def card_size_request(text: str) -> CardSizeAsk | None:
     """Card enlarge/restore ask from the whole utterance, or None. Fixed code, never a model."""
     t = _clean(text).lower().replace(",", "")
@@ -573,7 +579,7 @@ def card_size_request(text: str) -> CardSizeAsk | None:
             target = (m["target"] or m["make_target"]).strip()
             if target.startswith(("on ", "upon ")):
                 return None
-            target = _CARD_TARGET_LEAD_RE.sub("", target)
+            target = _CARD_TARGET_LEAD_RE.sub("", _first_sentence(target))
             if target.endswith(" card"):
                 target = target[:-5]
             return CardSizeAsk("max", target.strip())
@@ -597,7 +603,8 @@ def card_remove_request(text: str) -> CardRemoveAsk | None:
             return CardRemoveAsk(target, True, card)
         if target.startswith(("on ", "upon ")) or set(target.split()) & _CARD_REMOVE_BLOCKED:
             return None
-        target = _CARD_TARGET_LEAD_RE.sub("", target)
+        cut = _first_sentence(target)  # never a pointer: "close it. yes" must not become one
+        target = _CARD_TARGET_LEAD_RE.sub("", target if cut in _CARD_REMOVE_POINTERS else cut)
         if target.endswith(" card"):
             target = target[:-5]
         return CardRemoveAsk(target.strip(), False, card)
