@@ -613,6 +613,16 @@ def test_memory_request():
         assert parse(s, apps={}).kind != "memory", s
 
 
+def test_open_app_wins_over_saved_workspace_word():
+    apps = {"notes": "Notes", "safari": "Safari"}
+    names = ("battery notes",)
+    assert parse("open notes", apps=apps, workspace_names=names) == Intent("open_app", "notes")
+    assert parse("open github.com", apps=apps, workspace_names=("github.com research",)).kind == "open_site"
+    # no installed app of that name: the subset rule still asks which workspace
+    assert parse("open battery", apps=apps, workspace_names=names) == Intent("workspace", "open")
+    assert parse("open the battery notes", apps=apps, workspace_names=names).kind == "workspace"
+
+
 def test_workspace_request():
     ask = workspace_request("save these pages and overlays as our battery research")
     assert (ask.action, ask.name) == ("save", "battery research")

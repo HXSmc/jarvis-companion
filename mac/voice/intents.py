@@ -287,7 +287,8 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if ask:
         return Intent("memory", ask.action)
     ask = workspace_request(text, workspace_names or ())
-    if ask:
+    # An installed app or a site wins over a saved name sharing a word ("open notes").
+    if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
     # Hide first: "get rid of it for now" is temporary, not the final clear.
     for rx, kind in ((_HIDE_RE, "hide"), (_CLEAR_RE, "clear"), (_SHOW_RE, "show"),
@@ -336,13 +337,21 @@ def parse(text: str, apps: dict[str, str] | None = None,
         return Intent("look", t)
     if low.startswith("open "):
         arg = t[5:].strip()
-        name = _APP_NOISE_RE.sub("", arg).strip()
-        if _match_app(name, apps if apps is not None else list_apps()):
-            return Intent("open_app", name)
-        host = arg.lower().partition("/")[0]
-        kind = "open_site" if _HOST_RE.match(host) else "open_app"
-        return Intent(kind, arg)
+        return _open_intent(t, apps) or Intent("open_app", arg)
     return Intent("answer", t)
+
+
+def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
+    """"open <x>" resolved to an installed app or a site host, else None."""
+    if not t.lower().startswith("open "):
+        return None
+    arg = t[5:].strip()
+    name = _APP_NOISE_RE.sub("", arg).strip()
+    if _match_app(name, apps if apps is not None else list_apps()):
+        return Intent("open_app", name)
+    if _HOST_RE.match(arg.lower().partition("/")[0]):
+        return Intent("open_site", arg)
+    return None
 
 
 def _agent_sub(low: str) -> str:

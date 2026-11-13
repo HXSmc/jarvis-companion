@@ -241,6 +241,25 @@ def test_session_rate_limit(client, monkeypatch, tmp_path):
     assert [m for m, _u, _a, _b in seen] == ["GET"]
 
 
+def test_session_rate_counts_timed_out_calls(client, monkeypatch, tmp_path):
+    """A start/stop whose request left but timed out still counts toward the hourly cap."""
+    clock = Clock()
+    _deps(clock)
+
+    def timeout(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    seen = _session_env(monkeypatch, tmp_path, post=timeout)
+    turn(client, "start a session to fix the failing tests", conv_id="t1")
+    events = turn(client, "yes", conv_id="t1")
+    assert acks.PHRASES["session_failed"] in says(events)
+    assert [m for m, _u, _a, _b in seen] == ["POST"]  # the request did leave
+    assert len(overlay._session_calls["start"]) == 1
+    turn(client, "stop the build runner session", conv_id="t1")
+    turn(client, "yes", conv_id="t1")
+    assert len(overlay._session_calls["stop"]) == 1
+
+
 def test_session_token_never_leaks(client, monkeypatch, tmp_path):
     clock = Clock()
     _deps(clock)

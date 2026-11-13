@@ -1003,7 +1003,7 @@ def _session_rate_ok(action: str, now: float) -> bool:
 
 
 def _session_rate_sent(action: str, now: float) -> None:
-    """Count one confirmed call that was actually sent (hit or error, never unreachable)."""
+    """Count one confirmed call, before it is attempted (a timeout may still have arrived)."""
     times = _session_calls.setdefault(action, [])
     times.append(now)
     _session_calls[action] = [t for t in times if now - t < 3600.0]
@@ -1119,9 +1119,8 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
     req = {"msg_id": uuid.uuid4().hex, "thread_id": "ov-" + uuid.uuid4().hex[:8],
            "text": session_prompt(str(payload.get("words") or ""), payload.get("ref_row")),
            "new_session": True}
+    _session_rate_sent("start", now)  # counted before the call: a timeout may still have reached the router
     status, out = await asyncio.to_thread(_companion_call, "POST", "/chat", req)
-    if status is not None:
-        _session_rate_sent("start", now)
     if not (isinstance(status, int) and 200 <= status < 300 and isinstance(out, dict)):
         async for ev in _session_failed("start", "unreachable" if status is None else f"http_{status}",
                                         deps, said, on_step):
@@ -1155,9 +1154,8 @@ async def _session_stop_action(payload: dict, body: TurnBody, deps: OverlayDeps,
     """Yes said: POST the allow-listed stop for the stored id."""
     now = deps.clock()
     sid = str(payload.get("id") or "")
+    _session_rate_sent("stop", now)
     status, _out = await asyncio.to_thread(_companion_call, "POST", f"/central/sessions/{sid}/stop")
-    if status is not None:
-        _session_rate_sent("stop", now)
     if not (isinstance(status, int) and 200 <= status < 300):
         async for ev in _session_failed("stop", "unreachable" if status is None else f"http_{status}",
                                         deps, said, on_step):
@@ -1216,9 +1214,8 @@ async def _session_answer_action(payload: dict, body: TurnBody, deps: OverlayDep
     else:
         path, req = f"/central/sessions/{sid}/message", {"msg_id": uuid.uuid4().hex,
                                                          "text": (words or answer)[:300]}
+    _session_rate_sent("answer", now)
     status, _out = await asyncio.to_thread(_companion_call, "POST", path, req)
-    if status is not None:
-        _session_rate_sent("answer", now)
     if not (isinstance(status, int) and 200 <= status < 300):
         async for ev in _session_failed("answer", "unreachable" if status is None else f"http_{status}",
                                         deps, said, on_step):
