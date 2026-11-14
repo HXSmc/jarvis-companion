@@ -497,3 +497,32 @@ def test_key_events_accept_chars_and_every_key_maps_on_mac_and_windows():
 
     from windows.agent import commands
     assert keys == set(commands.VK), keys ^ set(commands.VK)
+
+
+def test_system_shortcut_denied_is_409(gateway_server, fresh_rate_limit, monkeypatch):
+    calls: list = []
+
+    def refuse(events, *, locked=False):
+        calls.append(events)
+        raise mac_driver.ShortcutDenied("log_out", index=0)
+
+    monkeypatch.setattr(mac_driver, "send_events", refuse)
+
+    async def run():
+        async with gateway_server() as base, httpx.AsyncClient(base_url=f"http://{base}") as http:
+            resp = await http.post(
+                "/screen/mac/input",
+                headers=IOS_AUTH_HEADER,
+                json={"events": [{"type": "key", "key": "q", "mods": ["shift", "cmd", "cmd"]}]},
+            )
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert set(detail) == {"error", "shortcut", "refused_index", "events_run",
+                                   "partial", "message"}, detail
+            assert detail["error"] == "system_shortcut_denied", detail
+            assert detail["shortcut"] == "log_out", detail
+            assert (detail["refused_index"], detail["events_run"], detail["partial"]) == \
+                (0, 0, False), detail
+            assert calls[0][0]["mods"] == ["shift", "cmd", "cmd"], calls  # forwarded as given, no 422
+
+    asyncio.run(run())
