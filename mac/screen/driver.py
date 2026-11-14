@@ -33,6 +33,11 @@ down releases at its checked start point). Those release posts are the
 only posts after a refusal; `_guarded_post` and `_post_release` are the only
 two places that call CGEventPost.
 
+System shortcuts: `_key` refuses log out (cmd+shift+Q) and lock screen
+(ctrl+cmd+Q) always, and screenshots (cmd+shift+3/4/5) on a focus-locked
+event, before any event is built (ShortcutDenied); the match folds case,
+aliases, order and duplicates, and extra modifiers still match.
+
 Pure ctypes against macOS system frameworks — no pyobjc, no new deps.
 """
 
@@ -179,6 +184,32 @@ _FLAG_MASKS = {
     "ctrl": 0x40000,   # kCGEventFlagMaskControl
 }
 
+# System-wide; macOS acts on these whatever app is in front. Table order
+# matters: the first match names the refusal (ctrl+cmd+shift+Q -> log_out).
+_DENY_ALWAYS = (
+    ("log_out", "q", frozenset({"cmd", "shift"})),
+    ("lock_screen", "q", frozenset({"ctrl", "cmd"})),
+)
+_DENY_LOCKED = (
+    ("screenshot", "3", frozenset({"cmd", "shift"})),
+    ("screenshot", "4", frozenset({"cmd", "shift"})),
+    ("screenshot", "5", frozenset({"cmd", "shift"})),
+)
+# Matching only: _key still posts canonical names alone (KeyError otherwise).
+_MOD_ALIASES = {"command": "cmd", "cmd": "cmd", "option": "alt", "opt": "alt",
+                "alt": "alt", "control": "ctrl", "ctrl": "ctrl", "shift": "shift"}
+
+
+def _system_shortcut(key, mods, locked: bool) -> str | None:
+    """Name of the denied system shortcut this key event would fire, or None.
+    Same key and the event's folded mod set is a superset of the entry's."""
+    k = str(key).lower()
+    folded = {_MOD_ALIASES.get(str(m).lower()) for m in (mods or ())}
+    for name, dk, dmods in _DENY_ALWAYS + (_DENY_LOCKED if locked else ()):
+        if k == dk and dmods <= folded:
+            return name
+    return None
+
 
 def tcc_ok() -> bool:
     """Both TCC gates, one bool: Screen Recording AND Accessibility."""
@@ -278,6 +309,19 @@ class FocusMismatch(Exception):
         self.expected_app = expected_app
         self.actual_app = actual_app
         self.window_matched = window_matched
+        self.index = index
+        self.partial = partial
+
+
+class ShortcutDenied(Exception):
+    """A key event would fire a system-wide macOS shortcut (`shortcut`:
+    log_out | lock_screen | screenshot); nothing was built or posted for it.
+    No `reason` on purpose: it is not a focus mismatch. `index`/`partial`
+    are set by send_events."""
+
+    def __init__(self, shortcut: str, index: int = 0, partial: bool = False):
+        super().__init__(shortcut)
+        self.shortcut = shortcut
         self.index = index
         self.partial = partial
 
@@ -513,7 +557,7 @@ def send_events(events, *, locked: bool = False) -> None:
             _event_posted = False
             try:
                 _post(ev, bounds)
-            except (FocusMismatch, InputHalted) as exc:
+            except (FocusMismatch, InputHalted, ShortcutDenied) as exc:
                 exc.index = index
                 exc.partial = _event_posted
                 raise
@@ -628,6 +672,9 @@ def _type_text(text: str, ev: dict | None = None) -> None:
 
 
 def _key(key: str, mods: list[str], ev: dict | None = None) -> None:
+    if name := _system_shortcut(key, mods, locked=ev is not None and (
+            ev.get("require_app") is not None or ev.get("require_window") is not None)):
+        raise ShortcutDenied(name)
     mask = 0
     for m in mods:
         mask |= _FLAG_MASKS[m]

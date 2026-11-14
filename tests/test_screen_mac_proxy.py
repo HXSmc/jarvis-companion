@@ -240,3 +240,27 @@ def test_proxy_non_json_mac_status_refuses_lock_as_offline(gateway_server, monke
 
     asyncio.run(run())
     assert forwarded == []
+
+
+def test_proxy_passes_shortcut_refusal_through(gateway_server, mac_lock):
+    detail = {
+        "error": "system_shortcut_denied", "shortcut": "screenshot",
+        "refused_index": 0, "events_run": 0, "partial": False,
+        "message": "Refused: screenshot is a system-wide macOS shortcut and is blocked by the "
+                   "gateway. Nothing was sent for event 0; events before it already ran.",
+    }
+    mac_lock["status"] = 409
+    mac_lock["detail"] = detail
+
+    async def run():
+        async with gateway_server() as base:
+            async with httpx.AsyncClient(base_url=f"http://{base}", headers=IOS_AUTH_HEADER) as c:
+                resp = await c.post(
+                    "/screen/mac/input",
+                    json={"events": [{"type": "key", "key": "3", "mods": ["cmd", "shift"],
+                                      "require_app": "Terminal"}]},
+                )
+                assert resp.status_code == 409, resp.text
+                assert resp.json()["detail"] == detail, resp.text
+
+    asyncio.run(run())
