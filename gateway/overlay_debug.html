@@ -90,6 +90,8 @@ function describe(s) {
                            s.note != null ? `note=${s.note}` + (s.sentences != null ? ` sentences=${s.sentences}` : "") : ""]
                           .filter(Boolean).join(" ") || s.detail || "";
     case "sessions": return s.detail || "";
+    case "layout": return s.detail || [`mode=${s.mode ?? "?"}`, s.state ? `state=${s.state}` : "",
+      s.reason ? `reason=${s.reason}` : ""].filter(Boolean).join(" ");
     case "session_start": case "session_stop": case "session_answer": case "memory": case "workspace":
       return s.detail || "";
     case "barge_in": case "barge_aec": case "barge_gate": return s.detail || "";
