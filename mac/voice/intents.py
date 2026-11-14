@@ -1247,7 +1247,7 @@ _FOLLOW_SESSIONS_RE = re.compile(
     r"\bsessions\b|\b(?:the|my|our|that|those|these) sessions?\b"
     r"|\b(?:on|in|through|via) (?:(?:my|the|our) )?(?:(?:mini|many) ?(?:p ?c|b ?c|piece)|minipc|router"
     r"|(?:\w+(?:'s|s')? )?companion)\b")
-_FOLLOW_VERB_RE = re.compile(r"\b(?:start|stop|end|kill|close|cancel|spin up|open)\b")
+_FOLLOW_VERB_RE = re.compile(r"\b(?:start|stop|end|kill|close|cancel|spin up|open|restart|resume|launch|begin|create)\b")
 
 
 def sessions_followup(text: str) -> bool:

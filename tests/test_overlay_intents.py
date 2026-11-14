@@ -1024,7 +1024,10 @@ def test_sessions_followup_words():
     for text in ("thanks", "what's the weather in Riyadh", "tell me a joke about the Mac", "stop it",
                  "start a new session on the mini PC", "how long is a therapy session", "on the Mac",
                  "how do I take a screenshot on the Mac", "is the build still running",
-                 "what's running late today"):
+                 "what's running late today",
+                 # R6 security 3: an action on sessions is never the read-only listing
+                 "restart my sessions", "resume the sessions", "launch my sessions on the router",
+                 "begin those sessions", "create sessions on the mini PC"):
         assert not sessions_followup(text), text
 
 
