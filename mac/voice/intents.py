@@ -988,9 +988,11 @@ _NOTE_MINE_RE = re.compile(r"\b" + _NOTE_MINE + r"\b", re.I)
 # it" in another clause or say line. Only that narrow shape, and only when a note was already
 # dropped in the same reply (R6 security): alone it is spoken (loud and safe). Never on a clause
 # with "I", a question or a warning, so an admission, a question or a warning to the owner stays.
+# R6: the clause must END at "my reply" (", so they are included below" is an obey tail), and
+# a next clause in the same text that speaks as "I" without ignoring ("I added them.") keeps it.
 _NOTE_AIMED_RE = re.compile(
     r"\binstructions?\s+to\s+(?:add|include|put|insert|append|attach)\b[^.!?;:]{0,60}?"
-    r"\b(?:to|in|into)\s+my\s+(?:reply|replies|answer|answers|response|responses)\b", re.I)
+    r"\b(?:to|in|into)\s+my\s+(?:reply|replies|answer|answers|response|responses)\s*[.!]?\s*$", re.I)
 _NOTE_AIMED_VETO_RE = re.compile(r"\bi\b|\?|\b(?:warn\w*|unsafe|careful|caution|beware|trust)\b", re.I)
 _NOTE_REAL_SOURCE_RE = re.compile(_NOTE_SOURCE_RE.pattern.replace("|" + _NOTE_MINE, ""), re.I)
 # R2: "..., and I emailed him." admits obeying a web result: never hidden. Any first-person
@@ -1032,8 +1034,10 @@ def drop_injection_notes(text: str, noted: bool = False) -> tuple[str, int]:
         # (b): the directive clause may lack its own "I ignored it": another clause naming the
         # instruction and ignoring it convicts this one.
         other = convicting - bool(instr and ignore) > 0
+        nxt = units[k + 1][2] if k + 1 < len(units) else ""
         aimed = (instr and (noted or dropped or other) and _NOTE_AIMED_RE.search(c)
-                 and not _NOTE_AIMED_VETO_RE.search(c))
+                 and not _NOTE_AIMED_VETO_RE.search(c)
+                 and not (re.search(r"\bi\b", nxt, re.I) and not _NOTE_IGNORE_RE.search(nxt)))
         if ((instr and (ignore or mine or directive or bare_next)) or aimed
                 or (directive and (ignore or other or bare_next))
                 or (mine and ignore and _NOTE_REAL_SOURCE_RE.search(c))):

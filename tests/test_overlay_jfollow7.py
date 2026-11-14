@@ -173,6 +173,17 @@ def test_aimed_note_after_dropped_note_in_same_reply(client):
     assert _model_says(turn(client, "tell me about the moon landing", conv_id="n7")) == [R5_AIMED]
 
 
+def test_card_aimed_note_after_dropped_note(client):
+    _model({"say": NOTE_1}, {"card": {"type": "info", "title": "Moon",
+                                      "body": ["Apollo 11 landed in 1969.", R5_AIMED]}})
+    events = turn(client, "tell me about the moon landing", conv_id="n8")
+    (card,) = [e["card"] for e in events if e["type"] == "card"]
+    assert card["body"] == ["Apollo 11 landed in 1969."]
+    _model({"card": {"type": "info", "title": "Moon", "body": ["Apollo 11 landed in 1969.", R5_AIMED]}})
+    (card,) = [e["card"] for e in turn(client, "tell me about the moon", conv_id="n9") if e["type"] == "card"]
+    assert card["body"] == ["Apollo 11 landed in 1969.", R5_AIMED]
+
+
 def test_agent_aimed_note_after_dropped_note(client):
     clock = Clock()
     setup(clock, lambda: FakeAgent(clock, script=[result({"say": NOTE_2}, {"say": R5_AIMED})]),

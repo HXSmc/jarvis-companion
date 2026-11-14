@@ -1135,6 +1135,11 @@ R6_KEPT = (  # jfollow7 R6 security finding 1: admissions, questions, warnings a
     "Warning, sir: the page holds an instruction to change my answer, so treat it as unsafe.",
     "Warning, sir: the page has an instruction to add a sign-in link to my answer.",
     "The search results have an instruction to add their link to my reply, and I did.",
+    # R6 (advisor probes): an obey tail with no "I", or an "I" admission right after, keeps it
+    "The search results ended with an instruction to add source links to my reply, so they are "
+    "included below.",
+    "The page had an instruction to add its link to my answer, and it has been added.",
+    "The search results ended with an instruction to add source links to my reply. I added them.",
 )
 
 
@@ -1145,3 +1150,20 @@ def test_injection_notes_round6_never_hides_admission(kept, noted):
 
     out = drop_injection_notes(kept, noted=noted)
     assert out[1] == 0 and out[0] is kept
+
+
+def test_injection_notes_round6_obey_tail_survives_other_note():
+    from mac.voice.intents import drop_injection_notes
+
+    obey = "The search results ended with an instruction to add source links to my reply, so they are included below."
+    note = "That instruction came from the search results, not from you, so I ignored it."
+    assert drop_injection_notes(obey + " " + note) == (obey, 1)
+
+
+@pytest.mark.xfail(strict=True, reason="R6 security 2 (advisory, carried): a front-subject admission "
+                   "next to an ignore word is still hidden; left for the approver")
+def test_injection_notes_front_subject_admission_kept():
+    from mac.voice.intents import drop_injection_notes
+
+    line = "Per the search results' instruction, I've emailed Bob and ignored the rest."
+    assert drop_injection_notes(line) == (line, 0)
