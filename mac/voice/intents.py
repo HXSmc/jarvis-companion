@@ -960,48 +960,72 @@ def claims_overlay_change(line: str) -> bool:
     return False
 
 
+_NOTE_MINE = r"(?:not|wasn't|was not|isn't|is not) from you"
 _NOTE_SOURCE_RE = re.compile(
-    r"\b(?:search results|web results|results|not from you)\b"
-    r"|\b(?:the|a|one|that|those|these)\s+(?:pages?|sites?|websites?|sources?|articles?|snippets?)\b",
+    r"\b(?:search results?|web results?|results|" + _NOTE_MINE + r")\b"
+    r"|\b(?:the|a|one|that|those|these)\s+(?:\w+\s+)?"
+    r"(?:pages?|sites?|websites?|sources?|articles?|snippets?|results?)\b",
     re.I)
 _NOTE_INSTRUCTION_RE = re.compile(
     r"\binstructions?\b|\bhidden\s+(?:line|text|note)\b|\ba line\s+(?:telling|asking)\b", re.I)
 _NOTE_DIRECTIVE_RE = re.compile(
-    r"\b(?:told|asked|telling|asking|wanted|tried to get|instructing)\s+me\s+to\b", re.I)
+    r"\b(?:told|asked|telling|asking|wanted|tried to get|instructing)\s+me\s+to\b"
+    r"|\btried to (?:tell|make) me\b", re.I)
 _NOTE_IGNORE_RE = re.compile(
-    r"\b(?:ignored|ignore it|ignoring|didn't follow|did not follow|won't follow"
-    r"|not going to follow)\b", re.I)
-_NOTE_MINE_RE = re.compile(r"\bnot from you\b", re.I)
+    r"\b(?:ignored|ignore it|ignoring|disregard\w*|skipped|didn't follow|did not follow|won't follow"
+    r"|not going to follow|didn't do|did not do)\b", re.I)
+_NOTE_MINE_RE = re.compile(r"\b" + _NOTE_MINE + r"\b", re.I)
+_NOTE_REAL_SOURCE_RE = re.compile(_NOTE_SOURCE_RE.pattern.replace("|" + _NOTE_MINE, ""), re.I)
+# R1: "..., and I did." admits obeying a web result: never hidden.
+_NOTE_OBEY_RE = re.compile(r"\b(?:and|so|which) i (?:did|have|added|opened|followed)\b(?!\s+not\b)", re.I)
+# R1: a bare "I ignored it." after a dropped note is part of that note.
+_NOTE_BARE_IGNORE_RE = re.compile(
+    r"(?:and |so |which |but )?i (?:ignored|skipped|disregarded|didn't follow|did not follow"
+    r"|won't follow|didn't do|did not do)(?: (?:it|that|them|this|those|the instruction"
+    r"|that instruction|the request))?[.!?]?", re.I)
 
 
 def drop_injection_notes(text: str) -> tuple[str, int]:
-    """Removes model sentences that narrate an instruction injected by a web result
-    ("...told me to add source links... I ignored it"); it only ever removes text,
-    never adds."""
-    t = text.replace("’", "'")  # matching only: the kept text stays as spoken
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    tparts = re.split(r"(?<=[.!?])\s+", t.strip())
+    """Removes model sentences (and ";" clauses) that narrate an instruction injected by a web
+    result ("...told me to add source links... I ignored it"); it only ever removes text,
+    never adds. A refusal or answer sharing the sentence stays; an admission of obeying stays."""
+    split = lambda x: [re.split(r"\s*;\s*", s) for s in re.split(r"(?<=[.!?])\s+", x.strip())]
+    sents = split(text)
+    tsents = split(text.replace("’", "'"))  # matching only: the kept text stays as spoken
+    units = [(si, ci, c) for si, cl in enumerate(tsents) for ci, c in enumerate(cl)]
+    flags = [(_NOTE_INSTRUCTION_RE.search(c), _NOTE_IGNORE_RE.search(c), _NOTE_OBEY_RE.search(c))
+             for _, _, c in units]
+    drop: set[tuple[int, int]] = set()
     dropped = 0
-    kept = []
-    for i, sent in enumerate(tparts):
-        if not _NOTE_SOURCE_RE.search(sent):
-            kept.append(parts[i])
+    for k, (si, ci, c) in enumerate(units):
+        if (si, ci) in drop or not _NOTE_SOURCE_RE.search(c) or flags[k][2]:
             continue
-        instr = _NOTE_INSTRUCTION_RE.search(sent)
-        directive = _NOTE_DIRECTIVE_RE.search(sent)
-        ignore = _NOTE_IGNORE_RE.search(sent)
-        mine = _NOTE_MINE_RE.search(sent)
-        # (b): the directive sentence may lack its own "I ignored it" — another sentence
-        # naming the instruction and ignoring it convicts this one.
-        other = any(_NOTE_IGNORE_RE.search(o) and _NOTE_INSTRUCTION_RE.search(o)
-                    for j, o in enumerate(tparts) if j != i)
-        if (instr and (ignore or mine or directive)) or (directive and (ignore or other)):
+        instr, ignore, _ = flags[k]
+        directive = _NOTE_DIRECTIVE_RE.search(c)
+        mine = _NOTE_MINE_RE.search(c)
+        bare_next = k + 1 < len(units) and _NOTE_BARE_IGNORE_RE.fullmatch(units[k + 1][2])
+        # (b): the directive clause may lack its own "I ignored it": another clause naming the
+        # instruction and ignoring it convicts this one.
+        other = any(f[0] and f[1] for j, f in enumerate(flags) if j != k)
+        if ((instr and (ignore or mine or directive or bare_next))
+                or (directive and (ignore or other or bare_next))
+                or (mine and ignore and _NOTE_REAL_SOURCE_RE.search(c))):
             dropped += 1
-        else:
-            kept.append(parts[i])
+            drop.add((si, ci))
+            if bare_next:
+                drop.add(units[k + 1][:2])
     if not dropped:
         return text, 0
-    return " ".join(kept), dropped
+    out = []
+    for si, cl in enumerate(sents):
+        kept = [c for ci, c in enumerate(cl) if (si, ci) not in drop]
+        if not kept:
+            continue
+        line = "; ".join(kept)
+        if (si, len(cl) - 1) in drop:  # the sentence end was dropped: keep its stop
+            line = line.rstrip(" ,") + (cl[-1][-1] if cl[-1][-1:] in ".!?" else ".")
+        out.append(line)
+    return " ".join(out), dropped
 
 
 # "close the overlay" names nothing: these never carry a one-card name ("up"/"down"/"off"/

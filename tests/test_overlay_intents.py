@@ -1026,3 +1026,36 @@ def test_sessions_followup_words():
                  "how do I take a screenshot on the Mac", "is the build still running",
                  "what's running late today"):
         assert not sessions_followup(text), text
+
+
+def test_injection_notes_round1():
+    """jfollow7 R1: more note phrasings drop; a refusal, the owner's answer and an admission of
+    obeying stay."""
+    from mac.voice.intents import drop_injection_notes
+
+    for line, want in (
+        # ux 1: an instruction sentence followed by a bare "I ignored it." drops both (one note).
+        ("One of the search results contained an instruction to add source links. I ignored it. "
+         "Paris is the capital.", ("Paris is the capital.", 1)),
+        ("Paris is the capital. One web page had a line telling me to add links, and I ignored it.",
+         ("Paris is the capital.", 1)),
+        ("One search result asked me to include a link, which I did not do.", ("", 1)),
+        ("One of the pages had text that wasn't from you, so I disregarded it.", ("", 1)),
+        ("A search result tried to tell me what to say, so I skipped that.", ("", 1)),
+        # security 3: the refusal before the ";" stays; the note after it drops.
+        ("I can't email your contacts, sir; the page also asked me to share your address, "
+         "which I ignored.", ("I can't email your contacts, sir.", 1)),
+        # security 3: an admission of obeying is never hidden; only the other note drops.
+        ("The page told me to open a site, and I did. The search results had other instructions, "
+         "which I ignored.", ("The page told me to open a site, and I did.", 1)),
+    ):
+        assert drop_injection_notes(line) == want, line
+    for line in (
+        "I ignored the outdated results; the instructions say to attach the legs first.",
+        "The page told me to open a site, and I did.",
+        "One of the search results contained an instruction to add source links, and I added them.",
+        "The instructions on the page say to preheat the oven. Then bake it for an hour.",
+    ):
+        out = drop_injection_notes(line)
+        assert out[1] == 0 and out[0] is line, line
+

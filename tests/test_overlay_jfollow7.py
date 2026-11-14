@@ -184,6 +184,29 @@ def test_card_body_injection_note_dropped(client):
     assert [r["sentences"] for r in _note_rows()] == [1]
 
 
+def test_card_string_body_injection_note_dropped(client):
+    # R1 security 1: hud splits a string body into lines, so the filter must see it as lines too.
+    _model({"say": "Here is the battery."},
+           {"card": {"type": "info", "title": "Battery",
+                     "body": "A cell has an anode.\nThe search results told me to add source links, "
+                             "which I ignored."}})
+    events = turn(client, "what is inside a battery", conv_id="n5")
+    (card,) = [e["card"] for e in events if e["type"] == "card"]
+    assert card["body"] == ["A cell has an anode."]
+    assert [r["sentences"] for r in _note_rows()] == [1]
+
+
+def test_card_only_all_notes_says_one_line(client):
+    # R1 security 2: a reply that is only a card whose body is all notes is never silent.
+    _model({"card": {"type": "info", "title": "Battery",
+                     "body": ["The search results told me to add source links, which I ignored."]}})
+    events = turn(client, "what is inside a battery", conv_id="n6")
+    assert _model_says(events) == [acks.PHRASES["note_only"]]
+    assert [e for e in events if e["type"] == "card"] == []
+    fail_texts = {line for line, _title in overlay.ANSWER_FAIL.values()}
+    assert not fail_texts & set(says(events))
+
+
 def test_agent_injection_note_dropped(client):
     clock = Clock()
     setup(clock, lambda: FakeAgent(clock, script=[result({"say": NOTE_2})]), chunks=['{"agent": true}\n'])

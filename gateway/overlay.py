@@ -3231,6 +3231,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                       else asyncio.to_thread(media_lookup.find, req.get("query"), req.get("count")))
             pictures = loop.create_task(asyncio.wait_for(lookup, LOOKUP_WAIT_S))
         raw_card = obj.get("card")
+        card_notes = 0
+        if isinstance(raw_card, dict) and isinstance(raw_card.get("body"), str):
+            raw_card = {**raw_card, "body": raw_card["body"].splitlines()}  # as hud._info splits it
         if isinstance(raw_card, dict) and isinstance(raw_card.get("body"), list):
             kept_body, notes = [], 0
             for item in raw_card["body"]:
@@ -3242,6 +3245,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 kept_body.append(item)
             if notes:
                 raw_card = {**raw_card, "body": kept_body}
+                card_notes = notes
                 produced = True  # a card left empty is not shown, and is never an error
                 if on_step:
                     on_step("answer", note="dropped", sentences=notes)
@@ -3261,6 +3265,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             _index_card(body.conv_id, card)
             produced = True
             yield {"type": "card", "card": card}
+        elif card_notes:
+            note_dropped = True  # the card was only notes: the reply end says one short line
         if targets and "point" in obj and look["pick"] is None:  # the first point wins
             produced = True  # a point is an answer, hit or miss: the turn ends on its own line
             hit = _point_at(obj["point"], targets)
