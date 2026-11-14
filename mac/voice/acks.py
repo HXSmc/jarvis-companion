@@ -93,11 +93,11 @@ PHRASES = {
     "removed": "Removed, sir.",
     "session_waiting": "Asking the mini PC now.",
     "session_unsure": "Asked the mini PC. No answer yet.",
-    # jfollow6: pick replies and the one-card help lines.
+    # jfollow6: pick replies and the one-card help lines (each clip <= 1.8 s at the shipped voice).
     "removed_both": "Removed both, sir.",
-    "one_at_a_time": "I can enlarge one at a time.",
-    "card_help": "Yes: say remove the cat card.",
-    "card_hint": "Say: remove, then the card's name.",
+    "one_at_a_time": "One at a time, sir.",
+    "card_help": "Yes, name the card.",
+    "card_hint": "Remove it by name.",
     # jfollow7: the model's reply was only a note about a web result's instruction (dropped).
     "note_only": "That's all, sir.",
 }

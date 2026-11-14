@@ -5,6 +5,7 @@ sessions intent."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -234,6 +235,25 @@ def test_jfollow7_phrases():
     cache = acks.AckCache(synth=lambda t: (rendered.append(t), (b"pcm", 24000))[1])
     cache.prerender()
     assert text in rendered and cache.get("note_only") == (text, b"pcm", 24000)
+
+
+# The voice's model folder, read before the autouse fixture points HOME at a fake folder.
+_TTS_DIR = os.environ.get("HWMODE_TTS_DIR", str(Path.home() / ".local/share/kokoro"))
+
+
+def test_round6_lines_fit_clip(monkeypatch):
+    """Criterion 32 (Mac run r5: three lines ran 1.92-1.96 s): each round-6 fixed line renders
+    <= 1.8 s at the shipped voice. Runs where the voice is installed (kokoro-onnx + model files)."""
+    pytest.importorskip("kokoro_onnx")
+    from hwmode.tts import Voice
+
+    monkeypatch.setenv("HWMODE_TTS_DIR", _TTS_DIR)
+    voice = Voice()
+    if not voice.available():
+        pytest.skip("shipped voice not installed")
+    for key in ("removed_both", "one_at_a_time", "card_help", "card_hint"):
+        pcm, rate = voice.synth(acks.PHRASES[key])
+        assert len(pcm) / 2 / rate <= 1.8, (key, len(pcm) / 2 / rate)
 
 
 # --- S: every sessions question reaches the sessions intent (criteria S3-S5) ---
