@@ -336,11 +336,22 @@ public struct TailGate {
 public enum WakeGate {
     public enum Action: Equatable { case newTurn, cutReply, ignore }
 
+    /// heard: the open turn's words so far. A follow-up window whose words start with the wake
+    /// phrase is the owner's new wake request, not an answer: it gets its own turn (Mac run r5: the
+    /// window heard "Hey Jarvis" first, the wake was ignored and the request was lost).
     public static func decide(audioBusy: Bool, streaming: Bool, listening: Bool,
-                              followUp: Bool, hasSpeech: Bool) -> Action {
+                              followUp: Bool, hasSpeech: Bool, heard: String = "") -> Action {
         if audioBusy || streaming { return .cutReply }
         if listening && !followUp { return .ignore }
-        if listening && followUp && hasSpeech { return .ignore }
+        if listening && followUp && hasSpeech && !leadsWithWake(heard) { return .ignore }
         return .newTurn
+    }
+
+    /// The words start like a wake: "hey"/"hi" (also a misheard "Hey Jervis"), or "jarvis" at the
+    /// start or after "ok"/"okay". "the Jarvis overlay card" (a name inside an answer) does not.
+    public static func leadsWithWake(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.range(of: #"^(?:(?:hey|hi)\b|(?:(?:ok|okay)[\s,.]*)?jarvis\b|(?:ok|okay)[\s,.]*$)"#,
+                       options: [.regularExpression, .caseInsensitive]) != nil
     }
 }

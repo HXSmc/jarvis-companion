@@ -429,6 +429,30 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(d(true, false, true, false, true), .cutReply, "stop beats ignore")
     }
 
+    /// Mac run r5 (criterion 25): "Clear", then "Hey Jarvis, show me a card ..." inside the follow-up
+    /// window. The window heard "Hey Jarvis" before the wake hit came, so the hit was ignored and the
+    /// request was lost (a wake row, then nothing). A closed turn's window whose words start with the
+    /// wake phrase gives the wake its own turn; a name inside an answer is still ignored (criterion 29).
+    func testWakeGateFollowUpWindowWakeLead() {
+        func d(_ heard: String) -> WakeGate.Action {
+            WakeGate.decide(audioBusy: false, streaming: false, listening: true, followUp: true,
+                            hasSpeech: true, heard: heard)
+        }
+        for heard in ["Hey", "Hey Jarvis", "Hey, Jarvis, show me a card", "Hey Jervis show me",
+                      "Hi Jarvis", "Jarvis", "Jarvis, the companion one", "okay Jarvis", "OK"] {
+            XCTAssertEqual(d(heard), .newTurn, heard)
+        }
+        for heard in ["the Jarvis overlay capabilities card", "okay the jarvis one", "yes", "high up",
+                      "history of Jarvis", "remove the Jarvis capabilities card"] {
+            XCTAssertEqual(d(heard), .ignore, heard)
+        }
+        // A wake turn and playback are unchanged by the words.
+        XCTAssertEqual(WakeGate.decide(audioBusy: false, streaming: false, listening: true, followUp: false,
+                                       hasSpeech: true, heard: "Hey Jarvis"), .ignore)
+        XCTAssertEqual(WakeGate.decide(audioBusy: true, streaming: false, listening: true, followUp: true,
+                                       hasSpeech: true, heard: "the Jarvis card"), .cutReply)
+    }
+
     func testStripWakeKeepsANameInsideTheRequest() {
         XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis, show me a card titled Jarvis capabilities"),
                        "show me a card titled Jarvis capabilities")

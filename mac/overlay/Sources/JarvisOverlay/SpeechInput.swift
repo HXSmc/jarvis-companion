@@ -132,9 +132,10 @@ final class SpeechInput {
     }
 
     /// The owner's open turn, for the wake gate (WakeGate): nil when there is none or it is a barge run.
-    var openTurn: (followUp: Bool, hasSpeech: Bool)? {
+    /// heard = its words so far (the newest partial).
+    var openTurn: (followUp: Bool, hasSpeech: Bool, heard: String)? {
         guard let turn = currentTurn, turn.barge == nil, !turn.finished, !turn.cancelled else { return nil }
-        return (turn.followUp, turn.hasSpeech)
+        return (turn.followUp, turn.hasSpeech, turn.lastText)
     }
 
     // MARK: turn state (main actor only)

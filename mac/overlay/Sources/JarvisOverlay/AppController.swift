@@ -22,6 +22,8 @@ final class AppController {
     private var turnConvId = ""
     private var turnFirstAudio = false
     private var turnDone = false
+    /// The listenSerial of the open follow-up turn a wake was kept in (WakeGate .ignore).
+    private var wokenSerial: Int?
     /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
     private var listenSerial = 0
     private var heldLine = HeldLine<OverlayEvent>()
@@ -387,10 +389,12 @@ final class AppController {
         // its words and its 30 s cap go on untouched. A reply playing or streaming still cuts.
         if !followUp, let open = speech.openTurn,
            WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: true,
-                           followUp: open.followUp, hasSpeech: open.hasSpeech) == .ignore {
+                           followUp: open.followUp, hasSpeech: open.hasSpeech, heard: open.heard) == .ignore {
+            if open.followUp { wokenSerial = listenSerial }  // that window now carries a wake: never silent
             return
         }
         listenSerial += 1
+        let serial = listenSerial
         turnDone = false  // a barge-in's stale drain must not start a follow-up
         if followUp {
             model.orb = .followUp
@@ -404,6 +408,11 @@ final class AppController {
                     bargeIn(reason: .wake)  // A4: a wake during playback cuts the old reply's stream too
                 } else {
                     audio.stop()  // barge-in off: as before barge-in existed, no barge_in row
+                    // ...and the old stream ends too (Mac run r5): its later audio played the story
+                    // on, and its `done` drain opened a follow-up window that cancelled this turn.
+                    utteranceTask?.cancel()
+                    turnStreaming = false
+                    heldLine.drop()
                 }
             } else {
                 cutReply = []
@@ -441,7 +450,11 @@ final class AppController {
                     : echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
-                    guard !text.isEmpty else { self?.model.orb = .idle; return }  // only the reply's echo
+                    guard !text.isEmpty else {  // only the reply's echo
+                        if self?.wokenSerial == serial { await self?.handleWake(); return }
+                        self?.model.orb = .idle
+                        return
+                    }
                     self?.startUtterance(text: text, followUp: followUp, bargeIn: false,
                                          sttFinalMs: sttFinalMs,
                                          audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
@@ -451,6 +464,12 @@ final class AppController {
             onNothing: { [weak self] why in
                 Task { @MainActor in
                     guard let self else { return }
+                    // A window that heard a wake it kept (WakeGate) but ended with no request (only
+                    // "Hey Jarvis"): the owner's request follows, so listen as a wake turn would.
+                    if followUp, self.wokenSerial == serial {
+                        await self.handleWake()
+                        return
+                    }
                     if followUp {  // nobody spoke after the reply: close the window quietly
                         if self.model.orb == .followUp {
                             self.model.orb = .idle
@@ -899,6 +918,9 @@ final class AppController {
     /// Reply over: keep the mic open ~8 s so the user can go on without "Jarvis" (also how a
     /// trailing-off request gets its rest). 300 ms first so the room echo of the reply dies out.
     private func replyFinished() {
+        // An owner turn is listening (a wake cut this reply): its end must not idle the orb or open
+        // a follow-up window, whose listenAfterWake would cancel that turn.
+        if let open = speech.openTurn, !open.followUp { return }
         model.orb = .idle
         // A line pushed while the reply played: say it now; its drain comes back here for the window.
         let held = heldLine.release(at: Date())
