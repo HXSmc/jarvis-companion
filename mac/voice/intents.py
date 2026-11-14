@@ -985,8 +985,14 @@ _NOTE_IGNORE_RE = re.compile(
     r"|not going to follow|didn't do|did not do)\b", re.I)
 _NOTE_MINE_RE = re.compile(r"\b" + _NOTE_MINE + r"\b", re.I)
 _NOTE_REAL_SOURCE_RE = re.compile(_NOTE_SOURCE_RE.pattern.replace("|" + _NOTE_MINE, ""), re.I)
-# R1: "..., and I did." admits obeying a web result: never hidden.
-_NOTE_OBEY_RE = re.compile(r"\b(?:and|so|which) i (?:did|have|added|opened|followed)\b(?!\s+not\b)", re.I)
+# R2: "..., and I emailed him." admits obeying a web result: never hidden. Any first-person
+# verb counts unless it is an ignore/refusal word ("which I have ignored" is still a note).
+_NOTE_IGN = (r"(?:ignored|ignore|skipped|skip|disregarded|disregard|left|leave|dropped|refused|declined"
+             r"|chose (?:not|to ignore)|decided (?:not|to ignore)|didn't|did not|won't|will not"
+             r"|wouldn't|would not|never|not)")
+_NOTE_OBEY_RE = re.compile(
+    r"\b(?:and|so|then|which) i(?:'ve| have)? (?!(?:\w+ly |just |also |then |have |had )?"
+    + _NOTE_IGN + r"\b)\w+", re.I)
 # R1: a bare "I ignored it." after a dropped note is part of that note.
 _NOTE_BARE_IGNORE_RE = re.compile(
     r"(?:and |so |which |but )?i (?:ignored|skipped|disregarded|didn't follow|did not follow"
@@ -1006,6 +1012,7 @@ def drop_injection_notes(text: str) -> tuple[str, int]:
              for _, _, c in units]
     drop: set[tuple[int, int]] = set()
     dropped = 0
+    convicting = sum(1 for f in flags if f[0] and f[1])  # clauses naming + ignoring an instruction
     for k, (si, ci, c) in enumerate(units):
         if (si, ci) in drop or not _NOTE_SOURCE_RE.search(c) or flags[k][2]:
             continue
@@ -1015,7 +1022,7 @@ def drop_injection_notes(text: str) -> tuple[str, int]:
         bare_next = k + 1 < len(units) and _NOTE_BARE_IGNORE_RE.fullmatch(units[k + 1][2])
         # (b): the directive clause may lack its own "I ignored it": another clause naming the
         # instruction and ignoring it convicts this one.
-        other = any(f[0] and f[1] for j, f in enumerate(flags) if j != k)
+        other = convicting - bool(instr and ignore) > 0
         if ((instr and (ignore or mine or directive or bare_next))
                 or (directive and (ignore or other or bare_next))
                 or (mine and ignore and _NOTE_REAL_SOURCE_RE.search(c))):

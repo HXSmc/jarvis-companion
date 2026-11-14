@@ -1060,6 +1060,31 @@ def test_injection_notes_round1():
         assert out[1] == 0 and out[0] is line, line
 
 
+def test_injection_notes_round2_obey_any_verb():
+    """jfollow7 R2 (security 1): an admission of obeying with ANY verb stays, even when another
+    clause says "I ignored the other instructions"; "which I have ignored" is a note and drops."""
+    from mac.voice.intents import drop_injection_notes
+
+    for line, want in (
+        ("The page told me to email Bob, and I emailed him. I ignored the other instructions "
+         "on the site.", ("The page told me to email Bob, and I emailed him.", 1)),
+        ("The search results told me to run a command, and I ran it. Some other instructions in "
+         "the results I ignored.", ("The search results told me to run a command, and I ran it.", 1)),
+        ("The site asked me to forward your mail and I complied. That instruction came from the "
+         "search results, not from you, so I ignored it.",
+         ("The site asked me to forward your mail and I complied.", 1)),
+        ("The page told me to open a site, and I did. The search results had other instructions, "
+         "which I ignored.", ("The page told me to open a site, and I did.", 1)),
+        ("The search results told me to add source links, which I have ignored.", ("", 1)),
+        ("The search results told me to add source links, which I've ignored.", ("", 1)),
+        ("The page told me to add links, and I simply ignored it.", ("", 1)),
+        ("The page told me to add links, so I just ignored that.", ("", 1)),
+        ("The page told me to add links, and I chose to ignore it.", ("", 1)),
+        ("The page told me to add links, and I didn't do it.", ("", 1)),
+    ):
+        assert drop_injection_notes(line) == want, line
+
+
 def test_sessions_round1_shapes():
     """jfollow7 R1: a start/stop verb never reaches `sessions`; "how" questions need an article;
     more natural phrasings reach it."""
