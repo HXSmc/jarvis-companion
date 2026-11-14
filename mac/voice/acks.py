@@ -98,6 +98,8 @@ PHRASES = {
     "one_at_a_time": "I can enlarge one at a time.",
     "card_help": "Yes: say remove the cat card.",
     "card_hint": "Say: remove, then the card's name.",
+    # jfollow7: the model's reply was only a note about a web result's instruction (dropped).
+    "note_only": "That's all, sir.",
 }
 
 # Thinking lines said while the model works: (key, text, tag). "look" = an answer/lookup is

@@ -955,6 +955,50 @@ def claims_overlay_change(line: str) -> bool:
     return False
 
 
+_NOTE_SOURCE_RE = re.compile(
+    r"\b(?:search results|web results|results|not from you)\b"
+    r"|\b(?:the|a|one|that|those|these)\s+(?:pages?|sites?|websites?|sources?|articles?|snippets?)\b",
+    re.I)
+_NOTE_INSTRUCTION_RE = re.compile(
+    r"\binstructions?\b|\bhidden\s+(?:line|text|note)\b|\ba line\s+(?:telling|asking)\b", re.I)
+_NOTE_DIRECTIVE_RE = re.compile(
+    r"\b(?:told|asked|telling|asking|wanted|tried to get|instructing)\s+me\s+to\b", re.I)
+_NOTE_IGNORE_RE = re.compile(
+    r"\b(?:ignored|ignore it|ignoring|didn't follow|did not follow|won't follow"
+    r"|not going to follow)\b", re.I)
+_NOTE_MINE_RE = re.compile(r"\bnot from you\b", re.I)
+
+
+def drop_injection_notes(text: str) -> tuple[str, int]:
+    """Removes model sentences that narrate an instruction injected by a web result
+    ("...told me to add source links... I ignored it"); it only ever removes text,
+    never adds."""
+    t = text.replace("’", "'")  # matching only: the kept text stays as spoken
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    tparts = re.split(r"(?<=[.!?])\s+", t.strip())
+    dropped = 0
+    kept = []
+    for i, sent in enumerate(tparts):
+        if not _NOTE_SOURCE_RE.search(sent):
+            kept.append(parts[i])
+            continue
+        instr = _NOTE_INSTRUCTION_RE.search(sent)
+        directive = _NOTE_DIRECTIVE_RE.search(sent)
+        ignore = _NOTE_IGNORE_RE.search(sent)
+        mine = _NOTE_MINE_RE.search(sent)
+        # (b): the directive sentence may lack its own "I ignored it" — another sentence
+        # naming the instruction and ignoring it convicts this one.
+        other = any(_NOTE_IGNORE_RE.search(o) and _NOTE_INSTRUCTION_RE.search(o)
+                    for j, o in enumerate(tparts) if j != i)
+        if (instr and (ignore or mine or directive)) or (directive and (ignore or other)):
+            dropped += 1
+        else:
+            kept.append(parts[i])
+    if not dropped:
+        return text, 0
+    return " ".join(kept), dropped
+
+
 # "close the overlay" names nothing: these never carry a one-card name ("up"/"down"/"off"/
 # "out" are verb particles: "close down the overlay"; "the whole overlay" is no name either).
 _CARD_NAME_STOP = frozenset({"overlay", "screen", "these", "those", "them", "cards",

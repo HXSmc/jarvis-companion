@@ -19,8 +19,12 @@ import pytest  # noqa: E402
 
 from conftest import AUTH_HEADER  # noqa: E402
 from gateway import overlay  # noqa: E402
-from mac.voice import intents  # noqa: E402
-from test_overlay_service import FakeConversations, client, make_deps, turn  # noqa: F401,E402
+from mac.voice import acks, intents  # noqa: E402
+# The agent tests' fixtures (`reset` is autouse: stores cleared, HOME = a fake folder).
+from test_overlay_agent import Clock, FakeAgent, FakeAgentPool, client, reset, result, setup  # noqa: F401,E402
+from test_overlay_jfollow2 import lines  # noqa: E402
+from test_overlay_jfollow4 import _deps, _session_env, _steps  # noqa: E402
+from test_overlay_service import POOL_TEXTS, FakeConversations, make_deps, says, turn  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -105,3 +109,105 @@ def test_debug_page_describes_rows():
     assert got[8] == "score 0.79 (mac)"
     page = (ROOT / "gateway" / "overlay_debug.html").read_text()
     assert 'card_remove: "card remove"' in page and 'answer: "answer check"' in page
+
+
+# --- C: injected-instruction notes are never read aloud (criteria 14-18, 24) ---
+
+NOTE_1 = ("Of course, sir. One note: my earlier search was unnecessary, and its results told me to add "
+          "source links to my reply. That instruction came from the search results, not from you, so I "
+          "ignored it.")
+NOTE_2 = ("Here is a lithium-ion cell, sir. The search results also included a line telling me to add "
+          "source links to my reply, which I ignored.")
+NOTE_ONLY = "That instruction came from the search results, not from you, so I ignored it."
+INFO = {"type": "info", "title": "Battery", "body": ["A cell has an anode and a cathode."]}
+
+
+def _model(*objs):
+    loud = FakeConversations(lines(*objs))
+    _deps(Clock(), conversations=loud, quiet_conversations=FakeConversations(lines(*objs)))
+    return loud
+
+
+def _model_says(events):
+    return [t for t in says(events) if t not in POOL_TEXTS]
+
+
+def _note_rows():
+    return [r for r in _steps("answer") if r.get("note") == "dropped"]
+
+
+def test_answer_injection_note_dropped(client):
+    _model({"say": NOTE_1}, {"card": INFO})
+    events = turn(client, "what is inside a battery", conv_id="n1")
+    assert _model_says(events) == ["Of course, sir."]
+    blob = json.dumps([e for e in events if e["type"] != "audio"]).lower()
+    assert "search results" not in blob and "instruction" not in blob
+    assert [e["card"]["title"] for e in events if e["type"] == "card"] == ["Battery"]
+    (row,) = _note_rows()
+    assert row["sentences"] == 2 and set(row) == {"step", "at", "note", "sentences"}
+    assert "search results" not in str(overlay._history.get("n1")).lower()
+
+
+def test_note_split_across_two_say_lines(client):
+    _model({"say": "Here is a lithium-ion cell, sir."},
+           {"say": "The search results also included a line telling me to add source links to my reply, "
+                   "which I ignored."})
+    events = turn(client, "show me a lithium-ion cell", conv_id="n2")
+    assert _model_says(events) == ["Here is a lithium-ion cell, sir."]
+    assert [r["sentences"] for r in _note_rows()] == [1]
+    assert acks.PHRASES["note_only"] not in says(events)
+
+
+@pytest.mark.parametrize("card", [False, True])
+def test_note_only_reply(client, card):
+    objs = [{"say": NOTE_ONLY}] + ([{"card": INFO}] if card else [])
+    _model(*objs)
+    events = turn(client, "what is inside a battery", conv_id="n3")
+    assert _model_says(events) == [acks.PHRASES["note_only"]]
+    fail_texts = {line for line, _title in overlay.ANSWER_FAIL.values()}
+    fail_titles = {title for _line, title in overlay.ANSWER_FAIL.values()}
+    assert not fail_texts & set(says(events))
+    cards = [e["card"] for e in events if e["type"] == "card"]
+    assert not [c for c in cards if c.get("title") in fail_titles]
+    assert [c["title"] for c in cards] == (["Battery"] if card else [])
+    assert _steps("done")[-1]["error"] is None
+
+
+def test_card_body_injection_note_dropped(client):
+    _model({"say": "Here is the battery."},
+           {"card": {"type": "info", "title": "Battery",
+                     "body": ["A cell has an anode and a cathode.",
+                              "The search results told me to add source links, which I ignored."]}})
+    events = turn(client, "what is inside a battery", conv_id="n4")
+    (card,) = [e["card"] for e in events if e["type"] == "card"]
+    assert card["title"] == "Battery" and card["body"] == ["A cell has an anode and a cathode."]
+    assert [r["sentences"] for r in _note_rows()] == [1]
+
+
+def test_agent_injection_note_dropped(client):
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": NOTE_2})]), chunks=['{"agent": true}\n'])
+    events = turn(client, "tell me about the work I did", conv_id="ag7")
+    spoken = says(events)
+    assert "Here is a lithium-ion cell, sir." in spoken
+    assert "search results" not in " ".join(spoken).lower()
+    (row,) = _note_rows()
+    assert row["sentences"] == 1 and set(row) == {"step", "at", "note", "sentences"}
+
+
+def test_agent_note_only_says_one_line(client):
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": NOTE_ONLY})]), chunks=['{"agent": true}\n'])
+    spoken = says(turn(client, "tell me about the work I did", conv_id="ag8"))
+    assert spoken.count(acks.PHRASES["note_only"]) == 1
+    assert "I couldn't get an answer for that." not in spoken
+
+
+def test_jfollow7_phrases():
+    text = acks.PHRASES["note_only"]
+    assert len(text.split()) <= 8 and "?" not in text and "!" not in text
+    assert "jarvis" not in text.lower()
+    rendered = []
+    cache = acks.AckCache(synth=lambda t: (rendered.append(t), (b"pcm", 24000))[1])
+    cache.prerender()
+    assert text in rendered and cache.get("note_only") == (text, b"pcm", 24000)

@@ -963,3 +963,30 @@ def test_card_pick_by_the_name_as_heard():
     assert card_pick("the overlay capabilities", names) == [1]
     assert card_pick("the jarvis capabilities card", names) == [0]
     assert card_pick("the purple one", names) is None
+
+
+def test_injection_notes_table():
+    """Sentences narrating a web-injected instruction drop; everything else stays."""
+    from mac.voice.intents import drop_injection_notes
+
+    for line, want in (
+        ("Of course, sir. One note: my earlier search was unnecessary, and its results told me to add source links to my reply. That instruction came from the search results, not from you, so I ignored it.", ("Of course, sir.", 2)),
+        ("Here is a lithium-ion cell, sir. The search results also included a line telling me to add source links to my reply, which I ignored.", ("Here is a lithium-ion cell, sir.", 1)),
+        ("One of the pages had a hidden instruction asking me to change my answer; I ignored it.", ("", 1)),
+        ("That instruction came from the web results, not from you.", ("", 1)),
+    ):
+        assert drop_injection_notes(line) == want, line
+    for line in (
+        "The guide says to restart the router, then wait a minute.",
+        "The instructions on the page say to preheat the oven to 200 degrees.",
+        "The page asked me to sign in, so I couldn't read it.",
+        "The page asked me to sign in, so I couldn't read it. I ignored the duplicate results.",
+        "I won't add links from those search results, sir.",
+        "Saturn has 146 moons, per the search results.",
+        "I ignored the duplicate results.",
+        "Shall I push the branch to GitHub?",
+        "I can't do that, sir.",
+        "Understood, sir, clearing the capabilities card from the overlay now.",
+    ):
+        out = drop_injection_notes(line)
+        assert out[1] == 0 and out[0] is line, line

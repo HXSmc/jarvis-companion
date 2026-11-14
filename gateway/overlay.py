@@ -3054,8 +3054,12 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
     gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
     held: str | None = None  # a say line claiming an overlay change, held until a directive lands
+    note_dropped = False  # a say line was only an injected-instruction note (dropped, never spoken)
+    model_spoke = False  # a model say line was spoken this reply
 
     async def speak_say(say_text: str) -> AsyncIterator[dict]:
+        nonlocal model_spoke
+        model_spoke = True
         yield _say(say_text)
         said.append(say_text)
         audio = await _audio(say_text, deps)
@@ -3152,7 +3156,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         said.append(line)
 
     async def flush_line(line: str) -> AsyncIterator[dict]:
-        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held
+        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held, note_dropped
         line = line.strip()
         if not line:
             return
@@ -3183,9 +3187,13 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 yield ev
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
-            say_text = obj["say"].strip()
-            produced = True
-            if intents.claims_overlay_change(say_text):
+            say_text, notes = intents.drop_injection_notes(obj["say"].strip())
+            produced = True  # a line that was all notes is still an answer: never the failure line
+            if notes and on_step:
+                on_step("answer", note="dropped", sentences=notes)
+            if not say_text.strip():
+                note_dropped = True
+            elif intents.claims_overlay_change(say_text):
                 held = say_text  # spoken only if this reply really changes the overlay
             else:
                 async for ev in speak_say(say_text):
@@ -3207,6 +3215,20 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                       else asyncio.to_thread(media_lookup.find, req.get("query"), req.get("count")))
             pictures = loop.create_task(asyncio.wait_for(lookup, LOOKUP_WAIT_S))
         raw_card = obj.get("card")
+        if isinstance(raw_card, dict) and isinstance(raw_card.get("body"), list):
+            kept_body, notes = [], 0
+            for item in raw_card["body"]:
+                if isinstance(item, str):
+                    item, n = intents.drop_injection_notes(item)
+                    notes += n
+                    if not item.strip():
+                        continue
+                kept_body.append(item)
+            if notes:
+                raw_card = {**raw_card, "body": kept_body}
+                produced = True  # a card left empty is not shown, and is never an error
+                if on_step:
+                    on_step("answer", note="dropped", sentences=notes)
         if quiet and isinstance(raw_card, dict) and raw_card.get("type") in media_lookup.MEDIA_TYPES:
             async for ev in media_refused():
                 yield ev
@@ -3317,6 +3339,11 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                     fail_reason, fail_detail = exc.reason, exc.detail
                 else:
                     fail_reason, fail_detail = "error", f"{type(exc).__name__}: {exc}"
+        if fail_reason is None and note_dropped and not model_spoke and not escalate:
+            # The reply was only a dropped note: one short line, never silence, never the failure line.
+            async for event in _line("note_only", deps):
+                yield event
+            said.append(acks.PHRASES["note_only"])
         if fail_reason is None and not produced:
             # A clean but empty reply: the CLI is alive, so keep the session (only raise/timeout drop it).
             fail_reason, fail_detail = "error", "the answer step produced nothing"
@@ -4115,6 +4142,10 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         yield run.model_lines
                 else:  # no file on screen (Mac run 2, B3: a warm "what changed in the last commit"):
                     _hunks.pop(run.conv_id, None)  # no change list either, so the old cursor goes
+                if len(said) == spoke and metrics.get("notes_dropped"):
+                    async for out in _line("note_only", deps):  # the reply was only dropped notes
+                        yield out
+                    said.append(acks.PHRASES["note_only"])
                 if len(said) == spoke:
                     async for out in _speak("I couldn't get an answer for that.", deps):
                         yield out
@@ -4148,8 +4179,14 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
     if not isinstance(obj, dict):
         obj = {"say": line}
     if isinstance(obj.get("say"), str) and obj["say"].strip():
-        text = obj["say"].strip()
-        if intents.claims_overlay_change(text):
+        text, notes = intents.drop_injection_notes(obj["say"].strip())
+        if notes:
+            metrics["notes_dropped"] = metrics.get("notes_dropped", 0) + notes
+            if on_step:
+                on_step("answer", note="dropped", sentences=notes)
+        if not text.strip():
+            pass  # all notes: nothing spoken (the run's end says note_only if it spoke nothing)
+        elif intents.claims_overlay_change(text):
             # C4: the agent tier never changes the overlay: a claim to that effect is never spoken.
             if OVERLAY_UNCHANGED_LINE not in said:
                 async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
