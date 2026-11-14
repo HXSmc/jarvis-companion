@@ -352,6 +352,13 @@ public enum WakeGate {
         return .newTurn
     }
 
+    /// The words END with the wake phrase ("talking about you? I can't I Hey, Jarvis", Mac run 3):
+    /// a follow-up window that kept a wake heard room talk, then the owner's wake; his request comes next.
+    public static func endsWithWake(_ text: String) -> Bool {
+        text.range(of: #"(?:^|[\s,.!?])(?:(?:hey|hi|ok|okay)[\s,.]*)?jarvis[\s,.!?]*$"#,
+                   options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     /// The words start like a wake: "hey"/"hi" (also a misheard "Hey Jervis"), or "jarvis" at the
     /// start or after "ok"/"okay". "the Jarvis overlay card" (a name inside an answer) does not.
     public static func leadsWithWake(_ text: String) -> Bool {

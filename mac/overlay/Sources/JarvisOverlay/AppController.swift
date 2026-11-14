@@ -464,6 +464,12 @@ final class AppController {
                     : echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
+                    // A window that kept a wake (WakeGate) and ends on "… Hey Jarvis": room talk, then
+                    // the owner's wake; listen for his request as a wake turn would (Mac run 3).
+                    if followUp, self?.wokenSerial == serial, WakeGate.endsWithWake(heardText) {
+                        await self?.handleWake()
+                        return
+                    }
                     guard !text.isEmpty else {  // only the reply's echo
                         if self?.wokenSerial == serial { await self?.handleWake(); return }
                         self?.model.orb = .idle

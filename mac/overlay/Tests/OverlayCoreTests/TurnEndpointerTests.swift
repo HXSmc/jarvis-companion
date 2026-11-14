@@ -433,6 +433,15 @@ final class TurnEndpointerTests: XCTestCase {
                                        followUp: false, hasSpeech: false), .newTurn)
     }
 
+    func testWakeGateEndsWithWake() {
+        XCTAssertTrue(WakeGate.endsWithWake("talking about you? I can't I Hey, Jarvis"))
+        XCTAssertTrue(WakeGate.endsWithWake("It's all sort of, uh, right. Hey, Jarvis."))
+        XCTAssertTrue(WakeGate.endsWithWake("Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("the Jarvis overlay capabilities card"))
+        XCTAssertFalse(WakeGate.endsWithWake("Hey Jarvis, what time is it"))
+        XCTAssertFalse(WakeGate.endsWithWake("I meant the Jarvises"))
+    }
+
     func testWakeGateTable() {
         typealias A = WakeGate.Action
         func d(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool) -> A {
