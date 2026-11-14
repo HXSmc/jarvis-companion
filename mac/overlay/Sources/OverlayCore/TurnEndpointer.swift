@@ -383,7 +383,10 @@ public enum WakeGate {
 
     public static func weakFinal(_ text: String) -> WeakAction {
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .ignore(reason: "no_speech") }
-        return StopPhrase.matches(text) ? .stopReply : .ignore(reason: "not_stop")
+        // "Be quiet, Jarvis": a trailing name would make stripWake drop the words before it.
+        let unnamed = text.replacingOccurrences(of: #"[\s,.!?]*\bjarvis[\s,.!?]*$"#, with: "",
+                                                options: [.regularExpression, .caseInsensitive])
+        return StopPhrase.matches(unnamed) ? .stopReply : .ignore(reason: "not_stop")
     }
 
     /// The words start like a wake: "hey"/"hi" (also a misheard "Hey Jervis"), or "jarvis" at the
