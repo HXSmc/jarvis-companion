@@ -339,8 +339,13 @@ public enum WakeGate {
     /// heard: the open turn's words so far. A follow-up window whose words start with the wake
     /// phrase is the owner's new wake request, not an answer: it gets its own turn (Mac run r5: the
     /// window heard "Hey Jarvis" first, the wake was ignored and the request was lost).
+    /// weak: a playback-only weak hit (wakeword.py WEAK_THRESHOLD). It may only cut a reply that is
+    /// playing on speakers with barge-in off (the owner's voice over Jarvis's own audio scores under
+    /// the full threshold); anything else, idle included, ignores it.
     public static func decide(audioBusy: Bool, streaming: Bool, listening: Bool,
-                              followUp: Bool, hasSpeech: Bool, heard: String = "") -> Action {
+                              followUp: Bool, hasSpeech: Bool, heard: String = "",
+                              weak: Bool = false, bargeInOn: Bool = false) -> Action {
+        if weak { return audioBusy && !bargeInOn ? .cutReply : .ignore }
         if audioBusy || streaming { return .cutReply }
         if listening && !followUp { return .ignore }
         if listening && followUp && hasSpeech && !leadsWithWake(heard) { return .ignore }

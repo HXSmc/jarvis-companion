@@ -72,7 +72,7 @@ function el(tag, cls, text) {
 
 function describe(s) {
   switch (s.step) {
-    case "wake": return `score ${s.score ?? "?"} (${s.source})` + (s.again ? ` · heard again ${s.again}× (kept listening)` : "");
+    case "wake": return s.detail ? s.detail : `score ${s.score ?? "?"} (${s.source})` + (s.again ? ` · heard again ${s.again}× (kept listening)` : "");
     case "voice": return (s.followup ? "follow-up, no wake word · " : "") + (s.barge_in ? "barge-in · " : "")
                        + `${s.audio_ms != null ? (s.audio_ms / 1000).toFixed(1) + " s of audio" : "audio length unknown"}`
                        + (s.stt_final_ms != null ? `, STT final ${Math.round(s.stt_final_ms)} ms` : "")

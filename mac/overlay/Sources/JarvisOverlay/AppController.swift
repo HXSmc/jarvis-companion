@@ -295,6 +295,8 @@ final class AppController {
                     endOutage()
                     if event.name == "wake" {
                         await handleWake()
+                    } else if event.name == "wake_weak" {
+                        await handleWeakWake()
                     } else if event.name == "hud" {
                         handlePush(OverlayEvent.decode(line: Data(event.data.utf8)))
                     }
@@ -381,6 +383,18 @@ final class AppController {
         sound.volume = WakeChime.volume
         return sound
     }()
+
+    /// A weak wake hit (only sent below the full threshold): honoured only while a reply plays on
+    /// speakers with barge-in off, where the owner's "Hey Jarvis" over Jarvis's own audio never
+    /// reaches the full score (Mac run 3, criterion 28). Then it is a wake: today's cut-reply path.
+    private func handleWeakWake() async {
+        let open = speech.openTurn
+        guard WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: open != nil,
+                              followUp: open?.followUp ?? false, hasSpeech: open?.hasSpeech ?? false,
+                              weak: true, bargeInOn: bargeInEnabled) == .cutReply else { return }
+        client.debugNote(step: "wake", detail: "weak hit during playback (speakers)")
+        await handleWake()
+    }
 
     /// followUp: the open-mic window after a reply (no wake word, same conversation);
     /// replayFrom: the reply's drain time, so only post-reply ring audio is replayed.

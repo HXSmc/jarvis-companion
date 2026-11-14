@@ -435,3 +435,61 @@ def test_sessions_cards_replace_not_pile_up(client, monkeypatch, tmp_path):
     assert overlay._short_time("2026-11-12T10:00:00Z") == (
         datetime.fromisoformat("2026-11-12T10:00:00+00:00").astimezone().strftime("%H:%M"))
     assert overlay._short_time("") == "" and overlay._short_time("soon") == "soon"
+
+
+# --- Round 7 (Mac run 3, criterion 28): a weak wake hit, honoured by the app only during playback ---
+
+def test_weak_wake_is_its_own_event_and_opens_no_turn(client, monkeypatch):
+    from test_overlay_agent import BusRecorder
+    bus = BusRecorder()
+    monkeypatch.setattr(overlay, "bus", bus)
+    overlay.debug_log.clear()
+    client.post("/overlay/wake", json={"score": 0.21, "weak": True}, headers=AUTH_HEADER)
+    assert bus.events == [("wake_weak", {"source": "mac"})]  # never "wake": idle never wakes on it
+    assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["turns"] == []
+    client.post("/overlay/wake", json={"score": 0.8}, headers=AUTH_HEADER)
+    assert bus.events[-1] == ("wake", {"source": "mac"})
+    # The app's note when it honours one is a wake row with fixed words; the stop's words join it.
+    overlay.debug_log.clear()
+    client.post("/overlay/debug/note", json={"step": "wake", "detail": "weak hit during playback (speakers)"},
+                headers=AUTH_HEADER)
+    turn(client, "stop")
+    (only,) = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["turns"]
+    assert [s["step"] for s in only["steps"]][:2] == ["wake", "voice"]
+    assert _describe_with_node([{"step": "wake", "detail": "weak hit during playback (speakers)"}]) == [
+        "weak hit during playback (speakers)"] if shutil.which("node") else True
+
+
+def test_wakeword_weak_hits_rate_limited(monkeypatch):
+    """run_live: >= 0.5 is a full hit (reset); 0.1-0.5 a weak hit, at most one per WEAK_GAP_S of audio."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("openwakeword")
+    from mac.voice import wakeword
+    frames = [0.0, 0.2, 0.3, 0.0, 0.6, 0.05] + [0.0] * 20 + [0.15]  # 80 ms each
+    scores = iter(frames)
+
+    class FakeModel:
+        def predict(self, pcm):
+            return {"hey_jarvis": next(scores)}
+
+        def reset(self):
+            sent.append(("reset",))
+
+    class FakeFfmpeg:
+        def __init__(self, *a, **k):
+            import io
+            self.stdout = io.BytesIO(b"\x00\x00" * wakeword.FRAME_SAMPLES * len(frames))
+
+        def terminate(self):
+            pass
+
+    sent: list = []
+    monkeypatch.setattr(wakeword.subprocess, "Popen", FakeFfmpeg)
+    monkeypatch.setattr(wakeword, "load_model", FakeModel)
+    monkeypatch.setattr(wakeword, "notify_wake", lambda at, dry_run, score=None, weak=False: sent.append((round(at, 2), score, weak)))
+    with pytest.raises(SystemExit):
+        wakeword.run_live()
+    # frame 1 weak (0.2); frame 2 (0.3) inside the gap: not sent; frame 4 full + reset; 0.05 nothing;
+    # the last frame (0.15) is 26 x 80 ms = 2.08 s in: past the 1.5 s gap from frame 1, sent.
+    assert sent == [(0.08, 0.2, True), (0.32, 0.6, False), ("reset",), (2.08, 0.15, True)]
+    assert wakeword.THRESHOLD == 0.5 and wakeword.WEAK_THRESHOLD == 0.1  # the idle threshold is unchanged

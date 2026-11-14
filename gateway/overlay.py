@@ -238,6 +238,7 @@ class WakeBody(BaseModel):
     type: str = Field("wake", max_length=16)
     source: str = Field("mac", max_length=32)
     score: float | None = None
+    weak: bool = False  # a playback-only weak hit: only the app may honour it (WakeGate)
 
 
 class DebugNote(BaseModel):
@@ -4380,6 +4381,10 @@ async def get_events() -> StreamingResponse:
 
 @router.post("/wake", dependencies=_LOOP_DEPS)
 async def post_wake(body: WakeBody | None = None) -> dict:
+    if body is not None and body.weak:
+        # Its own event, never "wake": no debug turn here; the app logs one only when it honours it.
+        bus.publish("wake_weak", {"source": body.source})
+        return {"ok": True}
     debug_log.wake_hit(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}

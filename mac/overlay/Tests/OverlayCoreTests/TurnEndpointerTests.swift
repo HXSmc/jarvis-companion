@@ -412,6 +412,27 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(LevelBlocks.blocks(samples, from: t0, to: t0), [])
     }
 
+    /// Mac run 3 (criterion 28): "Hey Jarvis, stop" over the story on speakers scored under 0.5, so no
+    /// wake came. A weak hit cuts only a reply playing on speakers with barge-in off; never idle, a
+    /// stream with no audio yet, an open turn, or headphones (barge-in on).
+    func testWakeGateWeakHit() {
+        func w(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool,
+               barge: Bool = false) -> WakeGate.Action {
+            WakeGate.decide(audioBusy: busy, streaming: streaming, listening: listening, followUp: followUp,
+                            hasSpeech: speech, weak: true, bargeInOn: barge)
+        }
+        XCTAssertEqual(w(true, true, false, false, false), .cutReply)   // story playing on speakers
+        XCTAssertEqual(w(true, false, false, false, false), .cutReply)  // last clip playing, stream done
+        XCTAssertEqual(w(false, false, false, false, false), .ignore)   // idle: only a full hit wakes
+        XCTAssertEqual(w(false, true, false, false, false), .ignore)    // stream open, nothing playing yet
+        XCTAssertEqual(w(false, false, true, false, true), .ignore)     // the owner's wake turn is open
+        XCTAssertEqual(w(false, false, true, true, false), .ignore)     // follow-up window
+        XCTAssertEqual(w(true, true, false, false, false, barge: true), .ignore)  // headphones: barge run
+        // The full hit's rows are unchanged by the new defaulted parameters.
+        XCTAssertEqual(WakeGate.decide(audioBusy: false, streaming: false, listening: false,
+                                       followUp: false, hasSpeech: false), .newTurn)
+    }
+
     func testWakeGateTable() {
         typealias A = WakeGate.Action
         func d(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool) -> A {
