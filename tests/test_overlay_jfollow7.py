@@ -540,3 +540,46 @@ def test_no_or_cancel_naming_jarvis_answers_the_confirm(client, monkeypatch, tmp
     assert "p2" not in overlay._host_ask
     assert "Stopped." not in says(events)
     assert all(m == "GET" for m, _u, _a, _b in seen)
+
+
+# --- Round 9 (glm-cross 5): Jarvis's own near-name ("Hey, Travis." scores 0.29) never weak-cuts its reply ---
+
+def test_weak_hit_dropped_while_own_near_name_line_plays(client, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from test_overlay_agent import BusRecorder
+    bus = BusRecorder()
+    monkeypatch.setattr(overlay, "bus", bus)
+    monkeypatch.setattr(overlay, "_speech_end", 0.0)
+    monkeypatch.setattr(overlay, "_self_name_until", 0.0)
+    deps = SimpleNamespace(synth=lambda text: (b"\0" * 48000, 24000))  # 1 s of 16-bit mono
+    weak = {"score": 0.29, "weak": True}
+
+    asyncio.run(overlay._audio("The harvest notes are on screen.", deps))  # no near-name: no hold
+    client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
+    assert bus.events == [("wake_weak", {"source": "mac"})]
+
+    for line in ("Hey, Travis.", "Hey Jervis", "Davis sent it."):
+        bus.events.clear()
+        overlay._speech_end = overlay._self_name_until = 0.0
+        asyncio.run(overlay._audio(line, deps))
+        assert 2.5 < overlay._self_name_until - overlay.time.monotonic() <= 1 + overlay.SELF_NAME_SLACK_S
+        client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
+        assert bus.events == [], line  # Jarvis's own voice: the app never sees the weak hit
+        client.post("/overlay/wake", json={"score": 0.9}, headers=AUTH_HEADER)
+        assert bus.events == [("wake", {"source": "mac"})]  # a full hit is unchanged (base barge-in)
+
+    overlay._self_name_until = 0.0  # the line has finished playing
+    client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
+    assert bus.events[-1] == ("wake_weak", {"source": "mac"})
+
+
+def test_near_name_rule():
+    near = overlay._NEAR_NAME_RE
+    assert all(near.search(overlay._voice_text(t)) for t in (
+        "Hey, Travis.", "Hey Jervis", "The Jervis branch is merged.", "Mavis called.", "Purvis", "Hey, nervous?",
+        "Jarvik.", "Hi, Charles.", "Okay, Garvey.", "Hay, Jarvik."))
+    assert not any(near.search(overlay._voice_text(t)) for t in (
+        "Your service is running, sir.", "The harvest notes are on screen.", "Elvis", "Jarvis, sir.",
+        "Shall I push the branch to GitHub?", "Visit the page.", "Revisit it.", "They left at noon.",
+        "Ask Charles about it.", "This is a high bar."))

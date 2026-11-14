@@ -8,7 +8,8 @@ A digital mix, no recording of anyone: every voice is the local Kokoro synth.
           at 0/+3/+6 dB against the story's RMS, at 4 offsets.
   - room: room talk with no wake word, mixed over the story at 0/+6 dB.
 Prints the peak score per mix and the counts at the weak (0.1) and full (0.5) thresholds. Exit 1 when
-an own line or room talk reaches WEAK_THRESHOLD (the margin is gone). The NEAR lines are printed only.
+an own line or room talk reaches WEAK_THRESHOLD (the margin is gone), or a NEAR line does while the
+host's self-name hold (gateway.overlay._NEAR_NAME_RE) would not cover it.
 
 Run: uv run --with kokoro-onnx python scripts/wake_margin.py --models DIR
   DIR holds hey_jarvis_v0.1.onnx, melspectrogram.onnx, embedding_model.onnx (openWakeWord's
@@ -25,7 +26,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gateway.overlay import _voice_text  # noqa: E402
+from gateway.overlay import _NEAR_NAME_RE, _voice_text  # noqa: E402
 from hwmode.tts import Voice  # noqa: E402
 from mac.voice import wakeword  # noqa: E402
 
@@ -36,9 +37,14 @@ OWN = ["Jarvis Companion is up to date, sir.", "Which one: Jarvis capabilities o
        "I hid the Jarvis card.", "Travis sent the build report an hour ago.",
        "The Jervis branch is merged.", "Your service is running on the mini PC, sir.",
        "Shall I push the branch to GitHub?", "The harvest notes are on screen."]
-# Known limit, printed but not gated: "Hey" right before a near-name the filter keeps sounds like the
-# wake phrase in Jarvis's own voice (full threshold too; _voice_text strips only "Jarvis").
-NEAR = ["Hey, Travis.", "Hey Jervis", "Hey, the Jervis branch is merged."]
+# "Hey" right before a near-name the voice keeps sounds like the wake phrase in Jarvis's own voice
+# (full threshold too; _voice_text strips only "Jarvis"), and so does a name like Jarvis ("Jarvik").
+# A weak hit is dropped while such a line plays
+# (_NEAR_NAME_RE); a line that reaches the weak band without matching it fails the run.
+NEAR = ["Hey, Travis.", "Hey Jervis", "Hey, the Jervis branch is merged.", "Hey, Davis.", "Hey Mavis.",
+        "Hey, Harvey's here.", "Hey, service is up.", "Hey, Marcus.", "Hey, nervous?", "Hey, Marvin.",
+        "Hey, Garvey.", "Hey, Davies.", "Hey, curves.", "Hey, Jarvik.", "Hey, Charles.", "Hey, it serves.",
+        "Jarvik.", "Hi, Charles.", "Okay, Jarvik.", "Hay, Jarvik.", "Yes, Jarvik.", "Ask Charles about it."]
 WAKE_VOICES = ["am_adam", "am_michael", "bm_george", "af_bella"]
 ROOM = ["Did you see the game last night?", "Can you pass me the remote?",
         "I think it is going to rain later.", "What time is dinner tonight?",
@@ -103,8 +109,11 @@ def main(argv: list[str] | None = None) -> int:
     own_peak = max(p for _t, p in own)
     raw = peak(model, synth(voice, OWN[0], shipped))
     print(f"own peak {own_peak:.4f}; the same first line with the name left in: {raw:.4f}")
+    near_bad = 0
     for t in NEAR:
-        print(f"near (not gated) {peak(model, synth(voice, _voice_text(t), shipped)):.4f}  {_voice_text(t)!r}")
+        p, held = peak(model, synth(voice, _voice_text(t), shipped)), bool(_NEAR_NAME_RE.search(_voice_text(t)))
+        near_bad += p >= weak and not held
+        print(f"near {p:.4f} {'held' if held else 'not held'}  {_voice_text(t)!r}")
 
     counts = {(db, th): 0 for db in GAINS_DB for th in (weak, full)}
     room_peak = 0.0
@@ -124,8 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     n = len(WAKE_VOICES) * len(OFFSETS_S)
     for db in GAINS_DB:
         print(f"+{db} dB: {counts[(db, weak)]}/{n} mixes reach {weak}, {counts[(db, full)]}/{n} reach {full}")
-    print(f"margin: own peak {own_peak:.4f}, room talk peak {room_peak:.4f}, weak threshold {weak}")
-    return 0 if own_peak < weak and room_peak < weak else 1
+    print(f"margin: own peak {own_peak:.4f}, room talk peak {room_peak:.4f}, weak threshold {weak}; "
+          f"near lines in the weak band with no hold: {near_bad}")
+    return 0 if own_peak < weak and room_peak < weak and not near_bad else 1
 
 
 if __name__ == "__main__":
