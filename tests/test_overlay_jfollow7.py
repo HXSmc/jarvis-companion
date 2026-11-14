@@ -449,13 +449,15 @@ def test_weak_wake_is_its_own_event_and_opens_no_turn(client, monkeypatch):
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["turns"] == []
     client.post("/overlay/wake", json={"score": 0.8}, headers=AUTH_HEADER)
     assert bus.events[-1] == ("wake", {"source": "mac"})
-    # The app's note when it honours one is a wake row with fixed words; the stop's words join it.
+    # The app's notes when it honours one are fixed words: the wake row, then how its turn ended
+    # (round 8: a weak turn's words are never sent, so no voice row follows).
     overlay.debug_log.clear()
     client.post("/overlay/debug/note", json={"step": "wake", "detail": "weak hit during playback (speakers)"},
                 headers=AUTH_HEADER)
-    turn(client, "stop")
+    client.post("/overlay/debug/note", json={"step": "weak_wake", "detail": "stop"}, headers=AUTH_HEADER)
     (only,) = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["turns"]
-    assert [s["step"] for s in only["steps"]][:2] == ["wake", "voice"]
+    assert [(s["step"], s["detail"]) for s in only["steps"]] == [
+        ("wake", "weak hit during playback (speakers)"), ("weak_wake", "stop")]
     assert _describe_with_node([{"step": "wake", "detail": "weak hit during playback (speakers)"}]) == [
         "weak hit during playback (speakers)"] if shutil.which("node") else True
 
@@ -493,3 +495,48 @@ def test_wakeword_weak_hits_rate_limited(monkeypatch):
     # the last frame (0.15) is 26 x 80 ms = 2.08 s in: past the 1.5 s gap from frame 1, sent.
     assert sent == [(0.08, 0.2, True), (0.32, 0.6, False), ("reset",), (2.08, 0.15, True)]
     assert wakeword.THRESHOLD == 0.5 and wakeword.WEAK_THRESHOLD == 0.1  # the idle threshold is unchanged
+
+
+def _host_stop_ask(clock, conv):
+    overlay._host_ask[conv] = overlay.HostAsk(
+        kind="stop", summary="Stop build runner", deadline=clock() + overlay.CONFIRM_S,
+        payload={"id": "s9", "title": "build runner"})
+
+
+def test_weak_hit_never_answers_a_pending_confirm(client, monkeypatch, tmp_path):
+    """Round 8: a weak hit is barge-in only. Over the Confirm question it posts only its event and the
+    app's fixed notes; the ask stays pending, nothing reaches the router, then a real yes answers it."""
+    from test_overlay_agent import BusRecorder
+    clock = Clock()
+    _deps(clock)
+    seen = _session_env(monkeypatch, tmp_path)
+    bus = BusRecorder()
+    monkeypatch.setattr(overlay, "bus", bus)
+    _host_stop_ask(clock, "p1")
+    client.post("/overlay/wake", json={"score": 0.12, "weak": True}, headers=AUTH_HEADER)
+    client.post("/overlay/debug/note", json={"step": "wake", "detail": "weak hit during playback (speakers)"},
+                headers=AUTH_HEADER)
+    client.post("/overlay/debug/note", json={"step": "weak_wake", "detail": "ignored reason=not_stop"},
+                headers=AUTH_HEADER)
+    assert bus.events == [("wake_weak", {"source": "mac"})]
+    assert "p1" in overlay._host_ask  # still pending
+    assert seen == [] and _steps("session_stop") == [] and _steps("agent") == []
+    assert _steps("weak_wake")[-1]["detail"] == "ignored reason=not_stop"
+    # The owner's full-wake (or follow-up window) yes, with his name on the end, answers it.
+    events = turn(client, "Yes, Jarvis", conv_id="p1")
+    assert says(events) == ["Stopped."]
+    assert [e["card"]["title"] for e in events if e["type"] == "card"][0] == "Going ahead"
+    assert "p1" not in overlay._host_ask and [m for m, *_ in seen if m != "GET"]  # the stop ran only now
+
+
+@pytest.mark.parametrize("reply", ["No, Jarvis", "Cancel it, Jarvis"])
+def test_no_or_cancel_naming_jarvis_answers_the_confirm(client, monkeypatch, tmp_path, reply):
+    """Round 8 finding 2: a short no/cancel with a trailing name settles the ask; nothing is stopped."""
+    clock = Clock()
+    _deps(clock)
+    seen = _session_env(monkeypatch, tmp_path)
+    _host_stop_ask(clock, "p2")
+    events = turn(client, reply, conv_id="p2")
+    assert "p2" not in overlay._host_ask
+    assert "Stopped." not in says(events)
+    assert all(m == "GET" for m, _u, _a, _b in seen)
