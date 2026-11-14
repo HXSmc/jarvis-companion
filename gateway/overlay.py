@@ -3071,6 +3071,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
     held: str | None = None  # a say line claiming an overlay change, held until a directive lands
     note_dropped = False  # a say line was only an injected-instruction note (dropped, never spoken)
+    note_seen = False  # any note dropped so far in this reply (widens only the aimed-note rule)
     model_spoke = False  # a model say line was spoken this reply
 
     async def speak_say(say_text: str) -> AsyncIterator[dict]:
@@ -3172,7 +3173,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         said.append(line)
 
     async def flush_line(line: str) -> AsyncIterator[dict]:
-        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held, note_dropped
+        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held, note_dropped, note_seen
         line = line.strip()
         if not line:
             return
@@ -3203,7 +3204,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 yield ev
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
-            say_text, notes = intents.drop_injection_notes(obj["say"].strip())
+            say_text, notes = intents.drop_injection_notes(obj["say"].strip(), noted=note_seen)
+            note_seen = note_seen or notes > 0
             produced = True  # a line that was all notes is still an answer: never the failure line
             if notes and on_step:
                 on_step("answer", note="dropped", sentences=notes)
@@ -3238,7 +3240,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             kept_body, notes = [], 0
             for item in raw_card["body"]:
                 if isinstance(item, str):
-                    item, n = intents.drop_injection_notes(item)
+                    item, n = intents.drop_injection_notes(item, noted=note_seen or notes > 0)
                     notes += n
                     if not item.strip():
                         continue
@@ -3246,6 +3248,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             if notes:
                 raw_card = {**raw_card, "body": kept_body}
                 card_notes = notes
+                note_seen = True
                 produced = True  # a card left empty is not shown, and is never an error
                 if on_step:
                     on_step("answer", note="dropped", sentences=notes)
@@ -4201,7 +4204,8 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
     if not isinstance(obj, dict):
         obj = {"say": line}
     if isinstance(obj.get("say"), str) and obj["say"].strip():
-        text, notes = intents.drop_injection_notes(obj["say"].strip())
+        text, notes = intents.drop_injection_notes(obj["say"].strip(),
+                                                   noted=bool(metrics.get("notes_dropped")))
         if notes:
             metrics["notes_dropped"] = metrics.get("notes_dropped", 0) + notes
             if on_step:

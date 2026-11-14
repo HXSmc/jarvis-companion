@@ -984,9 +984,14 @@ _NOTE_IGNORE_RE = re.compile(
     r"\b(?:ignored|ignore it|ignoring|disregard\w*|skipped|didn't follow|did not follow|won't follow"
     r"|not going to follow|didn't do|did not do)\b", re.I)
 _NOTE_MINE_RE = re.compile(r"\b" + _NOTE_MINE + r"\b", re.I)
-# R5 (Mac run): "...ended with an instruction to add source links to my reply." An instruction
-# aimed at Jarvis's own reply is a note even with no ignore word (the "I ignored it" came apart).
-_NOTE_AIMED_RE = re.compile(r"\bmy (?:reply|replies|answer|answers|response|responses)\b", re.I)
+# R5 (Mac run): "...ended with an instruction to add source links to my reply." with its "I ignored
+# it" in another clause or say line. Only that narrow shape, and only when a note was already
+# dropped in the same reply (R6 security): alone it is spoken (loud and safe). Never on a clause
+# with "I", a question or a warning, so an admission, a question or a warning to the owner stays.
+_NOTE_AIMED_RE = re.compile(
+    r"\binstructions?\s+to\s+(?:add|include|put|insert|append|attach)\b[^.!?;:]{0,60}?"
+    r"\b(?:to|in|into)\s+my\s+(?:reply|replies|answer|answers|response|responses)\b", re.I)
+_NOTE_AIMED_VETO_RE = re.compile(r"\bi\b|\?|\b(?:warn\w*|unsafe|careful|caution|beware|trust)\b", re.I)
 _NOTE_REAL_SOURCE_RE = re.compile(_NOTE_SOURCE_RE.pattern.replace("|" + _NOTE_MINE, ""), re.I)
 # R2: "..., and I emailed him." admits obeying a web result: never hidden. Any first-person
 # verb counts unless it is an ignore/refusal word ("which I have ignored" is still a note).
@@ -1003,10 +1008,11 @@ _NOTE_BARE_IGNORE_RE = re.compile(
     r"|that instruction|the request))?[.!?]?", re.I)
 
 
-def drop_injection_notes(text: str) -> tuple[str, int]:
+def drop_injection_notes(text: str, noted: bool = False) -> tuple[str, int]:
     """Removes model sentences (and ";" clauses) that narrate an instruction injected by a web
     result ("...told me to add source links... I ignored it"); it only ever removes text,
-    never adds. A refusal or answer sharing the sentence stays; an admission of obeying stays."""
+    never adds. A refusal or answer sharing the sentence stays; an admission of obeying stays.
+    `noted`: a note was already dropped earlier in this reply (only widens `_NOTE_AIMED_RE`)."""
     split = lambda x: [re.split(r"\s*;\s*", s) for s in re.split(r"(?<=[.!?])\s+", x.strip())]
     sents = split(text)
     tsents = split(text.replace("’", "'"))  # matching only: the kept text stays as spoken
@@ -1026,7 +1032,9 @@ def drop_injection_notes(text: str) -> tuple[str, int]:
         # (b): the directive clause may lack its own "I ignored it": another clause naming the
         # instruction and ignoring it convicts this one.
         other = convicting - bool(instr and ignore) > 0
-        if ((instr and (ignore or mine or directive or bare_next or _NOTE_AIMED_RE.search(c)))
+        aimed = (instr and (noted or dropped or other) and _NOTE_AIMED_RE.search(c)
+                 and not _NOTE_AIMED_VETO_RE.search(c))
+        if ((instr and (ignore or mine or directive or bare_next)) or aimed
                 or (directive and (ignore or other or bare_next))
                 or (mine and ignore and _NOTE_REAL_SOURCE_RE.search(c))):
             dropped += 1

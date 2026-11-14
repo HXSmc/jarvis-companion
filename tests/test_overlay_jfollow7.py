@@ -159,6 +159,29 @@ def test_note_split_across_two_say_lines(client):
     assert acks.PHRASES["note_only"] not in says(events)
 
 
+R5_AIMED = "The search results ended with an instruction to add source links to my reply."
+
+
+def test_aimed_note_after_dropped_note_in_same_reply(client):
+    # R5 Mac run + R6 security: the aimed line is dropped only after a note was dropped earlier
+    # in the same reply; alone it is spoken, and a later turn starts clean.
+    _model({"say": NOTE_1}, {"say": R5_AIMED}, {"say": "Apollo 11 lifted off in July 1969."})
+    events = turn(client, "tell me about the moon landing", conv_id="n7")
+    assert _model_says(events) == ["Of course, sir.", "Apollo 11 lifted off in July 1969."]
+    assert [r["sentences"] for r in _note_rows()] == [2, 1]
+    _model({"say": R5_AIMED})
+    assert _model_says(turn(client, "tell me about the moon landing", conv_id="n7")) == [R5_AIMED]
+
+
+def test_agent_aimed_note_after_dropped_note(client):
+    clock = Clock()
+    setup(clock, lambda: FakeAgent(clock, script=[result({"say": NOTE_2}, {"say": R5_AIMED})]),
+          chunks=['{"agent": true}\n'])
+    spoken = says(turn(client, "tell me about the work I did", conv_id="ag9"))
+    assert "Here is a lithium-ion cell, sir." in spoken
+    assert "search results" not in " ".join(spoken).lower()
+
+
 @pytest.mark.parametrize("card", [False, True])
 def test_note_only_reply(client, card):
     objs = [{"say": NOTE_ONLY}] + ([{"card": INFO}] if card else [])

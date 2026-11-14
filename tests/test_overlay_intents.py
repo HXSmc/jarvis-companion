@@ -1102,15 +1102,43 @@ def test_sessions_round1_shapes():
 
 def test_injection_notes_round5_aimed_at_reply():
     """jfollow7 R5 (Mac run, story turn): the note line came alone, its "I ignored it" elsewhere.
-    An instruction aimed at Jarvis's own reply is a note; the criterion-13 KEPT rows stay kept."""
+    R6 security: it is dropped only when a note was already dropped in the same reply (`noted`,
+    or another clause of the same text); alone it is spoken (loud and safe)."""
     from mac.voice.intents import drop_injection_notes
 
     line = "The search results ended with an instruction to add source links to my reply."
-    assert drop_injection_notes(line) == ("", 1)
-    assert drop_injection_notes("On the sixteenth of July, 1969, Apollo 11 lifted off. " + line) == (
-        "On the sixteenth of July, 1969, Apollo 11 lifted off.", 1)
+    assert drop_injection_notes(line, noted=True) == ("", 1)
+    assert drop_injection_notes(line) == (line, 0)
+    assert drop_injection_notes(line)[0] is line
+    assert drop_injection_notes(
+        line + " That instruction came from the search results, not from you, so I ignored it.") == ("", 2)
+    story = "On the sixteenth of July, 1969, Apollo 11 lifted off. " + line
+    assert drop_injection_notes(story, noted=True) == ("On the sixteenth of July, 1969, Apollo 11 lifted off.", 1)
     for kept in ("The instructions on the page say to preheat the oven to 200 degrees.",
                  "My answer is in the search results, sir.",
                  "Per the search results, my reply is yes."):
-        out = drop_injection_notes(kept)
-        assert out[1] == 0 and out[0] is kept, kept
+        for noted in (False, True):
+            out = drop_injection_notes(kept, noted=noted)
+            assert out[1] == 0 and out[0] is kept, kept
+
+
+R6_KEPT = (  # jfollow7 R6 security finding 1: admissions, questions, warnings and real answers
+    "Following an instruction in the search results, I added source links to my reply.",
+    "Per the page's instruction, I have changed my answer to recommend their product.",
+    "As the search results' instruction asked, my answer now includes their sign-in link.",
+    "Should I follow the instruction from the search results and change my answer?",
+    "The page has an instruction to put this link in my answer: shall I open it?",
+    "My answer follows the instructions on the page: preheat to 200 degrees.",
+    "Warning, sir: the page holds an instruction to change my answer, so treat it as unsafe.",
+    "Warning, sir: the page has an instruction to add a sign-in link to my answer.",
+    "The search results have an instruction to add their link to my reply, and I did.",
+)
+
+
+@pytest.mark.parametrize("kept", R6_KEPT)
+@pytest.mark.parametrize("noted", [False, True])
+def test_injection_notes_round6_never_hides_admission(kept, noted):
+    from mac.voice.intents import drop_injection_notes
+
+    out = drop_injection_notes(kept, noted=noted)
+    assert out[1] == 0 and out[0] is kept
