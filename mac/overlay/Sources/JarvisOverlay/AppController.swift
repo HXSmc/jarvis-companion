@@ -431,6 +431,9 @@ final class AppController {
 
     private func endWeakTurn(_ action: WakeGate.WeakAction) {
         weakSerial = nil
+        // Ring audio up to now (the cut Confirm question's echo, the dropped words) is never replayed:
+        // the window below replays from max(lastDrainAt, now), and lastDrainAt may predate the cut.
+        lastHeardUntil = Date()
         model.orb = .idle
         switch action {
         case .stopReply:
@@ -449,7 +452,8 @@ final class AppController {
         // A wake inside the owner's open turn (a name inside the request) is ignored: the turn,
         // its words and its 30 s cap go on untouched. A reply playing or streaming still cuts.
         // A full hit inside a weak hit's turn upgrades it to a normal wake turn (no ignore).
-        let upgrade = !followUp && weakSerial != nil && weakSerial == listenSerial
+        // (openTurn: a barge run or other listen that replaced the weak turn leaves nothing to upgrade.)
+        let upgrade = !followUp && weakSerial != nil && weakSerial == listenSerial && speech.openTurn != nil
         weakSerial = nil
         if !followUp, !upgrade, let open = speech.openTurn,
            WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: true,
