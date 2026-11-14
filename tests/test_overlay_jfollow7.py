@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +26,7 @@ from mac.voice import acks, intents  # noqa: E402
 from test_overlay_agent import Clock, FakeAgent, FakeAgentPool, client, reset, result, setup  # noqa: F401,E402
 from test_overlay_jfollow2 import lines  # noqa: E402
 from test_overlay_jfollow4 import _deps, _session_env, _steps  # noqa: E402
-from test_overlay_service import POOL_TEXTS, FakeConversations, make_deps, says, turn  # noqa: E402
+from test_overlay_service import POOL_TEXTS, FakeConversations, FakeSession, make_deps, says, turn  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +98,9 @@ def test_debug_page_describes_rows():
         {"step": "answer", "note": "dropped", "sentences": 2},
         {"step": "wake", "score": 0.79, "source": "mac", "again": 1},
         {"step": "wake", "score": 0.79, "source": "mac"},
+        {"step": "layout", "mode": "aside", "state": "dropped"},  # Mac run 3 finding 5: was empty
+        {"step": "layout", "mode": "clear", "state": "dropped", "reason": "one_card"},
+        {"step": "layout", "mode": "hide"},
     ]
     got = _describe_with_node(rows)
     assert got[0] == "card=b52eda1c match=title"
@@ -108,6 +112,7 @@ def test_debug_page_describes_rows():
     assert "note=dropped" in got[6] and "2" in got[6]
     assert "score 0.79" in got[7] and "heard again 1" in got[7]
     assert got[8] == "score 0.79 (mac)"
+    assert got[9:] == ["mode=aside state=dropped", "mode=clear state=dropped reason=one_card", "mode=hide"]
     page = (ROOT / "gateway" / "overlay_debug.html").read_text()
     assert 'card_remove: "card remove"' in page and 'answer: "answer check"' in page
 
@@ -372,3 +377,61 @@ def test_sessions_follow_keeps_gates(client, monkeypatch, tmp_path):
     assert [e["type"] for e in events] == ["done"]
     assert _steps("followup_dropped")[-1]["reason"] == "level"
     assert len(_steps("sessions")) == rows
+
+
+# --- Round 7 (Mac run 3, S8): a second sessions summary in one conversation ---
+
+def _quiet_replies(*replies):
+    """Quiet pool whose n-th ask streams replies[n] (the sessions summary step)."""
+    pool = FakeConversations()
+    asks = iter(replies)
+
+    class Scripted(FakeSession):
+        def ask(self, text, jpeg=None, on_text=None):
+            self.chunks = list(next(asks))
+            return super().ask(text, jpeg=jpeg, on_text=on_text)
+
+    pool.get = lambda conv: pool.sessions.setdefault(conv, Scripted())
+    return pool
+
+
+@pytest.mark.parametrize("second", [lines({"agent": True}), [], ["\n"]],
+                         ids=["handover", "nothing", "blank"])
+def test_sessions_followup_summary_never_fails(client, monkeypatch, tmp_path, second):
+    """Mac run 3: "check it through the router" after a sessions answer -> intent sessions, rows ok,
+    then "Something went wrong on my side." (answer_error) 2 of 2. The summary step that hands over
+    or says nothing now ends on the fixed-code count line; no failure line or card, no agent run."""
+    deps, clock, made = _sessions_setup(monkeypatch, tmp_path)
+    deps.quiet_conversations = _quiet_replies(lines({"say": "Two sessions, one waiting."}), second)
+    _first(client, "r7")
+    clock.now += 2
+    events = turn(client, MEANT, conv_id="r7", followup=True, audio_ms=3000, levels=NEAR, conf=0.9)
+    spoken = says(events)
+    assert spoken[0] == "Checking your sessions."
+    assert spoken[-1] == "2 sessions, sir: 2 waiting on you, 0 running."
+    assert "Something went wrong on my side." not in spoken
+    assert not [c for c in (e.get("card") for e in events) if c and c["title"] == "No answer"]
+    assert _steps("done")[-1]["error"] is None
+    assert _steps("sessions")[-1]["detail"].startswith("summary=host reason=")
+    assert not made and not _steps("agent")
+    # The follow-up is asked as the fixed sessions question, never the owner's router words.
+    prompt = deps.quiet_conversations.sessions["r7"].prompts[-1]
+    assert prompt.startswith(overlay.SESSIONS_FOLLOW_QUESTION) and "through the router" not in prompt.split("\n\n")[0]
+
+
+def test_sessions_cards_replace_not_pile_up(client, monkeypatch, tmp_path):
+    """Mac run 3 finding 3: four copies of one session's card stayed on screen, with a raw ISO time."""
+    deps, clock, made = _sessions_setup(monkeypatch, tmp_path)
+    ids = []
+    for _ in range(2):
+        events = _first(client, "r7c")
+        cards = [e["card"] for e in events if e.get("type") == "card"]
+        ids.append(sorted(c["id"] for c in cards))
+        for c in cards:
+            assert not any("T10:00:00" in b or "T09:00:00" in b for b in c["body"]), c["body"]
+        clock.now += 40
+    assert ids[0] == ids[1] and len(ids[0]) == 2
+    assert all(overlay._host_card_id(i) for i in ids[0])
+    assert overlay._short_time("2026-11-12T10:00:00Z") == (
+        datetime.fromisoformat("2026-11-12T10:00:00+00:00").astimezone().strftime("%H:%M"))
+    assert overlay._short_time("") == "" and overlay._short_time("soon") == "soon"
