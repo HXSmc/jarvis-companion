@@ -406,13 +406,19 @@ async def screen_frame(
 
 
 def _refusal_detail(exc) -> dict:
-    """409 body for a refused batch (driver FocusMismatch / InputHalted).
+    """409 body for a refused batch (driver FocusMismatch / InputHalted / ShortcutDenied).
 
     Never echoes a window title (the caller's require_window or the real
     one): app names and a window_matched boolean only. events_run counts the
     events that posted anything, the refused one only when it was partial.
     """
     events_run = exc.index + (1 if exc.partial else 0)
+    if hasattr(exc, "shortcut"):  # duck-typed like `reason`: a reloaded driver is another class
+        return {"error": "system_shortcut_denied", "shortcut": exc.shortcut,
+                "refused_index": exc.index, "events_run": events_run, "partial": exc.partial,
+                "message": (f"Refused: {exc.shortcut} is a system-wide macOS shortcut and is blocked by "
+                            f"the gateway. Nothing was sent for event {exc.index}; events before it "
+                            "already ran.")}
     if not hasattr(exc, "reason"):
         return {"error": "input_halted", "refused_index": exc.index, "events_run": events_run}
     msg = (f"Refused ({exc.reason}): {exc.actual_app or 'unknown app'} is focused or under the point, "
@@ -460,7 +466,7 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
         from mac.screen import driver
         try:
             await run_in_threadpool(driver.send_events, events)
-        except (driver.FocusMismatch, driver.InputHalted) as exc:
+        except (driver.FocusMismatch, driver.InputHalted, driver.ShortcutDenied) as exc:
             detail = _refusal_detail(exc)
             logger.info("screen input refused: %s at index %d", detail.get("reason", detail["error"]), exc.index)
             raise HTTPException(status_code=409, detail=detail) from None
