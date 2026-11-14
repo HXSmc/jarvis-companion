@@ -411,4 +411,39 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(blocks[2], 0.02, accuracy: 0.0001)
         XCTAssertEqual(LevelBlocks.blocks(samples, from: t0, to: t0), [])
     }
+
+    func testWakeGateTable() {
+        typealias A = WakeGate.Action
+        func d(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool) -> A {
+            WakeGate.decide(audioBusy: busy, streaming: streaming, listening: listening, followUp: followUp, hasSpeech: speech)
+        }
+        XCTAssertEqual(d(false, false, false, false, false), .newTurn, "idle")
+        XCTAssertEqual(d(false, false, true, false, false), .ignore, "wake turn open, no speech")
+        XCTAssertEqual(d(false, false, true, false, true), .ignore, "wake turn open, speech")
+        XCTAssertEqual(d(false, false, true, true, false), .newTurn, "follow-up window, no speech")
+        XCTAssertEqual(d(false, false, true, true, true), .ignore, "follow-up turn with speech")
+        XCTAssertEqual(d(true, false, false, false, false), .cutReply, "reply on speakers, no barge run")
+        XCTAssertEqual(d(true, true, false, false, false), .cutReply, "barge run during playback")
+        XCTAssertEqual(d(false, true, false, false, false), .cutReply, "stream open, audio not yet playing")
+        XCTAssertEqual(d(false, false, false, false, false), .newTurn, "gap after a final before the stream")
+        XCTAssertEqual(d(true, false, true, false, true), .cutReply, "stop beats ignore")
+    }
+
+    func testStripWakeKeepsANameInsideTheRequest() {
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis, show me a card titled Jarvis capabilities"),
+                       "show me a card titled Jarvis capabilities")
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis what can Jarvis Companion do"), "what can Jarvis Companion do")
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jervis, show me a card titled Jarvis capabilities"),
+                       "Hey Jervis, show me a card titled Jarvis capabilities")
+        XCTAssertEqual(TurnEndpointer.stripWake("so anyway. Hey Jarvis, open Safari"), "open Safari")
+        XCTAssertEqual(TurnEndpointer.stripWake("remove the Jarvis capabilities card", followUp: true),
+                       "remove the Jarvis capabilities card")
+        XCTAssertEqual(TurnEndpointer.stripWake("Jarvis, the companion one", followUp: true), "the companion one")
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis next change", followUp: true), "next change")
+        XCTAssertEqual(TurnEndpointer.stripWake("Jarvis stop"), "stop")
+        // A stop said over the reply after a clause break still reads as a stop (barge path).
+        XCTAssertEqual(TurnEndpointer.stripWake("so, jarvis stop it"), "stop it")
+        XCTAssertTrue(StopPhrase.matches("so, jarvis stop it"))
+        XCTAssertTrue(StopPhrase.matches("Hey Jarvis, stop."))
+    }
 }

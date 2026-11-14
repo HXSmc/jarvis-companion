@@ -131,6 +131,12 @@ final class SpeechInput {
         cancel?()
     }
 
+    /// The owner's open turn, for the wake gate (WakeGate): nil when there is none or it is a barge run.
+    var openTurn: (followUp: Bool, hasSpeech: Bool)? {
+        guard let turn = currentTurn, turn.barge == nil, !turn.finished, !turn.cancelled else { return nil }
+        return (turn.followUp, turn.hasSpeech)
+    }
+
     // MARK: turn state (main actor only)
 
     private final class Turn: @unchecked Sendable {
@@ -223,7 +229,7 @@ final class SpeechInput {
             turn.onNothing?(turn.diagnosis)
             return
         }
-        let text = Self.stripWake(raw)
+        let text = Self.stripWake(raw, followUp: turn.followUp)
         guard !text.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
         log.debug("final \(text, privacy: .private)")
         let levels = LevelBlocks.blocks(tap.levelSamples(), from: turn.levelFrom, to: end.addingTimeInterval(0.3))
@@ -232,8 +238,10 @@ final class SpeechInput {
                             audioFrom: turn.stats.firstAt))
     }
 
-    /// Drops everything up to a "jarvis" near the start, and stray punctuation.
-    static func stripWake(_ raw: String) -> String { TurnEndpointer.stripWake(raw) }
+    /// Drops a leading wake phrase (a follow-up: only at the very start), and stray punctuation.
+    static func stripWake(_ raw: String, followUp: Bool = false) -> String {
+        TurnEndpointer.stripWake(raw, followUp: followUp)
+    }
 
     // MARK: watchdog
 

@@ -313,6 +313,9 @@ bus = EventBus()
 
 # --- Debug ring buffer (GET /overlay/debug): memory only, never written to disk ---
 
+WAKE_OPEN_S = 30  # the app's hard turn cap: a second hit inside it folds into the waiting wake row
+
+
 class DebugLog:
     """Last 50 turns, each a list of pipeline steps; plus the wake listener state.
 
@@ -334,6 +337,18 @@ class DebugLog:
             self._turns.append(turn)
         self.add(turn, "wake", score=score, source=source)
         return turn
+
+    def wake_hit(self, score: float | None, source: str) -> dict:
+        """A hit while the newest turn is a wake still waiting (< WAKE_OPEN_S) is the same request:
+        the app ignores it (WakeGate), so count it on that wake row instead of opening a turn."""
+        with self._lock:
+            if self._turns:
+                last = self._turns[-1]
+                step = last["steps"][-1] if last["steps"] else None
+                if step and step["step"] == "wake" and time.time() - step["at"] < WAKE_OPEN_S:
+                    step["again"] = int(step.get("again", 0)) + 1
+                    return last
+        return self.wake(score, source)
 
     def for_utterance(self) -> dict:
         """The newest turn when it is a wake still waiting for its words (<60 s), else a new one."""
@@ -4261,7 +4276,7 @@ async def get_events() -> StreamingResponse:
 
 @router.post("/wake", dependencies=_LOOP_DEPS)
 async def post_wake(body: WakeBody | None = None) -> dict:
-    debug_log.wake(body.score if body else None, body.source if body else "mac")
+    debug_log.wake_hit(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}
 

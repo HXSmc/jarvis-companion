@@ -383,6 +383,13 @@ final class AppController {
     /// followUp: the open-mic window after a reply (no wake word, same conversation);
     /// replayFrom: the reply's drain time, so only post-reply ring audio is replayed.
     private func handleWake(followUp: Bool = false, replayFrom: Date? = nil) async {
+        // A wake inside the owner's open turn (a name inside the request) is ignored: the turn,
+        // its words and its 30 s cap go on untouched. A reply playing or streaming still cuts.
+        if !followUp, let open = speech.openTurn,
+           WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: true,
+                           followUp: open.followUp, hasSpeech: open.hasSpeech) == .ignore {
+            return
+        }
         listenSerial += 1
         turnDone = false  // a barge-in's stale drain must not start a follow-up
         if followUp {

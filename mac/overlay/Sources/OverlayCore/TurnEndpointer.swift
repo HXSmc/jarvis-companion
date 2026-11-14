@@ -62,11 +62,19 @@ public enum TurnEndpointer {
     }
 
     /// The words after the wake word (moved from SpeechInput unchanged, so tests can pin it).
-    public static func stripWake(_ raw: String) -> String {
+    /// A wake turn drops everything through the first wake "jarvis" near the start: a "hey/hi/ok"
+    /// lead-in, a clause break, or the line's start (the 2 s ring buffer can hold words said before
+    /// the wake word); a "jarvis" preceded by an ordinary word, like "titled Jarvis", is part of the
+    /// request and stays. A follow-up drops only a leading wake phrase: its turn already opened on
+    /// the wake word, so a later "Jarvis" is a name, not a second wake.
+    public static func stripWake(_ raw: String, followUp: Bool = false) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The 2 s ring buffer can hold words said before the wake word: drop through it.
-        if let range = text.range(of: "jarvis", options: [.caseInsensitive]),
-           text.distance(from: text.startIndex, to: range.lowerBound) < 40 {
+        let pattern = followUp
+            ? #"^(?:(?:hey|hi|ok|okay)[\s,]+)?jarvis\b"#
+            : #"(?:^|(?:\b(?:hey|hi|ok|okay)[\s,]+)|(?:[,.!?;]\s*))jarvis\b"#
+        if let range = text.range(of: pattern, options: [.regularExpression, .caseInsensitive]),
+           followUp || text.distance(from: text.startIndex,
+                                     to: text.index(range.upperBound, offsetBy: -6)) < 40 {
             text = String(text[range.upperBound...])
         }
         return text
@@ -320,5 +328,19 @@ public struct TailGate {
     static func words(_ s: String) -> Set<String> {
         let plain = s.lowercased().filter { $0 != "'" && $0 != "\u{2019}" }
         return Set(plain.split { !$0.isLetter }.map(String.init))
+    }
+}
+
+/// What a wake-word hit does given the app's state: cut the reply that plays or streams, ignore it
+/// while the owner's turn is open (the words keep flowing into that turn), or open a new turn.
+public enum WakeGate {
+    public enum Action: Equatable { case newTurn, cutReply, ignore }
+
+    public static func decide(audioBusy: Bool, streaming: Bool, listening: Bool,
+                              followUp: Bool, hasSpeech: Bool) -> Action {
+        if audioBusy || streaming { return .cutReply }
+        if listening && !followUp { return .ignore }
+        if listening && followUp && hasSpeech { return .ignore }
+        return .newTurn
     }
 }
