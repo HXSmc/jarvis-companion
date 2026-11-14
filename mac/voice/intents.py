@@ -262,20 +262,29 @@ _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anythi
 # companion"); matched after session/memory/workspace, before the hide/clear verbs, so
 # their phrases keep their kinds. Whole utterance, commas off.
 # jfollow7 S: an adjective before "sessions", the article before the device optional, more devices (mac, router, STT forms of mini PC).
-_COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion|(?:mini|many) ?(?:p ?c|b ?c)"
+_COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion|(?:mini|many) ?(?:p ?c|b ?c|piece)"
               r"|minipc|mac|router)")
 _SESSIONS_PREP = r"(?:on|in|through|via)"
-_SESSIONS_LEAD = (r"(?:check|show|list|see|tell me|give me|what's|whats|what|which|how's|hows|how|any"
-                  r"|are there|are|is)")
+# R1: "how" questions keep base's article rule ("how are the sessions"), so "how do I check
+# sessions" / "how long are sessions" stay answers.
+_SESSIONS_LEAD = (r"(?:check|show|list|see|tell me|give me|what's|whats|what|which|how many|any"
+                  r"|are there|are|is|do i have|can you tell me|can you show me|i want to see"
+                  r"|i'd like to see|i would like to see)")
+_SESSIONS_TAIL = (r"(?: (?:are |is )?(?:doing|going|running|open|active)| today| right now| now| ok| okay"
+                  r"| do i have)?"
+                  r"(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?")
 _SESSIONS_TOPIC_RE = re.compile(
-    _SESSIONS_LEAD + r"[\w' ]{0,16}?(?:(?:my|the|our) )?(?:(?:active|running|open|live|current) )?sessions"
-    r"(?: doing| going| running| open| active| today| right now| now| ok| okay)?"
-    r"(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
-    r"|(?:" + _SESSIONS_LEAD + r" )?(?:any )?sessions? (?:are |is )?"
+    # R1: never with a start/stop verb anywhere ("check and stop all sessions" is no listing).
+    r"(?!.*\b(?:start|stop|end|kill|close|cancel|spin up)\b)(?:"
+    + _SESSIONS_LEAD + r"[\w' ]{0,16}?(?:(?:my|the|our) )?(?:(?:active|running|open|live|current) )?sessions"
+    + _SESSIONS_TAIL +
+    r"|(?:how's|hows|how)[\w' ]{0,16}?(?:my|the|our) (?:(?:active|running|open|live|current) )?sessions"
+    + _SESSIONS_TAIL +
+    r"|(?:(?:" + _SESSIONS_LEAD + r"|how's|hows|how) )?(?:any )?sessions? (?:are |is )?"
     r"(?:(?:running|active|open|going)(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
     r"|" + _SESSIONS_PREP + r" " + _COMPANION + r")"
     r"|what(?:'s| is| are)? (?:running|active) " + _SESSIONS_PREP + r" " + _COMPANION +
-    r"|status of (?:my|the|our) sessions")
+    r"|status of (?:my|the|our) sessions)")
 # jfollow6 C1: "can you remove a single card?" is a how-to question, not a remove.
 _CARD_HELP_RE = re.compile(
     r"(?:can you|could you|can't you|cannot you|can you not|could you not|how do i|how can i"
@@ -1218,7 +1227,7 @@ def open_site(target: str, *, run=subprocess.run) -> str | None:
 # the Mac" is no sessions question). A start/stop/open verb never counts.
 _FOLLOW_SESSIONS_RE = re.compile(
     r"\bsessions\b|\b(?:the|my|our|that|those|these) sessions?\b"
-    r"|\b(?:on|in|through|via) (?:(?:my|the|our) )?(?:(?:mini|many) ?(?:p ?c|b ?c)|minipc|router"
+    r"|\b(?:on|in|through|via) (?:(?:my|the|our) )?(?:(?:mini|many) ?(?:p ?c|b ?c|piece)|minipc|router"
     r"|(?:\w+(?:'s|s')? )?companion)\b")
 _FOLLOW_VERB_RE = re.compile(r"\b(?:start|stop|end|kill|close|cancel|spin up|open)\b")
 

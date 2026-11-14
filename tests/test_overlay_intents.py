@@ -1059,3 +1059,17 @@ def test_injection_notes_round1():
         out = drop_injection_notes(line)
         assert out[1] == 0 and out[0] is line, line
 
+
+def test_sessions_round1_shapes():
+    """jfollow7 R1: a start/stop verb never reaches `sessions`; "how" questions need an article;
+    more natural phrasings reach it."""
+    for text in ("do I have any sessions on the mac", "what sessions do I have", "how many sessions are open",
+                 "can you tell me what sessions are running", "I want to see the sessions on the mini PC",
+                 "what sessions are running on the mini piece", "how are the sessions on the mac"):
+        assert parse(text, apps=()) == Intent("sessions", "", ""), text
+    for text in ("check and stop all sessions", "see and close my sessions", "how to start sessions on the mac",
+                 "how do I stop the running sessions", "how do I check sessions", "how are sessions",
+                 "how long are sessions on the mac", "how many sessions should I do a week",
+                 "can you tell me what sessions are for", "how do I stop my sessions",
+                 "check and kill the sessions"):
+        assert parse(text, apps={}).kind == "answer", text
