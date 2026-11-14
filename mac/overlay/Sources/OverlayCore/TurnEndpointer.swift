@@ -354,9 +354,36 @@ public enum WakeGate {
 
     /// The words END with the wake phrase ("talking about you? I can't I Hey, Jarvis", Mac run 3):
     /// a follow-up window that kept a wake heard room talk, then the owner's wake; his request comes next.
+    /// A short yes/no/cancel before the name ("Yes, Jarvis", "Cancel it, Jarvis") is the owner's
+    /// answer naming him, not a new wake (round 8): it goes on as the window's answer.
     public static func endsWithWake(_ text: String) -> Bool {
-        text.range(of: #"(?:^|[\s,.!?])(?:(?:hey|hi|ok|okay)[\s,.]*)?jarvis[\s,.!?]*$"#,
-                   options: [.regularExpression, .caseInsensitive]) != nil
+        guard let wake = text.range(of: #"(?:^|[\s,.!?])(?:(?:hey|hi|ok|okay)[\s,.]*)?jarvis[\s,.!?]*$"#,
+                                    options: [.regularExpression, .caseInsensitive]) else { return false }
+        // "No. Hey Jarvis": a spoken wake phrase is still a wake; only a bare trailing name is checked.
+        if text[wake].range(of: #"\b(?:hey|hi|ok|okay)\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        return !isShortReply(String(text[..<wake.lowerBound]))
+    }
+
+    static func isShortReply(_ text: String) -> Bool {
+        let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .components(separatedBy: CharacterSet(charactersIn: " ,.!?;:")).filter { !$0.isEmpty }
+        let t = words.joined(separator: " ")
+        guard !t.isEmpty else { return false }
+        return StopPhrase.matches(t) || t.range(
+            of: #"^(?:(?:yes|yeah|yep|no|nope)(?: (?:please|sir))?(?: (?:do it|go ahead|don't|do not|thanks|thank you))?|do it|go ahead|don't|do not|confirm(?:ed)?)$"#,
+            options: .regularExpression) != nil
+    }
+
+    /// What a weak hit's turn does with its words (hub, round 8). A weak hit is barge-in only: a stop
+    /// phrase ends the reply it cut; anything else, a "yes" or "go ahead" to a pending Confirm
+    /// included, is dropped. There is no "send": a weak turn never reaches the service.
+    public enum WeakAction: Equatable { case stopReply, ignore(reason: String) }
+
+    public static func weakFinal(_ text: String) -> WeakAction {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .ignore(reason: "no_speech") }
+        return StopPhrase.matches(text) ? .stopReply : .ignore(reason: "not_stop")
     }
 
     /// The words start like a wake: "hey"/"hi" (also a misheard "Hey Jervis"), or "jarvis" at the

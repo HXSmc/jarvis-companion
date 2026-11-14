@@ -440,6 +440,36 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertFalse(WakeGate.endsWithWake("the Jarvis overlay capabilities card"))
         XCTAssertFalse(WakeGate.endsWithWake("Hey Jarvis, what time is it"))
         XCTAssertFalse(WakeGate.endsWithWake("I meant the Jarvises"))
+        // Round 8: a short yes/no/cancel naming him answers the window (a pending Confirm), not a wake.
+        XCTAssertFalse(WakeGate.endsWithWake("Yes, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("No, Jarvis."))
+        XCTAssertFalse(WakeGate.endsWithWake("Cancel it, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("Yes please, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("Go ahead, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("Don\u{2019}t, Jarvis"))
+        XCTAssertTrue(WakeGate.endsWithWake("No. Hey, Jarvis"))     // a spoken wake phrase stays a wake
+        XCTAssertTrue(WakeGate.endsWithWake("I said no to that, Jarvis"))
+    }
+
+    func testWeakHitTurnNeverSends() {
+        // A weak hit is barge-in only (hub, round 8): stop words end the cut reply; a yes, "go ahead"
+        // (a pending Confirm stays pending) or any request is dropped; no case sends to the service.
+        let notStop = WakeGate.WeakAction.ignore(reason: "not_stop")
+        XCTAssertEqual(WakeGate.weakFinal("yes"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("Yes, go ahead"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("go ahead"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("Yes, Jarvis"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("Hey Jarvis, what's the weather"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("push it to GitHub"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("stop"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("Hey Jarvis, stop."), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("cancel"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("never mind"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("Be quiet, Jarvis"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("  "), .ignore(reason: "no_speech"))
+        // A weak hit while the Confirm question plays still only cuts the audio (decide), never more.
+        XCTAssertEqual(WakeGate.decide(audioBusy: true, streaming: true, listening: false, followUp: false,
+                                       hasSpeech: false, weak: true, bargeInOn: false), .cutReply)
     }
 
     func testWakeGateTable() {

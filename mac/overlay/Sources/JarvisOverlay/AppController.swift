@@ -24,6 +24,8 @@ final class AppController {
     private var turnDone = false
     /// The listenSerial of the open follow-up turn a wake was kept in (WakeGate .ignore).
     private var wokenSerial: Int?
+    /// The listenSerial of the open turn a weak hit started: barge-in only, its words never sent.
+    private var weakSerial: Int?
     /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
     private var listenSerial = 0
     private var heldLine = HeldLine<OverlayEvent>()
@@ -386,14 +388,59 @@ final class AppController {
 
     /// A weak wake hit (only sent below the full threshold): honoured only while a reply plays on
     /// speakers with barge-in off, where the owner's "Hey Jarvis" over Jarvis's own audio never
-    /// reaches the full score (Mac run 3, criterion 28). Then it is a wake: today's cut-reply path.
+    /// reaches the full score (Mac run 3, criterion 28). It is barge-in ONLY (hub, round 8): it cuts
+    /// the reply as a full wake does with barge-in off, then listens; a stop phrase ends there and
+    /// anything else is dropped. Its words never reach the service, so it never answers a pending
+    /// Confirm (that still needs a full wake or the follow-up window) and never opens a request.
+    /// A full hit that follows (the same "Hey Jarvis" scoring up) turns it into a normal wake turn.
     private func handleWeakWake() async {
         let open = speech.openTurn
         guard WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: open != nil,
                               followUp: open?.followUp ?? false, hasSpeech: open?.hasSpeech ?? false,
                               weak: true, bargeInOn: bargeInEnabled) == .cutReply else { return }
         client.debugNote(step: "wake", detail: "weak hit during playback (speakers)")
-        await handleWake()
+        cutReply = replyTexts
+        audio.stop()
+        utteranceTask?.cancel()
+        turnStreaming = false
+        heldLine.drop()
+        turnDone = false
+        listenSerial += 1
+        let serial = listenSerial
+        weakSerial = serial
+        let echoOf = cutReply
+        model.orb = .listening
+        speech.listenAfterWake(
+            onPartial: { _ in },
+            onFinal: { [weak self] heardText, _, _, _ in
+                let heardUntil = Date()
+                Task { @MainActor in
+                    guard let self, self.listenSerial == serial else { return }
+                    self.lastHeardUntil = heardUntil
+                    let text = echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
+                    self.endWeakTurn(WakeGate.weakFinal(text))
+                }
+            },
+            onNothing: { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.listenSerial == serial else { return }
+                    self.endWeakTurn(.ignore(reason: "no_speech"))
+                }
+            })
+    }
+
+    private func endWeakTurn(_ action: WakeGate.WeakAction) {
+        weakSerial = nil
+        model.orb = .idle
+        switch action {
+        case .stopReply:
+            client.debugNote(step: "weak_wake", detail: "stop")  // the reply was cut at the hit
+        case .ignore(let reason):
+            client.debugNote(step: "weak_wake", detail: "ignored reason=\(reason)")
+            // A Confirm question it cut stays pending: open the normal follow-up window (level gate)
+            // the question's end would have opened, so a yes/no can still answer it.
+            if BargeWords.confirmPending(model.cards) { replyFinished() }
+        }
     }
 
     /// followUp: the open-mic window after a reply (no wake word, same conversation);
@@ -401,7 +448,10 @@ final class AppController {
     private func handleWake(followUp: Bool = false, replayFrom: Date? = nil) async {
         // A wake inside the owner's open turn (a name inside the request) is ignored: the turn,
         // its words and its 30 s cap go on untouched. A reply playing or streaming still cuts.
-        if !followUp, let open = speech.openTurn,
+        // A full hit inside a weak hit's turn upgrades it to a normal wake turn (no ignore).
+        let upgrade = !followUp && weakSerial != nil && weakSerial == listenSerial
+        weakSerial = nil
+        if !followUp, !upgrade, let open = speech.openTurn,
            WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: true,
                            followUp: open.followUp, hasSpeech: open.hasSpeech, heard: open.heard) == .ignore {
             if open.followUp { wokenSerial = listenSerial }  // that window now carries a wake: never silent
@@ -428,7 +478,7 @@ final class AppController {
                     turnStreaming = false
                     heldLine.drop()
                 }
-            } else {
+            } else if !upgrade {  // an upgrade keeps the cut reply's echo list; its audio already stopped
                 cutReply = []
                 audio.stop()
             }
