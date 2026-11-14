@@ -261,15 +261,20 @@ _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anythi
 # jfollow6 D: a wider net of read-only sessions questions/asks ("what's running on my
 # companion"); matched after session/memory/workspace, before the hide/clear verbs, so
 # their phrases keep their kinds. Whole utterance, commas off.
-_COMPANION = r"(?:(?:\w+(?:'s|s')? )?companion|mini ?pc)"
+# jfollow7 S: an adjective before "sessions", the article before the device optional, more devices (mac, router, STT forms of mini PC).
+_COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion|(?:mini|many) ?(?:p ?c|b ?c)"
+              r"|minipc|mac|router)")
+_SESSIONS_PREP = r"(?:on|in|through|via)"
+_SESSIONS_LEAD = (r"(?:check|show|list|see|tell me|give me|what's|whats|what|which|how's|hows|how|any"
+                  r"|are there|are|is)")
 _SESSIONS_TOPIC_RE = re.compile(
-    r"(?:what's|whats|what|how's|hows|how|which|are|is|any|show|list|tell me|give me|check)"
-    r"[\w' ]{0,16}?(?:my|the|our) sessions"
-    r"(?: doing| going| running| open| today| right now| now| ok| okay)?"
-    r"(?: on (?:my|the|our) " + _COMPANION + r")?"
-    r"|(?:what's|whats|what|how's|hows|how|which|are|is|any)? ?sessions? (?:are |is )?"
-    r"(?:running|going|open|on (?:my|the|our) " + _COMPANION + r")"
-    r"|what(?:'s| is)? running on (?:my|the|our) " + _COMPANION +
+    _SESSIONS_LEAD + r"[\w' ]{0,16}?(?:(?:my|the|our) )?(?:(?:active|running|open|live|current) )?sessions"
+    r"(?: doing| going| running| open| active| today| right now| now| ok| okay)?"
+    r"(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
+    r"|(?:" + _SESSIONS_LEAD + r" )?(?:any )?sessions? (?:are |is )?"
+    r"(?:(?:running|active|open|going)(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
+    r"|" + _SESSIONS_PREP + r" " + _COMPANION + r")"
+    r"|what(?:'s| is| are)? (?:running|active) " + _SESSIONS_PREP + r" " + _COMPANION +
     r"|status of (?:my|the|our) sessions")
 # jfollow6 C1: "can you remove a single card?" is a how-to question, not a remove.
 _CARD_HELP_RE = re.compile(
@@ -1181,3 +1186,20 @@ def open_site(target: str, *, run=subprocess.run) -> str | None:
     url = "https://" + target
     run(["open", url], check=False)
     return url
+
+
+# jfollow7 S2: the follow-up rule's words (only after a sessions answer, one turn, 30 s): the
+# plural "sessions", "the/my/our/that/those/these session(s)", or a follow-up device after
+# on/in/through/via (mini PC + STT forms, router, companion; never "mac": "a screenshot on
+# the Mac" is no sessions question). A start/stop/open verb never counts.
+_FOLLOW_SESSIONS_RE = re.compile(
+    r"\bsessions\b|\b(?:the|my|our|that|those|these) sessions?\b"
+    r"|\b(?:on|in|through|via) (?:(?:my|the|our) )?(?:(?:mini|many) ?(?:p ?c|b ?c)|minipc|router"
+    r"|(?:\w+(?:'s|s')? )?companion)\b")
+_FOLLOW_VERB_RE = re.compile(r"\b(?:start|stop|end|kill|close|cancel|spin up|open)\b")
+
+
+def sessions_followup(text: str) -> bool:
+    """True when a reply right after a sessions answer is still about sessions (pure, no state)."""
+    low = _clean(text).lower().replace(",", "")
+    return bool(_FOLLOW_SESSIONS_RE.search(low)) and not _FOLLOW_VERB_RE.search(low)

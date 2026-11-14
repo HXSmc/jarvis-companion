@@ -601,6 +601,7 @@ def _forget(conv_id: str) -> None:
     _session_ref.pop(conv_id, None)
     _host_ask.pop(conv_id, None)
     _card_pick.pop(conv_id, None)
+    _sessions_follow.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
     _tainted.discard(conv_id)
 
@@ -1193,6 +1194,10 @@ CARD_PICK_S = 30
 # conv -> CardPick, under _confirm_lock like _host_ask; expiry is judged on the next utterance.
 # Ids only ever come from the conv's _card_index via the line; a reply can only choose among them.
 _card_pick: dict[str, CardPick] = {}
+# jfollow7 S2: conv -> deadline after a sessions answer; the next turn may stay on sessions
+# (an `answer` holding sessions/device words only, after the follow-up gates). One turn, 30 s.
+SESSIONS_FOLLOW_S = 30
+_sessions_follow: dict[str, float] = {}
 
 
 def _live_pick(conv_id: str, deps: OverlayDeps) -> CardPick | None:
@@ -2108,6 +2113,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             yield {"type": "done", "metrics": metrics, "error": None}
             return
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
+    sessions_turn = False  # this turn answered a sessions question (S2 deadline at the end)
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         ws_names = await asyncio.to_thread(_ws_names)
@@ -2125,6 +2131,11 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 if pick_ids is not None:
                     intent = (intents.Intent("card_remove", "pick", "") if pick.action == "remove"
                               else intents.Intent("card_size", "max", ""))
+        # S2: right after a sessions answer, a reply about sessions/the device stays on sessions.
+        follow_at = _sessions_follow.pop(body.conv_id, None)  # one turn only, live or not
+        if (follow_at is not None and deps.clock() < follow_at and pick_ids is None
+                and intent.kind == "answer" and intents.sessions_followup(raw_text)):
+            intent = intents.Intent("sessions", "", "")
         # A1: a remove hidden behind small talk ("Sure. Take the diagram card off") re-parses raw
         # speech; it only becomes card_remove when a card this conv already holds matches.
         if intent.kind == "answer" and not joined:
@@ -2633,6 +2644,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 yield ev
 
         elif intent.kind == "sessions":
+            sessions_turn = True
             access = _sessions_access()
             rows: list[dict] = []
             if access is None:
@@ -2750,6 +2762,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             _card_ids.pop(oldest, None)  # _resets stays: a running turn compares against it (ints only)
             _hunks.pop(oldest, None)
     _last_reply[body.conv_id] = (deps.clock(), len(_card_ids.get(body.conv_id, ())) > cards_at_start)
+    if sessions_turn and error is None:  # counted from the end of the spoken sessions answer
+        _sessions_follow[body.conv_id] = deps.clock() + SESSIONS_FOLLOW_S
+        while len(_sessions_follow) > 32:
+            _sessions_follow.pop(next(iter(_sessions_follow)))
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}

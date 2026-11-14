@@ -990,3 +990,39 @@ def test_injection_notes_table():
     ):
         out = drop_injection_notes(line)
         assert out[1] == 0 and out[0] is line, line
+
+
+def test_sessions_any_shape_table():
+    """jfollow7 S1: every read-only sessions question, with its device, reaches `sessions`."""
+    for text in ("check the active sessions on mini BC", "check the active sessions on the mini PC",
+                 "Hey Jarvis, check the active sessions on mini PC", "check the active sessions on mini pc",
+                 "check the active sessions on mini p c", "check the active sessions on minipc",
+                 "check the active sessions on many PC", "show my sessions", "list the sessions on the Mac",
+                 "any sessions running", "which sessions are active", "what's running on the mini PC",
+                 "what's active on the mini PC", "what sessions are running on the Mac",
+                 "are there any sessions on Jarvis companion", "tell me the open sessions on the router",
+                 "what's running on the router"):
+        assert parse(text, apps=()) == Intent("sessions", "", ""), text
+    for text, want in (("start a new session to write the readme", "session"),
+                       ("start a new session on the mini PC to check my sessions", "session"),
+                       ("stop the voice-test session", "session"),
+                       ("open a session", "open_app"),
+                       ("is the build still running", "answer"),
+                       ("what's running late today", "answer"),
+                       ("how long is a therapy session", "answer"),
+                       ("what's open on the Mac", "answer"),
+                       ("I meant on the mini PC, and you can check it through the router", "answer")):
+        assert parse(text, apps={}).kind == want, text  # the app opener needs a dict
+
+
+def test_sessions_followup_words():
+    """jfollow7 S2: the follow-up rule's word check (pure)."""
+    from mac.voice.intents import sessions_followup
+    for text in ("I meant on the mini PC, and you can check it through the router", "on the router",
+                 "what about the sessions", "check it on mini BC", "and on Jarvis companion"):
+        assert sessions_followup(text), text
+    for text in ("thanks", "what's the weather in Riyadh", "tell me a joke about the Mac", "stop it",
+                 "start a new session on the mini PC", "how long is a therapy session", "on the Mac",
+                 "how do I take a screenshot on the Mac", "is the build still running",
+                 "what's running late today"):
+        assert not sessions_followup(text), text

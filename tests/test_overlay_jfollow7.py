@@ -211,3 +211,87 @@ def test_jfollow7_phrases():
     cache = acks.AckCache(synth=lambda t: (rendered.append(t), (b"pcm", 24000))[1])
     cache.prerender()
     assert text in rendered and cache.get("note_only") == (text, b"pcm", 24000)
+
+
+# --- S: every sessions question reaches the sessions intent (criteria S3-S5) ---
+
+from test_overlay_jfollow2 import NEAR, OWNER, ROOM  # noqa: E402
+
+FIRST = "check the active sessions on mini BC"
+MEANT = "I meant on the mini PC, and you can check it through the router"
+
+
+def _sessions_setup(monkeypatch, tmp_path, n=8):
+    _session_env(monkeypatch, tmp_path)
+    clock = Clock()
+    made: list = []
+    deps = _deps(clock, conversations=FakeConversations(lines(*[{"say": "Model answer."}] * n)),
+                 quiet_conversations=FakeConversations(lines({"say": "Two sessions, one waiting."})))
+    deps.agent_conversations = FakeAgentPool(lambda: made.append(1))
+    return deps, clock, made
+
+
+def _first(client, conv):
+    return turn(client, FIRST, conv_id=conv, audio_ms=1800, levels=OWNER)
+
+
+def _kinds():
+    return [r["kind"] for r in _steps("intent")]  # oldest first
+
+
+def _assert_sessions_turn(events, deps, conv, quiet_calls):
+    assert events[0]["text"] == "Checking your sessions."
+    assert _steps("sessions")[-1]["detail"] == "result=ok rows=2"
+    assert [c for c in (e.get("card") for e in events) if c and c["type"] == "info"]
+    assert "can't" not in " ".join(says(events))
+    assert len(deps.quiet_conversations.sessions[conv].prompts) == quiet_calls
+
+
+def test_sessions_owner_two_utterances(client, monkeypatch, tmp_path):
+    deps, clock, made = _sessions_setup(monkeypatch, tmp_path)
+    events = _first(client, "s1")
+    _assert_sessions_turn(events, deps, "s1", 1)
+    assert _kinds() == ["sessions"]
+    clock.now += 5
+    events = turn(client, MEANT, conv_id="s1", followup=True, audio_ms=3000, levels=NEAR, conf=0.9)
+    _assert_sessions_turn(events, deps, "s1", 2)
+    assert _kinds() == ["sessions", "sessions"]
+    assert deps.conversations.sessions == {} and not made and not _steps("agent")
+
+
+def test_sessions_follow_expires(client, monkeypatch, tmp_path):
+    deps, clock, made = _sessions_setup(monkeypatch, tmp_path)
+    # (a) expired
+    _first(client, "e1")
+    clock.now += overlay.SESSIONS_FOLLOW_S + 1
+    turn(client, MEANT, conv_id="e1")
+    assert _kinds()[-1] == "answer" and len(_steps("sessions")) == 1
+    # (b) one turn only
+    _first(client, "e2")
+    turn(client, "what time is it", conv_id="e2")
+    turn(client, MEANT, conv_id="e2")
+    assert _kinds()[-1] == "answer"
+    # (c) no sessions turn first
+    turn(client, MEANT, conv_id="e3")
+    assert _kinds()[-1] == "answer"
+    # (d), (e) follow-ups that are not about sessions
+    for i, text in enumerate(("tell me a joke about the Mac", "how long is a therapy session",
+                              "is the build still running", "what's running late today")):
+        conv = f"e4{i}"
+        _first(client, conv)
+        clock.now += 2
+        turn(client, text, conv_id=conv, followup=True, audio_ms=3000, levels=NEAR, conf=0.9)
+        assert _kinds()[-1] == "answer", text
+        assert conv not in overlay._sessions_follow
+    assert not made
+
+
+def test_sessions_follow_keeps_gates(client, monkeypatch, tmp_path):
+    deps, clock, made = _sessions_setup(monkeypatch, tmp_path)
+    _first(client, "g1")
+    rows = len(_steps("sessions"))
+    clock.now += 3
+    events = turn(client, MEANT, conv_id="g1", followup=True, audio_ms=3000, levels=ROOM, conf=0.9)
+    assert [e["type"] for e in events] == ["done"]
+    assert _steps("followup_dropped")[-1]["reason"] == "level"
+    assert len(_steps("sessions")) == rows
