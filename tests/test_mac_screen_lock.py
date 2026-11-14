@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import ctypes
 import importlib.util
+import itertools
 import sys
 import types
 from pathlib import Path
@@ -819,3 +820,187 @@ def test_electron_fallback_fails_closed(load, case):
         mod.send_events([CODE_LOCK])
     assert exc.value.reason == reason and mac.posted == []
     assert sorted(mac.created) == sorted(mac.released)
+
+
+# ---- macgw3: system-wide shortcut deny (log out, lock screen, screenshots) -
+
+
+def _denied_variants(mods: list, key: str) -> list[tuple[str, list]]:
+    """Every (key, mods) spelling of one denied combo the matcher must fold:
+    every mod order, duplicated mods, mixed case, and macOS alias names."""
+    spellings = [list(p) for p in itertools.permutations(mods)]
+    spellings.append(mods + mods)  # duplicated mods fold to the same set
+    alias_opts = [{"cmd": ["command"], "alt": ["option", "opt"],
+                   "ctrl": ["control"]}.get(m, [m]) for m in mods]
+    spellings += [list(p) for p in itertools.product(*alias_opts)]
+    cases = [(key, spelling) for spelling in spellings]
+    cases.append((key.upper(),
+                  [m.upper() if m == "cmd" else m.capitalize() for m in mods]))
+    return cases
+
+
+def assert_nothing_built(mac) -> None:
+    """A denied shortcut builds nothing: no event created, no flag written,
+    no attribute-name CFString."""
+    assert mac.posted == [], mac.log
+    assert not [e for e in mac.log if e[0] == "flags"], mac.log
+    assert not [e for e in mac.log if e[:2] == ("new", "key")], mac.log
+    assert mac.keys_made == 0, mac.log
+
+
+@pytest.mark.parametrize("mods,expected", [
+    (["ctrl", "cmd"], "lock_screen"),
+    (["cmd", "shift"], "log_out"),
+    (["cmd", "alt", "shift"], "log_out"),
+    (["ctrl", "cmd", "shift"], "log_out"),
+])
+def test_logout_and_lock_screen_denied_without_lock_post_nothing(load, mods, expected):
+    for key, variant in _denied_variants(mods, key="q"):
+        for lock in ({}, {"require_app": SAFARI[0]}):
+            mod, mac = load()
+            with pytest.raises(mod.ShortcutDenied) as exc:
+                mod.send_events([{"type": "key", "key": key, "mods": variant, **lock}])
+            assert exc.value.shortcut == expected, (key, variant)
+            assert_nothing_built(mac)
+
+
+SCREENSHOT_COMBOS = [("3", ["cmd", "shift"]), ("3", ["ctrl", "cmd", "shift"]),
+                     ("4", ["cmd", "shift"]), ("4", ["ctrl", "cmd", "shift"]),
+                     ("5", ["cmd", "shift"]), ("5", ["ctrl", "cmd", "shift"]),
+                     ("4", ["alt", "cmd", "shift"])]
+
+
+@pytest.mark.parametrize("key,mods", SCREENSHOT_COMBOS)
+def test_screenshot_denied_only_with_lock(load, key, mods):
+    for variant_key, variant in _denied_variants(mods, key=key):
+        for lock in ({"require_app": SAFARI[0]},
+                     {"require_app": SAFARI[0], "require_window": "Inbox"}):
+            mod, mac = load()
+            with pytest.raises(mod.ShortcutDenied) as exc:
+                mod.send_events([{"type": "key", "key": variant_key,
+                                  "mods": variant, **lock}])
+            assert exc.value.shortcut == "screenshot", (variant_key, variant)
+            assert_nothing_built(mac)
+    for perm in itertools.permutations(mods):  # unlocked: the digit just types
+        mod, mac = load()
+        mod.send_events([{"type": "key", "key": key, "mods": list(perm)}])
+        code, mask = mod.KEYCODES[key], 0
+        for m in perm:
+            mask |= mod._FLAG_MASKS[m]
+        assert mac.posted == [("key", code, True), ("key", code, False)], (key, perm)
+        assert_pairs(mac.posted)
+        assert [e[1] for e in mac.log if e[0] == "flags"] == [mask, mask], (key, perm)
+
+
+@pytest.mark.parametrize("key,mods", [
+    ("q", ["cmd"]), ("t", ["cmd", "shift"]), ("f", ["ctrl", "cmd"]),
+    ("q", []), ("q", ["shift"]), ("q", ["alt", "cmd"]),
+    ("3", ["cmd"]), ("3", ["shift"]), ("3", ["ctrl", "shift"]),
+    ("6", ["cmd", "shift"]), ("esc", []),
+])
+def test_near_miss_combos_still_post_with_lock(load, key, mods):
+    mod, mac = load()
+    mod.send_events([{"type": "key", "key": key, "mods": list(mods),
+                      "require_app": SAFARI[0]}])
+    code, mask = mod.KEYCODES[key], 0
+    for m in mods:
+        mask |= mod._FLAG_MASKS[m]
+    assert mac.posted == [("key", code, True), ("key", code, False)], (key, mods)
+    assert_pairs(mac.posted)
+    assert [e[1] for e in mac.log if e[0] == "flags"] == [mask, mask], (key, mods)
+
+
+def test_denied_shortcut_stops_batch_at_that_event(load):
+    mod, mac = load()
+    with pytest.raises(mod.ShortcutDenied) as exc:
+        mod.send_events([{"type": "key", "key": "esc", "mods": []},
+                         {"type": "key", "key": "q", "mods": ["cmd", "shift"]},
+                         {"type": "key", "key": "return", "mods": []}])
+    assert (exc.value.shortcut, exc.value.index, exc.value.partial) == ("log_out", 1, False)
+    assert mac.posted == [("key", 53, True), ("key", 53, False)], mac.log  # only esc ran
+    assert not [e for e in mac.log if e[:3] == ("new", "key", 36)], mac.log
+    assert_pairs(mac.posted)
+
+
+def test_denied_shortcut_wins_over_focus_and_halt(load):
+    shot = {"type": "key", "key": "3", "mods": ["cmd", "shift"], "require_app": SAFARI[0]}
+    mod, mac = load()
+    mac.front = TERMINAL  # a wrong front app would be a FocusMismatch if the guard ran first
+    with pytest.raises(mod.ShortcutDenied) as exc:
+        mod.send_events([dict(shot)])
+    assert exc.value.shortcut == "screenshot"
+    assert mac.system_created == 0 and mac.posted == [], mac.log
+
+    mod, mac = load()
+    mod.halt()
+    with pytest.raises(mod.ShortcutDenied) as exc:
+        mod.send_events([dict(shot)])
+    assert exc.value.shortcut == "screenshot"
+    assert mac.system_created == 0 and mac.posted == [], mac.log
+    mod.resume()
+
+
+@pytest.mark.parametrize("text", ["3", "q"])
+@pytest.mark.parametrize("mods", [["cmd", "shift"], ["ctrl", "cmd"]])
+def test_text_event_cannot_carry_a_shortcut(load, text, mods):
+    for lock in ({}, {"require_app": SAFARI[0]}):
+        mod, mac = load()
+        mod.send_events([{"type": "text", "text": text, "mods": list(mods), **lock}])
+        assert mac.posted == [("key", 0, True), ("key", 0, False)], (text, mods, mac.log)
+        assert [e[1] for e in mac.log if e[0] == "flags"] == [0, 0], (text, mods)
+        assert {e[2] for e in mac.log if e[:2] == ("new", "key")} == {0}, (text, mods)
+        assert not [e for e in mac.log
+                    if e[:2] == ("new", "key") and e[2] in (20, 12)], mac.log
+
+
+def test_no_raw_keycode_or_modifier_key_path(load):
+    mod, _mac = load()
+    assert not (set(mod.KEYCODES.values()) & set(range(54, 64))), sorted(mod.KEYCODES.values())
+    # every postable mod name folds to itself, so a new _FLAG_MASKS entry cannot skip the deny match
+    assert all(mod._MOD_ALIASES[m] == m for m in mod._FLAG_MASKS), mod._MOD_ALIASES
+    for fn in ast.walk(ast.parse(DRIVER_PATH.read_text())):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Name) and node.id == "_FLAG_MASKS"
+                    and isinstance(node.ctx, ast.Load)):
+                assert fn.name == "_key", fn.name
+            if isinstance(node, ast.Attribute) and node.attr == "CGEventCreateKeyboardEvent":
+                assert fn.name in ("_key", "_type_text"), fn.name
+
+
+def test_shortcut_refusal_body(load):
+    import json
+
+    from gateway import screen
+
+    mod, mac = load()
+    with pytest.raises(mod.ShortcutDenied) as exc:
+        mod.send_events([{"type": "key", "key": "esc", "mods": []},
+                         {"type": "key", "key": "4", "mods": ["cmd", "shift"],
+                          "require_app": SAFARI[0], "require_window": "SECRET-TITLE"}])
+    body = screen._refusal_detail(exc.value)
+    assert set(body) == {"error", "shortcut", "refused_index", "events_run", "partial",
+                         "message"}, body
+    assert body["error"] == "system_shortcut_denied", body
+    assert body["shortcut"] == "screenshot", body
+    assert (body["refused_index"], body["events_run"], body["partial"]) == (1, 1, False), body
+    dump = json.dumps(body)
+    assert "SECRET-TITLE" not in dump and SAFARI[0] not in dump, body
+
+
+def test_key_refuses_before_building_any_event():
+    key_fn = next(fn for fn in ast.walk(ast.parse(DRIVER_PATH.read_text()))
+                  if isinstance(fn, ast.FunctionDef) and fn.name == "_key")
+    first = key_fn.body[0]
+    assert isinstance(first, ast.If), ast.dump(first)
+    assert any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "_system_shortcut" for n in ast.walk(first.test)), \
+        ast.dump(first.test)
+    builds = [lambda n: isinstance(n, ast.Name) and n.id == "_FLAG_MASKS",
+              lambda n: isinstance(n, ast.Attribute)
+              and n.attr == "CGEventCreateKeyboardEvent"]
+    assert not any(is_build(n) for is_build in builds for n in ast.walk(first)), ast.dump(first)
+    hits = [i for i, stmt in enumerate(key_fn.body)
+            if any(is_build(n) for is_build in builds for n in ast.walk(stmt))]
+    assert hits and hits[0] > 0, hits

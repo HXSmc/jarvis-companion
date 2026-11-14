@@ -51,9 +51,19 @@ except OSError:
             self.index = index
             self.partial = partial
 
+    class _ShortcutDenied(Exception):
+        """Same constructor and attributes as mac/screen/driver.py's ShortcutDenied."""
+
+        def __init__(self, shortcut, index=0, partial=False):
+            super().__init__(shortcut)
+            self.shortcut = shortcut
+            self.index = index
+            self.partial = partial
+
     _halt = threading.Event()
     _mac_driver.FocusMismatch = _FocusMismatch
     _mac_driver.InputHalted = _InputHalted
+    _mac_driver.ShortcutDenied = _ShortcutDenied
     _mac_driver.halt = _halt.set
     _mac_driver.resume = _halt.clear
     _mac_driver.is_halted = _halt.is_set
