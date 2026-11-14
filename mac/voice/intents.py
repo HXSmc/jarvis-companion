@@ -984,6 +984,9 @@ _NOTE_IGNORE_RE = re.compile(
     r"\b(?:ignored|ignore it|ignoring|disregard\w*|skipped|didn't follow|did not follow|won't follow"
     r"|not going to follow|didn't do|did not do)\b", re.I)
 _NOTE_MINE_RE = re.compile(r"\b" + _NOTE_MINE + r"\b", re.I)
+# R5 (Mac run): "...ended with an instruction to add source links to my reply." An instruction
+# aimed at Jarvis's own reply is a note even with no ignore word (the "I ignored it" came apart).
+_NOTE_AIMED_RE = re.compile(r"\bmy (?:reply|replies|answer|answers|response|responses)\b", re.I)
 _NOTE_REAL_SOURCE_RE = re.compile(_NOTE_SOURCE_RE.pattern.replace("|" + _NOTE_MINE, ""), re.I)
 # R2: "..., and I emailed him." admits obeying a web result: never hidden. Any first-person
 # verb counts unless it is an ignore/refusal word ("which I have ignored" is still a note).
@@ -1023,7 +1026,7 @@ def drop_injection_notes(text: str) -> tuple[str, int]:
         # (b): the directive clause may lack its own "I ignored it": another clause naming the
         # instruction and ignoring it convicts this one.
         other = convicting - bool(instr and ignore) > 0
-        if ((instr and (ignore or mine or directive or bare_next))
+        if ((instr and (ignore or mine or directive or bare_next or _NOTE_AIMED_RE.search(c)))
                 or (directive and (ignore or other or bare_next))
                 or (mine and ignore and _NOTE_REAL_SOURCE_RE.search(c))):
             dropped += 1

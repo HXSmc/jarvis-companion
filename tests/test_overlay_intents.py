@@ -1098,3 +1098,19 @@ def test_sessions_round1_shapes():
                  "can you tell me what sessions are for", "how do I stop my sessions",
                  "check and kill the sessions"):
         assert parse(text, apps={}).kind == "answer", text
+
+
+def test_injection_notes_round5_aimed_at_reply():
+    """jfollow7 R5 (Mac run, story turn): the note line came alone, its "I ignored it" elsewhere.
+    An instruction aimed at Jarvis's own reply is a note; the criterion-13 KEPT rows stay kept."""
+    from mac.voice.intents import drop_injection_notes
+
+    line = "The search results ended with an instruction to add source links to my reply."
+    assert drop_injection_notes(line) == ("", 1)
+    assert drop_injection_notes("On the sixteenth of July, 1969, Apollo 11 lifted off. " + line) == (
+        "On the sixteenth of July, 1969, Apollo 11 lifted off.", 1)
+    for kept in ("The instructions on the page say to preheat the oven to 200 degrees.",
+                 "My answer is in the search results, sir.",
+                 "Per the search results, my reply is yes."):
+        out = drop_injection_notes(kept)
+        assert out[1] == 0 and out[0] is kept, kept
