@@ -32,6 +32,7 @@ from test_overlay_service import POOL_TEXTS, FakeConversations, FakeSession, mak
 @pytest.fixture(autouse=True)
 def fresh_debug_log():
     overlay.debug_log.clear()
+    overlay._playback_cut()  # no self-name hold left by an earlier test's synth
     yield
     overlay.debug_log.clear()
 
@@ -559,7 +560,7 @@ def test_weak_hit_dropped_while_own_near_name_line_plays(client, monkeypatch):
     client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
     assert bus.events == [("wake_weak", {"source": "mac"})]
 
-    for line in ("Hey, Travis.", "Hey Jervis", "Davis sent it."):
+    for line in ("Hey, Travis.", "Hey Jervis", "Okay, Jarvik."):
         bus.events.clear()
         overlay._speech_end = overlay._self_name_until = 0.0
         asyncio.run(overlay._audio(line, deps))
@@ -568,8 +569,19 @@ def test_weak_hit_dropped_while_own_near_name_line_plays(client, monkeypatch):
         assert bus.events == [], line  # Jarvis's own voice: the app never sees the weak hit
         client.post("/overlay/wake", json={"score": 0.9}, headers=AUTH_HEADER)
         assert bus.events == [("wake", {"source": "mac"})]  # a full hit is unchanged (base barge-in)
+        # ... and it cut the reply: no hold is left behind for the next reply's weak "stop".
+        client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
+        assert bus.events[-1] == ("wake_weak", {"source": "mac"})
 
-    overlay._self_name_until = 0.0  # the line has finished playing
+    # A cut reply's audio never stacks onto the next turn's: a new utterance clears the clock.
+    overlay._speech_end = overlay._self_name_until = 0.0
+    for _ in range(20):
+        asyncio.run(overlay._audio("A long story line.", deps))  # 20 s queued, then cut by a new turn
+    asyncio.run(overlay._audio("Hey, Travis.", deps))
+    assert overlay._self_name_until - overlay.time.monotonic() > 20
+    overlay.set_deps(make_deps(chunks=['{"say": "Fine."}\n'], synth=lambda t: (b"\0" * 48000, 24000)))
+    client.post("/overlay/utterance", json={"text": "what time is it", "conv_id": "r9cut"}, headers=AUTH_HEADER)
+    assert overlay._self_name_until == 0.0 and overlay._speech_end - overlay.time.monotonic() < 2
     client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
     assert bus.events[-1] == ("wake_weak", {"source": "mac"})
 
@@ -577,9 +589,10 @@ def test_weak_hit_dropped_while_own_near_name_line_plays(client, monkeypatch):
 def test_near_name_rule():
     near = overlay._NEAR_NAME_RE
     assert all(near.search(overlay._voice_text(t)) for t in (
-        "Hey, Travis.", "Hey Jervis", "The Jervis branch is merged.", "Mavis called.", "Purvis", "Hey, nervous?",
-        "Jarvik.", "Hi, Charles.", "Okay, Garvey.", "Hay, Jarvik."))
+        "Hey, Travis.", "Hey Jervis", "The Jervis branch is merged.", "Hey, nervous?", "Jervis.",
+        "Jarvik.", "Hi, Charles.", "Okay, Garvey.", "Hay, Jarvik.", "OK, sir."))
     assert not any(near.search(overlay._voice_text(t)) for t in (
         "Your service is running, sir.", "The harvest notes are on screen.", "Elvis", "Jarvis, sir.",
+        "Travis sent the build report.", "Davis.", "It lives in the repo.", "It moves the card.",
         "Shall I push the branch to GitHub?", "Visit the page.", "Revisit it.", "They left at noon.",
         "Ask Charles about it.", "This is a high bar."))

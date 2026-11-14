@@ -888,15 +888,20 @@ def _voice_text(text: str) -> str:
     return _WAKE_WORD_RE.sub("", text).strip()
 
 
-# Jarvis's own voice can reach the playback-only weak wake band (scripts/wake_margin.py): a name like
-# Jarvis ("Hey, Travis." 0.29, "Jarvik." 0.26, "Hey, nervous?" 0.29) or a short greeting before any name
-# ("Hi, Charles." 0.39). While such a line may still be playing, a weak hit is Jarvis itself and is
-# dropped. Full hits are untouched (base barge-in).
-_NEAR_NAME_RE = re.compile(r"\b(?:hey|hi|hay|okay|ok)\b|\bj[ae]rv|\b\w{0,3}[aeiouy]r?v[aeiouy]{1,2}s\b",
-                           re.IGNORECASE)
+# Jarvis's own voice can reach the playback-only weak wake band (scripts/wake_margin.py): a greeting
+# before a name ("Hey, Travis." 0.29, "Hi, Charles." 0.39, "Okay, Jarvik." 0.92) or a Jarvis-like stem
+# ("Jarvik." 0.26, "Jervis." 0.15); without either, own lines stay under 0.01. While such a line may
+# still be playing, a weak hit is Jarvis itself and is dropped. Full hits are untouched (base barge-in).
+_NEAR_NAME_RE = re.compile(r"\b(?:hey|hi|hay|okay|ok)\b|\bj[ae]rv", re.IGNORECASE)
 SELF_NAME_SLACK_S = 2.0  # app start-up + network lag past the synth clock
 _speech_end = 0.0  # monotonic: when the audio synthesized so far ends, played back to back
 _self_name_until = 0.0
+
+
+def _playback_cut() -> None:
+    """A new turn or a full wake: the app stopped (or drained) what it was playing."""
+    global _speech_end, _self_name_until
+    _speech_end = _self_name_until = 0.0
 
 
 def _note_playback(voice: str, seconds: float) -> None:
@@ -4341,6 +4346,7 @@ async def post_workspace_snapshot(nonce: str, body: WorkspaceSnapshotBody) -> di
 @router.post("/utterance", dependencies=_LOOP_DEPS)
 async def post_utterance(body: TurnBody) -> StreamingResponse:
     deps = get_deps()
+    _playback_cut()
 
     async def stream() -> AsyncIterator[str]:
         rec = debug_log.for_utterance()
@@ -4409,6 +4415,7 @@ async def post_wake(body: WakeBody | None = None) -> dict:
         # Its own event, never "wake": no debug turn here; the app logs one only when it honours it.
         bus.publish("wake_weak", {"source": body.source})
         return {"ok": True}
+    _playback_cut()
     debug_log.wake_hit(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}
