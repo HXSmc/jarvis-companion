@@ -107,7 +107,7 @@ _SCREEN_REPLIES = {
     "screen_minipc": "Opening your Mini PC screen",
 }
 
-# The iPhone app's 3 screen chips (ios/.../App.swift ~1167) send one of these
+# The iPhone app's 3 screen chips (ios/.../App.swift, the screen chips in `chips`; tests/test_phone_chips.py keeps them in sync) send one of these
 # verbatim — phone callers only launch the screen on an exact match, never on
 # voice_router.route()'s keyword/substring matching (which also fires on any
 # text containing "screen" plus "mac"/"pc"/"windows"/"computer", e.g. "fix the
