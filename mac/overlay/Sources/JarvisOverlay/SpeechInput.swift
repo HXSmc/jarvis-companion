@@ -360,7 +360,8 @@ final class SpeechInput {
             let (verdict, row) = barge.tracker.judge(
                 at: now, recheck: recheck, recentlyOver: over, candidate: candidate,
                 freshFrom: barge.freshFrom, wordCount: count,
-                words: BargeWords.check(partial: partial, reply: reply, freshFrom: barge.freshFrom), level: level)
+                words: BargeWords.check(partial: partial, reply: reply, freshFrom: barge.freshFrom,
+                                       speakers: barge.aec), level: level)
             if let row { barge.onCheck?(row) }
             return verdict
         }

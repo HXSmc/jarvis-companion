@@ -29,6 +29,9 @@ final class BargeCheckTests: XCTestCase {
         XCTAssertEqual(verdict(aec: true, cand: true, W(newWords: 4)).reject, .noName)
         XCTAssertEqual(verdict(aec: false, cand: true, W(newWords: 2)), .init(rule: .words, reject: .none))
         XCTAssertEqual(verdict(aec: false, cand: false, W(newWords: 2)).reject, .noHold)
+        // Headphones as at jfollow8: a stop phrase holding a reply word never cuts, new words or not.
+        XCTAssertEqual(verdict(aec: false, cand: true, W(stop: true, stopClean: false, newWords: 3)),
+                       .init(rule: nil, reject: .echoWords))
     }
 
     // MARK: replay

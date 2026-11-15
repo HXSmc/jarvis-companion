@@ -254,7 +254,8 @@ public enum BargeWords {
     /// A stop phrase holding a reply word falls through to the name rule (C5, BargeCheck.wordRule).
     public static func confirmRule(partial: String, reply: [String], freshFrom: Int = 0,
                                    speakers: Bool = false) -> BargeRule? {
-        BargeCheck.wordRule(check(partial: partial, reply: reply, freshFrom: freshFrom), speakers: speakers)
+        BargeCheck.wordRule(check(partial: partial, reply: reply, freshFrom: freshFrom, speakers: speakers),
+                            speakers: speakers)
             .flatMap { BargeRule(rawValue: $0.rawValue) }
     }
 
@@ -270,7 +271,10 @@ public enum BargeWords {
     }
 
     /// The flags `BargeCheck` decides on, for the partial's words from `freshFrom` (echo lead dropped).
-    public static func check(partial: String, reply: [String], freshFrom: Int = 0) -> BargeCheck.Words {
+    /// Headphones (`speakers: false`): the stop flags as at jfollow8 (the whole text one stop phrase,
+    /// clean = no word in the reply); the lead words and echo-like checks are for the canceller only.
+    public static func check(partial: String, reply: [String], freshFrom: Int = 0,
+                             speakers: Bool = true) -> BargeCheck.Words {
         let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
         let owned = ownerWords(partial: fresh, reply: reply)
@@ -279,8 +283,10 @@ public enum BargeWords {
         let rs = Set(r)
         let named = p.contains("jarvis")
         let freshName = named && !echoLike("jarvis", reply: rs)
-        let stop = StopPhrase.matches(owned) || StopPhrase.endsInStop(owned)
-        let clean = !p.isEmpty && p.allSatisfy { !rs.contains($0) && !(commandWords.contains($0) && echoLike($0, reply: rs)) }
+        let stop = StopPhrase.matches(owned) || (speakers && StopPhrase.endsInStop(owned))
+        let clean = !p.isEmpty && p.allSatisfy {
+            !rs.contains($0) && !(speakers && commandWords.contains($0) && echoLike($0, reply: rs))
+        }
         return BargeCheck.Words(freshName: freshName, nameInReply: named && !freshName, stop: stop,
                                 stopClean: stop && clean, newWords: newWords(p, replySet: rs),
                                 contiguous: isContiguous(p, in: r))

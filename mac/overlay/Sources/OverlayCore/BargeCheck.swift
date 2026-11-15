@@ -59,6 +59,7 @@ public enum BargeCheck {
         if speakers {
             return w.freshName && ((w.newWords >= 2 && !w.contiguous) || w.stop) ? .name : nil
         }
+        if w.stop { return nil }  // headphones as at jfollow8: a stop phrase with a reply word never cuts
         return w.newWords >= 2 && !w.contiguous ? .words : nil
     }
 

@@ -191,6 +191,27 @@ def test_short_names_only_remove_followup_acts(client, text, want):
     assert _last("followup_dropped")["reason"] == "short"
 
 
+def test_short_delete_followup_never_reaches_a_saved_workspace(client, monkeypatch, tmp_path):
+    """Security R1: "delete the cat" with a saved workspace "cat" and a Cat card shown parses as a
+    workspace delete at dispatch. The short-rule exemption is for a card remove only: it stays dropped."""
+    from mac.voice import workspaces
+    monkeypatch.setenv("OVERLAY_WORKSPACE_DIR", str(tmp_path / "ws"))
+    workspaces.save("cat", [{"id": "old", "type": "info", "title": "Old"}], [], None)
+    clock = Clock()
+    _deps(clock=clock, chunks=['{"say": "Here."}\n'])
+    _owner(client, "j9w")
+    _seed("j9w", clock)
+    events = turn(client, "delete the cat", conv_id="j9w", followup=True, levels=[0.049] * 12, conf=0.9)
+    assert _last("followup_dropped")["reason"] == "short"
+    assert says(events) == [] and not _drops(events)
+    assert not [e for e in events if e["type"] == "card"]  # no "Delete cat. Shall I?" Confirm
+    assert "workspace" not in [r.get("kind") for r in _steps("intent")]
+    assert "cat" in overlay._ws_names()  # the file is still there
+    # with no workspace of that name the same words are a card remove, as before
+    events = turn(client, "delete the moon", conv_id="j9w", followup=True, levels=[0.049] * 12, conf=0.9)
+    assert _drops(events) == [["k2"]]
+
+
 def test_barge_combined_on_speakers(client):
     _deps(chunks=['{"say": "Here."}\n'])
     _owner(client, "j9c")

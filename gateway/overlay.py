@@ -2202,7 +2202,15 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         words = intents.noise_words(body.text)
         if (words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
                                                 body.conv_id, None).kind == "answer"
-                and not _is_card_remove(body.text, body.conv_id, deps)):  # "remove the cat": A1 upgrade
+                # "remove the cat": the A1 upgrade. Only when the dispatch's own parse (real apps,
+                # saved names) can still upgrade it: "delete the cat" with a saved "cat" is a
+                # workspace delete and stays dropped (security R1).
+                and not (_is_card_remove(body.text, body.conv_id, deps)
+                         and intents.parse(
+                             body.text,
+                             apps=deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps),
+                             workspace_names=await asyncio.to_thread(_ws_names),
+                         ).kind in ("answer", "card_remove"))):
             # The room, not the owner: a short follow-up with no question in it (STT heard "Jew").
             # Nothing is said, shown or stored.
             _followup_dropped(body, "short", _followup_gate(body)[1], words, on_step)

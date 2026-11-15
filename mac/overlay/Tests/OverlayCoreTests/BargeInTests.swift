@@ -570,4 +570,18 @@ final class BargeInTests: XCTestCase {
         XCTAssertNil(BargeWords.commandIndex(partial: "that was quiet", reply: quite, from: 0))
         XCTAssertNil(BargeWords.confirmRule(partial: "quiet", reply: quite, speakers: true))
     }
+
+    /// R1 (lens note 4): C5 and the lead words act through the canceller only; headphones keep the
+    /// jfollow8 rule (the whole text one stop phrase, no word of it in the reply).
+    func testHeadphonesStopRuleUnchanged() {
+        let reply = ["That's the plan for today."]
+        XCTAssertNil(BargeWords.confirmRule(partial: "thank you that's all", reply: reply))
+        XCTAssertEqual(BargeWords.confirmRule(partial: "thank you that's all", reply: reply, speakers: true), nil)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "stop", reply: reply), .stop)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "no no stop", reply: reply), .words)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "no no stop", reply: reply, speakers: true), .stop)
+        let quite = ["That was quite a day."]
+        XCTAssertEqual(BargeWords.confirmRule(partial: "quiet", reply: quite), .stop)  // as at jfollow8
+        XCTAssertNil(BargeWords.confirmRule(partial: "quiet", reply: quite, speakers: true))
+    }
 }
