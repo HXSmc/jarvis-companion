@@ -73,6 +73,8 @@ final class AppController {
     private var playbackNoted = false
     /// The barge listening run of the current turn, nil while its audio is not playing.
     private var bargeRun: BargeRun?
+    /// The ended run's coupling for the restart in the same reply (C4); used once.
+    private var handOverCoupling: Double?
     /// The reply texts a wake cut (A4): stripped from that wake turn's text.
     private var cutReply: [String] = []
     /// Every .audio/.say text of the current turn so far, also the ones before the barge run
@@ -800,8 +802,10 @@ final class AppController {
     /// A2: with the first .audio of the turn playing, one recognition turn listens for a barge-in:
     /// no ring replay, never ends on silence, and while unconfirmed no final/nothing. On confirm it
     /// runs on as the owner's ordinary follow-up turn; at the reply's drain it is cancelled silently.
-    /// `coupling`: a restart within the same reply hands over the ended run's learned coupling (C4).
-    private func startBargeListeningIfNeeded(coupling: Double? = nil) {
+    /// A restart within the same reply starts at the ended run's coupling (`handOverCoupling`, C4).
+    private func startBargeListeningIfNeeded() {
+        let coupling = handOverCoupling  // only the restart right after a run ended hands one over
+        handOverCoupling = nil
         guard bargeInEnabled, bargeRun == nil, model.missingPermissions.isEmpty else { return }
         let audioOut = audio
         let run = BargeRun(enabled: true, aec: speech.aecActive, coupling: coupling,
@@ -869,7 +873,9 @@ final class AppController {
         }
         bargeRun = nil
         client.debugNote(step: "barge_gate", detail: "restart reason=run_ended after=\(reason)")
-        startBargeListeningIfNeeded(coupling: run.aec == speech.aecActive ? run.gate.coupling : nil)
+        // C4: the new run in the same reply starts at this run's learned coupling.
+        handOverCoupling = run.aec == speech.aecActive ? run.gate.coupling : nil
+        startBargeListeningIfNeeded()
     }
 
     /// Control events steer the overlay itself: end_listening closes the follow-up window for

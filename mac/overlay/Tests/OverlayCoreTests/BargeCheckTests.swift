@@ -7,25 +7,28 @@ import XCTest
 final class BargeCheckTests: XCTestCase {
     typealias W = BargeCheck.Words
 
-    private func verdict(aec: Bool, over: Bool = true, cand: Bool = false, inWindow: Int, _ w: W) -> BargeCheck.Verdict {
-        BargeCheck.decide(aec: aec, recentlyOver: over, candidate: cand, overInWindow: inWindow, words: w)
+    private func verdict(aec: Bool, over: Bool = true, cand: Bool, _ w: W) -> BargeCheck.Verdict {
+        BargeCheck.decide(aec: aec, recentlyOver: over, candidate: cand, words: w)
     }
 
+    /// Hub H7: the level part is 3 over blocks in a row (a candidate) on every run.
     func testRuleTable() {
         let name = W(freshName: true, newWords: 3)
         let stop = W(stop: true, stopClean: true, newWords: 1)
-        XCTAssertEqual(verdict(aec: true, inWindow: 2, name), .init(rule: .name, reject: .none))
-        XCTAssertEqual(verdict(aec: true, inWindow: 2, stop), .init(rule: .stop, reject: .none))
-        XCTAssertEqual(verdict(aec: true, inWindow: 1, name).reject, .noHold)
-        XCTAssertEqual(verdict(aec: true, over: false, inWindow: 0, name).reject, .notOver)
+        XCTAssertEqual(verdict(aec: true, cand: true, name), .init(rule: .name, reject: .none))
+        XCTAssertEqual(verdict(aec: true, cand: true, stop), .init(rule: .stop, reject: .none))
+        // Over blocks, but 2 or fewer in a row: no hold.
+        XCTAssertEqual(verdict(aec: true, cand: false, name).reject, .noHold)
+        XCTAssertEqual(verdict(aec: true, cand: false, stop).reject, .noHold)
+        XCTAssertEqual(verdict(aec: true, over: false, cand: false, name).reject, .notOver)
         // A stop word the reply holds, no fresh name.
-        XCTAssertEqual(verdict(aec: true, cand: true, inWindow: 3, W(stop: true, stopClean: false, newWords: 0)).reject, .echoWords)
+        XCTAssertEqual(verdict(aec: true, cand: true, W(stop: true, stopClean: false, newWords: 0)).reject, .echoWords)
         // "jarvis" only as the reply's own word.
-        XCTAssertEqual(verdict(aec: true, cand: true, inWindow: 3, W(nameInReply: true, newWords: 2)).reject, .echoWords)
+        XCTAssertEqual(verdict(aec: true, cand: true, W(nameInReply: true, newWords: 2)).reject, .echoWords)
         // "what time is it": new words, no name, no stop.
-        XCTAssertEqual(verdict(aec: true, cand: true, inWindow: 4, W(newWords: 4)).reject, .noName)
-        XCTAssertEqual(verdict(aec: false, cand: true, inWindow: 3, W(newWords: 2)), .init(rule: .words, reject: .none))
-        XCTAssertEqual(verdict(aec: false, cand: false, inWindow: 2, W(newWords: 2)).reject, .noHold)
+        XCTAssertEqual(verdict(aec: true, cand: true, W(newWords: 4)).reject, .noName)
+        XCTAssertEqual(verdict(aec: false, cand: true, W(newWords: 2)), .init(rule: .words, reject: .none))
+        XCTAssertEqual(verdict(aec: false, cand: false, W(newWords: 2)).reject, .noHold)
     }
 
     // MARK: replay
@@ -59,9 +62,11 @@ final class BargeCheckTests: XCTestCase {
 
     private struct Partial { let at: Double; let text: String }
 
+    private func blockTimes(_ count: Int) -> [Double] { (0..<count).map { Double($0 + 1) * 0.1 } }
+
     /// Replays 100 ms blocks (mic, out) and partials in time order the way SpeechInput does
-    /// (feed blocks, re-check after new over blocks, check each partial). Returns the time of the
-    /// confirm and its rule, or nil.
+    /// (a partial is checked when it arrives; the watch loop feeds blocks and re-checks the last
+    /// partial after new over blocks, C2). Returns the time of the confirm and its rule, or nil.
     private func replay(mic: [Double], out: Double, coupling: Double, partials: [Partial],
                         reply: Set<String>, aec: Bool = true) -> (at: Double, rule: BargeCheck.Rule, tracker: BargeCheck.Tracker)? {
         var tracker = BargeCheck.Tracker(aec: aec)
@@ -94,67 +99,93 @@ final class BargeCheckTests: XCTestCase {
         return nil
     }
 
-    /// The owner's three first tries of 2026-11-15 (16:58:16, 17:01:55, 17:08:13), each said once.
-    /// Real numbers from the Mac-local rows where they exist: coupling 0.005 and out 0.215
-    /// (17:08:13 barge_gate), the owner's processed-stream level 0.045 (his follow-up levels were
-    /// 0.045-0.079). Hand-typed: the block timeline (only 2 non-adjacent owner blocks per word, as
-    /// the canceller damps double talk) and the partial texts and times (lag 0.8 s, the rows
-    /// carry no transcript). Each confirms on its FIRST phrase.
-    func testOwnerFirstTry() {
-        let reply: Set<String> = ["the", "empire", "grew", "under", "trajan", "and", "its", "roads"]
-        let residual = 0.001  // 0.005 * 0.215: what the canceller leaves of the reply
-        let owner = 0.045
-        // Echo partial first, then the owner's phrase: words at 1.0-1.3 s ("Hey"), 1.4-1.7 s
-        // ("Jarvis"), 1.8-2.1 s ("stop"); over blocks 2 per word, never 3 in a row.
-        var mic = Array(repeating: residual, count: 60)
-        for i in [10, 12, 14, 16, 18, 20] { mic[i] = owner }
-        let echo = "the empire grew under"
-        // 1) 16:58:16 "Hey, Jarvis, stop." with partials 0.8 s after each word.
-        let first = replay(mic: mic, out: 0.215, coupling: 0.005, partials: [
-            Partial(at: 0.9, text: echo),
-            Partial(at: 2.1, text: echo + " Hey"),
-            Partial(at: 2.5, text: echo + " Hey Jarvis"),
-            Partial(at: 2.9, text: echo + " Hey Jarvis stop"),
-        ], reply: reply)
-        XCTAssertNotNil(first)
-        XCTAssertLessThanOrEqual(first?.at ?? 99, 2.9 + 0.01)
-        XCTAssertEqual(first?.tracker.cmdRejects, 0)
-        // 2) 17:01:55 "No, no, Jarvis, stop." where the partial lands BEFORE the blocks of its last
-        // word are fed (C2): confirmed by the re-check, not by a repeat.
-        var mic2 = Array(repeating: residual, count: 60)
-        for i in [21, 23] { mic2[i] = owner }  // "No, no," left no over block; "Jarvis, stop." 2
-        let second = replay(mic: mic2, out: 0.215, coupling: 0.005, partials: [
-            Partial(at: 0.9, text: echo),
-            Partial(at: 1.9, text: echo + " No, no,"),
-            Partial(at: 2.15, text: echo + " No, no, Jarvis, stop."),
-        ], reply: reply)
-        XCTAssertNotNil(second)
-        XCTAssertEqual(second?.rule, .stop)
-        XCTAssertEqual(second?.at ?? 99, 2.4, accuracy: 0.001)
-        XCTAssertEqual(second?.tracker.cmdRejects, 2)  // not_over at the partial, no_hold at 1 block
-        // 3) 17:08:13 "Hey, Jarvis, stop." whose partial trails its last over block by 1.4 s
-        // (C1: the gate is quiet by then; base moved freshFrom past the words).
-        let third = replay(mic: mic, out: 0.215, coupling: 0.005, partials: [
-            Partial(at: 0.9, text: echo),
-            Partial(at: 3.5, text: echo + " Hey Jarvis stop"),
-        ], reply: reply)
-        XCTAssertEqual(third?.rule, .stop)
-        XCTAssertEqual(third?.at, 3.5)
-        XCTAssertEqual(third?.tracker.freshFrom, 5)  // kept at "Jarvis", not moved past the phrase
+    /// The 6affea7 check (SpeechInput.checkBarge before jfollow9), for the replay's "before": a
+    /// partial while the gate is quiet moves the fresh start past ALL its words; a check happens
+    /// only on a new partial while the gate is a candidate; no re-check. Returns (checked, confirmed).
+    private func baseReplay(mic: [Double], out: Double, coupling: Double, partials: [Partial],
+                            reply: Set<String>) -> (checked: Int, confirmed: Bool) {
+        var gate = BargeCheck.Tracker(aec: true)  // its recentlyOver/candidate = EchoGate's (same blocks)
+        let t0 = Date(timeIntervalSince1970: 5000)
+        var freshFrom = 0, checked = 0, next = 0
+        for (i, m) in mic.enumerated() {
+            let blockEnd = Double(i + 1) * 0.1
+            while next < partials.count, partials[next].at <= blockEnd {
+                let now = t0.addingTimeInterval(partials[next].at)
+                let words = partials[next].text.split(separator: " ").map(String.init)
+                next += 1
+                guard gate.recentlyOver(at: now) else {
+                    freshFrom = words.count
+                    continue
+                }
+                guard gate.candidate(at: now) else { continue }
+                checked += 1
+                let w = flags(words, from: freshFrom, reply: reply)
+                if (w.stop && w.stopClean) || (w.freshName && w.newWords >= 2) { return (checked, true) }
+            }
+            gate.block(over: isOver(mic: m, out: out, coupling: coupling), at: t0.addingTimeInterval(blockEnd))
+        }
+        return (checked, false)
     }
 
-    /// The same first try with only the 3-in-a-row hold (headphones rule, as the aec run had at
-    /// base): the damped double talk never holds 3 blocks, so nothing confirms.
-    func testThreeInARowMissesTheDampedPhrase() {
-        var mic = Array(repeating: 0.001, count: 60)
-        for i in [10, 12, 14, 16, 18, 20] { mic[i] = 0.045 }
-        XCTAssertNil(replay(mic: mic, out: 0.215, coupling: 0.005, partials: [
-            Partial(at: 2.5, text: "Hey Jarvis"), Partial(at: 2.9, text: "Hey Jarvis stop"),
-        ], reply: ["the", "empire"], aec: false))
+    /// The owner's first tries of 2026-11-15, replayed with the Mac-local row numbers (hub H7).
+    /// Real: 17:01:36 `blocks=197 over=15 longest_run=5 partials=10 checked=0 coupling=0.003
+    /// mic_p90=0.004 out_p90=0.200`; 17:08:13 `blocks=193 over=17 longest_run=7 partials=6
+    /// checked=1 rule=stop`; the owner's processed-stream level 0.045 (his follow-ups 0.045-0.079).
+    /// Hand-typed (the rows carry no per-block or per-partial times, no transcript): where the
+    /// over blocks sit and when each partial lands.
+    func testOwnerFirstTry() {
+        let reply: Set<String> = ["the", "empire", "grew", "under", "trajan", "and", "its", "roads"]
+        let owner = 0.045
+        // 17:01:36. "Hey, Jarvis, stop." at 6.0-6.9 s: the canceller damps the double talk to 2
+        // over blocks per word; partials 0.8 s after each word. He goes on talking at 8.1 s and makes
+        // the run of 5 (8.1-8.5 s), but the recogniser's next partials only land 1.3 s and more after
+        // it (volatile text revised at the pause), and 4 lone blips follow. 15 over blocks, 10 partials.
+        var mic = Array(repeating: 0.004, count: 197)
+        for i in [60, 61, 64, 65, 68, 69, 80, 81, 82, 83, 84, 120, 130, 140, 150] { mic[i] = owner }
+        let phrase = [Partial(at: 7.0, text: "Hey"), Partial(at: 7.4, text: "Hey Jarvis"),
+                      Partial(at: 7.8, text: "Hey Jarvis stop")]
+        let later = (0..<7).map { Partial(at: 9.9 + Double($0) * 0.3, text: "Hey Jarvis stop" + String(repeating: " and", count: $0 + 1)) }
+        XCTAssertEqual(mic.filter { isOver(mic: $0, out: 0.2, coupling: 0.003) }.count, 15)
+        let base = baseReplay(mic: mic, out: 0.2, coupling: 0.003, partials: phrase + later, reply: reply)
+        XCTAssertEqual(base.checked, 0)  // the row: checked=0, the reply played to its end
+        XCTAssertFalse(base.confirmed)
+        let fixed = replay(mic: mic, out: 0.2, coupling: 0.003, partials: phrase + later, reply: reply)
+        XCTAssertEqual(fixed?.rule, .stop)
+        XCTAssertEqual(fixed?.at ?? 99, 8.3, accuracy: 0.001)  // C2: the re-check when the run reaches 3
+        XCTAssertEqual(fixed?.tracker.cmdRejects, 0)
+        // 17:08:13. "Hey, Jarvis, stop." said twice. The first phrase's 2-block bursts end at 6.0 s;
+        // its last partials (the text revised at the pause) land 1.4-2.0 s after, the gate quiet
+        // (base moved the fresh start past them, C1). The repeat holds the run of 7 at 8.1-8.7 s
+        // and its one partial lands at 9.5 s. 17 over blocks, 6 partials.
+        var mic2 = Array(repeating: 0.006, count: 193)
+        for i in [50, 51, 54, 55, 58, 59, 80, 81, 82, 83, 84, 85, 86, 100, 120, 140, 160] { mic2[i] = owner }
+        let twice = [Partial(at: 6.6, text: "Hey"), Partial(at: 7.0, text: "Hey Jarvis"),
+                     Partial(at: 7.4, text: "Hey Jarvis stop"), Partial(at: 7.8, text: "Hey, Jarvis, stop"),
+                     Partial(at: 8.0, text: "Hey, Jarvis, stop."),
+                     Partial(at: 9.5, text: "Hey, Jarvis, stop. Hey, Jarvis, stop.")]
+        XCTAssertEqual(mic2.filter { isOver(mic: $0, out: 0.215, coupling: 0.005) }.count, 17)
+        let base2 = baseReplay(mic: mic2, out: 0.215, coupling: 0.005, partials: twice, reply: reply)
+        XCTAssertEqual(base2.checked, 1)  // the row: checked=1, confirmed on the repeat
+        XCTAssertTrue(base2.confirmed)
+        let fixed2 = replay(mic: mic2, out: 0.215, coupling: 0.005, partials: twice, reply: reply)
+        XCTAssertEqual(fixed2?.rule, .stop)
+        XCTAssertEqual(fixed2?.at ?? 99, 8.3, accuracy: 0.001)  // on the first phrase's words, before the repeat's partial
+        XCTAssertEqual(fixed2?.tracker.freshFrom, 1)  // kept at "Jarvis" (C1), not moved past the phrase
+        XCTAssertEqual(fixed2?.tracker.cmdRejects, 0)
+    }
+
+    /// Without a run of 3 the damped phrase alone does not confirm (hub H7 keeps the hold): only
+    /// over blocks in a row count, on every run.
+    func testTwoBlocksDoNotHold() {
+        var mic = Array(repeating: 0.004, count: 60)
+        for i in [10, 11, 14, 15, 18, 19] { mic[i] = 0.045 }
+        XCTAssertNil(replay(mic: mic, out: 0.2, coupling: 0.003, partials: [
+            Partial(at: 1.9, text: "Hey Jarvis"), Partial(at: 2.3, text: "Hey Jarvis stop"),
+        ], reply: ["the", "empire"]))
     }
 
     /// Jarvis's own words never confirm: echo partials of the reply only, with residual echo
-    /// blips over the gate in 2 blocks of the window. And a stale command word kept from a quiet
+    /// blips over the gate in 2 non-adjacent blocks. And a stale command word kept from a quiet
     /// gate does not confirm on a later blip.
     func testOwnWordsNeverConfirm() {
         let blips: [Double] = {
@@ -225,7 +256,8 @@ final class BargeCheckTests: XCTestCase {
         }
         XCTAssertEqual(rows, BargeCheck.maxRows)
         XCTAssertEqual(tracker.capped, 3)
-        XCTAssertEqual(tracker.cmdRejects, 7)
+        XCTAssertEqual(tracker.skipNotOver, 7)  // the gate was quiet: waits, not word-rule rejects
+        XCTAssertEqual(tracker.cmdRejects, 2)  // the kept word expired twice (after 2 s, at 3 s and 6 s): lost
         for k in 1...3 { tracker.block(over: true, at: t.addingTimeInterval(7 + Double(k) * 0.1)) }
         let confirm = tracker.check(at: t.addingTimeInterval(7.4), wordCount: 2, recheck: false,
                                     commandIndex: { _ in 0 }, words: { _ in W(freshName: true, newWords: 2) },

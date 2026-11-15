@@ -352,22 +352,39 @@ final class SpeechInput {
         feedGate(barge, now: now)  // the gate is current before it is read
         if !recheck { barge.partials += 1 }
         let reply = barge.reply
+        let count = BargeWords.wordCount(partial)
         let level = BargeCheck.Level(mic: barge.micBlocks.last ?? 0, out: barge.outBlocks.last ?? 0,
                                      coupling: barge.gate.coupling, ratio: barge.lastRatio)
-        // Through the echo canceller (speakers) the fresh words must name Jarvis or say stop (hub Q5).
-        let (verdict, row) = barge.tracker.check(
-            at: now, wordCount: BargeWords.wordCount(partial), recheck: recheck,
-            commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) },
-            words: { BargeWords.check(partial: partial, reply: reply, freshFrom: $0) }, level: level)
-        if let row { barge.onCheck?(row) }
-        if verdict.reject != .notOver && verdict.reject != .noHold {
-            barge.checked += 1
+        barge.freshFrom = barge.tracker.expire(at: now, freshFrom: barge.freshFrom, wordCount: count)
+        func judge(over: Bool, candidate: Bool) -> BargeCheck.Verdict {
+            let (verdict, row) = barge.tracker.judge(
+                at: now, recheck: recheck, recentlyOver: over, candidate: candidate,
+                freshFrom: barge.freshFrom, wordCount: count,
+                words: BargeWords.check(partial: partial, reply: reply, freshFrom: barge.freshFrom), level: level)
+            if let row { barge.onCheck?(row) }
+            return verdict
+        }
+        guard barge.gate.recentlyOver(at: now) else {
+            // Echo only so far: these words are the reply's, the owner's can only come after them.
+            // C1: on an echo-cancelled run a wake name or stop word the reply lacks stays fresh: its
+            // partial trails the audio, its over blocks may reach the gate after it (re-check, C2).
+            if let index = barge.tracker.keep(at: now, freshFrom: barge.freshFrom, wordCount: count,
+                                              commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) }) {
+                barge.freshFrom = index
+            } else {
+                barge.freshFrom = BargeWords.wordCount(partial)
+            }
+            _ = judge(over: false, candidate: false)
+            return
+        }
+        let candidate = barge.gate.candidate(at: now)
+        if candidate {
             barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: reply,
                                                                       freshFrom: barge.freshFrom))
         }
-        guard barge.enabled, let rule = verdict.rule else { return }
+        // Through the echo canceller (speakers) the fresh words must name Jarvis or say stop (hub Q5).
+        guard let rule = judge(over: true, candidate: candidate).rule, barge.enabled else { return }
         barge.rule = BargeRule(rawValue: rule.rawValue)
-        if barge.voiceFrom == nil || !barge.gate.candidate(at: now) { barge.voiceFrom = barge.tracker.firstOverInWindow }
         barge.confirmed = true
         turn.capFrom = now
         // The tail gate and the sent levels start at the confirmation, not over the reply's echo.
@@ -851,13 +868,15 @@ final class BargeRun {
     /// The barge-in decision state (BargeCheck): words of the partial heard while the gate was
     /// quiet are the reply's echo and the word check starts after them (`freshFrom`).
     var tracker: BargeCheck.Tracker
-    var freshFrom: Int { tracker.freshFrom }
+    var freshFrom = 0
     /// The newest fed block's mic over the gate's echo estimate (the `barge_check` row's ratio).
     var lastRatio = 0.0
     /// One `barge_check` row (numbers and fixed words only).
     var onCheck: ((String) -> Void)?
-    /// Partials seen, and word checks made while the gate was a candidate (debug note only).
-    var partials = 0, checked = 0
+    /// Partials seen (debug note only; the checks are counted in `tracker`).
+    var partials = 0
+    /// Word checks made while the gate was a candidate (re-checks included).
+    var checked: Int { tracker.checked }
     /// Most new (not-in-the-reply) words any checked partial held; the word check needs 2.
     var maxNew = 0
     /// Which word rule confirmed (name|stop|words), for the `barge_gate`/`barge_in` notes.
@@ -874,9 +893,11 @@ final class BargeRun {
     func end() {
         guard !ended else { return }
         ended = true
+        // skip_over / skip_hold: checks turned down before the word rule (gate quiet / no 3-in-a-row).
         onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) max_new=\(maxNew) "
                  + "rule=\(rule?.rawValue ?? "none") aec=\(aec ? 1 : 0) mic_p90=\(Self.p90(micBlocks)) "
-                 + "out_p90=\(Self.p90(outBlocks)) confirmed=\(confirmed ? 1 : 0)"
+                 + "out_p90=\(Self.p90(outBlocks)) confirmed=\(confirmed ? 1 : 0) "
+                 + "skip_over=\(tracker.skipNotOver) skip_hold=\(tracker.skipNoHold)"
                  + (tracker.capped > 0 ? " capped=\(tracker.capped)" : ""))
     }
 

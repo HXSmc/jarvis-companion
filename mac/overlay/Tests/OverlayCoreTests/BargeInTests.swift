@@ -491,25 +491,30 @@ final class BargeInTests: XCTestCase {
     }
 
     /// C1: a "hey jarvis stop" partial that lands 1.6 s after its over blocks (the gate is quiet
-    /// by then) keeps its command words fresh and confirms; the echo before it does not count.
+    /// by then) keeps its command words fresh; the next run of 3 over blocks confirms it on the
+    /// re-check (C2). The echo before it does not count.
     func testFreshFromKeepsOwnerCommand() {
         let reply = ["The empire grew under Trajan and its roads ran everywhere."]
         var tracker = BargeCheck.Tracker(aec: true)
         let t = Date(timeIntervalSince1970: 500)
-        for k in 1...8 { tracker.block(over: k % 2 == 1, at: t.addingTimeInterval(Double(k) * 0.1)) }  // never 3 in a row
+        for k in 1...3 { tracker.block(over: true, at: t.addingTimeInterval(Double(k) * 0.1)) }
+        tracker.block(over: false, at: t.addingTimeInterval(0.4))
         let partial = "the empire grew hey jarvis stop"
-        let r = tracker.check(at: t.addingTimeInterval(0.7 + 1.6), wordCount: 6, recheck: false,
-                              commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) },
-                              words: { BargeWords.check(partial: partial, reply: reply, freshFrom: $0) },
-                              level: .init())
+        func check(_ at: Double, recheck: Bool) -> BargeCheck.Verdict {
+            tracker.check(at: t.addingTimeInterval(at), wordCount: 6, recheck: recheck,
+                          commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) },
+                          words: { BargeWords.check(partial: partial, reply: reply, freshFrom: $0) }).verdict
+        }
+        XCTAssertEqual(check(0.3 + 1.6, recheck: false).reject, .notOver)
         XCTAssertEqual(tracker.freshFrom, 4)
-        XCTAssertEqual(r.verdict.rule, .stop)
+        for k in 1...3 { tracker.block(over: true, at: t.addingTimeInterval(2.0 + Double(k) * 0.1)) }
+        XCTAssertTrue(tracker.wantsRecheck(at: t.addingTimeInterval(2.3)))
+        XCTAssertEqual(check(2.3, recheck: true).rule, .stop)
         // The echo alone, gate quiet: freshFrom moves past every word as before.
         var echo = BargeCheck.Tracker(aec: true)
         _ = echo.check(at: t, wordCount: 3, recheck: false,
                        commandIndex: { BargeWords.commandIndex(partial: "the empire grew", reply: reply, from: $0) },
-                       words: { BargeWords.check(partial: "the empire grew", reply: reply, freshFrom: $0) },
-                       level: .init())
+                       words: { BargeWords.check(partial: "the empire grew", reply: reply, freshFrom: $0) })
         XCTAssertEqual(echo.freshFrom, 3)
     }
 
