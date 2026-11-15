@@ -1302,11 +1302,23 @@ def _drop_pick(conv_id: str) -> None:
         _card_pick.pop(conv_id, None)
 
 
+# Words a spoken name never starts (after "the ") or ends on: "the the roman", "rise and fall of".
+_NAME_EDGE_WORDS = frozenset({"the", "a", "an", "of", "and", "or", "in", "on", "at", "to", "for",
+                              "with", "from", "by", "about"})
+
+
+def _title_name(title: tuple) -> str:
+    """At most 4 title words for speech: a lead article dropped, no dangling edge word; "" if none."""
+    words = list(title[1:] if title[:1] and title[0] in ("the", "a", "an") else title)[:4]
+    while words and words[-1] in _NAME_EDGE_WORDS:
+        words.pop()
+    return " ".join(words)
+
+
 def _card_name(card: tuple) -> str:
-    """A spoken card name: "the " + its first 4 title words, else its kind ("the picture")."""
-    words = card[2][:4]
-    return "the " + (" ".join(words) if words
-                     else {"image": "picture", "video": "video"}.get(card[1], "card"))
+    """A spoken card name: "the " + its title name, else its kind ("the picture")."""
+    return "the " + (_title_name(card[2])
+                     or {"image": "picture", "video": "video"}.get(card[1], "card"))
 
 
 def _which_one(conv_id: str, action: str, hit_ids: list[str], cards: list, deps: OverlayDeps) -> str:
@@ -1316,8 +1328,8 @@ def _which_one(conv_id: str, action: str, hit_ids: list[str], cards: list, deps:
     names: list[str] = []
     titles: list[tuple[str, ...]] = []
     for i in hit_ids:
-        title = next(c for c in reversed(cards) if c[0] == i)[2]
-        name = "the " + " ".join(title[:4])
+        card = next(c for c in reversed(cards) if c[0] == i)
+        title, name = card[2], _card_name(card)
         if name in names:  # a same-name twin: the newest (first) one stands for it
             continue
         ids.append(i)

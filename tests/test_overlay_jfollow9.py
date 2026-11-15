@@ -275,6 +275,28 @@ def test_spoken_title_taints(client):
     assert "j9i" in overlay._tainted
 
 
+def test_spoken_name_drops_lead_article_and_dangling_word(client):
+    # Mac live run a (round 2): "The Roman Empire: key facts" was spoken "the the roman empire key".
+    clock = Clock()
+    _deps(clock=clock)
+    for title, want in [("The Roman Empire: key facts", "Removed the roman empire key facts, sir."),
+                        ("A cat on a mat", "Removed the cat on a mat, sir."),
+                        ("Rise and fall of Rome", "Removed the rise and fall, sir."),
+                        ("Notes on the Roman Empire", "Removed the notes on the roman, sir."),
+                        ("The", "Removed the card, sir.")]:
+        _seed("j9r", clock, [("info", title)])
+        events = turn(client, "remove that card", conv_id="j9r")
+        assert says(events) == [want]
+    _seed("j9s", clock, [("info", "The Roman Empire: key facts"), ("image", "A cat")])
+    events = turn(client, "remove the dog card", conv_id="j9s")
+    assert says(events) == ["I don't see that card. On screen: the cat and the roman empire key facts."]
+    _seed("j9t", clock, [("info", "The Rome history"), ("info", "The Rome facts")])
+    events = turn(client, "remove the Rome card", conv_id="j9t")
+    assert says(events)[0].startswith("Which one: the rome facts or the rome history?")
+    assert not any("the the" in s.lower() for s in says(events))
+    overlay._card_pick.pop("j9t", None)
+
+
 def test_offscreen_cards_are_not_targets(client):
     clock = Clock()
     _deps(clock=clock)
