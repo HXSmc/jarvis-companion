@@ -87,3 +87,13 @@ def test_about_companion_aliases():
     for key in ("removed_named", "no_card_named", "no_cards", "companion_about"):
         assert key in acks.PHRASES, key
     assert len(acks.PHRASES["companion_about"].split()) <= 12
+
+
+def test_stutter_and_kind_words_keep_old_asks():
+    """Builder review: the prefix stutter needs STT punctuation ("the car cards" is not one), and
+    a saved workspace named with a kind word is still deleted as a workspace."""
+    assert parse("remove the car cards", apps={}).kind != "clear"
+    assert parse("Clear the over, overlay", apps={}).kind == "clear"
+    for name in ("shopping list", "meeting notes"):
+        assert parse(f"delete the {name}", apps={}, workspace_names=(name,)).kind == "workspace"
+    assert parse("delete the cat card", apps={}, workspace_names=("cat",)).kind == "card_remove"

@@ -401,9 +401,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         return Intent("vault_secrets")
     ask = workspace_request(text, ws_names)
     # An installed app or a site wins over a saved name sharing a word ("open notes").
-    # "delete the cat card" is a card ask even when a saved name shares the words.
-    if ask and ask.action == "delete" and (ask.name.endswith(" card")
-                                           or any(w in KIND_WORDS for w in ask.name.split())):
+    # "delete the cat card" is a card ask even when a saved name shares the words; a saved
+    # "shopping list" or "meeting notes" (kind words) stays a workspace delete.
+    if ask and ask.action == "delete" and "card" in ask.name.split():
         ask = None
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
@@ -545,8 +545,8 @@ def _strip_tail(text: str) -> str:
 
 def destutter(text: str) -> str:
     """Stuttered words off ("clear the over, overlay" -> "clear the overlay"): a word
-    repeated at once ("the the") keeps its second copy only, and a word whose letters
-    start the next word's ("over," before "overlay") is dropped. Comparison strips
+    repeated at once ("the the") keeps its second copy only, and a word with STT
+    punctuation whose letters start the next word's ("over," before "overlay") is dropped. Comparison strips
     ,.;:!? from each word's ends; kept words keep their punctuation."""
     words = text.split()
     bare = [w.strip(",.;:!?") for w in words]
@@ -557,7 +557,9 @@ def destutter(text: str) -> str:
         if b and nxt:
             if b == nxt:  # an immediate repeat: the second copy stays
                 continue
-            if len(b) >= 2 and nxt.startswith(b):  # a strict prefix of the next word
+            # A strict prefix of the next word, cut off by STT punctuation ("over, overlay"):
+            # without the comma "the car cards" is two words, not a stutter.
+            if len(b) >= 2 and nxt.startswith(b) and w != b:
                 continue
         kept.append(w)
     return " ".join(kept)
