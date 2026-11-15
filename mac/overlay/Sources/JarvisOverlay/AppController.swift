@@ -780,6 +780,12 @@ final class AppController {
         let stopMs = Int(stoppedAt.timeIntervalSince(confirmedAt) * 1000)
         let rule = run?.rule.map { " rule=\($0.rawValue)" } ?? ""
         let voice = run?.voiceFrom.map { " voice_to_stop_ms=\(Int(stoppedAt.timeIntervalSince($0) * 1000))" } ?? ""
+        // First try: from the first partial that held the name or stop word, and how many such
+        // partials the gate turned down before this one.
+        let command = run.map { r in
+            (r.tracker.commandAt.map { " cmd_to_stop_ms=\(Int(stoppedAt.timeIntervalSince($0) * 1000))" } ?? "")
+                + " cmd_rejects=\(r.tracker.cmdRejects)"
+        } ?? ""
         utteranceTask?.cancel()
         turnStreaming = false
         turnDone = false  // the stop's stale drains must not start a follow-up
@@ -788,17 +794,20 @@ final class AppController {
         client.debugNote(step: "barge_in",
                          detail: "at=\(at) reason=\(reason.rawValue)\(rule) "
                              + "dropped_sentences=\(pending + lateAudioCount) stop_ms=\(stopMs) "
-                             + "stream_open=\(streamOpen ? 1 : 0)\(voice)")
+                             + "stream_open=\(streamOpen ? 1 : 0)\(voice)\(command)")
     }
 
     /// A2: with the first .audio of the turn playing, one recognition turn listens for a barge-in:
     /// no ring replay, never ends on silence, and while unconfirmed no final/nothing. On confirm it
     /// runs on as the owner's ordinary follow-up turn; at the reply's drain it is cancelled silently.
-    private func startBargeListeningIfNeeded() {
+    /// `coupling`: a restart within the same reply hands over the ended run's learned coupling (C4).
+    private func startBargeListeningIfNeeded(coupling: Double? = nil) {
         guard bargeInEnabled, bargeRun == nil, model.missingPermissions.isEmpty else { return }
         let audioOut = audio
-        let run = BargeRun(enabled: true, aec: speech.aecActive, outLevels: { audioOut.outputLevels })
+        let run = BargeRun(enabled: true, aec: speech.aecActive, coupling: coupling,
+                           outLevels: { audioOut.outputLevels })
         run.onConfirmed = { [weak self] reason in self?.bargeIn(reason: reason) }
+        run.onCheck = { [weak self] row in self?.client.debugNote(step: "barge_check", detail: row) }
         // One note per run with the gate's numbers (live tuning: coupling, peak ratio, runs). An
         // unconfirmed end mid-reply restarts the run on the next tick, after any cancel() that
         // ended it (listenAfterWake, reconfigure) has settled.
@@ -860,7 +869,7 @@ final class AppController {
         }
         bargeRun = nil
         client.debugNote(step: "barge_gate", detail: "restart reason=run_ended after=\(reason)")
-        startBargeListeningIfNeeded()
+        startBargeListeningIfNeeded(coupling: run.aec == speech.aecActive ? run.gate.coupling : nil)
     }
 
     /// Control events steer the overlay itself: end_listening closes the follow-up window for

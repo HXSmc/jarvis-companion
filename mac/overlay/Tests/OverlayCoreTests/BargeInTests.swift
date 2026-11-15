@@ -481,4 +481,82 @@ final class BargeInTests: XCTestCase {
         let stripped = TurnEndpointer.stripWake(final, followUp: true)
         XCTAssertEqual(BargeWords.bargeTurnText(stripped, reply: story, speakers: true).text, "stop")
     }
+
+    // MARK: jfollow9 (BargeCheck wiring through BargeWords)
+
+    /// BargeCheck copies EchoGate's hold and lag (it builds alone on Linux): they stay equal.
+    func testBargeCheckMatchesEchoGate() {
+        XCTAssertEqual(BargeCheck.holdBlocks, EchoGate.holdBlocks)
+        XCTAssertEqual(BargeCheck.wordLag, EchoGate.wordLag)
+    }
+
+    /// C1: a "hey jarvis stop" partial that lands 1.6 s after its over blocks (the gate is quiet
+    /// by then) keeps its command words fresh and confirms; the echo before it does not count.
+    func testFreshFromKeepsOwnerCommand() {
+        let reply = ["The empire grew under Trajan and its roads ran everywhere."]
+        var tracker = BargeCheck.Tracker(aec: true)
+        let t = Date(timeIntervalSince1970: 500)
+        for k in 1...8 { tracker.block(over: k % 2 == 1, at: t.addingTimeInterval(Double(k) * 0.1)) }  // never 3 in a row
+        let partial = "the empire grew hey jarvis stop"
+        let r = tracker.check(at: t.addingTimeInterval(0.7 + 1.6), wordCount: 6, recheck: false,
+                              commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) },
+                              words: { BargeWords.check(partial: partial, reply: reply, freshFrom: $0) },
+                              level: .init())
+        XCTAssertEqual(tracker.freshFrom, 4)
+        XCTAssertEqual(r.verdict.rule, .stop)
+        // The echo alone, gate quiet: freshFrom moves past every word as before.
+        var echo = BargeCheck.Tracker(aec: true)
+        _ = echo.check(at: t, wordCount: 3, recheck: false,
+                       commandIndex: { BargeWords.commandIndex(partial: "the empire grew", reply: reply, from: $0) },
+                       words: { BargeWords.check(partial: "the empire grew", reply: reply, freshFrom: $0) },
+                       level: .init())
+        XCTAssertEqual(echo.freshFrom, 3)
+    }
+
+    /// C5: the reply holds "stop"; a fresh "jarvis stop" is the name rule, not a miss.
+    func testStopFallsThroughToName() {
+        let reply = ["Press stop on the timer when it rings."]
+        XCTAssertEqual(BargeWords.confirmRule(partial: "jarvis stop", reply: reply, speakers: true), .name)
+        XCTAssertNil(BargeWords.confirmRule(partial: "stop", reply: reply, speakers: true))
+    }
+
+    /// C5: repeats and lead words before a stop phrase still say stop; a lone "no" does not.
+    func testStopPhraseRepeats() {
+        let reply = ["The Apollo crew landed on the moon in nineteen sixty nine."]
+        for text in ["no no no stop", "stop stop", "okay stop. stop", "No, no, Jarvis, stop."] {
+            XCTAssertEqual(BargeWords.confirmRule(partial: text, reply: reply, speakers: true), .stop, text)
+        }
+        XCTAssertNil(BargeWords.confirmRule(partial: "no", reply: reply, speakers: true))
+        XCTAssertFalse(StopPhrase.endsInStop("no no"))
+        XCTAssertFalse(StopPhrase.endsInStop("please stop the build"))
+    }
+
+    /// C4: a restarted run starts at the ended run's coupling (clamped); the default is unchanged.
+    func testRestartedRunKeepsCoupling() {
+        XCTAssertEqual(EchoGate(margin: EchoGate.aecMargin, coupling: 0.05).coupling, 0.05)
+        XCTAssertEqual(EchoGate(margin: EchoGate.aecMargin, coupling: 0.001).coupling, 0.01)
+        XCTAssertEqual(EchoGate(margin: EchoGate.aecMargin, coupling: 5).coupling, EchoGate.startCoupling)
+        XCTAssertEqual(EchoGate().coupling, 1.0)
+    }
+
+    /// Jarvis's own words as BargeCheck sees them: a misheard "Jarvis" of "Jervis" and a "quiet"
+    /// heard for "quite" are the reply's (never kept fresh, never a clean stop).
+    func testOwnWordsFlags() {
+        let jervis = ["Hey Jervis, Travis says the build is ready."]
+        let w = BargeWords.check(partial: "Hey Jarvis, Travis says the build is ready", reply: jervis)
+        XCTAssertFalse(w.freshName)
+        XCTAssertNil(BargeCheck.wordRule(w, speakers: true))
+        XCTAssertNil(BargeWords.commandIndex(partial: "Hey Jarvis, Travis says", reply: jervis, from: 0))
+        let ready = ["Jarvis is ready when you are."]
+        let echo = BargeWords.check(partial: "Jarvis is ready when you are", reply: ready)
+        XCTAssertFalse(echo.freshName)
+        XCTAssertNil(BargeCheck.wordRule(echo, speakers: true))
+        XCTAssertTrue(BargeWords.check(partial: "Jarvis", reply: ready).nameInReply)
+        let quite = ["That was quite a day."]
+        let q = BargeWords.check(partial: "quiet", reply: quite)
+        XCTAssertTrue(q.stop)
+        XCTAssertFalse(q.stopClean)
+        XCTAssertNil(BargeWords.commandIndex(partial: "that was quiet", reply: quite, from: 0))
+        XCTAssertNil(BargeWords.confirmRule(partial: "quiet", reply: quite, speakers: true))
+    }
 }

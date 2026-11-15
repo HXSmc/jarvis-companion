@@ -339,42 +339,42 @@ final class SpeechInput {
         turn.lastText = text
         turn.hasSpeech = true
         turn.endOfSpeech = Date()
-        if let barge = turn.barge, !barge.confirmed { checkBarge(barge, turn: turn, partial: text, now: Date()) }
+        if let barge = turn.barge, !barge.confirmed { checkBarge(barge, turn: turn, partial: text, now: Date(), recheck: false) }
         turn.tail.partial(text, at: Date())
         turn.onPartial?(text)
     }
 
-    /// The barge-in word check on one partial: gate candidate (or one that ended within the
-    /// partials' lag) + words the reply does not contain, counted only from the words heard since
-    /// the gate last went over the echo. On confirm the turn goes on as an ordinary follow-up.
-    private func checkBarge(_ barge: BargeRun, turn: Turn, partial: String, now: Date) {
+    /// The barge-in check on one partial (`recheck`: the last partial again after new over blocks,
+    /// C2): `BargeCheck` decides from the gate's blocks and the partial's word flags; a decisive
+    /// partial (a name or stop word in its fresh words) gets one `barge_check` row. On confirm the
+    /// turn goes on as an ordinary follow-up.
+    private func checkBarge(_ barge: BargeRun, turn: Turn, partial: String, now: Date, recheck: Bool) {
         feedGate(barge, now: now)  // the gate is current before it is read
-        barge.partials += 1
-        guard barge.gate.recentlyOver(at: now) else {
-            // Echo only so far: these words are the reply's, the owner's can only come after them.
-            barge.freshFrom = BargeWords.wordCount(partial)
-            return
-        }
-        let candidate = barge.gate.candidate(at: now)
-        if candidate {
+        if !recheck { barge.partials += 1 }
+        let reply = barge.reply
+        let level = BargeCheck.Level(mic: barge.micBlocks.last ?? 0, out: barge.outBlocks.last ?? 0,
+                                     coupling: barge.gate.coupling, ratio: barge.lastRatio)
+        // Through the echo canceller (speakers) the fresh words must name Jarvis or say stop (hub Q5).
+        let (verdict, row) = barge.tracker.check(
+            at: now, wordCount: BargeWords.wordCount(partial), recheck: recheck,
+            commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) },
+            words: { BargeWords.check(partial: partial, reply: reply, freshFrom: $0) }, level: level)
+        if let row { barge.onCheck?(row) }
+        if verdict.reject != .notOver && verdict.reject != .noHold {
             barge.checked += 1
-            barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: barge.reply,
+            barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: reply,
                                                                       freshFrom: barge.freshFrom))
         }
-        // Through the echo canceller (speakers) the fresh words must name Jarvis or say stop (hub Q5).
-        guard let reason = BargeDecision.decide(gateCandidate: candidate, partial: partial,
-                                                reply: barge.reply, wake: false,
-                                                enabled: barge.enabled, aec: barge.aec,
-                                                freshFrom: barge.freshFrom, speakers: barge.aec) else { return }
-        barge.rule = BargeWords.confirmRule(partial: partial, reply: barge.reply,
-                                            freshFrom: barge.freshFrom, speakers: barge.aec)
+        guard barge.enabled, let rule = verdict.rule else { return }
+        barge.rule = BargeRule(rawValue: rule.rawValue)
+        if barge.voiceFrom == nil || !barge.gate.candidate(at: now) { barge.voiceFrom = barge.tracker.firstOverInWindow }
         barge.confirmed = true
         turn.capFrom = now
         // The tail gate and the sent levels start at the confirmation, not over the reply's echo.
         turn.tail = TailGate(ratio: tailRatio)
         turn.fedBlocks = 0
         turn.levelFrom = Date()
-        barge.onConfirmed?(reason)
+        barge.onConfirmed?(barge.aec ? .aec : .level)
         barge.end()
     }
 
@@ -442,7 +442,12 @@ final class SpeechInput {
             // Barge listening runs while the reply plays: silence, the caps and the endpointer
             // never end it — only a confirmed barge-in or a cancel (the reply drain) does.
             if let barge = turn.barge, !barge.confirmed {
-                feedGate(barge, now: Date())
+                let now = Date()
+                feedGate(barge, now: now)
+                // C2: over blocks that came after the last partial: its words are checked again.
+                if barge.tracker.wantsRecheck(at: now), !turn.lastText.isEmpty {
+                    checkBarge(barge, turn: turn, partial: turn.lastText, now: now, recheck: true)
+                }
                 try? await Task.sleep(nanoseconds: 50_000_000)
                 continue
             }
@@ -494,8 +499,12 @@ final class SpeechInput {
         let done = min(max(0, mic.count - 1), max(0, out.count - 1))  // the newest block is still filling
         guard done > barge.fedBlocks else { return }
         for i in barge.fedBlocks..<done {
-            barge.gate.block(mic: mic[i], out: out[i],
-                             at: from.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
+            let at = from.addingTimeInterval(Double(i + 1) * LevelBlocks.width)
+            let overBefore = barge.gate.overTotal
+            let echo = barge.gate.echoEstimate(nextOut: out[i])
+            barge.gate.block(mic: mic[i], out: out[i], at: at)
+            barge.tracker.block(over: barge.gate.overTotal > overBefore, at: at)
+            barge.lastRatio = echo > 0 ? mic[i] / echo : 0
             barge.micBlocks.append(mic[i])
             barge.outBlocks.append(out[i])
             // The first over block of the newest candidate run: voice_to_stop_ms counts from it.
@@ -839,9 +848,14 @@ final class BargeRun {
     var confirmed = false
     /// AppController's stop-the-reply path (audio.stop, stream cancel, orb).
     var onConfirmed: ((BargeReason) -> Void)?
-    /// Words of the partial heard while the gate was quiet (the reply's echo): the word check
-    /// starts after them.
-    var freshFrom = 0
+    /// The barge-in decision state (BargeCheck): words of the partial heard while the gate was
+    /// quiet are the reply's echo and the word check starts after them (`freshFrom`).
+    var tracker: BargeCheck.Tracker
+    var freshFrom: Int { tracker.freshFrom }
+    /// The newest fed block's mic over the gate's echo estimate (the `barge_check` row's ratio).
+    var lastRatio = 0.0
+    /// One `barge_check` row (numbers and fixed words only).
+    var onCheck: ((String) -> Void)?
     /// Partials seen, and word checks made while the gate was a candidate (debug note only).
     var partials = 0, checked = 0
     /// Most new (not-in-the-reply) words any checked partial held; the word check needs 2.
@@ -862,7 +876,8 @@ final class BargeRun {
         ended = true
         onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) max_new=\(maxNew) "
                  + "rule=\(rule?.rawValue ?? "none") aec=\(aec ? 1 : 0) mic_p90=\(Self.p90(micBlocks)) "
-                 + "out_p90=\(Self.p90(outBlocks)) confirmed=\(confirmed ? 1 : 0)")
+                 + "out_p90=\(Self.p90(outBlocks)) confirmed=\(confirmed ? 1 : 0)"
+                 + (tracker.capped > 0 ? " capped=\(tracker.capped)" : ""))
     }
 
     /// The 90th percentile, 3 decimals ("0.000" for no blocks).
@@ -872,11 +887,14 @@ final class BargeRun {
         return String(format: "%.3f", v)
     }
 
-    init(enabled: Bool, aec: Bool, outLevels: @escaping () -> [LevelSample]) {
+    /// `coupling`: a run restarted in the same reply starts at the ended run's (C4).
+    init(enabled: Bool, aec: Bool, coupling: Double? = nil, outLevels: @escaping () -> [LevelSample]) {
         self.enabled = enabled
         self.aec = aec
         self.outLevels = outLevels
-        self.gate = EchoGate(margin: aec ? EchoGate.aecMargin : EchoGate.defaultMargin)
+        let margin = aec ? EchoGate.aecMargin : EchoGate.defaultMargin
+        self.gate = coupling.map { EchoGate(margin: margin, coupling: $0) } ?? EchoGate(margin: margin)
+        self.tracker = BargeCheck.Tracker(aec: aec)
     }
 }
 
