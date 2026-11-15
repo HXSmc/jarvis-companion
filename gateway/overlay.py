@@ -3712,16 +3712,16 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         said.append(acks.PHRASES.get("expired", ""))
         yield _finish(body, deps, metrics, said, start)
         return
+    with _confirm_lock:
+        pending = body.conv_id in _confirm
+    if pending and body.barge_in and intents.is_confirm(body.text):
+        # hub ruling: a barge-in never approves; the run stays pending for a plain yes
+        if on_step:
+            on_step("agent_confirm", state="pending")
+        yield _finish(body, deps, metrics, said, start)
+        return
     run = _take_confirm(body.conv_id)
     if run is not None:
-        if body.barge_in and intents.is_confirm(body.text):
-            # hub ruling: a barge-in never approves; the run stays pending for a plain yes
-            with _confirm_lock:
-                _confirm.setdefault(body.conv_id, run)
-            if on_step:
-                on_step("agent_confirm", state="pending")
-            yield _finish(body, deps, metrics, said, start)
-            return
         if intents.is_confirm(body.text) and deps.clock() < run.deadline and not run.session.closed:
             if on_step:
                 on_step("agent_confirm", state="allowed")

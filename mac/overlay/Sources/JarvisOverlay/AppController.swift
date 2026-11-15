@@ -757,8 +757,13 @@ final class AppController {
         let audioOut = audio
         let run = BargeRun(enabled: true, aec: speech.aecActive, outLevels: { audioOut.outputLevels })
         run.onConfirmed = { [weak self] reason in self?.bargeIn(reason: reason) }
-        // One note per run with the gate's numbers (live tuning: coupling, peak ratio, runs).
-        run.onEnded = { [weak self] summary in self?.client.debugNote(step: "barge_gate", detail: summary) }
+        // One note per run with the gate's numbers (live tuning: coupling, peak ratio, runs). An
+        // unconfirmed end mid-reply restarts the run on the next tick, after any cancel() that
+        // ended it (listenAfterWake, reconfigure) has settled.
+        run.onEnded = { [weak self, weak run] summary in
+            self?.client.debugNote(step: "barge_gate", detail: summary)
+            Task { @MainActor in self?.restartEndedBargeRun(run, reason: "ended") }
+        }
         run.reply = replyTexts
         bargeRun = run
         // Screen capture starts when the barge turn starts; only awaited when its utterance lands.
@@ -792,6 +797,19 @@ final class AppController {
                 }
             },
             onNothing: { _ in })
+    }
+
+    /// I1: the barge run `ended` (still the current one) stopped listening unconfirmed while its
+    /// reply plays: a fresh run listens on (EchoCancel.restartBargeRun), so raw self-hits stay ignored.
+    private func restartEndedBargeRun(_ ended: BargeRun?, reason: String) {
+        guard let run = bargeRun, run === ended else { return }
+        let anyTurn = speech.openTurn != nil || speech.bargeListening || speech.bargeTurnOpen
+        let ranFor = run.gateThrough.map { Date().timeIntervalSince($0) } ?? 0
+        guard EchoCancel.restartBargeRun(confirmed: run.confirmed, anyTurnOpen: anyTurn,
+                                         audioBusy: audio.isBusy, ranFor: ranFor) else { return }
+        bargeRun = nil
+        client.debugNote(step: "barge_gate", detail: "restart reason=run_ended after=\(reason)")
+        startBargeListeningIfNeeded()
     }
 
     /// Control events steer the overlay itself: end_listening closes the follow-up window for
@@ -833,12 +851,7 @@ final class AppController {
             bargeRun?.reply = replyTexts
             model.orb = .speaking
             audio.enqueue(pcm: pcm, rate: rate)
-            if let run = bargeRun, EchoCancel.bargeRunEnded(confirmed: run.confirmed,
-                                                            listening: speech.bargeListening,
-                                                            turnOpen: speech.bargeTurnOpen) {
-                bargeRun = nil  // its turn ended mid-reply: a fresh run listens from this clip on
-                client.debugNote(step: "barge_gate", detail: "restart reason=run_ended")
-            }
+            restartEndedBargeRun(bargeRun, reason: "clip")
             startBargeListeningIfNeeded()  // seeded with replyTexts, this clip included
         case .shape(let shape, let check):
             // The capture is seconds old: re-resolve once, off the main actor, before drawing.

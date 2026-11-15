@@ -41,11 +41,16 @@ public enum EchoCancel {
         return .gate
     }
 
-    /// A barge run whose listening turn ended unconfirmed (a reconfigure cancelled it, or the
-    /// recogniser gave up) while its reply plays on: drop it so the next clip starts a fresh run,
-    /// else `wakeAction` sees no listener and a raw self-hit reaches the wake gate.
-    public static func bargeRunEnded(confirmed: Bool, listening: Bool, turnOpen: Bool) -> Bool {
-        !confirmed && !listening && !turnOpen
+    /// A barge run ends after this long at the earliest before it is restarted (a recogniser that
+    /// fails at once must not restart every tick).
+    public static let minBargeRunS: TimeInterval = 1.0
+
+    /// Restart the barge run now: it ended unconfirmed (a reconfigure cancelled it, or the recogniser
+    /// gave up), no other turn listens, its reply still plays, and it ran `minBargeRunS`. Else
+    /// `wakeAction` sees no listener for the rest of the reply and a raw self-hit reaches the gate.
+    public static func restartBargeRun(confirmed: Bool, anyTurnOpen: Bool, audioBusy: Bool,
+                                       ranFor: TimeInterval) -> Bool {
+        !confirmed && !anyTurnOpen && audioBusy && ranFor >= minBargeRunS
     }
 
     /// The playback makeup gain for what the canceller takes off the mic: `gainDb` of gain, capped

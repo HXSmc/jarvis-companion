@@ -205,10 +205,15 @@ def test_barge_final_keeps_wake_words():
 
 
 def test_ended_barge_run_restarts_on_next_clip():
-    """Security R3 finding 2 (I1): a barge run whose turn ended mid-reply is dropped before the next
-    clip's startBargeListeningIfNeeded, so a fresh run listens and raw self-hits stay ignored."""
+    """Security R3 finding 2 (I1): a barge run whose turn ended mid-reply is replaced, both on the
+    next clip (before startBargeListeningIfNeeded) and one tick after the run ends (queued clips
+    still playing), through EchoCancel.restartBargeRun."""
     src = (ROOT / "mac/overlay/Sources/JarvisOverlay/AppController.swift").read_text()
     audio = src[src.index("case .audio(let text"):src.index("case .shape(")]
-    ended = audio.index("EchoCancel.bargeRunEnded(confirmed: run.confirmed,")
-    assert ended < audio.index("bargeRun = nil") < audio.index("startBargeListeningIfNeeded()")
-    assert 'detail: "restart reason=run_ended"' in audio
+    assert audio.index('restartEndedBargeRun(bargeRun, reason: "clip")') < audio.index("startBargeListeningIfNeeded()")
+    start = _swift_func("startBargeListeningIfNeeded", "AppController.swift")
+    assert 'Task { @MainActor in self?.restartEndedBargeRun(run, reason: "ended") }' in start
+    body = _swift_func("restartEndedBargeRun", "AppController.swift")
+    assert "run === ended" in body and "EchoCancel.restartBargeRun(confirmed: run.confirmed" in body
+    assert body.index("bargeRun = nil") < body.index("startBargeListeningIfNeeded()")
+    assert 'detail: "restart reason=run_ended after=' in body

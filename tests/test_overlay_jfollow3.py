@@ -551,7 +551,8 @@ def test_hyde_is_hide_and_who_wrote_needs_code():
 def test_barge_gate_note_and_debug_label():
     """Live 32: no gate numbers could be read. Every barge run posts one numbers-only barge_gate note."""
     start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
-    assert 'run.onEnded = { [weak self] summary in self?.client.debugNote(step: "barge_gate", detail: summary) }' in start
+    assert 'run.onEnded = { [weak self, weak run] summary in' in start  # jfollow8 R2: + the I1 restart
+    assert 'self?.client.debugNote(step: "barge_gate", detail: summary)' in start
     speech = (APP_SRC / "SpeechInput.swift").read_text()
     cancel = _swift_func(APP_SRC / "SpeechInput.swift", "cancel")
     assert "turn.barge?.end()" in cancel
