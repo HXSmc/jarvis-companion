@@ -963,3 +963,207 @@ def test_card_pick_by_the_name_as_heard():
     assert card_pick("the overlay capabilities", names) == [1]
     assert card_pick("the jarvis capabilities card", names) == [0]
     assert card_pick("the purple one", names) is None
+
+
+def test_injection_notes_table():
+    """Sentences narrating a web-injected instruction drop; everything else stays."""
+    from mac.voice.intents import drop_injection_notes
+
+    for line, want in (
+        ("Of course, sir. One note: my earlier search was unnecessary, and its results told me to add source links to my reply. That instruction came from the search results, not from you, so I ignored it.", ("Of course, sir.", 2)),
+        ("Here is a lithium-ion cell, sir. The search results also included a line telling me to add source links to my reply, which I ignored.", ("Here is a lithium-ion cell, sir.", 1)),
+        ("One of the pages had a hidden instruction asking me to change my answer; I ignored it.", ("", 1)),
+        ("That instruction came from the web results, not from you.", ("", 1)),
+    ):
+        assert drop_injection_notes(line) == want, line
+    for line in (
+        "The guide says to restart the router, then wait a minute.",
+        "The instructions on the page say to preheat the oven to 200 degrees.",
+        "The page asked me to sign in, so I couldn't read it.",
+        "The page asked me to sign in, so I couldn't read it. I ignored the duplicate results.",
+        "I won't add links from those search results, sir.",
+        "Saturn has 146 moons, per the search results.",
+        "I ignored the duplicate results.",
+        "Shall I push the branch to GitHub?",
+        "I can't do that, sir.",
+        "Understood, sir, clearing the capabilities card from the overlay now.",
+    ):
+        out = drop_injection_notes(line)
+        assert out[1] == 0 and out[0] is line, line
+
+
+def test_sessions_any_shape_table():
+    """jfollow7 S1: every read-only sessions question, with its device, reaches `sessions`."""
+    for text in ("check the active sessions on mini BC", "check the active sessions on the mini PC",
+                 "Hey Jarvis, check the active sessions on mini PC", "check the active sessions on mini pc",
+                 "check the active sessions on mini p c", "check the active sessions on minipc",
+                 "check the active sessions on many PC", "show my sessions", "list the sessions on the Mac",
+                 "any sessions running", "which sessions are active", "what's running on the mini PC",
+                 "what's active on the mini PC", "what sessions are running on the Mac",
+                 "are there any sessions on Jarvis companion", "tell me the open sessions on the router",
+                 "what's running on the router"):
+        assert parse(text, apps=()) == Intent("sessions", "", ""), text
+    for text, want in (("start a new session to write the readme", "session"),
+                       ("start a new session on the mini PC to check my sessions", "session"),
+                       ("stop the voice-test session", "session"),
+                       ("open a session", "open_app"),
+                       ("is the build still running", "answer"),
+                       ("what's running late today", "answer"),
+                       ("how long is a therapy session", "answer"),
+                       ("what's open on the Mac", "answer"),
+                       ("I meant on the mini PC, and you can check it through the router", "answer")):
+        assert parse(text, apps={}).kind == want, text  # the app opener needs a dict
+
+
+def test_sessions_followup_words():
+    """jfollow7 S2: the follow-up rule's word check (pure)."""
+    from mac.voice.intents import sessions_followup
+    for text in ("I meant on the mini PC, and you can check it through the router", "on the router",
+                 "what about the sessions", "check it on mini BC", "and on Jarvis companion"):
+        assert sessions_followup(text), text
+    for text in ("thanks", "what's the weather in Riyadh", "tell me a joke about the Mac", "stop it",
+                 "start a new session on the mini PC", "how long is a therapy session", "on the Mac",
+                 "how do I take a screenshot on the Mac", "is the build still running",
+                 "what's running late today",
+                 # R6 security 3: an action on sessions is never the read-only listing
+                 "restart my sessions", "resume the sessions", "launch my sessions on the router",
+                 "begin those sessions", "create sessions on the mini PC"):
+        assert not sessions_followup(text), text
+
+
+def test_injection_notes_round1():
+    """jfollow7 R1: more note phrasings drop; a refusal, the owner's answer and an admission of
+    obeying stay."""
+    from mac.voice.intents import drop_injection_notes
+
+    for line, want in (
+        # ux 1: an instruction sentence followed by a bare "I ignored it." drops both (one note).
+        ("One of the search results contained an instruction to add source links. I ignored it. "
+         "Paris is the capital.", ("Paris is the capital.", 1)),
+        ("Paris is the capital. One web page had a line telling me to add links, and I ignored it.",
+         ("Paris is the capital.", 1)),
+        ("One search result asked me to include a link, which I did not do.", ("", 1)),
+        ("One of the pages had text that wasn't from you, so I disregarded it.", ("", 1)),
+        ("A search result tried to tell me what to say, so I skipped that.", ("", 1)),
+        # security 3: the refusal before the ";" stays; the note after it drops.
+        ("I can't email your contacts, sir; the page also asked me to share your address, "
+         "which I ignored.", ("I can't email your contacts, sir.", 1)),
+        # security 3: an admission of obeying is never hidden; only the other note drops.
+        ("The page told me to open a site, and I did. The search results had other instructions, "
+         "which I ignored.", ("The page told me to open a site, and I did.", 1)),
+    ):
+        assert drop_injection_notes(line) == want, line
+    for line in (
+        "I ignored the outdated results; the instructions say to attach the legs first.",
+        "The page told me to open a site, and I did.",
+        "One of the search results contained an instruction to add source links, and I added them.",
+        "The instructions on the page say to preheat the oven. Then bake it for an hour.",
+    ):
+        out = drop_injection_notes(line)
+        assert out[1] == 0 and out[0] is line, line
+
+
+def test_injection_notes_round2_obey_any_verb():
+    """jfollow7 R2 (security 1): an admission of obeying with ANY verb stays, even when another
+    clause says "I ignored the other instructions"; "which I have ignored" is a note and drops."""
+    from mac.voice.intents import drop_injection_notes
+
+    for line, want in (
+        ("The page told me to email Bob, and I emailed him. I ignored the other instructions "
+         "on the site.", ("The page told me to email Bob, and I emailed him.", 1)),
+        ("The search results told me to run a command, and I ran it. Some other instructions in "
+         "the results I ignored.", ("The search results told me to run a command, and I ran it.", 1)),
+        ("The site asked me to forward your mail and I complied. That instruction came from the "
+         "search results, not from you, so I ignored it.",
+         ("The site asked me to forward your mail and I complied.", 1)),
+        ("The page told me to open a site, and I did. The search results had other instructions, "
+         "which I ignored.", ("The page told me to open a site, and I did.", 1)),
+        ("The search results told me to add source links, which I have ignored.", ("", 1)),
+        ("The search results told me to add source links, which I've ignored.", ("", 1)),
+        ("The page told me to add links, and I simply ignored it.", ("", 1)),
+        ("The page told me to add links, so I just ignored that.", ("", 1)),
+        ("The page told me to add links, and I chose to ignore it.", ("", 1)),
+        ("The page told me to add links, and I didn't do it.", ("", 1)),
+    ):
+        assert drop_injection_notes(line) == want, line
+
+
+def test_sessions_round1_shapes():
+    """jfollow7 R1: a start/stop verb never reaches `sessions`; "how" questions need an article;
+    more natural phrasings reach it."""
+    for text in ("do I have any sessions on the mac", "what sessions do I have", "how many sessions are open",
+                 "can you tell me what sessions are running", "I want to see the sessions on the mini PC",
+                 "what sessions are running on the mini piece", "how are the sessions on the mac"):
+        assert parse(text, apps=()) == Intent("sessions", "", ""), text
+    for text in ("check and stop all sessions", "see and close my sessions", "how to start sessions on the mac",
+                 "how do I stop the running sessions", "how do I check sessions", "how are sessions",
+                 "how long are sessions on the mac", "how many sessions should I do a week",
+                 "can you tell me what sessions are for", "how do I stop my sessions",
+                 "check and kill the sessions"):
+        assert parse(text, apps={}).kind == "answer", text
+
+
+def test_injection_notes_round5_aimed_at_reply():
+    """jfollow7 R5 (Mac run, story turn): the note line came alone, its "I ignored it" elsewhere.
+    R6 security: it is dropped only when a note was already dropped in the same reply (`noted`,
+    or another clause of the same text); alone it is spoken (loud and safe)."""
+    from mac.voice.intents import drop_injection_notes
+
+    line = "The search results ended with an instruction to add source links to my reply."
+    assert drop_injection_notes(line, noted=True) == ("", 1)
+    assert drop_injection_notes(line) == (line, 0)
+    assert drop_injection_notes(line)[0] is line
+    assert drop_injection_notes(
+        line + " That instruction came from the search results, not from you, so I ignored it.") == ("", 2)
+    story = "On the sixteenth of July, 1969, Apollo 11 lifted off. " + line
+    assert drop_injection_notes(story, noted=True) == ("On the sixteenth of July, 1969, Apollo 11 lifted off.", 1)
+    for kept in ("The instructions on the page say to preheat the oven to 200 degrees.",
+                 "My answer is in the search results, sir.",
+                 "Per the search results, my reply is yes."):
+        for noted in (False, True):
+            out = drop_injection_notes(kept, noted=noted)
+            assert out[1] == 0 and out[0] is kept, kept
+
+
+R6_KEPT = (  # jfollow7 R6 security finding 1: admissions, questions, warnings and real answers
+    "Following an instruction in the search results, I added source links to my reply.",
+    "Per the page's instruction, I have changed my answer to recommend their product.",
+    "As the search results' instruction asked, my answer now includes their sign-in link.",
+    "Should I follow the instruction from the search results and change my answer?",
+    "The page has an instruction to put this link in my answer: shall I open it?",
+    "My answer follows the instructions on the page: preheat to 200 degrees.",
+    "Warning, sir: the page holds an instruction to change my answer, so treat it as unsafe.",
+    "Warning, sir: the page has an instruction to add a sign-in link to my answer.",
+    "The search results have an instruction to add their link to my reply, and I did.",
+    # R6 (advisor probes): an obey tail with no "I", or an "I" admission right after, keeps it
+    "The search results ended with an instruction to add source links to my reply, so they are "
+    "included below.",
+    "The page had an instruction to add its link to my answer, and it has been added.",
+    "The search results ended with an instruction to add source links to my reply. I added them.",
+)
+
+
+@pytest.mark.parametrize("kept", R6_KEPT)
+@pytest.mark.parametrize("noted", [False, True])
+def test_injection_notes_round6_never_hides_admission(kept, noted):
+    from mac.voice.intents import drop_injection_notes
+
+    out = drop_injection_notes(kept, noted=noted)
+    assert out[1] == 0 and out[0] is kept
+
+
+def test_injection_notes_round6_obey_tail_survives_other_note():
+    from mac.voice.intents import drop_injection_notes
+
+    obey = "The search results ended with an instruction to add source links to my reply, so they are included below."
+    note = "That instruction came from the search results, not from you, so I ignored it."
+    assert drop_injection_notes(obey + " " + note) == (obey, 1)
+
+
+@pytest.mark.xfail(strict=True, reason="R6 security 2 (advisory, carried): a front-subject admission "
+                   "next to an ignore word is still hidden; left for the approver")
+def test_injection_notes_front_subject_admission_kept():
+    from mac.voice.intents import drop_injection_notes
+
+    line = "Per the search results' instruction, I've emailed Bob and ignored the rest."
+    assert drop_injection_notes(line) == (line, 0)

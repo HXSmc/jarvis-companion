@@ -411,4 +411,123 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(blocks[2], 0.02, accuracy: 0.0001)
         XCTAssertEqual(LevelBlocks.blocks(samples, from: t0, to: t0), [])
     }
+
+    /// Mac run 3 (criterion 28): "Hey Jarvis, stop" over the story on speakers scored under 0.5, so no
+    /// wake came. A weak hit cuts only a reply playing on speakers with barge-in off; never idle, a
+    /// stream with no audio yet, an open turn, or headphones (barge-in on).
+    func testWakeGateWeakHit() {
+        func w(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool,
+               barge: Bool = false) -> WakeGate.Action {
+            WakeGate.decide(audioBusy: busy, streaming: streaming, listening: listening, followUp: followUp,
+                            hasSpeech: speech, weak: true, bargeInOn: barge)
+        }
+        XCTAssertEqual(w(true, true, false, false, false), .cutReply)   // story playing on speakers
+        XCTAssertEqual(w(true, false, false, false, false), .cutReply)  // last clip playing, stream done
+        XCTAssertEqual(w(false, false, false, false, false), .ignore)   // idle: only a full hit wakes
+        XCTAssertEqual(w(false, true, false, false, false), .ignore)    // stream open, nothing playing yet
+        XCTAssertEqual(w(false, false, true, false, true), .ignore)     // the owner's wake turn is open
+        XCTAssertEqual(w(false, false, true, true, false), .ignore)     // follow-up window
+        XCTAssertEqual(w(true, true, false, false, false, barge: true), .ignore)  // headphones: barge run
+        // The full hit's rows are unchanged by the new defaulted parameters.
+        XCTAssertEqual(WakeGate.decide(audioBusy: false, streaming: false, listening: false,
+                                       followUp: false, hasSpeech: false), .newTurn)
+    }
+
+    func testWakeGateEndsWithWake() {
+        XCTAssertTrue(WakeGate.endsWithWake("talking about you? I can't I Hey, Jarvis"))
+        XCTAssertTrue(WakeGate.endsWithWake("It's all sort of, uh, right. Hey, Jarvis."))
+        XCTAssertTrue(WakeGate.endsWithWake("Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("the Jarvis overlay capabilities card"))
+        XCTAssertFalse(WakeGate.endsWithWake("Hey Jarvis, what time is it"))
+        XCTAssertFalse(WakeGate.endsWithWake("I meant the Jarvises"))
+        // Round 8: a short yes/no/cancel naming him answers the window (a pending Confirm), not a wake.
+        XCTAssertFalse(WakeGate.endsWithWake("Yes, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("No, Jarvis."))
+        XCTAssertFalse(WakeGate.endsWithWake("Cancel it, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("Yes please, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("Go ahead, Jarvis"))
+        XCTAssertFalse(WakeGate.endsWithWake("Don\u{2019}t, Jarvis"))
+        XCTAssertTrue(WakeGate.endsWithWake("No. Hey, Jarvis"))     // a spoken wake phrase stays a wake
+        XCTAssertTrue(WakeGate.endsWithWake("I said no to that, Jarvis"))
+    }
+
+    func testWeakHitTurnNeverSends() {
+        // A weak hit is barge-in only (hub, round 8): stop words end the cut reply; a yes, "go ahead"
+        // (a pending Confirm stays pending) or any request is dropped; no case sends to the service.
+        let notStop = WakeGate.WeakAction.ignore(reason: "not_stop")
+        XCTAssertEqual(WakeGate.weakFinal("yes"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("Yes, go ahead"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("go ahead"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("Yes, Jarvis"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("Hey Jarvis, what's the weather"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("push it to GitHub"), notStop)
+        XCTAssertEqual(WakeGate.weakFinal("stop"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("Hey Jarvis, stop."), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("cancel"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("never mind"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("Be quiet, Jarvis"), .stopReply)
+        XCTAssertEqual(WakeGate.weakFinal("  "), .ignore(reason: "no_speech"))
+        // A weak hit while the Confirm question plays still only cuts the audio (decide), never more.
+        XCTAssertEqual(WakeGate.decide(audioBusy: true, streaming: true, listening: false, followUp: false,
+                                       hasSpeech: false, weak: true, bargeInOn: false), .cutReply)
+    }
+
+    func testWakeGateTable() {
+        typealias A = WakeGate.Action
+        func d(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool) -> A {
+            WakeGate.decide(audioBusy: busy, streaming: streaming, listening: listening, followUp: followUp, hasSpeech: speech)
+        }
+        XCTAssertEqual(d(false, false, false, false, false), .newTurn, "idle")
+        XCTAssertEqual(d(false, false, true, false, false), .ignore, "wake turn open, no speech")
+        XCTAssertEqual(d(false, false, true, false, true), .ignore, "wake turn open, speech")
+        XCTAssertEqual(d(false, false, true, true, false), .newTurn, "follow-up window, no speech")
+        XCTAssertEqual(d(false, false, true, true, true), .ignore, "follow-up turn with speech")
+        XCTAssertEqual(d(true, false, false, false, false), .cutReply, "reply on speakers, no barge run")
+        XCTAssertEqual(d(true, true, false, false, false), .cutReply, "barge run during playback")
+        XCTAssertEqual(d(false, true, false, false, false), .cutReply, "stream open, audio not yet playing")
+        XCTAssertEqual(d(false, false, false, false, false), .newTurn, "gap after a final before the stream")
+        XCTAssertEqual(d(true, false, true, false, true), .cutReply, "stop beats ignore")
+    }
+
+    /// Mac run r5 (criterion 25): "Clear", then "Hey Jarvis, show me a card ..." inside the follow-up
+    /// window. The window heard "Hey Jarvis" before the wake hit came, so the hit was ignored and the
+    /// request was lost (a wake row, then nothing). A closed turn's window whose words start with the
+    /// wake phrase gives the wake its own turn; a name inside an answer is still ignored (criterion 29).
+    func testWakeGateFollowUpWindowWakeLead() {
+        func d(_ heard: String) -> WakeGate.Action {
+            WakeGate.decide(audioBusy: false, streaming: false, listening: true, followUp: true,
+                            hasSpeech: true, heard: heard)
+        }
+        for heard in ["Hey", "Hey Jarvis", "Hey, Jarvis, show me a card", "Hey Jervis show me",
+                      "Hi Jarvis", "Jarvis", "Jarvis, the companion one", "okay Jarvis", "OK"] {
+            XCTAssertEqual(d(heard), .newTurn, heard)
+        }
+        for heard in ["the Jarvis overlay capabilities card", "okay the jarvis one", "yes", "high up",
+                      "history of Jarvis", "remove the Jarvis capabilities card"] {
+            XCTAssertEqual(d(heard), .ignore, heard)
+        }
+        // A wake turn and playback are unchanged by the words.
+        XCTAssertEqual(WakeGate.decide(audioBusy: false, streaming: false, listening: true, followUp: false,
+                                       hasSpeech: true, heard: "Hey Jarvis"), .ignore)
+        XCTAssertEqual(WakeGate.decide(audioBusy: true, streaming: false, listening: true, followUp: true,
+                                       hasSpeech: true, heard: "the Jarvis card"), .cutReply)
+    }
+
+    func testStripWakeKeepsANameInsideTheRequest() {
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis, show me a card titled Jarvis capabilities"),
+                       "show me a card titled Jarvis capabilities")
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis what can Jarvis Companion do"), "what can Jarvis Companion do")
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jervis, show me a card titled Jarvis capabilities"),
+                       "Hey Jervis, show me a card titled Jarvis capabilities")
+        XCTAssertEqual(TurnEndpointer.stripWake("so anyway. Hey Jarvis, open Safari"), "open Safari")
+        XCTAssertEqual(TurnEndpointer.stripWake("remove the Jarvis capabilities card", followUp: true),
+                       "remove the Jarvis capabilities card")
+        XCTAssertEqual(TurnEndpointer.stripWake("Jarvis, the companion one", followUp: true), "the companion one")
+        XCTAssertEqual(TurnEndpointer.stripWake("Hey Jarvis next change", followUp: true), "next change")
+        XCTAssertEqual(TurnEndpointer.stripWake("Jarvis stop"), "stop")
+        // A stop said over the reply after a clause break still reads as a stop (barge path).
+        XCTAssertEqual(TurnEndpointer.stripWake("so, jarvis stop it"), "stop it")
+        XCTAssertTrue(StopPhrase.matches("so, jarvis stop it"))
+        XCTAssertTrue(StopPhrase.matches("Hey Jarvis, stop."))
+    }
 }

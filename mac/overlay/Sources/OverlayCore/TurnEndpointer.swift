@@ -62,11 +62,19 @@ public enum TurnEndpointer {
     }
 
     /// The words after the wake word (moved from SpeechInput unchanged, so tests can pin it).
-    public static func stripWake(_ raw: String) -> String {
+    /// A wake turn drops everything through the first wake "jarvis" near the start: a "hey/hi/ok"
+    /// lead-in, a clause break, or the line's start (the 2 s ring buffer can hold words said before
+    /// the wake word); a "jarvis" preceded by an ordinary word, like "titled Jarvis", is part of the
+    /// request and stays. A follow-up drops only a leading wake phrase: its turn already opened on
+    /// the wake word, so a later "Jarvis" is a name, not a second wake.
+    public static func stripWake(_ raw: String, followUp: Bool = false) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The 2 s ring buffer can hold words said before the wake word: drop through it.
-        if let range = text.range(of: "jarvis", options: [.caseInsensitive]),
-           text.distance(from: text.startIndex, to: range.lowerBound) < 40 {
+        let pattern = followUp
+            ? #"^(?:(?:hey|hi|ok|okay)[\s,]+)?jarvis\b"#
+            : #"(?:^|(?:\b(?:hey|hi|ok|okay)[\s,]+)|(?:[,.!?;]\s*))jarvis\b"#
+        if let range = text.range(of: pattern, options: [.regularExpression, .caseInsensitive]),
+           followUp || text.distance(from: text.startIndex,
+                                     to: text.index(range.upperBound, offsetBy: -6)) < 40 {
             text = String(text[range.upperBound...])
         }
         return text
@@ -320,5 +328,72 @@ public struct TailGate {
     static func words(_ s: String) -> Set<String> {
         let plain = s.lowercased().filter { $0 != "'" && $0 != "\u{2019}" }
         return Set(plain.split { !$0.isLetter }.map(String.init))
+    }
+}
+
+/// What a wake-word hit does given the app's state: cut the reply that plays or streams, ignore it
+/// while the owner's turn is open (the words keep flowing into that turn), or open a new turn.
+public enum WakeGate {
+    public enum Action: Equatable { case newTurn, cutReply, ignore }
+
+    /// heard: the open turn's words so far. A follow-up window whose words start with the wake
+    /// phrase is the owner's new wake request, not an answer: it gets its own turn (Mac run r5: the
+    /// window heard "Hey Jarvis" first, the wake was ignored and the request was lost).
+    /// weak: a playback-only weak hit (wakeword.py WEAK_THRESHOLD). It may only cut a reply that is
+    /// playing on speakers with barge-in off (the owner's voice over Jarvis's own audio scores under
+    /// the full threshold); anything else, idle included, ignores it.
+    public static func decide(audioBusy: Bool, streaming: Bool, listening: Bool,
+                              followUp: Bool, hasSpeech: Bool, heard: String = "",
+                              weak: Bool = false, bargeInOn: Bool = false) -> Action {
+        if weak { return audioBusy && !bargeInOn ? .cutReply : .ignore }
+        if audioBusy || streaming { return .cutReply }
+        if listening && !followUp { return .ignore }
+        if listening && followUp && hasSpeech && !leadsWithWake(heard) { return .ignore }
+        return .newTurn
+    }
+
+    /// The words END with the wake phrase ("talking about you? I can't I Hey, Jarvis", Mac run 3):
+    /// a follow-up window that kept a wake heard room talk, then the owner's wake; his request comes next.
+    /// A short yes/no/cancel before the name ("Yes, Jarvis", "Cancel it, Jarvis") is the owner's
+    /// answer naming him, not a new wake (round 8): it goes on as the window's answer.
+    public static func endsWithWake(_ text: String) -> Bool {
+        guard let wake = text.range(of: #"(?:^|[\s,.!?])(?:(?:hey|hi|ok|okay)[\s,.]*)?jarvis[\s,.!?]*$"#,
+                                    options: [.regularExpression, .caseInsensitive]) else { return false }
+        // "No. Hey Jarvis": a spoken wake phrase is still a wake; only a bare trailing name is checked.
+        if text[wake].range(of: #"\b(?:hey|hi|ok|okay)\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        return !isShortReply(String(text[..<wake.lowerBound]))
+    }
+
+    static func isShortReply(_ text: String) -> Bool {
+        let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .components(separatedBy: CharacterSet(charactersIn: " ,.!?;:")).filter { !$0.isEmpty }
+        let t = words.joined(separator: " ")
+        guard !t.isEmpty else { return false }
+        return StopPhrase.matches(t) || t.range(
+            of: #"^(?:(?:yes|yeah|yep|no|nope)(?: (?:please|sir))?(?: (?:do it|go ahead|don't|do not|thanks|thank you))?|do it|go ahead|don't|do not|confirm(?:ed)?)$"#,
+            options: .regularExpression) != nil
+    }
+
+    /// What a weak hit's turn does with its words (hub, round 8). A weak hit is barge-in only: a stop
+    /// phrase ends the reply it cut; anything else, a "yes" or "go ahead" to a pending Confirm
+    /// included, is dropped. There is no "send": a weak turn never reaches the service.
+    public enum WeakAction: Equatable { case stopReply, ignore(reason: String) }
+
+    public static func weakFinal(_ text: String) -> WeakAction {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .ignore(reason: "no_speech") }
+        // "Be quiet, Jarvis": a trailing name would make stripWake drop the words before it.
+        let unnamed = text.replacingOccurrences(of: #"[\s,.!?]*\bjarvis[\s,.!?]*$"#, with: "",
+                                                options: [.regularExpression, .caseInsensitive])
+        return StopPhrase.matches(unnamed) ? .stopReply : .ignore(reason: "not_stop")
+    }
+
+    /// The words start like a wake: "hey"/"hi" (also a misheard "Hey Jervis"), or "jarvis" at the
+    /// start or after "ok"/"okay". "the Jarvis overlay card" (a name inside an answer) does not.
+    public static func leadsWithWake(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.range(of: #"^(?:(?:hey|hi)\b|(?:(?:ok|okay)[\s,.]*)?jarvis\b|(?:ok|okay)[\s,.]*$)"#,
+                       options: [.regularExpression, .caseInsensitive]) != nil
     }
 }

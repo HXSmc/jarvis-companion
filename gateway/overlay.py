@@ -238,6 +238,7 @@ class WakeBody(BaseModel):
     type: str = Field("wake", max_length=16)
     source: str = Field("mac", max_length=32)
     score: float | None = None
+    weak: bool = False  # a playback-only weak hit: only the app may honour it (WakeGate)
 
 
 class DebugNote(BaseModel):
@@ -313,6 +314,9 @@ bus = EventBus()
 
 # --- Debug ring buffer (GET /overlay/debug): memory only, never written to disk ---
 
+WAKE_OPEN_S = 30  # the app's hard turn cap: a second hit inside it folds into the waiting wake row
+
+
 class DebugLog:
     """Last 50 turns, each a list of pipeline steps; plus the wake listener state.
 
@@ -334,6 +338,18 @@ class DebugLog:
             self._turns.append(turn)
         self.add(turn, "wake", score=score, source=source)
         return turn
+
+    def wake_hit(self, score: float | None, source: str) -> dict:
+        """A hit while the newest turn is a wake still waiting (< WAKE_OPEN_S) is the same request:
+        the app ignores it (WakeGate), so count it on that wake row instead of opening a turn."""
+        with self._lock:
+            if self._turns:
+                last = self._turns[-1]
+                step = last["steps"][-1] if last["steps"] else None
+                if step and step["step"] == "wake" and time.time() - step["at"] < WAKE_OPEN_S:
+                    step["again"] = int(step.get("again", 0)) + 1
+                    return last
+        return self.wake(score, source)
 
     def for_utterance(self) -> dict:
         """The newest turn when it is a wake still waiting for its words (<60 s), else a new one."""
@@ -586,6 +602,7 @@ def _forget(conv_id: str) -> None:
     _session_ref.pop(conv_id, None)
     _host_ask.pop(conv_id, None)
     _card_pick.pop(conv_id, None)
+    _sessions_follow.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
     _tainted.discard(conv_id)
 
@@ -871,6 +888,31 @@ def _voice_text(text: str) -> str:
     return _WAKE_WORD_RE.sub("", text).strip()
 
 
+# Jarvis's own voice can reach the playback-only weak wake band (scripts/wake_margin.py): a greeting
+# before a name ("Hey, Travis." 0.29, "Hi, Charles." 0.39, "Okay, Jarvik." 0.92) or a Jarvis-like stem
+# ("Jarvik." 0.26, "Jervis." 0.15); without either, own lines stay under 0.01. While such a line may
+# still be playing, a weak hit is Jarvis itself and is dropped. Full hits are untouched (base barge-in).
+_NEAR_NAME_RE = re.compile(r"\b(?:hey|hi|hay|okay|ok)\b|\bj[ae]rv", re.IGNORECASE)
+SELF_NAME_SLACK_S = 2.0  # app start-up + network lag past the synth clock
+_speech_end = 0.0  # monotonic: when the audio synthesized so far ends, played back to back
+_self_name_until = 0.0
+
+
+def _playback_cut() -> None:
+    """A new turn or a full wake: the app stopped (or drained) what it was playing."""
+    global _speech_end, _self_name_until
+    _speech_end = _self_name_until = 0.0
+
+
+def _note_playback(voice: str, seconds: float) -> None:
+    # shortcut: assumes the app plays clips in order from synth time; an app that starts a clip
+    # later than SELF_NAME_SLACK_S past that shortens the hold (move the hold app-side then).
+    global _speech_end, _self_name_until
+    _speech_end = max(time.monotonic(), _speech_end) + seconds
+    if _NEAR_NAME_RE.search(voice):
+        _self_name_until = _speech_end + SELF_NAME_SLACK_S
+
+
 async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     """Synthesized say line, or None when there is no voice / synth fails."""
     voice = _voice_text(text.replace("`", ""))
@@ -881,6 +923,7 @@ async def _audio(text: str, deps: OverlayDeps) -> dict | None:
         pcm, rate = await asyncio.to_thread(deps.synth, voice)
     except Exception:
         return None
+    _note_playback(voice, len(pcm) / 2 / rate)  # 16-bit mono
     return {"type": "audio", "text": text, "rate": rate,
             "pcm_b64": base64.b64encode(pcm).decode()}
 
@@ -1002,6 +1045,32 @@ def _set_session_ref(conv_id: str, ids: list[str]) -> None:
         if len(_session_ref) <= 64:
             break
         _session_ref.pop(oldest, None)
+
+
+# An S2 follow-up's question for the summary step: the owner's follow-up words stay out of it.
+SESSIONS_FOLLOW_QUESTION = "What are my companion sessions doing right now?"
+
+
+def _session_card_id(session_id: str) -> str:
+    """A host card id fixed per session row (the reserved "sv-" session-card prefix)."""
+    return "sv-" + hashlib.sha256(session_id.encode()).hexdigest()[:8]
+
+
+def _short_time(stamp: str) -> str:
+    """An ISO time from the rows as local HH:MM ("2026-11-14T20:46:09.8+00:00" -> "23:46"); else as given."""
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%H:%M")
+    except ValueError:
+        return stamp[:16]
+
+
+def _sessions_count_line(rows: list[dict]) -> str:
+    """The fixed-code sessions answer: counts only, no title or other row text."""
+    n = len(rows)
+    waiting = sum(1 for r in rows if r["needs_owner"])
+    running = sum(1 for r in rows if r["state"] == "running")
+    return (f"{n} session{'' if n == 1 else 's'}, sir: "
+            f"{waiting} waiting on you, {running} running.")
 
 
 def _sessions_note(rows: list[dict]) -> str:
@@ -1178,6 +1247,10 @@ CARD_PICK_S = 30
 # conv -> CardPick, under _confirm_lock like _host_ask; expiry is judged on the next utterance.
 # Ids only ever come from the conv's _card_index via the line; a reply can only choose among them.
 _card_pick: dict[str, CardPick] = {}
+# jfollow7 S2: conv -> deadline after a sessions answer; the next turn may stay on sessions
+# (an `answer` holding sessions/device words only, after the follow-up gates). One turn, 30 s.
+SESSIONS_FOLLOW_S = 30
+_sessions_follow: dict[str, float] = {}
 
 
 def _live_pick(conv_id: str, deps: OverlayDeps) -> CardPick | None:
@@ -2093,6 +2166,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             yield {"type": "done", "metrics": metrics, "error": None}
             return
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
+    sessions_turn = False  # this turn answered a sessions question (S2 deadline at the end)
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         ws_names = await asyncio.to_thread(_ws_names)
@@ -2110,6 +2184,11 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 if pick_ids is not None:
                     intent = (intents.Intent("card_remove", "pick", "") if pick.action == "remove"
                               else intents.Intent("card_size", "max", ""))
+        # S2: right after a sessions answer, a reply about sessions/the device stays on sessions.
+        follow_at = _sessions_follow.pop(body.conv_id, None)  # one turn only, live or not
+        if (follow_at is not None and deps.clock() < follow_at and pick_ids is None
+                and intent.kind == "answer" and intents.sessions_followup(raw_text)):
+            intent = intents.Intent("sessions", "", "follow")
         # A1: a remove hidden behind small talk ("Sure. Take the diagram card off") re-parses raw
         # speech; it only becomes card_remove when a card this conv already holds matches.
         if intent.kind == "answer" and not joined:
@@ -2618,6 +2697,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 yield ev
 
         elif intent.kind == "sessions":
+            sessions_turn = True
             access = _sessions_access()
             rows: list[dict] = []
             if access is None:
@@ -2659,21 +2739,34 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         _set_session_ref(body.conv_id, [quiet[0]["id"]])
                 _tainted.add(body.conv_id)  # before the model call: the rows are untrusted data
                 for row in [r for r in rows if r["needs_owner"]][:4]:  # fixed code, never the model
-                    card = hud.validate_card({"type": "info", "title": row["title"][:60],
+                    # One host id per session row: asking again replaces its card, never piles up.
+                    card = hud.validate_card({"id": _session_card_id(row["id"]), "type": "info",
+                                              "title": row["title"][:60],
                                               "body": [f"{row['device']} · {row['state']}",
-                                                       f"updated {row['updated']}"]})
+                                                       f"updated {_short_time(row['updated'])}"]})
                     if card:
-                        seen = _card_ids.setdefault(body.conv_id, set())
-                        if card["id"] in seen or _host_card_id(card["id"]):
-                            card["id"] = uuid.uuid4().hex[:8]
-                        seen.add(card["id"])
+                        _card_ids.setdefault(body.conv_id, set()).add(card["id"])
                         yield {"type": "card", "card": card}
-                # The owner's question (intent.arg is only the name filter); the rows travel
-                # only in the untrusted block.
-                async for event in _answer_turn(body, intents._clean(body.text), deps, metrics, said,
-                                                start, failed=failed, on_step=on_step,
+                # The owner's question (intent.arg is only the name filter); the rows travel only in
+                # the untrusted block. An S2 follow-up ("check it through the router") is asked as a
+                # fixed sessions question: its own words made the model hand over (Mac run 3).
+                question = SESSIONS_FOLLOW_QUESTION if intent.sub == "follow" else intents._clean(body.text)
+                before, handover, summary_failed = len(said), [], []
+                async for event in _answer_turn(body, question, deps, metrics, said,
+                                                start, escalate=handover, failed=summary_failed,
+                                                fail_line=False, on_step=on_step,
                                                 extra_untrusted=_sessions_note(rows)):
                     yield event
+                if handover or summary_failed or len(said) == before:
+                    # The rows are in hand: a handover, an empty or a failed summary still gets a
+                    # fixed-code answer (numbers only), never the failure line or an agent run.
+                    if on_step:
+                        why = "handover" if handover else (summary_failed[0] if summary_failed else "empty")
+                        on_step("sessions", detail=f"summary=host reason={why}")
+                    line = _sessions_count_line(rows)
+                    async for ev in _speak(line, deps):
+                        yield ev
+                    said.append(line)
 
         elif intent.kind == "session":
             async for ev in _session_action_turn(body, sess_ask, deps, said, on_step):
@@ -2735,6 +2828,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             _card_ids.pop(oldest, None)  # _resets stays: a running turn compares against it (ints only)
             _hunks.pop(oldest, None)
     _last_reply[body.conv_id] = (deps.clock(), len(_card_ids.get(body.conv_id, ())) > cards_at_start)
+    if sessions_turn and error is None:  # counted from the end of the spoken sessions answer
+        _sessions_follow[body.conv_id] = deps.clock() + SESSIONS_FOLLOW_S
+        while len(_sessions_follow) > 32:
+            _sessions_follow.pop(next(iter(_sessions_follow)))
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
     yield {"type": "done", "metrics": metrics, "error": error}
@@ -2971,6 +3068,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                        failed: list | None = None, look: dict | None = None,
                        extra_untrusted: str | None = None,
                        owner_text: str | None = None, pick_open: bool = False,
+                       fail_line: bool = True,
                        on_step: Callable[..., None] | None = None) -> AsyncIterator[dict]:
     apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
     open_seen = False  # one model-driven launch per turn
@@ -3039,8 +3137,13 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     cards_before = len(_card_ids.get(body.conv_id, ()))  # more later = this reply showed a card
     gate_dropped: list[str] = []  # modes the owner-verb gate refused this reply (one honest line)
     held: str | None = None  # a say line claiming an overlay change, held until a directive lands
+    note_dropped = False  # a say line was only an injected-instruction note (dropped, never spoken)
+    note_seen = False  # any note dropped so far in this reply (widens only the aimed-note rule)
+    model_spoke = False  # a model say line was spoken this reply
 
     async def speak_say(say_text: str) -> AsyncIterator[dict]:
+        nonlocal model_spoke
+        model_spoke = True
         yield _say(say_text)
         said.append(say_text)
         audio = await _audio(say_text, deps)
@@ -3137,7 +3240,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         said.append(line)
 
     async def flush_line(line: str) -> AsyncIterator[dict]:
-        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held
+        nonlocal pictures, video_lookup, media_seen, produced, lookup_alone_at, held, note_dropped, note_seen
         line = line.strip()
         if not line:
             return
@@ -3168,9 +3271,14 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 yield ev
             return
         if isinstance(obj.get("say"), str) and obj["say"].strip():
-            say_text = obj["say"].strip()
-            produced = True
-            if intents.claims_overlay_change(say_text):
+            say_text, notes = intents.drop_injection_notes(obj["say"].strip(), noted=note_seen)
+            note_seen = note_seen or notes > 0
+            produced = True  # a line that was all notes is still an answer: never the failure line
+            if notes and on_step:
+                on_step("answer", note="dropped", sentences=notes)
+            if not say_text.strip():
+                note_dropped = True
+            elif intents.claims_overlay_change(say_text):
                 held = say_text  # spoken only if this reply really changes the overlay
             else:
                 async for ev in speak_say(say_text):
@@ -3192,6 +3300,25 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                       else asyncio.to_thread(media_lookup.find, req.get("query"), req.get("count")))
             pictures = loop.create_task(asyncio.wait_for(lookup, LOOKUP_WAIT_S))
         raw_card = obj.get("card")
+        card_notes = 0
+        if isinstance(raw_card, dict) and isinstance(raw_card.get("body"), str):
+            raw_card = {**raw_card, "body": raw_card["body"].splitlines()}  # as hud._info splits it
+        if isinstance(raw_card, dict) and isinstance(raw_card.get("body"), list):
+            kept_body, notes = [], 0
+            for item in raw_card["body"]:
+                if isinstance(item, str):
+                    item, n = intents.drop_injection_notes(item, noted=note_seen or notes > 0)
+                    notes += n
+                    if not item.strip():
+                        continue
+                kept_body.append(item)
+            if notes:
+                raw_card = {**raw_card, "body": kept_body}
+                card_notes = notes
+                note_seen = True
+                produced = True  # a card left empty is not shown, and is never an error
+                if on_step:
+                    on_step("answer", note="dropped", sentences=notes)
         if quiet and isinstance(raw_card, dict) and raw_card.get("type") in media_lookup.MEDIA_TYPES:
             async for ev in media_refused():
                 yield ev
@@ -3208,6 +3335,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             _index_card(body.conv_id, card)
             produced = True
             yield {"type": "card", "card": card}
+        elif card_notes:
+            note_dropped = True  # the card was only notes: the reply end says one short line
         if targets and "point" in obj and look["pick"] is None:  # the first point wins
             produced = True  # a point is an answer, hit or miss: the turn ends on its own line
             hit = _point_at(obj["point"], targets)
@@ -3302,6 +3431,11 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                     fail_reason, fail_detail = exc.reason, exc.detail
                 else:
                     fail_reason, fail_detail = "error", f"{type(exc).__name__}: {exc}"
+        if fail_reason is None and note_dropped and not model_spoke and not escalate:
+            # The reply was only a dropped note: one short line, never silence, never the failure line.
+            async for event in _line("note_only", deps):
+                yield event
+            said.append(acks.PHRASES["note_only"])
         if fail_reason is None and not produced:
             # A clean but empty reply: the CLI is alive, so keep the session (only raise/timeout drop it).
             fail_reason, fail_detail = "error", "the answer step produced nothing"
@@ -3315,7 +3449,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             logger.warning("overlay answer failed: class=%s detail=%s", fail_reason, _redact(fail_detail))
             if failed is not None:
                 failed.append(f"answer_{fail_reason}")
-            if not produced:  # never a second line after speech, never when the turn handed over
+            if not produced and fail_line:  # never a second line after speech or a handover;
+                # fail_line=False: the caller speaks its own fixed answer instead
                 line_text, title = ANSWER_FAIL[fail_reason]
                 card = hud.validate_card({"id": uuid.uuid4().hex[:8], "type": "info", "title": title,
                                           "body": [line_text]})
@@ -4100,6 +4235,10 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         yield run.model_lines
                 else:  # no file on screen (Mac run 2, B3: a warm "what changed in the last commit"):
                     _hunks.pop(run.conv_id, None)  # no change list either, so the old cursor goes
+                if len(said) == spoke and metrics.get("notes_dropped"):
+                    async for out in _line("note_only", deps):  # the reply was only dropped notes
+                        yield out
+                    said.append(acks.PHRASES["note_only"])
                 if len(said) == spoke:
                     async for out in _speak("I couldn't get an answer for that.", deps):
                         yield out
@@ -4133,8 +4272,15 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
     if not isinstance(obj, dict):
         obj = {"say": line}
     if isinstance(obj.get("say"), str) and obj["say"].strip():
-        text = obj["say"].strip()
-        if intents.claims_overlay_change(text):
+        text, notes = intents.drop_injection_notes(obj["say"].strip(),
+                                                   noted=bool(metrics.get("notes_dropped")))
+        if notes:
+            metrics["notes_dropped"] = metrics.get("notes_dropped", 0) + notes
+            if on_step:
+                on_step("answer", note="dropped", sentences=notes)
+        if not text.strip():
+            pass  # all notes: nothing spoken (the run's end says note_only if it spoke nothing)
+        elif intents.claims_overlay_change(text):
             # C4: the agent tier never changes the overlay: a claim to that effect is never spoken.
             if OVERLAY_UNCHANGED_LINE not in said:
                 async for ev in _speak(OVERLAY_UNCHANGED_LINE, deps):
@@ -4200,6 +4346,7 @@ async def post_workspace_snapshot(nonce: str, body: WorkspaceSnapshotBody) -> di
 @router.post("/utterance", dependencies=_LOOP_DEPS)
 async def post_utterance(body: TurnBody) -> StreamingResponse:
     deps = get_deps()
+    _playback_cut()
 
     async def stream() -> AsyncIterator[str]:
         rec = debug_log.for_utterance()
@@ -4261,7 +4408,15 @@ async def get_events() -> StreamingResponse:
 
 @router.post("/wake", dependencies=_LOOP_DEPS)
 async def post_wake(body: WakeBody | None = None) -> dict:
-    debug_log.wake(body.score if body else None, body.source if body else "mac")
+    if body is not None and body.weak:
+        if time.monotonic() < _self_name_until:
+            logger.info("wake_weak dropped reason=self_name")
+            return {"ok": True}
+        # Its own event, never "wake": no debug turn here; the app logs one only when it honours it.
+        bus.publish("wake_weak", {"source": body.source})
+        return {"ok": True}
+    _playback_cut()
+    debug_log.wake_hit(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}
 

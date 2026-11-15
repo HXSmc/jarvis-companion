@@ -261,16 +261,30 @@ _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anythi
 # jfollow6 D: a wider net of read-only sessions questions/asks ("what's running on my
 # companion"); matched after session/memory/workspace, before the hide/clear verbs, so
 # their phrases keep their kinds. Whole utterance, commas off.
-_COMPANION = r"(?:(?:\w+(?:'s|s')? )?companion|mini ?pc)"
+# jfollow7 S: an adjective before "sessions", the article before the device optional, more devices (mac, router, STT forms of mini PC).
+_COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion|(?:mini|many) ?(?:p ?c|b ?c|piece)"
+              r"|minipc|mac|router)")
+_SESSIONS_PREP = r"(?:on|in|through|via)"
+# R1: "how" questions keep base's article rule ("how are the sessions"), so "how do I check
+# sessions" / "how long are sessions" stay answers.
+_SESSIONS_LEAD = (r"(?:check|show|list|see|tell me|give me|what's|whats|what|which|how many|any"
+                  r"|are there|are|is|do i have|can you tell me|can you show me|i want to see"
+                  r"|i'd like to see|i would like to see)")
+_SESSIONS_TAIL = (r"(?: (?:are |is )?(?:doing|going|running|open|active)| today| right now| now| ok| okay"
+                  r"| do i have)?"
+                  r"(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?")
 _SESSIONS_TOPIC_RE = re.compile(
-    r"(?:what's|whats|what|how's|hows|how|which|are|is|any|show|list|tell me|give me|check)"
-    r"[\w' ]{0,16}?(?:my|the|our) sessions"
-    r"(?: doing| going| running| open| today| right now| now| ok| okay)?"
-    r"(?: on (?:my|the|our) " + _COMPANION + r")?"
-    r"|(?:what's|whats|what|how's|hows|how|which|are|is|any)? ?sessions? (?:are |is )?"
-    r"(?:running|going|open|on (?:my|the|our) " + _COMPANION + r")"
-    r"|what(?:'s| is)? running on (?:my|the|our) " + _COMPANION +
-    r"|status of (?:my|the|our) sessions")
+    # R1: never with a start/stop verb anywhere ("check and stop all sessions" is no listing).
+    r"(?!.*\b(?:start|stop|end|kill|close|cancel|spin up)\b)(?:"
+    + _SESSIONS_LEAD + r"[\w' ]{0,16}?(?:(?:my|the|our) )?(?:(?:active|running|open|live|current) )?sessions"
+    + _SESSIONS_TAIL +
+    r"|(?:how's|hows|how)[\w' ]{0,16}?(?:my|the|our) (?:(?:active|running|open|live|current) )?sessions"
+    + _SESSIONS_TAIL +
+    r"|(?:(?:" + _SESSIONS_LEAD + r"|how's|hows|how) )?(?:any )?sessions? (?:are |is )?"
+    r"(?:(?:running|active|open|going)(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
+    r"|" + _SESSIONS_PREP + r" " + _COMPANION + r")"
+    r"|what(?:'s| is| are)? (?:running|active) " + _SESSIONS_PREP + r" " + _COMPANION +
+    r"|status of (?:my|the|our) sessions)")
 # jfollow6 C1: "can you remove a single card?" is a how-to question, not a remove.
 _CARD_HELP_RE = re.compile(
     r"(?:can you|could you|can't you|cannot you|can you not|could you not|how do i|how can i"
@@ -955,6 +969,96 @@ def claims_overlay_change(line: str) -> bool:
     return False
 
 
+_NOTE_MINE = r"(?:not|wasn't|was not|isn't|is not) from you"
+_NOTE_SOURCE_RE = re.compile(
+    r"\b(?:search results?|web results?|results|" + _NOTE_MINE + r")\b"
+    r"|\b(?:the|a|one|that|those|these)\s+(?:\w+\s+)?"
+    r"(?:pages?|sites?|websites?|sources?|articles?|snippets?|results?)\b",
+    re.I)
+_NOTE_INSTRUCTION_RE = re.compile(
+    r"\binstructions?\b|\bhidden\s+(?:line|text|note)\b|\ba line\s+(?:telling|asking)\b", re.I)
+_NOTE_DIRECTIVE_RE = re.compile(
+    r"\b(?:told|asked|telling|asking|wanted|tried to get|instructing)\s+me\s+to\b"
+    r"|\btried to (?:tell|make) me\b", re.I)
+_NOTE_IGNORE_RE = re.compile(
+    r"\b(?:ignored|ignore it|ignoring|disregard\w*|skipped|didn't follow|did not follow|won't follow"
+    r"|not going to follow|didn't do|did not do)\b", re.I)
+_NOTE_MINE_RE = re.compile(r"\b" + _NOTE_MINE + r"\b", re.I)
+# R5 (Mac run): "...ended with an instruction to add source links to my reply." with its "I ignored
+# it" in another clause or say line. Only that narrow shape, and only when a note was already
+# dropped in the same reply (R6 security): alone it is spoken (loud and safe). Never on a clause
+# with "I", a question or a warning, so an admission, a question or a warning to the owner stays.
+# R6: the clause must END at "my reply" (", so they are included below" is an obey tail), and
+# a next clause in the same text that speaks as "I" without ignoring ("I added them.") keeps it.
+_NOTE_AIMED_RE = re.compile(
+    r"\binstructions?\s+to\s+(?:add|include|put|insert|append|attach)\b[^.!?;:]{0,60}?"
+    r"\b(?:to|in|into)\s+my\s+(?:reply|replies|answer|answers|response|responses)\s*[.!]?\s*$", re.I)
+_NOTE_AIMED_VETO_RE = re.compile(r"\bi\b|\?|\b(?:warn\w*|unsafe|careful|caution|beware|trust)\b", re.I)
+_NOTE_REAL_SOURCE_RE = re.compile(_NOTE_SOURCE_RE.pattern.replace("|" + _NOTE_MINE, ""), re.I)
+# R2: "..., and I emailed him." admits obeying a web result: never hidden. Any first-person
+# verb counts unless it is an ignore/refusal word ("which I have ignored" is still a note).
+_NOTE_IGN = (r"(?:ignored|ignore|skipped|skip|disregarded|disregard|left|leave|dropped|refused|declined"
+             r"|chose (?:not|to ignore)|decided (?:not|to ignore)|didn't|did not|won't|will not"
+             r"|wouldn't|would not|never|not)")
+_NOTE_OBEY_RE = re.compile(
+    r"\b(?:and|so|then|which) i(?:'ve| have)? (?!(?:\w+ly |just |also |then |have |had )?"
+    + _NOTE_IGN + r"\b)\w+", re.I)
+# R1: a bare "I ignored it." after a dropped note is part of that note.
+_NOTE_BARE_IGNORE_RE = re.compile(
+    r"(?:and |so |which |but )?i (?:ignored|skipped|disregarded|didn't follow|did not follow"
+    r"|won't follow|didn't do|did not do)(?: (?:it|that|them|this|those|the instruction"
+    r"|that instruction|the request))?[.!?]?", re.I)
+
+
+def drop_injection_notes(text: str, noted: bool = False) -> tuple[str, int]:
+    """Removes model sentences (and ";" clauses) that narrate an instruction injected by a web
+    result ("...told me to add source links... I ignored it"); it only ever removes text,
+    never adds. A refusal or answer sharing the sentence stays; an admission of obeying stays.
+    `noted`: a note was already dropped earlier in this reply (only widens `_NOTE_AIMED_RE`)."""
+    split = lambda x: [re.split(r"\s*;\s*", s) for s in re.split(r"(?<=[.!?])\s+", x.strip())]
+    sents = split(text)
+    tsents = split(text.replace("’", "'"))  # matching only: the kept text stays as spoken
+    units = [(si, ci, c) for si, cl in enumerate(tsents) for ci, c in enumerate(cl)]
+    flags = [(_NOTE_INSTRUCTION_RE.search(c), _NOTE_IGNORE_RE.search(c), _NOTE_OBEY_RE.search(c))
+             for _, _, c in units]
+    drop: set[tuple[int, int]] = set()
+    dropped = 0
+    convicting = sum(1 for f in flags if f[0] and f[1])  # clauses naming + ignoring an instruction
+    for k, (si, ci, c) in enumerate(units):
+        if (si, ci) in drop or not _NOTE_SOURCE_RE.search(c) or flags[k][2]:
+            continue
+        instr, ignore, _ = flags[k]
+        directive = _NOTE_DIRECTIVE_RE.search(c)
+        mine = _NOTE_MINE_RE.search(c)
+        bare_next = k + 1 < len(units) and _NOTE_BARE_IGNORE_RE.fullmatch(units[k + 1][2])
+        # (b): the directive clause may lack its own "I ignored it": another clause naming the
+        # instruction and ignoring it convicts this one.
+        other = convicting - bool(instr and ignore) > 0
+        nxt = units[k + 1][2] if k + 1 < len(units) else ""
+        aimed = (instr and (noted or dropped or other) and _NOTE_AIMED_RE.search(c)
+                 and not _NOTE_AIMED_VETO_RE.search(c)
+                 and not (re.search(r"\bi\b", nxt, re.I) and not _NOTE_IGNORE_RE.search(nxt)))
+        if ((instr and (ignore or mine or directive or bare_next)) or aimed
+                or (directive and (ignore or other or bare_next))
+                or (mine and ignore and _NOTE_REAL_SOURCE_RE.search(c))):
+            dropped += 1
+            drop.add((si, ci))
+            if bare_next:
+                drop.add(units[k + 1][:2])
+    if not dropped:
+        return text, 0
+    out = []
+    for si, cl in enumerate(sents):
+        kept = [c for ci, c in enumerate(cl) if (si, ci) not in drop]
+        if not kept:
+            continue
+        line = "; ".join(kept)
+        if (si, len(cl) - 1) in drop:  # the sentence end was dropped: keep its stop
+            line = line.rstrip(" ,") + (cl[-1][-1] if cl[-1][-1:] in ".!?" else ".")
+        out.append(line)
+    return " ".join(out), dropped
+
+
 # "close the overlay" names nothing: these never carry a one-card name ("up"/"down"/"off"/
 # "out" are verb particles: "close down the overlay"; "the whole overlay" is no name either).
 _CARD_NAME_STOP = frozenset({"overlay", "screen", "these", "those", "them", "cards",
@@ -1137,3 +1241,20 @@ def open_site(target: str, *, run=subprocess.run) -> str | None:
     url = "https://" + target
     run(["open", url], check=False)
     return url
+
+
+# jfollow7 S2: the follow-up rule's words (only after a sessions answer, one turn, 30 s): the
+# plural "sessions", "the/my/our/that/those/these session(s)", or a follow-up device after
+# on/in/through/via (mini PC + STT forms, router, companion; never "mac": "a screenshot on
+# the Mac" is no sessions question). A start/stop/open verb never counts.
+_FOLLOW_SESSIONS_RE = re.compile(
+    r"\bsessions\b|\b(?:the|my|our|that|those|these) sessions?\b"
+    r"|\b(?:on|in|through|via) (?:(?:my|the|our) )?(?:(?:mini|many) ?(?:p ?c|b ?c|piece)|minipc|router"
+    r"|(?:\w+(?:'s|s')? )?companion)\b")
+_FOLLOW_VERB_RE = re.compile(r"\b(?:start|stop|end|kill|close|cancel|spin up|open|restart|resume|launch|begin|create)\b")
+
+
+def sessions_followup(text: str) -> bool:
+    """True when a reply right after a sessions answer is still about sessions (pure, no state)."""
+    low = _clean(text).lower().replace(",", "")
+    return bool(_FOLLOW_SESSIONS_RE.search(low)) and not _FOLLOW_VERB_RE.search(low)

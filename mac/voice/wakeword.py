@@ -49,6 +49,11 @@ def load_model() -> Model:
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz — openWakeWord's canonical chunk
 THRESHOLD = 0.5
+# A playback-only weak hit: the app honours it only while a reply plays on speakers (WakeGate).
+# Mixed "Hey Jarvis" over Jarvis's own story scores 0.1-0.4 at equal level, never 0.5; Jarvis's
+# own lines (wake word stripped from the voice) peak 0.0016 and room talk over the story 0.063.
+WEAK_THRESHOLD = 0.1
+WEAK_GAP_S = 1.5  # at most one weak post per 1.5 s of audio
 # The system default input, the same device the Swift app's speech-to-text hears.
 # Never a bare index: avfoundation index 0 can be an iPhone Continuity mic or a
 # virtual device (BlackHole, Teams), and then the wake word hears nothing.
@@ -91,10 +96,10 @@ def ffmpeg_argv(mic: str = MIC) -> list[str]:
     ]
 
 
-def notify_wake(at_seconds: float, dry_run: bool, score: float | None = None) -> None:
+def notify_wake(at_seconds: float, dry_run: bool, score: float | None = None, weak: bool = False) -> None:
     """Local callbacks always; gateway POST only in live mode (never when --dry-run)."""
-    print(f"WAKE detected at {at_seconds:.2f}")
-    for cb in wake_callbacks:
+    print(f"WAKE{' (weak)' if weak else ''} detected at {at_seconds:.2f}")
+    for cb in wake_callbacks if not weak else ():
         cb(at_seconds)
     if dry_run:
         return  # no network side effects in dry-run, by construction
@@ -103,7 +108,7 @@ def notify_wake(at_seconds: float, dry_run: bool, score: float | None = None) ->
     token = overlay_token()
     req = urllib.request.Request(
         f"http://127.0.0.1:{OVERLAY_PORT}/overlay/wake",
-        data=json.dumps({"type": "wake", "source": "mac", "score": score}).encode(),
+        data=json.dumps({"type": "wake", "source": "mac", "score": score, "weak": weak}).encode(),
         # Without the JSON content type FastAPI answers 422 and the wake never reaches the app.
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
@@ -123,6 +128,7 @@ def run_live(on_stats=None) -> None:
     total = 0
     peak_score = peak_level = 0.0
     frames = 0
+    last_weak = -WEAK_GAP_S * SAMPLE_RATE
     try:
         while True:
             chunk = ffmpeg.stdout.read(FRAME_SAMPLES * 2)
@@ -138,6 +144,12 @@ def run_live(on_stats=None) -> None:
                 except Exception as exc:  # one failed POST must not end wake listening
                     logger.warning("wake POST failed (%s: %s)", type(exc).__name__, exc)
                 model.reset()
+            elif score >= WEAK_THRESHOLD and total - last_weak >= WEAK_GAP_S * SAMPLE_RATE:
+                last_weak = total  # no reset: a full hit may still follow on the next frames
+                try:
+                    notify_wake(total / SAMPLE_RATE, dry_run=False, score=round(float(score), 3), weak=True)
+                except Exception as exc:
+                    logger.warning("weak wake POST failed (%s: %s)", type(exc).__name__, exc)
             frames += 1
             if on_stats and frames % 125 == 0:  # 125 x 80 ms = 10 s
                 on_stats(round(float(peak_score), 3), round(peak_level, 3))

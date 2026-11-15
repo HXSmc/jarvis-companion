@@ -22,6 +22,10 @@ final class AppController {
     private var turnConvId = ""
     private var turnFirstAudio = false
     private var turnDone = false
+    /// The listenSerial of the open follow-up turn a wake was kept in (WakeGate .ignore).
+    private var wokenSerial: Int?
+    /// The listenSerial of the open turn a weak hit started: barge-in only, its words never sent.
+    private var weakSerial: Int?
     /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
     private var listenSerial = 0
     private var heldLine = HeldLine<OverlayEvent>()
@@ -293,6 +297,8 @@ final class AppController {
                     endOutage()
                     if event.name == "wake" {
                         await handleWake()
+                    } else if event.name == "wake_weak" {
+                        await handleWeakWake()
                     } else if event.name == "hud" {
                         handlePush(OverlayEvent.decode(line: Data(event.data.utf8)))
                     }
@@ -380,10 +386,83 @@ final class AppController {
         return sound
     }()
 
+    /// A weak wake hit (only sent below the full threshold): honoured only while a reply plays on
+    /// speakers with barge-in off, where the owner's "Hey Jarvis" over Jarvis's own audio never
+    /// reaches the full score (Mac run 3, criterion 28). It is barge-in ONLY (hub, round 8): it cuts
+    /// the reply as a full wake does with barge-in off, then listens; a stop phrase ends there and
+    /// anything else is dropped. Its words never reach the service, so it never answers a pending
+    /// Confirm (that still needs a full wake or the follow-up window) and never opens a request.
+    /// A full hit that follows (the same "Hey Jarvis" scoring up) turns it into a normal wake turn.
+    private func handleWeakWake() async {
+        let open = speech.openTurn
+        guard WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: open != nil,
+                              followUp: open?.followUp ?? false, hasSpeech: open?.hasSpeech ?? false,
+                              weak: true, bargeInOn: bargeInEnabled) == .cutReply else { return }
+        client.debugNote(step: "wake", detail: "weak hit during playback (speakers)")
+        cutReply = replyTexts
+        audio.stop()
+        utteranceTask?.cancel()
+        turnStreaming = false
+        heldLine.drop()
+        turnDone = false
+        listenSerial += 1
+        let serial = listenSerial
+        weakSerial = serial
+        let echoOf = cutReply
+        model.orb = .listening
+        speech.listenAfterWake(
+            onPartial: { _ in },
+            onFinal: { [weak self] heardText, _, _, _ in
+                let heardUntil = Date()
+                Task { @MainActor in
+                    guard let self, self.listenSerial == serial else { return }
+                    self.lastHeardUntil = heardUntil
+                    let text = echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
+                    self.endWeakTurn(WakeGate.weakFinal(text))
+                }
+            },
+            onNothing: { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.listenSerial == serial else { return }
+                    self.endWeakTurn(.ignore(reason: "no_speech"))
+                }
+            })
+    }
+
+    private func endWeakTurn(_ action: WakeGate.WeakAction) {
+        weakSerial = nil
+        // Ring audio up to now (the cut Confirm question's echo, the dropped words) is never replayed:
+        // the window below replays from max(lastDrainAt, now), and lastDrainAt may predate the cut.
+        lastHeardUntil = Date()
+        model.orb = .idle
+        switch action {
+        case .stopReply:
+            client.debugNote(step: "weak_wake", detail: "stop")  // the reply was cut at the hit
+        case .ignore(let reason):
+            client.debugNote(step: "weak_wake", detail: "ignored reason=\(reason)")
+            // A Confirm question it cut stays pending: open the normal follow-up window (level gate)
+            // the question's end would have opened, so a yes/no can still answer it.
+            if BargeWords.confirmPending(model.cards) { replyFinished() }
+        }
+    }
+
     /// followUp: the open-mic window after a reply (no wake word, same conversation);
     /// replayFrom: the reply's drain time, so only post-reply ring audio is replayed.
     private func handleWake(followUp: Bool = false, replayFrom: Date? = nil) async {
+        // A wake inside the owner's open turn (a name inside the request) is ignored: the turn,
+        // its words and its 30 s cap go on untouched. A reply playing or streaming still cuts.
+        // A full hit inside a weak hit's turn upgrades it to a normal wake turn (no ignore).
+        // (openTurn: a barge run or other listen that replaced the weak turn leaves nothing to upgrade.)
+        let upgrade = !followUp && weakSerial != nil && weakSerial == listenSerial && speech.openTurn != nil
+        weakSerial = nil
+        if !followUp, !upgrade, let open = speech.openTurn,
+           WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: true,
+                           followUp: open.followUp, hasSpeech: open.hasSpeech, heard: open.heard) == .ignore {
+            if open.followUp { wokenSerial = listenSerial }  // that window now carries a wake: never silent
+            return
+        }
         listenSerial += 1
+        let serial = listenSerial
         turnDone = false  // a barge-in's stale drain must not start a follow-up
         if followUp {
             model.orb = .followUp
@@ -397,8 +476,13 @@ final class AppController {
                     bargeIn(reason: .wake)  // A4: a wake during playback cuts the old reply's stream too
                 } else {
                     audio.stop()  // barge-in off: as before barge-in existed, no barge_in row
+                    // ...and the old stream ends too (Mac run r5): its later audio played the story
+                    // on, and its `done` drain opened a follow-up window that cancelled this turn.
+                    utteranceTask?.cancel()
+                    turnStreaming = false
+                    heldLine.drop()
                 }
-            } else {
+            } else if !upgrade {  // an upgrade keeps the cut reply's echo list; its audio already stopped
                 cutReply = []
                 audio.stop()
             }
@@ -434,7 +518,17 @@ final class AppController {
                     : echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
                 Task { @MainActor in
                     self?.lastHeardUntil = heardUntil
-                    guard !text.isEmpty else { self?.model.orb = .idle; return }  // only the reply's echo
+                    // A window that kept a wake (WakeGate) and ends on "… Hey Jarvis": room talk, then
+                    // the owner's wake; listen for his request as a wake turn would (Mac run 3).
+                    if followUp, self?.wokenSerial == serial, WakeGate.endsWithWake(heardText) {
+                        await self?.handleWake()
+                        return
+                    }
+                    guard !text.isEmpty else {  // only the reply's echo
+                        if self?.wokenSerial == serial { await self?.handleWake(); return }
+                        self?.model.orb = .idle
+                        return
+                    }
                     self?.startUtterance(text: text, followUp: followUp, bargeIn: false,
                                          sttFinalMs: sttFinalMs,
                                          audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
@@ -444,6 +538,12 @@ final class AppController {
             onNothing: { [weak self] why in
                 Task { @MainActor in
                     guard let self else { return }
+                    // A window that heard a wake it kept (WakeGate) but ended with no request (only
+                    // "Hey Jarvis"): the owner's request follows, so listen as a wake turn would.
+                    if followUp, self.wokenSerial == serial {
+                        await self.handleWake()
+                        return
+                    }
                     if followUp {  // nobody spoke after the reply: close the window quietly
                         if self.model.orb == .followUp {
                             self.model.orb = .idle
@@ -892,6 +992,9 @@ final class AppController {
     /// Reply over: keep the mic open ~8 s so the user can go on without "Jarvis" (also how a
     /// trailing-off request gets its rest). 300 ms first so the room echo of the reply dies out.
     private func replyFinished() {
+        // An owner turn is listening (a wake cut this reply): its end must not idle the orb or open
+        // a follow-up window, whose listenAfterWake would cancel that turn.
+        if let open = speech.openTurn, !open.followUp { return }
         model.orb = .idle
         // A line pushed while the reply played: say it now; its drain comes back here for the window.
         let held = heldLine.release(at: Date())
