@@ -295,7 +295,7 @@ def test_card_remove_turn(client):
     phone, capitals = ids["Phone network diagram"], ids["Capital cities"]
 
     events = turn(client, "close the phone diagram card", conv_id="cr1")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the phone network diagram, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [phone]}]
     row = _steps("card_remove")[-1]
     assert (row["card"], row["match"]) == (phone, "title")
@@ -303,7 +303,7 @@ def test_card_remove_turn(client):
 
     # a pointer takes the newest card this conv holds
     events = turn(client, "get rid of that", conv_id="cr1")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the capital cities, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [capitals]}]
     row = _steps("card_remove")[-1]
     assert (row["card"], row["match"]) == (capitals, "newest")
@@ -327,8 +327,8 @@ def test_card_remove_none_and_ambiguous(client):
     clock = Clock()
     _deps()
     events = turn(client, "close the phone diagram card", conv_id="cr3")
-    assert says(events) == [acks.PHRASES["no_card"]]
-    assert _steps("card_remove")[-1]["detail"] == "refused reason=none"
+    assert says(events) == [acks.PHRASES["no_cards"]]
+    assert _steps("card_remove")[-1]["detail"] == "refused reason=empty"
 
 
 def test_card_remove_enlarged(client):
@@ -357,7 +357,7 @@ def test_card_remove_change_list(client, tmp_path):
     overlay._hunks["cr5"] = overlay.HunkNav(repo=tmp_path, rel="a.py", base="HEAD", hunks=[],
                                             index=0, editor=None, ctx=SimpleNamespace(), boxes=True)
     events = turn(client, "get rid of the changes list", conv_id="cr5")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the changes in a py, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards",
                                                                  "ids": ["gd-list"]}]
     assert {"type": "lines", "file": str(tmp_path / "a.py"), "ranges": []} in events
@@ -460,7 +460,7 @@ def test_card_remove_model_cannot_name_ids(client):
     first = turn(client, "tell me about springfield", conv_id="mc1")
     sid = {e["card"]["title"]: e["card"]["id"] for e in first if e["type"] == "card"}["Springfield"]
     events = turn(client, "sure. close the springfield", conv_id="mc1")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the springfield, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [sid]}]
     assert sid != overlay._CONFIRM_CARD_ID and "pwn-77" != sid
     assert "agentconfirm" not in json.dumps(events, default=str)
@@ -556,7 +556,7 @@ def test_card_remove_spec_cases(client, tmp_path):
         overlay._index_card(conv, card)
     overlay._card_sets.setdefault(conv, {})["git"] = ["gd-list", "gd-stat"]
     events = turn(client, "remove the dog picture", conv_id=conv)
-    assert says(events) == ["Removed, sir."]  # no thinking ack before the line
+    assert says(events) == ["Removed the dog, sir."]  # no thinking ack before the line
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards",
                                                                  "ids": ["ow-dog"]}]
     row = _steps("card_remove")[-1]
@@ -571,10 +571,10 @@ def test_card_remove_spec_cases(client, tmp_path):
 
     # 15: no such card; a names-only target with a matching card; an app name
     events = turn(client, "remove the cat picture", conv_id=conv)
-    assert says(events) == [acks.PHRASES["no_card"]]
+    assert says(events) == ["I don't see that card. On screen: the inbox summary."]
     assert _steps("card_remove")[-1]["detail"] == "refused reason=none"
     assert not [e for e in events if e["type"] == "drop_cards"]
-    assert says(turn(client, "remove the unicorn card", conv_id=conv)) == [acks.PHRASES["no_card"]]
+    assert says(turn(client, "remove the unicorn card", conv_id=conv)) == ["I don't see that card. On screen: the inbox summary."]
     overlay._index_card(conv, {"id": "b-1", "type": "flow", "title": "Battery"})
     events = turn(client, "remove the battery", conv_id=conv)
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": ["b-1"]}]
@@ -671,7 +671,7 @@ def test_card_remove_enlarged_card_wins_a_tie(client):
     assert says(events) == [acks.PHRASES["enlarged"]]
     assert overlay._enlarged["r3a"] == old  # the older one, so this is not just "newest"
     events = turn(client, "close the phone diagram", conv_id="r3a")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the smartphone architecture, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [old]}]
     assert (_steps("card_remove")[-1]["card"], _steps("card_remove")[-1]["match"]) == (old, "title")
     assert "r3a" not in overlay._enlarged
@@ -685,7 +685,7 @@ def test_card_remove_same_name_twins_take_newest(client):
     second = _show_cards(client, "r3b", "Dog")["Dog"]
     assert first != second
     events = turn(client, "remove the dog card", conv_id="r3b")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the dog, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [second]}]
     assert [c[0] for c in overlay._card_index["r3b"]] == [first]
     assert not [s for s in says(events) if s.startswith("Which one")]
@@ -703,7 +703,7 @@ def test_room_words_after_a_card_ask(client):
                   conv_id="r3c")
     assert says(events) == [acks.PHRASES["enlarged"]]
     events = turn(client, "close the phone diagram. Yes", conv_id="r3c")
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the phone network diagram, sir."]
     assert [e for e in events if e["type"] == "drop_cards"] == [{"type": "drop_cards", "ids": [phone]}]
     # a card whose title holds a blocked word is never reached through room words
     _show_cards(client, "r3e", "Window functions", "Credit cards")

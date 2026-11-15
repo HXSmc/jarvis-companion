@@ -505,11 +505,14 @@ def test_known_commands_are_never_dropped(client, tmp_path):
     turn(client, "highlight the changes", conv_id="g6", screen=_on_screen(repo))
     events = turn(client, "next change", conv_id="g6", **quiet)
     assert _lines(events) or any(s.get("kind") == "hunk" for s in _steps("intent"))
+    # jfollow9 hub question 3: clear and one-card remove now pass the level/confidence gate,
+    # so a quiet room "clear" is dropped; stop / yes / no below still never are.
     events = turn(client, "clear", conv_id="g6", **quiet)
-    assert {"type": "clear"} in events
+    assert {"type": "clear"} not in events
+    assert [s["reason"] for s in _steps("followup_dropped")] == ["level"]
     for text in ("stop", "yes", "no"):
         turn(client, text, conv_id="g6", **quiet)
-    assert not _steps("followup_dropped")
+    assert len(_steps("followup_dropped")) == 1
 
 
 def test_confirm_answer_with_room_level_is_not_dropped(client):

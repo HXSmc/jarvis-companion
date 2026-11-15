@@ -116,7 +116,7 @@ def test_remove_exact_title_turn(client, order):
     events = turn(client, "Remove the Jarvis capabilities card", conv_id="rx")
     exact, other = ids["Jarvis capabilities"], ids["Jarvis companion capabilities"]
     assert _drops(events) == [[exact]]
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the jarvis capabilities, sir."]
     row = _steps("card_remove")[-1]
     assert (row["card"], row["match"]) == (exact, "title")
     assert _held("rx") == [other]
@@ -169,7 +169,7 @@ def test_pick_removes_named_card(client, reply):
     assert _drops(events) == [[ids[t] for t in want]]
     row = _steps("card_remove")[-1]
     if len(want) == 1:
-        assert says(events) == ["Removed, sir."]
+        assert says(events) == ["Removed the jarvis companion capabilities, sir."]
         assert (row["card"], row["match"]) == (ids[want[0]], "pick")
     else:
         assert says(events) == [acks.PHRASES["removed_both"]]
@@ -214,7 +214,7 @@ def test_pick_cleared(client):
     # (d) a reference that names no offered card: no_card, no model
     ids, clock, loud, quiet = _ask_which(client, "c4")
     events = turn(client, "the purple one", conv_id="c4", followup=True, levels=NEAR)
-    assert says(events) == [acks.PHRASES["no_card"]]
+    assert says(events) == ["I don't see that card. On screen: the jarvis overlay capabilities and the jarvis companion capabilities."]
     assert not _drops(events) and _model_calls(loud, quiet) == 0
     assert "c4" not in overlay._card_pick
     # (e) _forget drops it
@@ -229,7 +229,7 @@ def test_pick_cleared(client):
     overlay._card_index["c6"] = deque((c for c in overlay._card_index["c6"] if c[0] != gone),
                                       maxlen=12)
     events = turn(client, "the companion one", conv_id="c6", followup=True, levels=NEAR)
-    assert says(events) == [acks.PHRASES["no_card"]] and not _drops(events)
+    assert says(events) == ["I don't see that card. On screen: the jarvis overlay capabilities."] and not _drops(events)
     assert _model_calls(loud, quiet) == 0
 
 
@@ -274,7 +274,7 @@ def test_pick_ids_only_from_line(client):
     assert len(pick.ids) == 3 and set(pick.ids) <= set(ids.values())
     left_out = (set(ids.values()) - set(pick.ids)).pop()
     events = turn(client, "the fourth one", conv_id="p4", followup=True, levels=NEAR)
-    assert says(events) == [acks.PHRASES["no_card"]] and not _drops(events)
+    assert says(events) == ["I don't see that card. On screen: the jarvis delta capabilities, the jarvis gamma capabilities and the jarvis beta capabilities."] and not _drops(events)
     turn(client, "remove the jarvis capabilities card", conv_id="p4")
     named = list(overlay._card_pick["p4"].ids)
     events = turn(client, "all", conv_id="p4", followup=True, levels=NEAR)
@@ -532,7 +532,7 @@ def test_pick_by_the_name_as_heard_turn(client):
     assert says(events)[0].startswith("Which one: ")
     events = turn(client, "the capabilities one", conv_id="ah", followup=True, levels=NEAR)
     assert _drops(events) == [[ids["Jarvis capabilities"]]]
-    assert says(events) == ["Removed, sir."]
+    assert says(events) == ["Removed the jarvis capabilities, sir."]
     assert _model_calls(loud, quiet) == 0
 
 
