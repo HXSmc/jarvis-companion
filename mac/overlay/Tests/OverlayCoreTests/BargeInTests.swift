@@ -443,26 +443,31 @@ final class BargeInTests: XCTestCase {
         XCTAssertNil(BargeWords.confirmRule(partial: "jarvis said hello there", reply: reply, speakers: true))
     }
 
-    /// Security R1: on speakers a barge turn never answers a Confirm and, without a fresh "jarvis",
-    /// sends only "stop" (the silent barge stop). Headphones send the owner's words unchanged.
-    func testSpeakersTurnTextStopsOnly() {
+    /// Security R1: a barge turn never sends a Confirm answer (any route) and, on speakers without
+    /// a fresh "jarvis", sends only "stop" (the silent barge stop). Stop phrases go as heard.
+    func testBargeTurnTextStopsOnly() {
+        func text(_ owned: String, _ reply: [String], speakers: Bool) -> String {
+            BargeWords.bargeTurnText(owned, reply: reply, speakers: speakers).text
+        }
         let question = ["Commit and push your changes to main?"]
-        XCTAssertEqual(BargeWords.speakersTurnText("Jarvis, yes", reply: question, speakers: true), "stop")
-        XCTAssertEqual(BargeWords.speakersTurnText("Jarvis go ahead", reply: question, speakers: true), "stop")
-        XCTAssertEqual(BargeWords.speakersTurnText("yes please", reply: question, speakers: true), "stop")
-        XCTAssertEqual(BargeWords.speakersTurnText("Jarvis, yes", reply: question, speakers: false), "Jarvis, yes")
+        XCTAssertEqual(text("Jarvis, yes", question, speakers: true), "stop")
+        XCTAssertEqual(text("Jarvis go ahead", question, speakers: true), "stop")
+        XCTAssertEqual(text("yes please", question, speakers: true), "stop")
+        XCTAssertEqual(text("Jarvis, yes", question, speakers: false), "stop")
+        XCTAssertEqual(text("Yes, do it.", question, speakers: false), "stop")
+        XCTAssertEqual(BargeWords.bargeTurnText("Jarvis, yes", reply: question, speakers: false).cut, .answer)
         let story = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
-        XCTAssertEqual(BargeWords.speakersTurnText("enough push my changes", reply: story, speakers: true), "stop")
-        XCTAssertEqual(BargeWords.speakersTurnText("stop open safari", reply: story, speakers: true), "stop")
-        XCTAssertEqual(BargeWords.speakersTurnText("stop", reply: story, speakers: true), "stop")
-        XCTAssertEqual(BargeWords.speakersTurnText("jarvis stop what time is it", reply: story, speakers: true),
-                       "jarvis stop what time is it")
-        XCTAssertEqual(BargeWords.speakersTurnText("hey jarvis what time is it", reply: story, speakers: true),
-                       "hey jarvis what time is it")
-        XCTAssertEqual(BargeWords.speakersTurnText("enough push my changes", reply: story, speakers: false),
-                       "enough push my changes")
+        XCTAssertEqual(text("enough push my changes", story, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.bargeTurnText("enough push my changes", reply: story, speakers: true).cut, .noName)
+        XCTAssertEqual(text("stop open safari", story, speakers: true), "stop")
+        XCTAssertEqual(text("stop", story, speakers: true), "stop")
+        XCTAssertNil(BargeWords.bargeTurnText("Hey Jarvis, stop.", reply: story, speakers: true).cut)
+        XCTAssertEqual(text("jarvis stop what time is it", story, speakers: true), "jarvis stop what time is it")
+        XCTAssertEqual(text("Hey Jarvis, what time is it?", story, speakers: true), "Hey Jarvis, what time is it?")
+        XCTAssertNil(BargeWords.bargeTurnText("Hey Jarvis, what time is it?", reply: story, speakers: true).cut)
+        XCTAssertEqual(text("enough push my changes", story, speakers: false), "enough push my changes")
+        XCTAssertEqual(text("What time is it?", story, speakers: false), "What time is it?")
         // A "jarvis" the reply itself said is not fresh: the words go no further than a stop.
-        XCTAssertEqual(BargeWords.speakersTurnText("jarvis open safari", reply: ["Jarvis is here."], speakers: true),
-                       "stop")
+        XCTAssertEqual(text("jarvis open safari", ["Jarvis is here."], speakers: true), "stop")
     }
 }

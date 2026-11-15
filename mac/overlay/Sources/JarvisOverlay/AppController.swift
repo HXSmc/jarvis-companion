@@ -780,10 +780,10 @@ final class AppController {
                         return
                     }
                     self.lastHeardUntil = Date()
-                    let sent = BargeWords.speakersTurnText(owned, reply: run.reply, speakers: run.aec)
-                    if sent != owned {
-                        self.client.debugNote(step: "barge_turn",
-                                              detail: "sent=stop words=\(BargeWords.wordCount(owned))")
+                    let (sent, cut) = BargeWords.bargeTurnText(owned, reply: run.reply, speakers: run.aec)
+                    if let cut {
+                        self.client.debugNote(step: "barge_turn", detail: "sent=stop reason=\(cut.rawValue) "
+                                                  + "aec=\(run.aec ? 1 : 0) words=\(BargeWords.wordCount(owned))")
                     }
                     self.startUtterance(text: sent, followUp: true, bargeIn: true,
                                         sttFinalMs: sttFinalMs,

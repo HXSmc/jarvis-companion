@@ -276,15 +276,20 @@ public enum BargeWords {
         return owned.isEmpty ? nil : owned
     }
 
-    /// The text a confirmed barge turn sends. Headphones: `owned` unchanged. Through the echo
-    /// canceller (`speakers`, hub Q5) the barge path may only stop the reply unless the owner named
-    /// Jarvis: a Confirm answer ("Jarvis, yes" over the question; any voice in the room can say it)
-    /// or words without a fresh "jarvis" ("enough, push my changes" from a TV) become "stop", the
-    /// service's silent barge stop. A pending Confirm then waits for a wake turn.
-    public static func speakersTurnText(_ owned: String, reply: [String], speakers: Bool) -> String {
-        guard speakers else { return owned }
-        if TailGate.isAnswer(owned) { return "stop" }
-        return confirmRule(partial: owned, reply: reply, speakers: true) == .name ? owned : "stop"
+    /// Why a confirmed barge turn was sent as "stop" (`bargeTurnText`, the `barge_turn` note).
+    public enum TurnCut: String { case answer, noName = "no_name" }
+
+    /// The text a confirmed barge turn sends, and why it was cut to "stop" (nil: sent unchanged).
+    /// A barge-in may stop or deny, never approve (security R1): a Confirm answer heard over the
+    /// reply ("Jarvis, yes" over the question; anyone in the room can say it) becomes "stop", the
+    /// service's silent barge stop, which denies a pending Confirm; the owner asks again. Through
+    /// the echo canceller (`speakers`, hub Q5) words without a fresh "jarvis" ("enough, push my
+    /// changes" from a TV) become "stop" too. A plain stop phrase goes as heard.
+    public static func bargeTurnText(_ owned: String, reply: [String], speakers: Bool) -> (text: String, cut: TurnCut?) {
+        if StopPhrase.matches(owned) { return (owned, nil) }
+        if TailGate.isAnswer(owned) { return ("stop", .answer) }
+        guard speakers, confirmRule(partial: owned, reply: reply, speakers: true) != .name else { return (owned, nil) }
+        return ("stop", .noName)
     }
 
     /// A heard text that reads as a Confirm answer (`TailGate.isAnswer`) and whose every word is in

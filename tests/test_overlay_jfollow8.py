@@ -108,9 +108,9 @@ def test_barge_stop_is_silent(client):
     assert _steps("followup_closed")[-1]["detail"] == "stop"
 
 
-def test_speakers_barge_yes_sent_as_stop_never_allows(client):
-    """Security R1: on speakers the app sends a barge "Jarvis, yes" as "stop"
-    (BargeWords.speakersTurnText). That stop is silent and never approves the pending Confirm."""
+def test_barge_yes_sent_as_stop_never_allows(client):
+    """Security R1: the app sends a barge "Jarvis, yes" (any route) as "stop"
+    (BargeWords.bargeTurnText). That stop is silent and denies the pending Confirm, never allows it."""
     clock = Clock()
     pool, _ = setup(clock, push_script(clock))
     turn(client, "commit and push my changes", conv_id="s1")
@@ -155,7 +155,7 @@ def test_debug_page_rows_jfollow8():
         ("playback", "ended audio_ms=12400"),
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
         ("barge_gate", "over=5 rule=name aec=1 mic_p90=0.042 out_p90=0.120 confirmed=1"),
-        ("barge_turn", "sent=stop words=4"),
+        ("barge_turn", "sent=stop reason=answer aec=1 words=2"),
     ]
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
