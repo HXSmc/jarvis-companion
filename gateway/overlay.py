@@ -2287,6 +2287,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
               and _MEDIA_NOUN_RE.search(body.text)):
             # Tainted + a media noun: the reply is the owner-words search or the refusal, no thinking ack.
             ack_phrase_key = None
+        elif (intent.kind == "answer" and pick is None and intents.about_companion(raw_text)
+              and intents._agent_sub(intents._clean(raw_text).lower()) == ""):
+            ack_phrase_key = None  # D3: the companion line (or the model's answer) is the whole speech
         if ack_phrase_key in ("answer", "generic"):
             _pool_key, ack_text, ack_pcm, ack_rate = deps.acks.thinking(intent.kind)
         elif ack_phrase_key:

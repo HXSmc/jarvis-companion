@@ -172,6 +172,8 @@ def test_followup_short_command_gate(client):
     _seed("j9b", clock)
     events = turn(client, "remove the cat card", conv_id="j9b", followup=True, levels=[0.002] * 12, conf=0.9)
     assert not _drops(events) and _last("followup_dropped")["reason"] == "level"
+    events = turn(client, "remove the cat", conv_id="j9b", followup=True, levels=[0.002] * 12, conf=0.9)
+    assert not _drops(events) and _last("followup_dropped")["reason"] == "level"  # names-only, quiet
 
 
 @pytest.mark.parametrize("text,want", [("remove the cat", "k1"), ("close the footage", "k2"),
@@ -280,9 +282,7 @@ def test_companion_question_never_goes_to_agent(client, text):
     body = " ".join(cards[0]["body"])
     for fact in ("iPhone app", "Gateway", "Mac overlay", "Claude Code sessions", "Windows", "Remote screen"):
         assert fact in body
-    # criterion 21: one line == companion_about (the answer turn's thinking ack comes before the
-    # model hands over; it is not a companion line)
-    assert says(events).count(acks.PHRASES["companion_about"]) == 1 and len(says(events)) <= 2
+    assert says(events) == [acks.PHRASES["companion_about"]]  # no thinking ack before it
     assert [s for s in _steps("intent") if s.get("kind") == "about_companion"]
 
 

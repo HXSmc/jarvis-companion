@@ -461,7 +461,7 @@ final class SpeechInput {
             if let barge = turn.barge, !barge.confirmed {
                 let now = Date()
                 feedGate(barge, now: now)
-                // C2: over blocks that came after the last partial: its words are checked again.
+                // C2 (BargeCheck.Tracker.wantsRecheck): over blocks that came after the last partial: its words are checked again.
                 if barge.tracker.wantsRecheck(at: now), !turn.lastText.isEmpty {
                     checkBarge(barge, turn: turn, partial: turn.lastText, now: now, recheck: true)
                 }
