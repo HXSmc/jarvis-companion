@@ -60,6 +60,8 @@ final class AppController {
     private var aecFailedHere = false
     /// The mic engine started once (launch); later reconfigures need it.
     private var speechStarted = false
+    /// The last reconfigure found no usable input; the next one that works clears the banner.
+    private var micDown = false
     /// A reconfigure waiting for the next idle moment (its reason), and the task that waits.
     private var pendingReconfigure: String?
     private var reconfigurePoll: Task<Void, Never>?
@@ -134,6 +136,9 @@ final class AppController {
     }
 
     private func micUnavailable() {
+        guard !micDown else { return }  // a retry that fails again (route/config change) says it once
+        micDown = true
+        client.debugNote(step: "barge_aec", detail: "failed reason=no_input")
         model.orb = .error
         let line = "Microphone unavailable. Check System Settings > Privacy & Security > Microphone."
         model.banner = line
@@ -166,6 +171,11 @@ final class AppController {
         }
         speechStarted = true
         pendingReconfigure = nil
+        if micDown {  // a retry after a failed reconfigure brought the mic back
+            micDown = false
+            model.banner = nil
+            if model.orb == .error { model.orb = .idle }
+        }
         if setup.failed != nil { aecFailedHere = true }
         if let reason { client.debugNote(step: "barge_aec", detail: "reconfigured reason=\(reason)") }
         noteEchoCancel(setup)
@@ -804,9 +814,18 @@ final class AppController {
     private func restartEndedBargeRun(_ ended: BargeRun?, reason: String) {
         guard let run = bargeRun, run === ended else { return }
         let anyTurn = speech.openTurn != nil || speech.bargeListening || speech.bargeTurnOpen
-        let ranFor = run.gateThrough.map { Date().timeIntervalSince($0) } ?? 0
-        guard EchoCancel.restartBargeRun(confirmed: run.confirmed, anyTurnOpen: anyTurn,
-                                         audioBusy: audio.isBusy, ranFor: ranFor) else { return }
+        guard let wait = EchoCancel.restartBargeRun(confirmed: run.confirmed, anyTurnOpen: anyTurn,
+                                                    audioBusy: audio.isBusy,
+                                                    ranFor: Date().timeIntervalSince(run.createdAt),
+                                                    retried: run.retryQueued) else { return }
+        if wait > 0 {  // ended young: one retry when it is minBargeRunS old, every check made again then
+            run.retryQueued = true
+            Task { @MainActor [weak self, weak run] in
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                self?.restartEndedBargeRun(run, reason: "retry")
+            }
+            return
+        }
         bargeRun = nil
         client.debugNote(step: "barge_gate", detail: "restart reason=run_ended after=\(reason)")
         startBargeListeningIfNeeded()

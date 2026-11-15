@@ -79,11 +79,42 @@ final class EchoCancelTests: XCTestCase {
     /// recogniser gave up) while its reply plays on restarts, so raw self-hits stay ignored; a
     /// confirmed run, another open turn, a drained reply or a run that failed at once does not.
     func testRestartBargeRunTable() {
-        XCTAssertTrue(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 5))
-        XCTAssertTrue(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 1.0))
-        XCTAssertFalse(EchoCancel.restartBargeRun(confirmed: true, anyTurnOpen: false, audioBusy: true, ranFor: 5))
-        XCTAssertFalse(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: true, audioBusy: true, ranFor: 5))
-        XCTAssertFalse(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: false, ranFor: 5))
-        XCTAssertFalse(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 0.2))
+        // nil: no restart; 0: restart now; > 0: one retry after that many seconds.
+        XCTAssertEqual(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 5, retried: false), 0)
+        XCTAssertEqual(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 1.0, retried: false), 0)
+        XCTAssertEqual(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 5, retried: true), 0)
+        XCTAssertNil(EchoCancel.restartBargeRun(confirmed: true, anyTurnOpen: false, audioBusy: true, ranFor: 5, retried: false))
+        XCTAssertNil(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: true, audioBusy: true, ranFor: 5, retried: false))
+        XCTAssertNil(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: false, ranFor: 5, retried: false))
+        // r4 finding 3: a run that died young (no gate block yet, ranFor from its creation) is
+        // retried once when it reaches minBargeRunS, not left dead until the next clip.
+        XCTAssertEqual(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 0.2, retried: false)!,
+                       0.8, accuracy: 1e-9)
+        XCTAssertEqual(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 0, retried: false),
+                       EchoCancel.minBargeRunS)
+        XCTAssertNil(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: false, audioBusy: true, ranFor: 0.2, retried: true))
+        // A live run (its turn still open) never queues a retry.
+        XCTAssertNil(EchoCancel.restartBargeRun(confirmed: false, anyTurnOpen: true, audioBusy: true, ranFor: 0.2, retried: false))
+    }
+
+    /// r4 finding 1: a reconfigure that threw leaves the engine stopped; once it started once, the
+    /// next configuration/route change must see it as stopped (and rebuild), not as fine.
+    func testEngineStoppedAfterFailedReconfigure() {
+        XCTAssertTrue(EchoCancel.engineStopped(startedOnce: true, running: false))
+        XCTAssertFalse(EchoCancel.engineStopped(startedOnce: true, running: true))
+        XCTAssertFalse(EchoCancel.engineStopped(startedOnce: false, running: false))
+        let stopped = EchoCancel.engineStopped(startedOnce: true, running: false)
+        XCTAssertEqual(EchoCancel.reconfigure(want: false, active: false, idle: true, engineStopped: stopped), .now)
+        XCTAssertEqual(EchoCancel.reconfigure(want: true, active: false, idle: false, engineStopped: stopped), .now)
+    }
+
+    /// r4 finding 2: the voice-processing input must be mono; more channels fall back to the plain path.
+    func testFormatUsable() {
+        XCTAssertTrue(EchoCancel.formatUsable(rate: 48000, channels: 1, voiceProcessing: true))
+        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 3, voiceProcessing: true))
+        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 2, voiceProcessing: true))
+        XCTAssertTrue(EchoCancel.formatUsable(rate: 48000, channels: 2, voiceProcessing: false))
+        XCTAssertFalse(EchoCancel.formatUsable(rate: 0, channels: 1, voiceProcessing: false))
+        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 0, voiceProcessing: false))
     }
 }

@@ -217,3 +217,43 @@ def test_ended_barge_run_restarts_on_next_clip():
     assert "run === ended" in body and "EchoCancel.restartBargeRun(confirmed: run.confirmed" in body
     assert body.index("bargeRun = nil") < body.index("startBargeListeningIfNeeded()")
     assert 'detail: "restart reason=run_ended after=' in body
+
+
+def test_failed_reconfigure_is_retried():
+    """Code lens R4 finding 1: a reconfigure that threw leaves isRunning false; the stopped flag must
+    still read true (started once, engine not running), so the next configuration/route change
+    rebuilds the engine instead of leaving a dead mic. A recovered mic clears the sticky banner."""
+    src = (ROOT / "mac/overlay/Sources/JarvisOverlay/SpeechInput.swift").read_text()
+    assert ("var engineStoppedOnItsOwn: Bool { EchoCancel.engineStopped(startedOnce: startedOnce, "
+            "running: engine.isRunning) }") in src
+    assert "isRunning && !engine.isRunning" not in src
+    start = _swift_func("startEngine", "SpeechInput.swift")
+    assert start.index("try engine.start()") < start.index("startedOnce = true")
+    unavailable = _swift_func("micUnavailable", "AppController.swift")
+    assert "guard !micDown else { return }" in unavailable
+    assert 'detail: "failed reason=no_input"' in unavailable
+    reconf = _swift_func("reconfigureEngine", "AppController.swift")
+    assert reconf.index("try speech.reconfigure") < reconf.index("micDown = false")
+    assert "model.banner = nil" in reconf
+
+
+def test_voice_processing_format_must_be_mono():
+    """Code lens R4 finding 2: with voice processing on, a multi-channel input format throws
+    EngineFail.format (plain path, row `barge_aec failed reason=format`) before the tap is installed."""
+    start = _swift_func("startEngine", "SpeechInput.swift")
+    assert "EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount)," in start
+    assert "voiceProcessing: on) else { throw EngineFail.format }" in start
+    assert start.index("EchoCancel.formatUsable") < start.index("tap.install(") < start.index("attach(on)")
+
+
+def test_young_barge_run_gets_one_delayed_retry():
+    """Code lens R4 finding 3: the run's age counts from its creation (not its first gate block), and
+    a run that ended younger than minBargeRunS is retried once after the rest of it, not left dead
+    until the next clip."""
+    body = _swift_func("restartEndedBargeRun", "AppController.swift")
+    assert "ranFor: Date().timeIntervalSince(run.createdAt)" in body
+    assert "retried: run.retryQueued" in body
+    assert "gateThrough" not in body
+    assert body.index("run.retryQueued = true") < body.index("Task.sleep(")
+    assert 'self?.restartEndedBargeRun(run, reason: "retry")' in body
+    assert body.index("return\n") < body.index("bargeRun = nil")

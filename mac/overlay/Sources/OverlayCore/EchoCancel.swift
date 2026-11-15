@@ -41,16 +41,34 @@ public enum EchoCancel {
         return .gate
     }
 
-    /// A barge run ends after this long at the earliest before it is restarted (a recogniser that
-    /// fails at once must not restart every tick).
+    /// A barge run lives this long at the earliest before a restart (a recogniser that fails at once
+    /// must not restart every tick; it restarts at most once per `minBargeRunS`).
     public static let minBargeRunS: TimeInterval = 1.0
 
-    /// Restart the barge run now: it ended unconfirmed (a reconfigure cancelled it, or the recogniser
-    /// gave up), no other turn listens, its reply still plays, and it ran `minBargeRunS`. Else
-    /// `wakeAction` sees no listener for the rest of the reply and a raw self-hit reaches the gate.
+    /// When to restart the barge run: nil never, 0 now, else one retry after that many seconds. It
+    /// restarts when it ended unconfirmed (a reconfigure cancelled it, or the recogniser gave up),
+    /// no other turn listens and its reply still plays; `ranFor` counts from the run's creation. A
+    /// run younger than `minBargeRunS` gets one delayed retry (`retried`: already queued), so it is
+    /// never left dead until the next clip. Else `wakeAction` sees no listener for the rest of the
+    /// reply and a raw self-hit reaches the gate.
     public static func restartBargeRun(confirmed: Bool, anyTurnOpen: Bool, audioBusy: Bool,
-                                       ranFor: TimeInterval) -> Bool {
-        !confirmed && !anyTurnOpen && audioBusy && ranFor >= minBargeRunS
+                                       ranFor: TimeInterval, retried: Bool) -> TimeInterval? {
+        guard !confirmed && !anyTurnOpen && audioBusy else { return nil }
+        if ranFor >= minBargeRunS { return 0 }
+        return retried ? nil : minBargeRunS - ranFor
+    }
+
+    /// The engine is stopped when it started once but does not run now: a configuration change
+    /// stopped it, or a reconfigure threw (no input for a moment during a device switch). The next
+    /// configuration or route change then rebuilds it instead of leaving the mic dead.
+    public static func engineStopped(startedOnce: Bool, running: Bool) -> Bool {
+        startedOnce && !running
+    }
+
+    /// An input format the tap can use; with voice processing on it must be mono (levels, the ring
+    /// and the converter read one channel), else the plain path runs (`barge_aec failed reason=format`).
+    public static func formatUsable(rate: Double, channels: Int, voiceProcessing: Bool) -> Bool {
+        rate > 0 && channels > 0 && (!voiceProcessing || channels == 1)
     }
 
     /// The playback makeup gain for what the canceller takes off the mic: `gainDb` of gain, capped

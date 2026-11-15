@@ -15,6 +15,8 @@ final class SpeechInput {
     var audioEngine: AVAudioEngine { engine }
     private let tap = MicTap()
     private var isRunning = false
+    /// startEngine succeeded once: from then on a stopped engine is a fault to rebuild.
+    private var startedOnce = false
     private var currentTurn: Turn?
     private var turnTask: Task<Void, Never>?
     /// How the last finished turn was heard (STT path, counters, what ended it): debug page only.
@@ -53,8 +55,9 @@ final class SpeechInput {
 
     private enum EngineFail: Error { case enable, format, start }
 
-    /// start() succeeded once, but the engine is not running now (a configuration change stopped it).
-    var engineStoppedOnItsOwn: Bool { isRunning && !engine.isRunning }
+    /// start() succeeded once, but the engine is not running now: a configuration change stopped it,
+    /// or a reconfigure threw (isRunning is false then), so the next change notification retries.
+    var engineStoppedOnItsOwn: Bool { EchoCancel.engineStopped(startedOnce: startedOnce, running: engine.isRunning) }
 
     /// An unconfirmed barge run is listening (the reply plays on).
     var bargeListening: Bool {
@@ -124,7 +127,8 @@ final class SpeechInput {
             input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
         }
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw EngineFail.format }
+        guard EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount),
+                                      voiceProcessing: on) else { throw EngineFail.format }
         tap.clearRing()  // ring audio in the old format must never be replayed into a new-format turn
         tap.install(on: input, format: format)
         tapInstalled = true
@@ -132,6 +136,7 @@ final class SpeechInput {
         engine.prepare()
         do { try engine.start() } catch { throw EngineFail.start }
         isRunning = true
+        startedOnce = true
         return format
     }
 
@@ -731,6 +736,10 @@ final class BargeRun {
     var fedBlocks = 0
     /// Set when the barge turn starts: gate blocks before it are pre-reply audio, never fed.
     var gateThrough: Date?
+    /// When AppController made this run: a restart measures the run's age from here.
+    let createdAt = Date()
+    /// AppController queued this run's one delayed restart (it ended younger than minBargeRunS).
+    var retryQueued = false
     /// True once a barge-in fired; the turn then runs on as an ordinary follow-up.
     var confirmed = false
     /// AppController's stop-the-reply path (audio.stop, stream cancel, orb).
