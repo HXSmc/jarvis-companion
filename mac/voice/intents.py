@@ -484,6 +484,8 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if low.startswith("open "):
         arg = t[5:].strip()
         return _open_intent(t, apps) or Intent("open_app", arg)
+    if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
+        return Intent("stop")
     return Intent("answer", t)
 
 
@@ -1023,11 +1025,24 @@ def card_pick(text: str, names: list[tuple[str, ...]]) -> list[int] | None:
 _COMPANION_ALIAS_RE = re.compile(
     r"\b(?:jarvis companions?|java'?s companions?|jarvis company|companion app"
     r"|the companion)\b")
+# Round 5 (owner rows 21:00:31, 21:02:24): naming the Companion is not asking about it. Only a
+# question about what it is, does, can do, covers or includes counts, or the bare name as a reply.
+_COMPANION_ASK_RE = re.compile(
+    r"\b(?:what(?:'s| is| are| does| do| can| could| else)|how does|how do|tell me (?:more )?about"
+    r"|explain|describe|capabilit\w*|features?|abilities|cover(?:s|ed)?|includes?|consists? of)\b")
+# A task naming it ("start a session to help the Jarvis companion app ...") goes on as the same
+# sentence without the name: a task verb opening the sentence or a clause.
+_COMPANION_TASK_RE = re.compile(
+    r"(?:^|[.,;!?]\s*|\b(?:and|then|please|to|so)\s+)(?:start|sort|create|open|fix|build|change|add"
+    r"|remember|make|help|allow|let|enable|set up|implement|install|update|write|edit|delete|remove)\b")
+_COMPANION_NAME_ONLY_RE = re.compile(
+    r"(?:(?:i meant|i mean|no|yes|okay|ok) )?(?:the )?(?:jarvis |java'?s )?(?:companions?|company)(?: app)?")
 
 
 def about_companion(text: str) -> bool:
-    """True when the transcript is about Jarvis Companion (any spoken alias); a card
-    ask, a pick reply or a sessions ask wins, False otherwise."""
+    """True when the transcript asks about Jarvis Companion itself (any spoken alias): what it
+    is, does, can do, covers or includes, or the bare name. A task that only names it, a card
+    ask, a pick reply or a sessions ask: False."""
     raw = text.strip().lower().replace("’", "'")
     low = _clean(text).lower().replace("’", "'")
     # The wake-word strip eats a leading "Jarvis " ("Jarvis companions features"), so the
@@ -1045,7 +1060,10 @@ def about_companion(text: str) -> bool:
         return False
     if pick_shaped(text):
         return False
-    return True
+    if any(_COMPANION_NAME_ONLY_RE.fullmatch(" ".join(re.sub(r"[^a-z' ]", " ", f).split()))
+           for f in (raw, low)):
+        return True
+    return bool(_COMPANION_ASK_RE.search(raw)) and not _COMPANION_TASK_RE.search(raw)
 
 
 _CLAIM_PAST = r"cleared|removed|closed|hid|hidden|dismissed|enlarged|shrank|shrunk|taken away|got rid"
@@ -1212,6 +1230,25 @@ def is_cancel(text: str) -> bool:
 def is_stop(text: str) -> bool:
     """Whole utterance stops the turn: silence, a cancel, or both."""
     return any(_STOP_RE.fullmatch(f) for f in _match_forms(_answer(text)))
+
+
+# Round 5 (owner row 21:02:40: "okay Jarvis stop" came out "Stop. Driver stop" and was dropped as a
+# short follow-up): a stop word with only filler or address words around it and at most one unknown
+# word (the mis-heard name) is a stop. A negation ("don't stop") never is.
+_STOP_WORDS = frozenset({"stop", "cancel", "abort"})
+_STOP_FILLERS = frozenset({"okay", "ok", "hey", "please", "now", "no", "jarvis", "sir", "it", "that",
+                           "just", "right", "enough"})
+_STOP_NEGATIONS = frozenset({"don't", "dont", "not", "never", "can't", "won't"})
+STOP_FAMILY_MAX_WORDS = 5
+
+
+def is_stop_family(text: str) -> bool:
+    """A short stop phrase with fillers and at most one unknown word ("Stop. Driver stop")."""
+    words = _answer(text).split()
+    if (not words or len(words) > STOP_FAMILY_MAX_WORDS or not _STOP_WORDS.intersection(words)
+            or _STOP_NEGATIONS.intersection(words)):
+        return False
+    return sum(w not in _STOP_WORDS and w not in _STOP_FILLERS for w in words) <= 1
 
 
 def is_no(text: str) -> bool:

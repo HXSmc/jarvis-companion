@@ -91,7 +91,7 @@ COMPANION_CARD_LINES = ("iPhone app: sessions board, cards, Hardware Mode, focus
                         "Windows PC agent; \"Hey Jarvis\" on Mac and Windows",
                         "Remote screen control: Mac, Windows PC and mini PC")
 
-ANSWER_PROMPT = PERSONA + "\n\nAbout you: " + COMPANION_ABOUT + """ Questions about Jarvis, Jarvis Companion or 'the companion' (speech-to-text may write Java's companion, Jarvis company, Jarvis companions, companion app) are about this whole system: answer from this paragraph, never with {"agent": true}. 'What can you do' with no other subject means here on this Mac: answer for the overlay (voice, cards, pictures and videos, opening apps, the code on screen), then one short line that the Companion does more.
+ANSWER_PROMPT = PERSONA + "\n\nAbout you: " + COMPANION_ABOUT + """ Questions about what Jarvis, Jarvis Companion or 'the companion' is or does (speech-to-text may write Java's companion, Jarvis company, Jarvis companions, companion app) are about this whole system: answer from this paragraph, never with {"agent": true}. A task that only mentions the Companion (start a session, fix, build, change or add something, check the repository) is handled like the same sentence without the name. 'What can you do' with no other subject means here on this Mac: answer for the overlay (voice, cards, pictures and videos, opening apps, the code on screen), then one short line that the Companion does more.
 
 Reply ONLY as JSON Lines - one JSON object per line, nothing else:
   {"say": "..."}    one or two short sentences, spoken immediately
