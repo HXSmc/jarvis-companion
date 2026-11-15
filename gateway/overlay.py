@@ -238,7 +238,7 @@ class WakeBody(BaseModel):
     type: str = Field("wake", max_length=16)
     source: str = Field("mac", max_length=32)
     score: float | None = None
-    weak: bool = False  # a playback-only weak hit: only the app may honour it (WakeGate)
+    weak: bool = False  # a stale poster's weak hit; post_wake drops it
 
 
 class DebugNote(BaseModel):
@@ -888,31 +888,6 @@ def _voice_text(text: str) -> str:
     return _WAKE_WORD_RE.sub("", text).strip()
 
 
-# Jarvis's own voice can reach the playback-only weak wake band (scripts/wake_margin.py): a greeting
-# before a name ("Hey, Travis." 0.29, "Hi, Charles." 0.39, "Okay, Jarvik." 0.92) or a Jarvis-like stem
-# ("Jarvik." 0.26, "Jervis." 0.15); without either, own lines stay under 0.01. While such a line may
-# still be playing, a weak hit is Jarvis itself and is dropped. Full hits are untouched (base barge-in).
-_NEAR_NAME_RE = re.compile(r"\b(?:hey|hi|hay|okay|ok)\b|\bj[ae]rv", re.IGNORECASE)
-SELF_NAME_SLACK_S = 2.0  # app start-up + network lag past the synth clock
-_speech_end = 0.0  # monotonic: when the audio synthesized so far ends, played back to back
-_self_name_until = 0.0
-
-
-def _playback_cut() -> None:
-    """A new turn or a full wake: the app stopped (or drained) what it was playing."""
-    global _speech_end, _self_name_until
-    _speech_end = _self_name_until = 0.0
-
-
-def _note_playback(voice: str, seconds: float) -> None:
-    # shortcut: assumes the app plays clips in order from synth time; an app that starts a clip
-    # later than SELF_NAME_SLACK_S past that shortens the hold (move the hold app-side then).
-    global _speech_end, _self_name_until
-    _speech_end = max(time.monotonic(), _speech_end) + seconds
-    if _NEAR_NAME_RE.search(voice):
-        _self_name_until = _speech_end + SELF_NAME_SLACK_S
-
-
 async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     """Synthesized say line, or None when there is no voice / synth fails."""
     voice = _voice_text(text.replace("`", ""))
@@ -923,7 +898,6 @@ async def _audio(text: str, deps: OverlayDeps) -> dict | None:
         pcm, rate = await asyncio.to_thread(deps.synth, voice)
     except Exception:
         return None
-    _note_playback(voice, len(pcm) / 2 / rate)  # 16-bit mono
     return {"type": "audio", "text": text, "rate": rate,
             "pcm_b64": base64.b64encode(pcm).decode()}
 
@@ -2258,13 +2232,16 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
 
         if intent.kind == "stop":
             # B1/B2: the stop word closes the turn: "OK.", close the follow-up window, done.
-            # No ack, model, card or clear; nothing new is tainted.
-            async for ev in _line("stop", deps):
-                yield ev
-            said.append(acks.PHRASES["stop"])
+            # No ack, model, card or clear; nothing new is tainted. A barge-in stop stays silent
+            # (jfollow8): the owner is talking over Jarvis's own speech, so no reply over it.
+            if not body.barge_in:
+                async for ev in _line("stop", deps):
+                    yield ev
+                said.append(acks.PHRASES["stop"])
             yield {"type": "end_listening"}
             if on_step:
-                on_step("followup_closed", detail="stop")
+                on_step("followup_closed",
+                        detail="stop (barge-in, silent)" if body.barge_in else "stop")
 
         elif intent.kind == "clear":
             _hunks.pop(body.conv_id, None)
@@ -3791,9 +3768,10 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
             if barge or clearing:  # cancelled quietly; the turn continues in the normal pipeline
                 return
             if stopped:
-                async for ev in _line("stop", deps):
-                    yield ev
-                said.append(acks.PHRASES["stop"])
+                if not body.barge_in:
+                    async for ev in _line("stop", deps):
+                        yield ev
+                    said.append(acks.PHRASES["stop"])
                 yield {"type": "end_listening"}
                 yield _finish(body, deps, metrics, said, start)
                 return
@@ -4346,7 +4324,6 @@ async def post_workspace_snapshot(nonce: str, body: WorkspaceSnapshotBody) -> di
 @router.post("/utterance", dependencies=_LOOP_DEPS)
 async def post_utterance(body: TurnBody) -> StreamingResponse:
     deps = get_deps()
-    _playback_cut()
 
     async def stream() -> AsyncIterator[str]:
         rec = debug_log.for_utterance()
@@ -4409,13 +4386,8 @@ async def get_events() -> StreamingResponse:
 @router.post("/wake", dependencies=_LOOP_DEPS)
 async def post_wake(body: WakeBody | None = None) -> dict:
     if body is not None and body.weak:
-        if time.monotonic() < _self_name_until:
-            logger.info("wake_weak dropped reason=self_name")
-            return {"ok": True}
-        # Its own event, never "wake": no debug turn here; the app logs one only when it honours it.
-        bus.publish("wake_weak", {"source": body.source})
+        logger.info("wake_weak dropped reason=removed")
         return {"ok": True}
-    _playback_cut()
     debug_log.wake_hit(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}
@@ -4501,13 +4473,13 @@ def _app_commit() -> str | None:
 
 
 def barge_mode() -> str:
-    """D2 DECISION 2C: "headphones" by default (the app barges in only while the output is a
-    headphones route, never on speakers); "off" with OVERLAY_BARGE_IN set to anything but "1";
-    "aec" only with OVERLAY_BARGE_IN=1 and OVERLAY_BARGE_AEC=1 (the unproven 2B path, opt-in)."""
+    """D2 DECISION 2C: "aec" by default — barge-in cancels speech through the echo canceller, on
+    speakers too; "headphones" only with OVERLAY_BARGE_AEC=0 (the app barges in only on a
+    headphones route); "off" with OVERLAY_BARGE_IN set to anything but "1"."""
     flag = os.environ.get("OVERLAY_BARGE_IN", "")
     if flag not in ("", "1"):
         return "off"
-    return "aec" if flag == "1" and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1" else "headphones"
+    return "headphones" if os.environ.get("OVERLAY_BARGE_AEC", "") == "0" else "aec"
 
 
 def barge_in_on() -> bool:

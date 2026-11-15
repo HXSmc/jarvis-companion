@@ -385,9 +385,8 @@ def test_sessions_with_no_rows_say_a_fixed_line(client, monkeypatch, tmp_path):
 
 
 def test_health_has_barge_switches(client, monkeypatch):
-    """A6; jfollow4 D2 DECISION 2C replaces hub amendment R6's "off unless OVERLAY_BARGE_IN=1":
-    the default is headphones only (barge_in true, the app gates it on the output route), AEC only
-    with OVERLAY_BARGE_IN=1, and OVERLAY_BARGE_IN=0 still turns it all off."""
+    """A6; jfollow8 makes the default "aec" (echo canceller on speakers too; OVERLAY_BARGE_AEC=0
+    opts back to headphones only), OVERLAY_BARGE_IN=0 still turns it all off."""
     overlay.set_deps(make_deps())
     monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
     monkeypatch.delenv("OVERLAY_BARGE_AEC", raising=False)
@@ -395,9 +394,9 @@ def test_health_has_barge_switches(client, monkeypatch):
     def health():
         return client.get("/overlay/health", headers=AUTH_HEADER).json()
 
-    assert (health()["barge_in"], health()["barge_aec"], health()["barge_mode"]) == (True, False, "headphones")
+    assert (health()["barge_in"], health()["barge_aec"], health()["barge_mode"]) == (True, True, "aec")
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
-    assert (health()["barge_in"], health()["barge_aec"]) == (True, False)
+    assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
     monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
     assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "0")
@@ -433,7 +432,8 @@ def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
     assert "private var bargeInEnabled = false" in ctl
     # jfollow4 D2: the mode comes from health (off / headphones only / echo canceller); speakers never barge.
     assert "BargeMode.from(health:" in ctl
-    assert "case .headphones: bargeInEnabled = routeIsHeadphones" in ctl
+    # jfollow8: one pure rule (EchoCancel.bargeInEnabled): headphones route, or the canceller really on.
+    assert "EchoCancel.bargeInEnabled(mode: bargeMode.rawValue, headphones: routeIsHeadphones," in ctl
     wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
     gated = wake.index("if bargeInEnabled {")
     assert gated < wake.index("bargeIn(reason: .wake)") < wake.index("audio.stop()", gated)
@@ -557,10 +557,11 @@ def test_barge_gate_note_and_debug_label():
     assert "barge.end(); return" in _swift_func(APP_SRC / "SpeechInput.swift", "completeTurn")
     assert "func end()" in speech and "guard !ended else { return }" in speech
     # Live run 2 (32): checked=6 confirmed=0 could not say whether STT heard the owner's words.
-    assert "checked=\\(checked) max_new=\\(maxNew) confirmed=" in speech
+    assert "checked=\\(checked) max_new=\\(maxNew) " in speech and "confirmed=\\(confirmed ? 1 : 0)" in speech
     assert "BargeWords.newWordCount(partial: partial" in _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
     assert "barge_gate" in overlay.DEBUG_PAGE
-    assert 'case "barge_gate": return s.detail' in overlay.DEBUG_PAGE.replace('case "barge_in": case "barge_aec": ', "")
+    assert ('case "barge_gate":\n    case "wake_ignored": case "playback": return s.detail || ""'
+            in overlay.DEBUG_PAGE.replace('case "barge_in": case "barge_aec": ', ""))
 
 
 def test_barge_check_uses_the_lagged_candidate_and_fresh_words():

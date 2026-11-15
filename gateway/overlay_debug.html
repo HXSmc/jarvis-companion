@@ -61,7 +61,8 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 card_size: "card size", card_remove: "card remove", answer: "answer check", sessions: "sessions",
                 session_start: "session start", session_stop: "session stop", session_answer: "session answered",
                 memory: "memory", workspace: "workspace",
-                barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate" };
+                barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate",
+                wake_ignored: "wake ignored", playback: "playback" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -94,7 +95,8 @@ function describe(s) {
       s.reason ? `reason=${s.reason}` : ""].filter(Boolean).join(" ");
     case "session_start": case "session_stop": case "session_answer": case "memory": case "workspace":
       return s.detail || "";
-    case "barge_in": case "barge_aec": case "barge_gate": return s.detail || "";
+    case "barge_in": case "barge_aec": case "barge_gate":
+    case "wake_ignored": case "playback": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return s.detail || (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
@@ -129,7 +131,7 @@ function render(data) {
   if (ok.vault === false) rows.push(["Notes vault not set (OVERLAY_VAULT): notes questions will not find your notes", false]);
   else if (ok.vault) rows.push([`Notes vault set; excluded: ${(ok.vault_excluded || []).join(", ")}`, true]);
   if (ok.barge_in === false) rows.push(["barge-in: off (OVERLAY_BARGE_IN=0 in the repo .env)", false]);
-  else if (ok.barge_mode === "aec") rows.push(["barge-in: on (echo canceller)", true]);
+  else if (ok.barge_mode === "aec") rows.push(["barge-in: on (echo canceller on speakers; headphones as before)", true]);
   else if (ok.barge_in) rows.push(["barge-in: on with headphones, off on speakers", true]);
   if (ok.sessions_access === false) rows.push(["Sessions access: not set (run the installer)", false]);
   setup.hidden = rows.length === 0;
