@@ -118,6 +118,25 @@
   .recapline { font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .extras { display: flex; flex-direction: column; gap: 9px; }
   .extras.compact { background: rgba(20,20,24,.6); border-radius: 10px; padding: 10px; }
+  .steps-wrap.off { opacity: .55; transition: none; }
+  .steps-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; border: 0; background: none; padding: 0; text-align: start; }
+  .steps-row:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
+  .steps-row .n { font: 600 12px var(--mono); color: var(--accent); flex: none; }
+  .steps-row .a { color: var(--text); font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .steps-row .ch { color: var(--muted); flex: none; }
+  .steps-bar { height: 3px; border-radius: 99px; background: var(--line); overflow: hidden; }
+  .steps-bar .fill { display: block; height: 100%; background: var(--accent); margin-inline-start: 0; transition: inline-size .25s ease-out; }
+  .steps-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .steps-list li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
+  .steps-list .m { flex: none; inline-size: 13px; block-size: 13px; margin-top: 2px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; line-height: 1; }
+  .steps-list li.done, .steps-list li.todo { color: var(--muted); }
+  .steps-list li.on .m { border: 2px solid var(--accent); }
+  .steps-list li.todo .m { border: 1.5px solid var(--muted); opacity: .6; }
+  .steps-list li.on .t { color: var(--text); font-weight: 600; }
+  .steps-list .b { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .steps-list .b .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .steps-list .d { color: var(--muted); font-size: 12px; }
+  .steps-more { color: var(--muted); font-size: 12px; }
   .ask { color: var(--accent); font-weight: 600; font-size: 14px; display: flex; gap: 7px; }
   .btnrow { display: flex; gap: 8px; }
   .btncol { display: flex; flex-direction: column; gap: 8px; }
@@ -214,7 +233,7 @@
   @keyframes sp { to { transform: rotate(360deg); } }
   @media (max-width: 1100px) { #board { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow-y: auto; } .col .list { overflow: visible; } }
   @media (max-width: 760px) { #app { grid-template-columns: 1fr; } nav { display: none; } #panel { position: fixed; inset: 0; width: auto; z-index: 30; } .chips { grid-template-columns: repeat(3, 1fr); } }
-  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } .steps-bar .fill { transition: none; } }
 </style>
 </head>
 <body>
@@ -827,7 +846,7 @@ $("#clear-done").addEventListener("click", async () => {
 });
 
 // ------------------------------------------------------- session cards --
-const hasCard = c => !!c && !!(c.need || (c.files || []).length || (c.links || []).length || (c.children || []).length || c.parent || c.receipt);
+const hasCard = c => !!c && !!(c.need || (c.files || []).length || (c.links || []).length || (c.children || []).length || c.parent || c.receipt || (c.steps && (c.steps.items || []).length));
 function needButtons(need) {
   switch (need.kind) {
     case "approve": return [["Approve", true], ["Revise", false]];
@@ -841,10 +860,50 @@ function needButtons(need) {
 const RECEIPT = { sent: ["Sending", "var(--muted)"], queued: ["Received, after the current step", "var(--muted)"],
   working: ["Being worked on", "var(--green)"], answered: ["Answered", "var(--green)"], failed: ["Not delivered, send again", "var(--danger)"] };
 const checks = {}; // need id -> [bool]: survives the 5 s re-render
+const stepsOpen = {}; // session id -> bool: survives the 5 s re-render
+function stepsEl(s, compact) {
+  const st = s.card && s.card.steps, items = (st && st.items) || [];
+  if (!items.length) return null;
+  const total = items.length, cur = Math.max(0, Math.min(st.current || 0, total));
+  const fin = !!st.finished || cur >= total;
+  const act = fin ? null : (st.active || null);
+  const next = act ? null : (items.find(i => i && i.status === "todo") || {}).name;
+  const missing = "…";
+  const wrap = h("div", { class: "steps-wrap" + (st.session_done ? " off" : "") });
+  const build = () => {
+    const open = !!stepsOpen[s.session_id];
+    const row = h("button", { class: "steps-row", "aria-expanded": String(open),
+      "aria-label": fin ? "All " + total + " steps done" : act ? "Step " + cur + " of " + total + ": " + act
+        : cur + " of " + total + " done, next: " + (next || missing),
+      onclick: e => { e.stopPropagation(); stepsOpen[s.session_id] = !open; build(); } },
+      h("span", { class: "n" }, cur + "/" + total),
+      h("span", { class: "a" }, fin ? "All done" : act || "Next: " + (next || missing)),
+      h("span", { class: "ch", "aria-hidden": "true" }, open ? "▴" : "▾"));
+    const pct = fin ? 100 : Math.round(cur / total * 100);
+    const bar = h("div", { class: "steps-bar", "aria-hidden": "true" },
+      h("span", { class: "fill", style: "inline-size:" + pct + "%" + (fin ? ";background:var(--green)" : "") }));
+    wrap.replaceChildren(row, bar);
+    if (!open) return;
+    const list = h("ol", { class: "steps-list" });
+    items.slice(0, compact && items.length > 8 ? 8 : items.length).forEach((it, i) => {
+      const done = it.status === "done", on = it.status === "active";
+      const name = it.name || "Step " + (i + 1);
+      const body = h("div", { class: "b" }, h("span", { class: "t" }, name));
+      if (on && it.detail) body.append(h("span", { class: "d" }, it.detail));
+      list.append(h("li", { class: done ? "done" : on ? "on" : "todo", "aria-label": (done ? "Done: " : on ? "Now: " : "To do: ") + name },
+        h("span", { class: "m" }, done ? "✓" : null), body));
+    });
+    wrap.append(list);
+    if (compact && items.length > 8) wrap.append(h("div", { class: "steps-more" }, "+" + (items.length - 8) + " more"));
+  };
+  build();
+  return wrap;
+}
 function cardExtras(s, compact) {
   const card = s.card, box = h("div", { class: "extras" + (compact ? " compact" : "") });
   const need = card.need, files = card.files || [];
   const errEl = h("div", { class: "errline", hidden: true });
+  add(box, stepsEl(s, compact));
   if (need && need.answered) {
     box.append(h("div", { class: "answered" }, h("span", { class: "ok" }, "✓"),
       need.answered.answer === "reply" ? "You replied in the chat" : "You answered: " + (need.answered.answer || "")));
