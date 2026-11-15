@@ -22,10 +22,14 @@ final class SpeechInput {
     private let log = Logger(subsystem: "JarvisOverlay", category: "SpeechInput")
     /// TailGate's ratio; the service sends it on /overlay/health (OVERLAY_TAIL_LEVEL_RATIO).
     var tailRatio = TailGate.defaultRatio
-    /// Barge-in with the AEC-backed gate wanted (health barge_aec); the start() probe decides.
-    var aecEnabled = false
-    /// The voice-processing probe actually stuck; the gate uses the AEC margin only when true.
+    /// Voice processing (Apple's echo canceller) is on, read back from the input node after the
+    /// last reconfigure; the gate uses the AEC margin and the speakers rule only when true.
     private(set) var aecActive = false
+    private var tapInstalled = false
+    private var configObserver: NSObjectProtocol?
+    /// The engine stopped by itself (AVAudioEngineConfigurationChange: a device or route change);
+    /// AppController reconfigures it at once.
+    var onConfigurationChange: (() -> Void)?
 
     /// What the service's follow-up gate reads with the words: 100 ms mic levels, STT confidence.
     struct Heard {
@@ -38,25 +42,107 @@ final class SpeechInput {
 
     // MARK: mic
 
-    /// Starts the always-on input tap and ring buffer. Throws when there is
-    /// no usable input device (or mic permission was never granted).
-    func start() throws {
-        guard !isRunning else { return }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
+    /// What one reconfigure did, for the `barge_aec` debug row (numbers and fixed words only).
+    struct EngineSetup {
+        var active: Bool       // voice processing on, read back from the input node
+        var failed: String?    // enable|format|start: turning it on failed, the plain path runs
+        var rate: Double
+        var channels: Int
+        var ms: Int
+    }
+
+    private enum EngineFail: Error { case enable, format, start }
+
+    /// start() succeeded once, but the engine is not running now (a configuration change stopped it).
+    var engineStoppedOnItsOwn: Bool { isRunning && !engine.isRunning }
+
+    /// An unconfirmed barge run is listening (the reply plays on).
+    var bargeListening: Bool {
+        guard let turn = currentTurn, let barge = turn.barge, !turn.finished, !turn.cancelled else { return false }
+        return !barge.confirmed
+    }
+
+    /// A confirmed barge-in's turn is still listening to the owner.
+    var bargeTurnOpen: Bool {
+        guard let turn = currentTurn, let barge = turn.barge, !turn.finished, !turn.cancelled else { return false }
+        return barge.confirmed
+    }
+
+    /// The one path that (re)starts the always-on input tap and ring buffer: launch, a route or
+    /// mode change, a configuration change. `attach(on)` moves AudioOut's player while the engine
+    /// is stopped (on: onto this engine, so the canceller hears the reply). A failure turning voice
+    /// processing on falls back to the plain path (`failed` says why). Throws when even the plain
+    /// path has no usable input device (or mic permission was never granted).
+    /// shortcut: runs on the main actor, so a voice-processing start can hold the UI 1-3 s (the
+    /// row's start_ms measures it); move it off the main actor if the live run shows a freeze.
+    func reconfigure(voiceProcessing want: Bool, attach: (Bool) -> Void) throws -> EngineSetup {
+        let started = Date()
+        observeConfigurationChanges()
+        if engineStoppedOnItsOwn, let turn = currentTurn {
+            let tell = (turn.barge?.confirmed ?? true) ? turn.onNothing : nil
+            cancel()
+            tell?("audio device changed")
+        }
+        aecActive = false
+        var failed: String?
+        var format: AVAudioFormat
+        if want {
+            do { format = try startEngine(voiceProcessing: true, attach: attach) }
+            catch {
+                failed = "\((error as? EngineFail) ?? .start)"
+                format = try startPlain(attach: attach)
+            }
+        } else {
+            format = try startPlain(attach: attach)
+        }
+        aecActive = want && failed == nil && engine.inputNode.isVoiceProcessingEnabled
+        return EngineSetup(active: aecActive, failed: failed, rate: format.sampleRate,
+                           channels: Int(format.channelCount), ms: Int(Date().timeIntervalSince(started) * 1000))
+    }
+
+    private func startPlain(attach: (Bool) -> Void) throws -> AVAudioFormat {
+        do { return try startEngine(voiceProcessing: false, attach: attach) } catch {
             throw NSError(domain: "JarvisOverlay.SpeechInput", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "No audio input available"])
         }
-        // AEC must be enabled before the engine starts; any failure keeps today's plain path.
-        if aecEnabled {
-            do { try input.setVoiceProcessingEnabled(true); aecActive = true }
-            catch { aecActive = false }
+    }
+
+    /// Stop, set voice processing, THEN read the input format (voice processing changes its rate
+    /// and channels), tap it, attach the player, start.
+    private func startEngine(voiceProcessing on: Bool, attach: (Bool) -> Void) throws -> AVAudioFormat {
+        if engine.isRunning { engine.stop() }
+        isRunning = false
+        let input = engine.inputNode
+        if tapInstalled { input.removeTap(onBus: 0); tapInstalled = false }
+        if input.isVoiceProcessingEnabled != on {
+            do { try input.setVoiceProcessingEnabled(on) } catch { throw EngineFail.enable }
         }
+        if on {
+            guard input.isVoiceProcessingEnabled else { throw EngineFail.enable }
+            input.isVoiceProcessingAGCEnabled = false  // AGC pumps the level between words; the gates read levels
+            // The owner's music: the least ducking Apple allows, and never more while he speaks.
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
+        let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { throw EngineFail.format }
+        tap.clearRing()  // ring audio in the old format must never be replayed into a new-format turn
         tap.install(on: input, format: format)
+        tapInstalled = true
+        attach(on)
         engine.prepare()
-        do { try engine.start() } catch { aecActive = false; throw error }
+        do { try engine.start() } catch { throw EngineFail.start }
         isRunning = true
+        return format
+    }
+
+    /// The engine posts this when a device or route change stopped it (mic and replies both).
+    private func observeConfigurationChanges() {
+        guard configObserver == nil else { return }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.onConfigurationChange?() }
+        }
     }
 
     // MARK: one turn of speech
@@ -198,10 +284,13 @@ final class SpeechInput {
             barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: barge.reply,
                                                                       freshFrom: barge.freshFrom))
         }
+        // Through the echo canceller (speakers) the fresh words must name Jarvis or say stop (hub Q5).
         guard let reason = BargeDecision.decide(gateCandidate: candidate, partial: partial,
                                                 reply: barge.reply, wake: false,
                                                 enabled: barge.enabled, aec: barge.aec,
-                                                freshFrom: barge.freshFrom) else { return }
+                                                freshFrom: barge.freshFrom, speakers: barge.aec) else { return }
+        barge.rule = BargeWords.confirmRule(partial: partial, reply: barge.reply,
+                                            freshFrom: barge.freshFrom, speakers: barge.aec)
         barge.confirmed = true
         turn.capFrom = now
         // The tail gate and the sent levels start at the confirmation, not over the reply's echo.
@@ -309,6 +398,10 @@ final class SpeechInput {
         for i in barge.fedBlocks..<done {
             barge.gate.block(mic: mic[i], out: out[i],
                              at: from.addingTimeInterval(Double(i + 1) * LevelBlocks.width))
+            barge.micBlocks.append(mic[i])
+            barge.outBlocks.append(out[i])
+            // The first over block of the newest candidate run: voice_to_stop_ms counts from it.
+            if barge.gate.isCandidate { barge.voiceFrom = barge.gate.candidateSince }
         }
         barge.fedBlocks = done
     }
@@ -646,6 +739,12 @@ final class BargeRun {
     var partials = 0, checked = 0
     /// Most new (not-in-the-reply) words any checked partial held; the word check needs 2.
     var maxNew = 0
+    /// Which word rule confirmed (name|stop|words), for the `barge_gate`/`barge_in` notes.
+    var rule: BargeRule?
+    /// End of the first over-echo block of the candidate run that confirmed.
+    var voiceFrom: Date?
+    /// Every fed 100 ms block's mic and out RMS (the note's p90s; a run lasts one reply).
+    var micBlocks: [Double] = [], outBlocks: [Double] = []
     /// Told once when the run ends (confirmed, cancelled at the drain, or the recogniser ended):
     /// the gate's numbers for the one-shot `barge_gate` debug note.
     var onEnded: ((String) -> Void)?
@@ -654,7 +753,16 @@ final class BargeRun {
     func end() {
         guard !ended else { return }
         ended = true
-        onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) max_new=\(maxNew) confirmed=\(confirmed ? 1 : 0)")
+        onEnded?("\(gate.summary) partials=\(partials) checked=\(checked) max_new=\(maxNew) "
+                 + "rule=\(rule?.rawValue ?? "none") aec=\(aec ? 1 : 0) mic_p90=\(Self.p90(micBlocks)) "
+                 + "out_p90=\(Self.p90(outBlocks)) confirmed=\(confirmed ? 1 : 0)")
+    }
+
+    /// The 90th percentile, 3 decimals ("0.000" for no blocks).
+    static func p90(_ values: [Double]) -> String {
+        let sorted = values.sorted()
+        let v = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.9))]
+        return String(format: "%.3f", v)
     }
 
     init(enabled: Bool, aec: Bool, outLevels: @escaping () -> [LevelSample]) {
@@ -704,6 +812,12 @@ private final class MicTap: @unchecked Sendable {
             lock.unlock()
             sink?(copy, now)
         }
+    }
+
+    func clearRing() {
+        lock.lock()
+        ring.removeAll()
+        lock.unlock()
     }
 
     func setSink(_ newSink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?) {
