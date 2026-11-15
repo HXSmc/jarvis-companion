@@ -412,27 +412,6 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertEqual(LevelBlocks.blocks(samples, from: t0, to: t0), [])
     }
 
-    /// Mac run 3 (criterion 28): "Hey Jarvis, stop" over the story on speakers scored under 0.5, so no
-    /// wake came. A weak hit cuts only a reply playing on speakers with barge-in off; never idle, a
-    /// stream with no audio yet, an open turn, or headphones (barge-in on).
-    func testWakeGateWeakHit() {
-        func w(_ busy: Bool, _ streaming: Bool, _ listening: Bool, _ followUp: Bool, _ speech: Bool,
-               barge: Bool = false) -> WakeGate.Action {
-            WakeGate.decide(audioBusy: busy, streaming: streaming, listening: listening, followUp: followUp,
-                            hasSpeech: speech, weak: true, bargeInOn: barge)
-        }
-        XCTAssertEqual(w(true, true, false, false, false), .cutReply)   // story playing on speakers
-        XCTAssertEqual(w(true, false, false, false, false), .cutReply)  // last clip playing, stream done
-        XCTAssertEqual(w(false, false, false, false, false), .ignore)   // idle: only a full hit wakes
-        XCTAssertEqual(w(false, true, false, false, false), .ignore)    // stream open, nothing playing yet
-        XCTAssertEqual(w(false, false, true, false, true), .ignore)     // the owner's wake turn is open
-        XCTAssertEqual(w(false, false, true, true, false), .ignore)     // follow-up window
-        XCTAssertEqual(w(true, true, false, false, false, barge: true), .ignore)  // headphones: barge run
-        // The full hit's rows are unchanged by the new defaulted parameters.
-        XCTAssertEqual(WakeGate.decide(audioBusy: false, streaming: false, listening: false,
-                                       followUp: false, hasSpeech: false), .newTurn)
-    }
-
     func testWakeGateEndsWithWake() {
         XCTAssertTrue(WakeGate.endsWithWake("talking about you? I can't I Hey, Jarvis"))
         XCTAssertTrue(WakeGate.endsWithWake("It's all sort of, uh, right. Hey, Jarvis."))
@@ -449,27 +428,6 @@ final class TurnEndpointerTests: XCTestCase {
         XCTAssertFalse(WakeGate.endsWithWake("Don\u{2019}t, Jarvis"))
         XCTAssertTrue(WakeGate.endsWithWake("No. Hey, Jarvis"))     // a spoken wake phrase stays a wake
         XCTAssertTrue(WakeGate.endsWithWake("I said no to that, Jarvis"))
-    }
-
-    func testWeakHitTurnNeverSends() {
-        // A weak hit is barge-in only (hub, round 8): stop words end the cut reply; a yes, "go ahead"
-        // (a pending Confirm stays pending) or any request is dropped; no case sends to the service.
-        let notStop = WakeGate.WeakAction.ignore(reason: "not_stop")
-        XCTAssertEqual(WakeGate.weakFinal("yes"), notStop)
-        XCTAssertEqual(WakeGate.weakFinal("Yes, go ahead"), notStop)
-        XCTAssertEqual(WakeGate.weakFinal("go ahead"), notStop)
-        XCTAssertEqual(WakeGate.weakFinal("Yes, Jarvis"), notStop)
-        XCTAssertEqual(WakeGate.weakFinal("Hey Jarvis, what's the weather"), notStop)
-        XCTAssertEqual(WakeGate.weakFinal("push it to GitHub"), notStop)
-        XCTAssertEqual(WakeGate.weakFinal("stop"), .stopReply)
-        XCTAssertEqual(WakeGate.weakFinal("Hey Jarvis, stop."), .stopReply)
-        XCTAssertEqual(WakeGate.weakFinal("cancel"), .stopReply)
-        XCTAssertEqual(WakeGate.weakFinal("never mind"), .stopReply)
-        XCTAssertEqual(WakeGate.weakFinal("Be quiet, Jarvis"), .stopReply)
-        XCTAssertEqual(WakeGate.weakFinal("  "), .ignore(reason: "no_speech"))
-        // A weak hit while the Confirm question plays still only cuts the audio (decide), never more.
-        XCTAssertEqual(WakeGate.decide(audioBusy: true, streaming: true, listening: false, followUp: false,
-                                       hasSpeech: false, weak: true, bargeInOn: false), .cutReply)
     }
 
     func testWakeGateTable() {

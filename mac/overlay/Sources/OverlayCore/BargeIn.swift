@@ -116,6 +116,10 @@ public enum StopPhrase {
     }
 }
 
+/// Which word rule confirmed a barge-in: the wake name in the fresh words, a stop phrase, or
+/// >= 2 words not in the reply (headphones only).
+public enum BargeRule: String { case name, stop, words }
+
 /// Word checks on the partial against the reply being spoken: the owner's words must not be
 /// words the reply itself contains.
 public enum BargeWords {
@@ -210,7 +214,16 @@ public enum BargeWords {
     /// so far), with their echo lead dropped (`ownerWords`). Then:
     /// (b) a stop phrase confirms only when none of its words is in the reply;
     /// (a) otherwise >= 2 words outside the reply and the words not a contiguous run of it.
+    /// Headphones rule; `confirmRule(speakers:)` names the rule.
     public static func confirms(partial: String, reply: [String], freshFrom: Int = 0) -> Bool {
+        confirmRule(partial: partial, reply: reply, freshFrom: freshFrom) != nil
+    }
+
+    /// The rule that confirms, or nil. Through the echo canceller (`speakers`, hub Q5) the fresh words
+    /// must say a stop phrase or name Jarvis; >= 2 words not in the reply alone never cut there (room
+    /// talk, a TV, residual echo). A name or stop word that the reply itself holds is not fresh.
+    public static func confirmRule(partial: String, reply: [String], freshFrom: Int = 0,
+                                   speakers: Bool = false) -> BargeRule? {
         let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
         let owned = ownerWords(partial: fresh, reply: reply)
@@ -218,10 +231,11 @@ public enum BargeWords {
         let p = snapped(tokens(owned), to: r)
         let rs = Set(r)
         if StopPhrase.matches(owned) {
-            return !p.isEmpty && p.allSatisfy { !rs.contains($0) }
+            return !p.isEmpty && p.allSatisfy { !rs.contains($0) } ? .stop : nil
         }
-        guard newWords(p, replySet: rs) >= 2 else { return false }
-        return !isContiguous(p, in: r)
+        guard newWords(p, replySet: rs) >= 2, !isContiguous(p, in: r) else { return nil }
+        guard speakers else { return .words }
+        return p.contains("jarvis") && !rs.contains("jarvis") ? .name : nil
     }
 
     /// How many of the partial's fresh words (from `freshFrom`, echo lead dropped) the reply does
@@ -334,11 +348,12 @@ public enum BargeWords {
 /// The barge-in call: when unsure, never interrupt (nil).
 public enum BargeDecision {
     public static func decide(gateCandidate: Bool, partial: String?, reply: [String],
-                              wake: Bool, enabled: Bool, aec: Bool, freshFrom: Int = 0) -> BargeReason? {
+                              wake: Bool, enabled: Bool, aec: Bool, freshFrom: Int = 0,
+                              speakers: Bool = false) -> BargeReason? {
         if wake { return .wake }  // the wake word interrupts even when barge-in is off
         guard enabled else { return nil }
         if gateCandidate, let partial, !partial.isEmpty,
-           BargeWords.confirms(partial: partial, reply: reply, freshFrom: freshFrom) {
+           BargeWords.confirmRule(partial: partial, reply: reply, freshFrom: freshFrom, speakers: speakers) != nil {
             return aec ? .aec : .level
         }
         return nil

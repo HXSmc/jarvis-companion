@@ -1,0 +1,77 @@
+import Foundation
+import XCTest
+@testable import OverlayCore
+
+final class EchoCancelTests: XCTestCase {
+    /// aec on speakers wants the canceller; a headphones route, a Bluetooth mic input or a non-aec
+    /// mode never does.
+    func testWantOnTable() {
+        XCTAssertTrue(EchoCancel.wantOn(aecMode: true, outputHeadphones: false, inputBluetooth: false))
+        XCTAssertFalse(EchoCancel.wantOn(aecMode: true, outputHeadphones: true, inputBluetooth: false))
+        XCTAssertFalse(EchoCancel.wantOn(aecMode: true, outputHeadphones: false, inputBluetooth: true))
+        XCTAssertFalse(EchoCancel.wantOn(aecMode: false, outputHeadphones: false, inputBluetooth: false))  // headphones mode
+        XCTAssertFalse(EchoCancel.wantOn(aecMode: false, outputHeadphones: true, inputBluetooth: false))  // off
+    }
+
+    /// .off never allows barge-in; .headphones only on a headphones route; .aec on headphones or
+    /// with the canceller really running (a failed reconfigure leaves it off on speakers).
+    func testBargeInEnabledTable() {
+        XCTAssertFalse(EchoCancel.bargeInEnabled(mode: "off", headphones: true, active: true))
+        XCTAssertFalse(EchoCancel.bargeInEnabled(mode: "off", headphones: true, active: false))
+        XCTAssertFalse(EchoCancel.bargeInEnabled(mode: "off", headphones: false, active: true))
+        XCTAssertFalse(EchoCancel.bargeInEnabled(mode: "off", headphones: false, active: false))
+        XCTAssertTrue(EchoCancel.bargeInEnabled(mode: "headphones", headphones: true, active: false))
+        XCTAssertFalse(EchoCancel.bargeInEnabled(mode: "headphones", headphones: false, active: true))
+        XCTAssertTrue(EchoCancel.bargeInEnabled(mode: "aec", headphones: true, active: false))
+        XCTAssertTrue(EchoCancel.bargeInEnabled(mode: "aec", headphones: false, active: true))
+        XCTAssertFalse(EchoCancel.bargeInEnabled(mode: "aec", headphones: false, active: false))
+    }
+
+    /// An engine that stopped by itself rebuilds now even when busy; a want/active difference goes
+    /// now when idle and waits when busy; no difference is nothing.
+    func testReconfigureTable() {
+        XCTAssertEqual(EchoCancel.reconfigure(want: true, active: true, idle: true, engineStopped: false), .none)
+        XCTAssertEqual(EchoCancel.reconfigure(want: true, active: false, idle: false, engineStopped: true), .now)
+        XCTAssertEqual(EchoCancel.reconfigure(want: true, active: true, idle: false, engineStopped: true), .now)
+        XCTAssertEqual(EchoCancel.reconfigure(want: true, active: false, idle: true, engineStopped: false), .now)
+        XCTAssertEqual(EchoCancel.reconfigure(want: true, active: false, idle: false, engineStopped: false), .later)
+    }
+
+    /// Raw wake hits over echo-cancelled playback are the reply's own residual and only cut through
+    /// a barge run; an open barge turn swallows them; everything else reaches the wake gate.
+    func testWakeActionTable() {
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: true, streaming: true, echoCancelled: true,
+                                             bargeListening: true, bargeTurnOpen: false),
+                       .ignore(reason: "echo_cancel"))  // playing
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: false, streaming: false, echoCancelled: true,
+                                             bargeListening: true, bargeTurnOpen: true),
+                       .ignore(reason: "barge_turn"))  // audio stopped, a barge turn is open
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: true, streaming: false, echoCancelled: true,
+                                             bargeListening: false, bargeTurnOpen: false),
+                       .gate)  // playing, no barge run
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: true, streaming: false, echoCancelled: false,
+                                             bargeListening: true, bargeTurnOpen: false),
+                       .gate)  // playing, canceller failed/off
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: true, streaming: false, echoCancelled: false,
+                                             bargeListening: true, bargeTurnOpen: false),
+                       .gate)  // headphones route, canceller never started
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: false, streaming: false, echoCancelled: false,
+                                             bargeListening: false, bargeTurnOpen: false),
+                       .gate)  // idle
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: false, streaming: true, echoCancelled: true,
+                                             bargeListening: false, bargeTurnOpen: false),
+                       .gate)  // stream open, no audio playing yet
+        XCTAssertEqual(EchoCancel.wakeAction(audioBusy: false, streaming: true, echoCancelled: true,
+                                             bargeListening: true, bargeTurnOpen: false),
+                       .ignore(reason: "echo_cancel"))  // a gap between clips inside a reply
+    }
+
+    /// The 6 dB makeup gain with its clip cap: 0.7 peak hits the 0.98/peak cap, 1.0 gains nothing,
+    /// an unknown peak takes the plain gain.
+    func testMakeupGain() {
+        XCTAssertEqual(EchoCancel.makeupGain(peak: 0.25, gainDb: 6), 1.995, accuracy: 0.001)
+        XCTAssertEqual(EchoCancel.makeupGain(peak: 0.7, gainDb: 6), 0.98 / 0.7, accuracy: 0.0001)
+        XCTAssertEqual(EchoCancel.makeupGain(peak: 1.0, gainDb: 6), 1.0)
+        XCTAssertEqual(EchoCancel.makeupGain(peak: 0, gainDb: 6), 1.995, accuracy: 0.001)
+    }
+}
