@@ -99,7 +99,9 @@ final class SpeechInput {
         if want {
             do { format = try startEngine(voiceProcessing: true, attach: attach) }
             catch {
-                failed = "\((error as? EngineFail) ?? .start)"
+                // The node's format as voice processing left it, for the row (the live run needs numbers).
+                let seen = engine.inputNode.outputFormat(forBus: 0)
+                failed = "\((error as? EngineFail) ?? .start) rate=\(Int(seen.sampleRate)) ch=\(seen.channelCount)"
                 format = try startPlain(attach: attach)
             }
         } else {
@@ -108,7 +110,7 @@ final class SpeechInput {
         aecActive = want && failed == nil && engine.inputNode.isVoiceProcessingEnabled
         return EngineSetup(active: aecActive, failed: failed, rate: format.sampleRate,
                            channels: Int(format.channelCount),
-                           src: EchoCancel.monoSource(channels: Int(format.channelCount)),
+                           src: EchoCancel.monoSource(channels: Int(format.channelCount)),  // printed only when on
                            ms: Int(Date().timeIntervalSince(started) * 1000))
     }
 
@@ -137,10 +139,11 @@ final class SpeechInput {
         }
         let format = input.outputFormat(forBus: 0)
         guard EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount)),
-              let mono = MicTap.monoFormat(of: format) else { throw EngineFail.format }
+              let mono = on ? MicTap.monoFormat(of: format) : format else { throw EngineFail.format }
         tap.clearRing()  // ring audio in the old format must never be replayed into a new-format turn
         // The tap keeps the node's own format (the input node does no format conversion on a device,
-        // Apple's AVAudioInputNode docs) and hands on channel 0 only, in `mono`.
+        // Apple's AVAudioInputNode docs). Voice processing on: it hands on channel 0 only, in `mono`;
+        // off: every channel, as before.
         tap.install(on: input, format: format, mono: mono)
         micFormat = mono
         tapInstalled = true
@@ -837,7 +840,8 @@ private final class MicTap: @unchecked Sendable {
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
             let perChannel = Self.channelRms(buffer)
-            let copy = Self.channel0(buffer, mono: mono)
+            let copy = mono.channelCount < buffer.format.channelCount ? Self.channel0(buffer, mono: mono)
+                                                                      : Self.copy(buffer)
             let now = Date()
             var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
             let rms = Self.rms(copy)
@@ -881,6 +885,21 @@ private final class MicTap: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return ring
+    }
+
+    private static func copy(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
+        guard let out = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength)
+        else { return buffer }
+        out.frameLength = buffer.frameLength
+        let channels = Int(buffer.format.channelCount)
+        let floatBytes = Int(buffer.frameLength) * MemoryLayout<Float>.size
+        if let src = buffer.floatChannelData, let dst = out.floatChannelData {
+            for channel in 0..<channels { memcpy(dst[channel], src[channel], floatBytes) }
+        } else if let src = buffer.int16ChannelData, let dst = out.int16ChannelData {
+            let int16Bytes = Int(buffer.frameLength) * MemoryLayout<Int16>.size
+            for channel in 0..<channels { memcpy(dst[channel], src[channel], int16Bytes) }
+        }
+        return out
     }
 
     /// Channel 0 of `buffer` copied into a `mono` buffer (tap buffers are only valid inside the

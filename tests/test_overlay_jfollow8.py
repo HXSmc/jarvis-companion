@@ -172,6 +172,7 @@ def test_debug_page_rows_jfollow8():
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=1 agc=off ducking=min gain_db=6 start_ms=310"),
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=3 src=ch0 agc=off ducking=min gain_db=6 start_ms=310"),
         ("barge_aec", "levels src=ch0 ch_rms=0.031,0.002,0.002"),
+        ("barge_aec", "failed reason=format rate=0 ch=3"),
         ("wake_ignored", "reason=echo_cancel"),
         ("playback", "ended audio_ms=12400"),
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
@@ -182,10 +183,10 @@ def test_debug_page_rows_jfollow8():
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
     assert got["d"] == [detail for _, detail in details]
-    assert got["l"][3] == "wake ignored"  # wake_ignored
-    assert got["l"][4] == "playback"
-    assert got["l"][7] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
-    assert got["l"][8] == "wake mic capture"
+    assert got["l"][4] == "wake ignored"  # wake_ignored
+    assert got["l"][5] == "playback"
+    assert got["l"][8] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
+    assert got["l"][9] == "wake mic capture"
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()
@@ -255,8 +256,12 @@ def test_multichannel_voice_processing_feeds_channel0():
     listen = _swift_func("listenAfterWake", "SpeechInput.swift")
     assert "let format = micFormat ?? engine.inputNode.outputFormat(forBus: 0)" in listen
     src = (ROOT / "mac/overlay/Sources/JarvisOverlay/SpeechInput.swift").read_text()
-    assert "let copy = Self.channel0(buffer, mono: mono)" in src
-    assert "Self.copy(buffer)" not in src  # the old all-channel copy fed the recogniser 3 channels
+    assert "let mono = on ? MicTap.monoFormat(of: format) : format" in start  # plain path as before
+    assert "mono.channelCount < buffer.format.channelCount ? Self.channel0(buffer, mono: mono)" in src
+    reconf = _swift_func("reconfigure", "SpeechInput.swift")
+    # a failed start prints the node's numbers: `failed reason=<r> rate=<n> ch=<n>`
+    assert 'failed = "\\((error as? EngineFail) ?? .start) rate=\\(Int(seen.sampleRate)) ch=\\(seen.channelCount)"' in reconf
+    assert reconf.index("let seen = engine.inputNode.outputFormat(forBus: 0)") < reconf.index("try startPlain")
     note = _swift_func("noteEchoCancel", "AppController.swift")
     assert "ch=\\(setup.channels) src=\\(setup.src)" in note
     levels = _swift_func("noteChannelLevels", "AppController.swift")
@@ -290,7 +295,7 @@ def test_engine_note_restarts_wake_capture(client, monkeypatch):
     client.post("/overlay/debug/note", json={"step": "lines", "detail": "on target"}, headers=AUTH_HEADER)
     assert asked == []
     for detail in ("on route=speakers in=builtin rate=48000 ch=3 src=ch0 agc=off ducking=min gain_db=6 start_ms=900",
-                   "off reason=headphones", "failed reason=format"):
+                   "off reason=headphones", "failed reason=format rate=0 ch=3"):
         client.post("/overlay/debug/note", json={"step": "barge_aec", "detail": detail}, headers=AUTH_HEADER)
     assert asked == ["reconfigure"] * 3
     # no wake thread (module never imported): the note is just a row
