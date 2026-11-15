@@ -138,6 +138,30 @@ final class CardSnapshotTests: XCTestCase {
                         "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
     """
 
+    static let stepsTwelve = """
+    {"session_id": "a1b2c3d4-0017", "title": "Step list on the open session screen", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Writing the tests",
+     "recap": ["I drew the open sheet", "I am writing the tests"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "Writing the tests",
+              "steps": {"items": [{"name": "Read the spec", "status": "done", "detail": ""},
+                                    {"name": "Plan the screens", "status": "done", "detail": ""},
+                                    {"name": "Draw the list card", "status": "done", "detail": ""},
+                                    {"name": "Draw the open sheet", "status": "done", "detail": ""},
+                                    {"name": "Write the tests", "status": "active", "detail": "Test 3 of 7"},
+                                    {"name": "Render the shots", "status": "todo", "detail": ""},
+                                    {"name": "Check the shots", "status": "todo", "detail": ""},
+                                    {"name": "Write the README", "status": "todo", "detail": ""},
+                                    {"name": "Run the gates", "status": "todo", "detail": ""},
+                                    {"name": "Push the branch", "status": "todo", "detail": ""},
+                                    {"name": "Run CI", "status": "todo", "detail": ""},
+                                    {"name": "Write the report", "status": "todo", "detail": ""}],
+                        "current": 5, "total": 12, "active": "Write the tests", "finished": false,
+                        "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
     static let stepsAllDone = """
     {"session_id": "a1b2c3d4-0013", "title": "Hook video for the launch", "state": "running",
      "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
@@ -378,6 +402,14 @@ final class CardSnapshotTests: XCTestCase {
         try shot("21-steps-long-name-expanded", fit: try expandedSteps(Self.stepsLong))
         try shot("22-steps-done-session-greyed", fit: try boardCard(Self.stepsDoneSession))
         try shot("23-steps-rtl-expanded", fit: try expandedSteps(Self.stepsArabic, rtl: true))
+
+        // Open-session sheet: the step list starts expanded with every step (list cards stay folded).
+        let recapModel = SessionsModel()
+        recapModel.sessions = try [Self.stepsGrown, Self.stepsTwelve].map(Self.session)
+        try shot("24-steps-recap-expanded", screen: RecapView(model: recapModel, sessionID: "a1b2c3d4-0012"))
+        // 12 steps: the sheet scrolls as one column, no inner box cuts the list (tall window shows all 12).
+        try shot("25-steps-recap-12-steps", screen: RecapView(model: recapModel, sessionID: "a1b2c3d4-0017"),
+                 size: CGSize(width: 390, height: 1300))
     }
 
     // MARK: drawing
@@ -417,8 +449,8 @@ final class CardSnapshotTests: XCTestCase {
     }
 
     /// A full screen (sheets with their own scroll views), iPhone 14 size.
-    private func shot<V: View>(_ name: String, screen view: V) throws {
-        try draw(name, AnyView(view), size: CGSize(width: 390, height: 844))
+    private func shot<V: View>(_ name: String, screen view: V, size: CGSize = CGSize(width: 390, height: 844)) throws {
+        try draw(name, AnyView(view), size: size)
     }
 
     private func draw(_ name: String, _ view: AnyView, size: CGSize) throws {

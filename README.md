@@ -78,6 +78,39 @@ When a session needs you, the phone rings: an in-app note, a push from your own
 [ntfy](https://ntfy.sh) server, or WhatsApp-to-self when the app is asleep. Notes sent
 while you were offline are caught up when you open the app.
 
+#### Step progress on session cards
+
+A card can show where the session is in its plan: "3/6 Render hook video" means step 3 of
+6 is running, with a thin bar under it. The total can grow: when the session adds steps,
+3/4 becomes 3/6 and the bar moves back.
+
+The steps fill in by themselves from the session's own Claude Code task list (TaskCreate
+and TaskUpdate). `scripts/jarvis-steps-hook` sends each change to the card. To turn it on,
+add a PostToolUse hook in `~/.claude/settings.json` with the matcher
+`TaskCreate|TaskUpdate|TodoWrite` that runs the hook, and set
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` so Claude Code has the task tools:
+
+```json
+"env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" },
+"hooks": { "PostToolUse": [ { "matcher": "TaskCreate|TaskUpdate|TodoWrite",
+  "hooks": [ { "type": "command", "command": "/path/to/jarvis-companion/scripts/jarvis-steps-hook" } ] } ] }
+```
+
+For a plan you name by hand, use `jarvis-card steps set "Plan" "Build" "Test"`, then
+`steps next`, `steps add "Fix CI"` and `steps done`. A hand-named plan wins over the task
+list until `steps clear`.
+
+On the board, the steps stay one line until you tap the step row. Open the session on the
+phone or on the PC and you see every step: done ones ticked, the current one highlighted
+with its detail, and the ones still to come. Tap the header to fold it again.
+
+<table><tr>
+<td valign="top"><img src="docs/images/steps-card.png" alt="Session card on the phone with the folded step row: 3/6 Render hook video and a progress bar" width="280"></td>
+<td valign="top"><img src="docs/images/steps-expanded.png" alt="Open session on the phone: the full list of 6 steps, 2 done, 1 running, 3 to come" width="280"></td>
+</tr></table>
+
+<img src="docs/images/steps-desktop.png" alt="Desktop Jarvis: the open session panel listing every step, 2 done, 1 running, 3 to come" width="520">
+
 ### 🔧 Hardware Mode: an agent that sees through your camera
 
 Point the phone at a PC case, a Raspberry Pi or an Arduino and talk. Jarvis looks at the
