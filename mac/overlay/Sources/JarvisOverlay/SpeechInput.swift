@@ -378,7 +378,8 @@ final class SpeechInput {
             _ = judge(over: false, candidate: false)
             return
         }
-        let candidate = barge.gate.candidate(at: now)
+        // The tracker adds the echo-cancelled hold memory (BargeCheck.aecHoldMemory, row 20:59:22).
+        let candidate = barge.gate.candidate(at: now) || barge.tracker.candidate(at: now)
         if candidate {
             barge.maxNew = max(barge.maxNew, BargeWords.newWordCount(partial: partial, reply: reply,
                                                                       freshFrom: barge.freshFrom))

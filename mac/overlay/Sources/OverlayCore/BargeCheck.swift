@@ -19,6 +19,13 @@ public enum BargeCheck {
     /// read again when over blocks come within this long of it.
     /// shortcut: hand-set from the owner's 2026-11-15 rows; recalibrate from live `barge_check` rows.
     public static let keepFor: TimeInterval = 2.0
+    /// Echo-cancelled runs: a finished run of `holdBlocks` still holds for this long (headphones
+    /// keep `wordLag`). Owner row 20:59:22 (`over=5 cand=0 run=0 last_over_ms=203`, run end
+    /// `longest_run=7 skip_hold=6 checked=0`): through the canceller his first partial landed about
+    /// 1.7 s after his run of 7 ended, past the 1.2 s `wordLag`. Same span as `keepFor`, its mirror
+    /// (a kept command word waits this long for its over blocks; here the blocks wait for the word).
+    /// shortcut: one owner row; recalibrate from `hold_age_ms` in live `barge_check` rows.
+    public static let aecHoldMemory: TimeInterval = 2.0
     /// `barge_check` rows per run; later ones only count (`capped=` on the run's `barge_gate` row).
     public static let maxRows = 4
 
@@ -102,9 +109,10 @@ public enum BargeCheck {
     }
 
     /// One `barge_check` row: fixed words and numbers only (no transcript), <= 200 chars.
+    /// `holdAgeMs`: age of the end of the newest run of `holdBlocks` (99999 = none yet).
     public static func row(_ v: Verdict, overInWindow: Int, candidate: Bool, run: Int, recentlyOver: Bool,
                            lastOverMs: Int?, level: Level, freshFrom: Int, wordCount: Int,
-                           words: Words) -> String {
+                           words: Words, holdAgeMs: Int? = nil) -> String {
         func n(_ x: Double, _ digits: Int, cap: Double) -> String { String(format: "%.\(digits)f", min(max(x, 0), cap)) }
         func i(_ x: Int) -> String { String(min(max(x, 0), 999)) }
         return "res=\(v.rule != nil ? "confirm" : "reject") why=\(v.reject.rawValue) rule=\(v.rule?.rawValue ?? "none") "
@@ -112,14 +120,15 @@ public enum BargeCheck {
             + "last_over_ms=\(min(max(lastOverMs ?? 99999, 0), 99999)) mic=\(n(level.mic, 3, cap: 9.999)) "
             + "out=\(n(level.out, 3, cap: 9.999)) coup=\(n(level.coupling, 3, cap: 9.999)) "
             + "ratio=\(n(level.ratio, 2, cap: 9999.99)) fresh=\(i(freshFrom)) words=\(i(wordCount)) "
-            + "new=\(i(words.newWords)) name=\(words.freshName ? 1 : 0) stop=\(words.stop ? 1 : 0)"
+            + "new=\(i(words.newWords)) name=\(words.freshName ? 1 : 0) stop=\(words.stop ? 1 : 0) "
+            + "hold_age_ms=\(min(max(holdAgeMs ?? 99999, 0), 99999))"
     }
 
     /// One barge run's decision state beside the EchoGate: the over blocks (the gate's, fed
     /// block by block), the C1 kept word, the counters and the row budget. SpeechInput owns one
-    /// per `BargeRun` and reads the level part from the gate itself (`recentlyOver`/`candidate`
-    /// here give the same answers from the same blocks, for the Linux replay); `check` is the
-    /// same order as `SpeechInput.checkBarge`.
+    /// per `BargeRun` and reads the level part from the gate itself (`recentlyOver` here gives the
+    /// same answer from the same blocks, for the Linux replay; `candidate` adds the echo-cancelled
+    /// `aecHoldMemory`, and checkBarge asks both); `check` is the same order as `SpeechInput.checkBarge`.
     public struct Tracker {
         public let aec: Bool
         public private(set) var run = 0
@@ -160,8 +169,16 @@ public enum BargeCheck {
             lastOverAt.map { now.timeIntervalSince($0) <= BargeCheck.wordLag } ?? false
         }
 
+        /// A run of `holdBlocks` now, or one that ended within the memory (`aecHoldMemory` on an
+        /// echo-cancelled run, `wordLag` on headphones, as EchoGate.candidate).
         public func candidate(at now: Date) -> Bool {
-            run >= BargeCheck.holdBlocks || lastCandidateAt.map { now.timeIntervalSince($0) <= BargeCheck.wordLag } ?? false
+            let memory = aec ? BargeCheck.aecHoldMemory : BargeCheck.wordLag
+            return run >= BargeCheck.holdBlocks || lastCandidateAt.map { now.timeIntervalSince($0) <= memory } ?? false
+        }
+
+        /// Milliseconds since the newest run of `holdBlocks` ended (0 while it runs), nil = none.
+        public func holdAgeMs(at now: Date) -> Int? {
+            run >= BargeCheck.holdBlocks ? 0 : lastCandidateAt.map { Int(now.timeIntervalSince($0) * 1000) }
         }
 
         public func overInWindow(at now: Date) -> Int {
@@ -219,7 +236,8 @@ public enum BargeCheck {
             let lastMs = lastOverAt.map { Int(now.timeIntervalSince($0) * 1000) }
             return (verdict, BargeCheck.row(verdict, overInWindow: overInWindow(at: now), candidate: candidate,
                                             run: run, recentlyOver: recentlyOver, lastOverMs: lastMs,
-                                            level: level, freshFrom: freshFrom, wordCount: wordCount, words: w))
+                                            level: level, freshFrom: freshFrom, wordCount: wordCount, words: w,
+                                            holdAgeMs: holdAgeMs(at: now)))
         }
 
         /// One whole check from this tracker's own blocks (tests and the replay): the order of

@@ -358,7 +358,7 @@ def test_debug_page_rows_jfollow9():
     label = re.search(r"const LABEL = \{.*?\};", page, re.S).group(0)
     describe = re.search(r"function describe\(s\) \{.*?\n\}\n", page, re.S).group(0)
     check = ("res=reject why=no_hold rule=none over=1 cand=0 run=1 win=1 last_over_ms=300 mic=0.031 "
-             "out=0.120 coup=0.050 ratio=4.10 fresh=0 words=3 new=3 name=1 stop=1")
+             "out=0.120 coup=0.050 ratio=4.10 fresh=0 words=3 new=3 name=1 stop=1 hold_age_ms=1703")
     barge = ("at=7827 reason=aec rule=stop dropped_sentences=2 stop_ms=0 stream_open=0 "
              "voice_to_stop_ms=223 cmd_to_stop_ms=1200 cmd_rejects=0")
     rows = [{"step": "barge_check", "detail": check}, {"step": "barge_in", "detail": barge}]

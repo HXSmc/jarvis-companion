@@ -72,6 +72,13 @@ final class BargeCheckTests: XCTestCase {
     /// partial after new over blocks, C2). Returns the time of the confirm and its rule, or nil.
     private func replay(mic: [Double], out: Double, coupling: Double, partials: [Partial],
                         reply: Set<String>, aec: Bool = true) -> (at: Double, rule: BargeCheck.Rule, tracker: BargeCheck.Tracker)? {
+        let r = replayRun(mic: mic, out: out, coupling: coupling, partials: partials, reply: reply, aec: aec)
+        return r.hit.map { ($0.at, $0.rule, r.tracker) }
+    }
+
+    /// `replay` that also hands back the tracker when nothing confirmed (the run-end counters).
+    private func replayRun(mic: [Double], out: Double, coupling: Double, partials: [Partial], reply: Set<String>,
+                           aec: Bool = true) -> (hit: (at: Double, rule: BargeCheck.Rule)?, tracker: BargeCheck.Tracker) {
         var tracker = BargeCheck.Tracker(aec: aec)
         let t0 = Date(timeIntervalSince1970: 5000)
         var next = 0
@@ -89,17 +96,17 @@ final class BargeCheckTests: XCTestCase {
             while next < partials.count, partials[next].at <= blockEnd {
                 lastText = partials[next].text
                 if let rule = run(lastText, at: partials[next].at, recheck: false) {
-                    return (partials[next].at, rule, tracker)
+                    return ((partials[next].at, rule), tracker)
                 }
                 next += 1
             }
             tracker.block(over: isOver(mic: m, out: out, coupling: coupling), at: t0.addingTimeInterval(blockEnd))
             if tracker.wantsRecheck(at: t0.addingTimeInterval(blockEnd)), !lastText.isEmpty,
                let rule = run(lastText, at: blockEnd, recheck: true) {
-                return (blockEnd, rule, tracker)
+                return ((blockEnd, rule), tracker)
             }
         }
-        return nil
+        return (nil, tracker)
     }
 
     /// The 6affea7 check (SpeechInput.checkBarge before jfollow9), for the replay's "before": a
@@ -107,7 +114,8 @@ final class BargeCheckTests: XCTestCase {
     /// only on a new partial while the gate is a candidate; no re-check. Returns (checked, confirmed).
     private func baseReplay(mic: [Double], out: Double, coupling: Double, partials: [Partial],
                             reply: Set<String>) -> (checked: Int, confirmed: Bool) {
-        var gate = BargeCheck.Tracker(aec: true)  // its recentlyOver/candidate = EchoGate's (same blocks)
+        // Headphones tracker: its recentlyOver/candidate = 6affea7's EchoGate (1.2 s hold memory).
+        var gate = BargeCheck.Tracker(aec: false)
         let t0 = Date(timeIntervalSince1970: 5000)
         var freshFrom = 0, checked = 0, next = 0
         for (i, m) in mic.enumerated() {
@@ -228,13 +236,92 @@ final class BargeCheckTests: XCTestCase {
         XCTAssertNil(stale)
     }
 
+    /// Round 5: owner row 20:59:22, replayed with its numbers. Decisive check `over=5 cand=0 run=0
+    /// win=1 last_over_ms=203 mic=0.001 out=0.154 coup=0.003 ratio=0.76 fresh=0 words=3 new=3 name=0
+    /// stop=1`; run end `blocks=290 over=14 longest_run=7 partials=6 checked=0 skip_over=0
+    /// skip_hold=6`. What the numbers force: 6 judge calls for 6 partials means no C2 re-check ran,
+    /// so no over block came after the first partial and none in the 2 s before it but those 5;
+    /// `skip_over=0` puts all 6 partials within 1.2 s of the block 203 ms before the first. `over=5`
+    /// in 2 s leaves room for 3 blocks of the run of 7 (+ the 203 ms block + 1 blip), so the run
+    /// ended 1.7 s before the first partial: past `wordLag` (1.2 s), inside `aecHoldMemory`.
+    /// Hand-typed: the run's place (24.8-25.4 s), the blips, the 3-word stop text.
+    func testOwnerRow205922() {
+        let reply: Set<String> = ["you'd", "need", "to", "open", "a", "claude", "code", "session"]
+        var mic = Array(repeating: 0.001, count: 290)
+        for i in [49, 99, 149, 179, 209, 247, 248, 249, 250, 251, 252, 253, 264, 268] { mic[i] = 0.02 }
+        let coupling = 0.003, out = 0.154
+        XCTAssertEqual(mic.filter { isOver(mic: $0, out: out, coupling: coupling) }.count, 14)
+        let first = 27.103  // the run of 7 ends at 25.4 s, the newest over block at 26.9 s
+        let partials = (0..<6).map { Partial(at: first + Double($0) * 0.15, text: "Okay okay stop") }
+        // e887b64's hold memory (`wordLag`, the headphones tracker keeps it): all 6 partials no_hold.
+        let old = replayRun(mic: mic, out: out, coupling: coupling, partials: partials, reply: reply, aec: false)
+        XCTAssertNil(old.hit)
+        XCTAssertEqual(old.tracker.checked, 0)
+        XCTAssertEqual(old.tracker.skipNoHold, 6)
+        XCTAssertEqual(old.tracker.skipNotOver, 0)
+        // With the fix: the first phrase's first partial confirms; its row carries the hold age.
+        let fixed = replayRun(mic: mic, out: out, coupling: coupling, partials: partials, reply: reply)
+        XCTAssertEqual(fixed.hit?.rule, .stop)
+        XCTAssertEqual(fixed.hit?.at ?? 99, first, accuracy: 0.001)
+        var tracker = BargeCheck.Tracker(aec: true)
+        let t0 = Date(timeIntervalSince1970: 5000)
+        for (i, m) in mic.enumerated() where Double(i + 1) * 0.1 <= first {
+            tracker.block(over: isOver(mic: m, out: out, coupling: coupling), at: t0.addingTimeInterval(Double(i + 1) * 0.1))
+        }
+        let now = t0.addingTimeInterval(first)
+        XCTAssertEqual(tracker.overInWindow(at: now), 5)
+        XCTAssertEqual(tracker.run, 0)
+        XCTAssertEqual(Double(tracker.holdAgeMs(at: now) ?? 0), 1703, accuracy: 1.5)
+        let words = ["Okay", "okay", "stop"]
+        let row = tracker.check(at: now, wordCount: 3, recheck: false,
+                                commandIndex: { self.commandIndex(words, from: $0, reply: reply) },
+                                words: { self.flags(words, from: $0, reply: reply) }).row ?? ""
+        XCTAssertTrue(row.hasPrefix("res=confirm why=none rule=stop over=5 cand=1 run=0 win=1 last_over_ms=20"), row)
+        XCTAssertTrue(row.hasSuffix(" hold_age_ms=1703") || row.hasSuffix(" hold_age_ms=1702"), row)
+    }
+
+    /// Round 5, own words stay safe with the hold memory: (a) the reply's own "stop"/"Jarvis" with
+    /// blips and no run of 3 never stops it, nor with a run in the memory (echo words); (b) a run
+    /// older than `aecHoldMemory` and a late fresh stop word is no_hold; inside the memory it confirms.
+    func testHoldMemoryKeepsOwnWordsSafe() {
+        let reply: Set<String> = ["jarvis", "will", "stop", "the", "build"]
+        var blips = Array(repeating: 0.001, count: 60)
+        for i in [20, 22, 24, 26] { blips[i] = 0.02 }
+        XCTAssertNil(replay(mic: blips, out: 0.2, coupling: 0.005, partials: [
+            Partial(at: 2.5, text: "Jarvis will stop"), Partial(at: 2.75, text: "Jarvis will stop the build"),
+        ], reply: reply))
+        var run = blips
+        for i in 10...12 { run[i] = 0.02 }  // a run of 3 ending at 1.3 s, inside the memory at 2.5 s
+        let echo = replayRun(mic: run, out: 0.2, coupling: 0.005, partials: [
+            Partial(at: 2.5, text: "Jarvis will stop"), Partial(at: 2.75, text: "Jarvis will stop the build"),
+        ], reply: reply)
+        XCTAssertNil(echo.hit)
+        XCTAssertGreaterThan(echo.tracker.checked, 0)  // read, and turned down by the word rule
+        // (b) the run ends at 1.3 s, a blip at 2.5 s keeps the gate over.
+        var late = Array(repeating: 0.001, count: 60)
+        for i in [10, 11, 12, 24] { late[i] = 0.02 }
+        let words = ["okay", "stop"]
+        func verdict(at: Double) -> BargeCheck.Verdict {
+            var tracker = BargeCheck.Tracker(aec: true)
+            let t0 = Date(timeIntervalSince1970: 5000)
+            for (i, m) in late.enumerated() where Double(i + 1) * 0.1 <= at + 1e-9 {
+                tracker.block(over: isOver(mic: m, out: 0.2, coupling: 0.005), at: t0.addingTimeInterval(Double(i + 1) * 0.1))
+            }
+            return tracker.check(at: t0.addingTimeInterval(at), wordCount: 2, recheck: false,
+                                 commandIndex: { self.commandIndex(words, from: $0, reply: reply) },
+                                 words: { self.flags(words, from: $0, reply: ["the", "build"]) }).verdict
+        }
+        XCTAssertEqual(verdict(at: 3.35).reject, .noHold)  // 2.05 s after the run: past the memory
+        XCTAssertEqual(verdict(at: 3.25).rule, .stop)  // 1.95 s: inside
+    }
+
     /// The longest row stays within the debug note cap and holds only fixed words and numbers.
     func testRowFits() {
         let w = W(freshName: true, nameInReply: true, stop: true, stopClean: true, newWords: 99_999)
         let row = BargeCheck.row(.init(rule: .words, reject: .echoWords), overInWindow: 99_999, candidate: true,
                                  run: 99_999, recentlyOver: true, lastOverMs: 9_999_999,
                                  level: .init(mic: 123, out: 123, coupling: 123, ratio: 1e9),
-                                 freshFrom: 99_999, wordCount: 99_999, words: w)
+                                 freshFrom: 99_999, wordCount: 99_999, words: w, holdAgeMs: 9_999_999)
         XCTAssertLessThanOrEqual(row.count, 200, row)
         XCTAssertNotNil(row.range(of: #"^res=(confirm|reject) why=\w+ rule=\w+( [a-z_]+=[0-9.]+)+$"#,
                                   options: .regularExpression), row)
@@ -243,7 +330,8 @@ final class BargeCheckTests: XCTestCase {
                                     level: .init(mic: 0.031, out: 0.12, coupling: 0.05, ratio: 4.1),
                                     freshFrom: 0, wordCount: 3, words: W(freshName: true, stop: true, newWords: 3))
         XCTAssertEqual(reject, "res=reject why=no_hold rule=none over=1 cand=0 run=1 win=1 last_over_ms=300 "
-                       + "mic=0.031 out=0.120 coup=0.050 ratio=4.10 fresh=0 words=3 new=3 name=1 stop=1")
+                       + "mic=0.031 out=0.120 coup=0.050 ratio=4.10 fresh=0 words=3 new=3 name=1 stop=1 "
+                       + "hold_age_ms=99999")
     }
 
     /// At most `maxRows` reject rows per run; the confirm always gets its row; the rest are counted.
