@@ -21,7 +21,7 @@ import pytest  # noqa: E402
 from conftest import AUTH_HEADER  # noqa: E402
 from gateway import overlay  # noqa: E402
 from mac.voice import acks  # noqa: E402
-from test_overlay_agent import BusRecorder, client, reset  # noqa: F401,E402
+from test_overlay_agent import BusRecorder, Clock, client, push_script, reset, setup  # noqa: F401,E402
 from test_overlay_jfollow4 import _deps, _steps  # noqa: E402
 from test_overlay_service import says, turn  # noqa: E402
 
@@ -108,6 +108,19 @@ def test_barge_stop_is_silent(client):
     assert _steps("followup_closed")[-1]["detail"] == "stop"
 
 
+def test_speakers_barge_yes_sent_as_stop_never_allows(client):
+    """Security R1: on speakers the app sends a barge "Jarvis, yes" as "stop"
+    (BargeWords.speakersTurnText). That stop is silent and never approves the pending Confirm."""
+    clock = Clock()
+    pool, _ = setup(clock, push_script(clock))
+    turn(client, "commit and push my changes", conv_id="s1")
+    events = turn(client, "stop", conv_id="s1", followup=True, barge_in=True)
+    assert "allow" not in [r["behavior"] for r in pool.made[0].responses]
+    assert says(events) == [] and not [e for e in events if e["type"] == "audio"]
+    assert [e["card"]["title"] for e in events if e["type"] == "card"] == ["Not done"]
+    assert overlay._take_confirm("s1") is None  # nothing left for a later yes to approve
+
+
 # --- D: a barge-in real request goes through the pipeline once (criterion 4, A5 side) ---
 
 def test_barge_request_answered_once(client):
@@ -142,12 +155,14 @@ def test_debug_page_rows_jfollow8():
         ("playback", "ended audio_ms=12400"),
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
         ("barge_gate", "over=5 rule=name aec=1 mic_p90=0.042 out_p90=0.120 confirmed=1"),
+        ("barge_turn", "sent=stop words=4"),
     ]
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
     assert got["d"] == [detail for _, detail in details]
     assert got["l"][1] == "wake ignored"  # wake_ignored
     assert got["l"][2] == "playback"
+    assert got["l"][5] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()

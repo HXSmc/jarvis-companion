@@ -3733,9 +3733,10 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         await asyncio.to_thread(_deny_and_drop, run, deps)
         yield _settled_card(run.confirm_summary, "Not done: it timed out" if late else "Not done")
         key = "expired" if late else "stop" if stopped else "not_confirmed"
-        async for ev in _line(key, deps):
-            yield ev
-        said.append(acks.PHRASES.get(key, ""))
+        if not (stopped and body.barge_in):  # a barge-in stop stays silent; the card says "Not done"
+            async for ev in _line(key, deps):
+                yield ev
+            said.append(acks.PHRASES.get(key, ""))
         if late:
             yield _finish(body, deps, metrics, said, start)
             return

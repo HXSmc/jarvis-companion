@@ -62,7 +62,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 session_start: "session start", session_stop: "session stop", session_answer: "session answered",
                 memory: "memory", workspace: "workspace",
                 barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate",
-                wake_ignored: "wake ignored", playback: "playback" };
+                wake_ignored: "wake ignored", playback: "playback", barge_turn: "barge-in turn" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -97,6 +97,7 @@ function describe(s) {
       return s.detail || "";
     case "barge_in": case "barge_aec": case "barge_gate":
     case "wake_ignored": case "playback": return s.detail || "";
+    case "barge_turn": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return s.detail || (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");

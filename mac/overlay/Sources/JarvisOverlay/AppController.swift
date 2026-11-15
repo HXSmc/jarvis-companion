@@ -780,7 +780,12 @@ final class AppController {
                         return
                     }
                     self.lastHeardUntil = Date()
-                    self.startUtterance(text: owned, followUp: true, bargeIn: true,
+                    let sent = BargeWords.speakersTurnText(owned, reply: run.reply, speakers: run.aec)
+                    if sent != owned {
+                        self.client.debugNote(step: "barge_turn",
+                                              detail: "sent=stop words=\(BargeWords.wordCount(owned))")
+                    }
+                    self.startUtterance(text: sent, followUp: true, bargeIn: true,
                                         sttFinalMs: sttFinalMs,
                                         audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
                                         endOfSpeech: endOfSpeech, heard: heard, screenTask: screenTask)

@@ -276,6 +276,17 @@ public enum BargeWords {
         return owned.isEmpty ? nil : owned
     }
 
+    /// The text a confirmed barge turn sends. Headphones: `owned` unchanged. Through the echo
+    /// canceller (`speakers`, hub Q5) the barge path may only stop the reply unless the owner named
+    /// Jarvis: a Confirm answer ("Jarvis, yes" over the question; any voice in the room can say it)
+    /// or words without a fresh "jarvis" ("enough, push my changes" from a TV) become "stop", the
+    /// service's silent barge stop. A pending Confirm then waits for a wake turn.
+    public static func speakersTurnText(_ owned: String, reply: [String], speakers: Bool) -> String {
+        guard speakers else { return owned }
+        if TailGate.isAnswer(owned) { return "stop" }
+        return confirmRule(partial: owned, reply: reply, speakers: true) == .name ? owned : "stop"
+    }
+
     /// A heard text that reads as a Confirm answer (`TailGate.isAnswer`) and whose every word is in
     /// the line Jarvis was speaking is that line's echo, never the owner's yes/no/stop: "" (fail
     /// closed: a pending Confirm stays pending). "Shall I send … with subject Yes?" must not answer

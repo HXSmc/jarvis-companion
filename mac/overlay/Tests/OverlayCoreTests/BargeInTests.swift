@@ -442,4 +442,27 @@ final class BargeInTests: XCTestCase {
         XCTAssertNil(BargeWords.confirmRule(partial: "jarvis stop", reply: reply, speakers: false))
         XCTAssertNil(BargeWords.confirmRule(partial: "jarvis said hello there", reply: reply, speakers: true))
     }
+
+    /// Security R1: on speakers a barge turn never answers a Confirm and, without a fresh "jarvis",
+    /// sends only "stop" (the silent barge stop). Headphones send the owner's words unchanged.
+    func testSpeakersTurnTextStopsOnly() {
+        let question = ["Commit and push your changes to main?"]
+        XCTAssertEqual(BargeWords.speakersTurnText("Jarvis, yes", reply: question, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.speakersTurnText("Jarvis go ahead", reply: question, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.speakersTurnText("yes please", reply: question, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.speakersTurnText("Jarvis, yes", reply: question, speakers: false), "Jarvis, yes")
+        let story = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
+        XCTAssertEqual(BargeWords.speakersTurnText("enough push my changes", reply: story, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.speakersTurnText("stop open safari", reply: story, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.speakersTurnText("stop", reply: story, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.speakersTurnText("jarvis stop what time is it", reply: story, speakers: true),
+                       "jarvis stop what time is it")
+        XCTAssertEqual(BargeWords.speakersTurnText("hey jarvis what time is it", reply: story, speakers: true),
+                       "hey jarvis what time is it")
+        XCTAssertEqual(BargeWords.speakersTurnText("enough push my changes", reply: story, speakers: false),
+                       "enough push my changes")
+        // A "jarvis" the reply itself said is not fresh: the words go no further than a stop.
+        XCTAssertEqual(BargeWords.speakersTurnText("jarvis open safari", reply: ["Jarvis is here."], speakers: true),
+                       "stop")
+    }
 }
