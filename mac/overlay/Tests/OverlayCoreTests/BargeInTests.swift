@@ -443,19 +443,19 @@ final class BargeInTests: XCTestCase {
         XCTAssertNil(BargeWords.confirmRule(partial: "jarvis said hello there", reply: reply, speakers: true))
     }
 
-    /// Security R1: a barge turn never sends a Confirm answer (any route) and, on speakers without
-    /// a fresh "jarvis", sends only "stop" (the silent barge stop). Stop phrases go as heard.
+    /// On speakers without a fresh "jarvis" a barge turn sends only "stop" (the silent barge stop);
+    /// stop phrases go as heard. A Confirm answer with the name goes as heard: the service keeps the
+    /// Confirm pending on any barge-in yes (hub ruling), so the app does not rewrite it.
     func testBargeTurnTextStopsOnly() {
         func text(_ owned: String, _ reply: [String], speakers: Bool) -> String {
             BargeWords.bargeTurnText(owned, reply: reply, speakers: speakers).text
         }
         let question = ["Commit and push your changes to main?"]
-        XCTAssertEqual(text("Jarvis, yes", question, speakers: true), "stop")
-        XCTAssertEqual(text("Jarvis go ahead", question, speakers: true), "stop")
+        XCTAssertEqual(text("Jarvis, yes", question, speakers: true), "Jarvis, yes")
+        XCTAssertEqual(text("Jarvis go ahead", question, speakers: true), "Jarvis go ahead")
         XCTAssertEqual(text("yes please", question, speakers: true), "stop")
-        XCTAssertEqual(text("Jarvis, yes", question, speakers: false), "stop")
-        XCTAssertEqual(text("Yes, do it.", question, speakers: false), "stop")
-        XCTAssertEqual(BargeWords.bargeTurnText("Jarvis, yes", reply: question, speakers: false).cut, .answer)
+        XCTAssertEqual(text("Jarvis, yes", question, speakers: false), "Jarvis, yes")
+        XCTAssertEqual(text("Yes, do it.", question, speakers: false), "Yes, do it.")
         let story = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
         XCTAssertEqual(text("enough push my changes", story, speakers: true), "stop")
         XCTAssertEqual(BargeWords.bargeTurnText("enough push my changes", reply: story, speakers: true).cut, .noName)
@@ -469,5 +469,16 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(text("What time is it?", story, speakers: false), "What time is it?")
         // A "jarvis" the reply itself said is not fresh: the words go no further than a stop.
         XCTAssertEqual(text("jarvis open safari", ["Jarvis is here."], speakers: true), "stop")
+    }
+
+    /// The barge final keeps its wake words (SpeechInput.completeTurn): the stripped form of the
+    /// owner's "Hey Jarvis, what time is it?" has no name left and would go out as "stop".
+    func testBargeFinalKeepsTheName() {
+        let story = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
+        let final = "Hey Jarvis, what time is it?"
+        let owned = BargeWords.turnText(final: final, reply: story, confirmed: true) ?? ""
+        XCTAssertEqual(BargeWords.bargeTurnText(owned, reply: story, speakers: true).text, final)
+        let stripped = TurnEndpointer.stripWake(final, followUp: true)
+        XCTAssertEqual(BargeWords.bargeTurnText(stripped, reply: story, speakers: true).text, "stop")
     }
 }

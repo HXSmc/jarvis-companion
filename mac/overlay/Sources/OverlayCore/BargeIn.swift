@@ -277,17 +277,16 @@ public enum BargeWords {
     }
 
     /// Why a confirmed barge turn was sent as "stop" (`bargeTurnText`, the `barge_turn` note).
-    public enum TurnCut: String { case answer, noName = "no_name" }
+    public enum TurnCut: String { case noName = "no_name" }
 
     /// The text a confirmed barge turn sends, and why it was cut to "stop" (nil: sent unchanged).
-    /// A barge-in may stop or deny, never approve (security R1): a Confirm answer heard over the
-    /// reply ("Jarvis, yes" over the question; anyone in the room can say it) becomes "stop", the
-    /// service's silent barge stop, which denies a pending Confirm; the owner asks again. Through
-    /// the echo canceller (`speakers`, hub Q5) words without a fresh "jarvis" ("enough, push my
-    /// changes" from a TV) become "stop" too. A plain stop phrase goes as heard.
+    /// Through the echo canceller (`speakers`, hub Q5) words without a fresh "jarvis" ("enough,
+    /// push my changes" from a TV) become "stop", the service's silent barge stop. A plain stop
+    /// phrase goes as heard. `owned` must keep its wake words (SpeechInput does not strip a barge
+    /// final). A Confirm answer goes as heard: the service never lets a barge-in approve (it stays
+    /// pending for a plain yes; hub ruling).
     public static func bargeTurnText(_ owned: String, reply: [String], speakers: Bool) -> (text: String, cut: TurnCut?) {
         if StopPhrase.matches(owned) { return (owned, nil) }
-        if TailGate.isAnswer(owned) { return ("stop", .answer) }
         guard speakers, confirmRule(partial: owned, reply: reply, speakers: true) != .name else { return (owned, nil) }
         return ("stop", .noName)
     }

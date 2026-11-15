@@ -173,13 +173,15 @@ def test_barge_in_turn_cancels_running_agent_quietly(client, monkeypatch):
 
 
 def test_barge_in_never_answers_a_confirm(client):
-    """B2: barge alone never answers a Confirm; the spoken yes/no paths are unchanged."""
+    """B2: a barge-in never approves a Confirm (jfollow8 hub ruling): a barge yes leaves the run
+    pending and silent; a barge no still denies."""
     clock = Clock()
     pool, deps = setup(clock, push_script(clock))
     turn(client, "commit and push my changes", conv_id="b1")
     events = turn(client, "yes", conv_id="b1", barge_in=True)
-    assert [r["behavior"] for r in pool.made[0].responses] == ["allow"]
-    assert "Pushed." in says(events)
+    assert pool.made[0].responses == []
+    assert "Pushed." not in says(events)
+    assert "b1" in overlay._confirm
     assert "end_listening" not in [e["type"] for e in events]
 
     turn(client, "commit and push my changes", conv_id="b2")

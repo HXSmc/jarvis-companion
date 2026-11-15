@@ -319,8 +319,11 @@ final class SpeechInput {
             turn.onNothing?(turn.diagnosis)
             return
         }
-        let text = Self.stripWake(raw, followUp: turn.followUp)
-        guard !text.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
+        let stripped = Self.stripWake(raw, followUp: turn.followUp)
+        guard !stripped.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
+        // A barge turn keeps its wake words: the speakers rule (bargeTurnText) needs the name, and
+        // freshFrom counts words of the unstripped text. The service drops the wake itself.
+        let text = turn.barge != nil ? raw.trimmingCharacters(in: .whitespacesAndNewlines) : stripped
         log.debug("final \(text, privacy: .private)")
         let levels = LevelBlocks.blocks(tap.levelSamples(), from: turn.levelFrom, to: end.addingTimeInterval(0.3))
         turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end,

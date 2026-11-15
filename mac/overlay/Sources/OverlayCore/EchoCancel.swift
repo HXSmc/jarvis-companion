@@ -41,6 +41,13 @@ public enum EchoCancel {
         return .gate
     }
 
+    /// A barge run whose listening turn ended unconfirmed (a reconfigure cancelled it, or the
+    /// recogniser gave up) while its reply plays on: drop it so the next clip starts a fresh run,
+    /// else `wakeAction` sees no listener and a raw self-hit reaches the wake gate.
+    public static func bargeRunEnded(confirmed: Bool, listening: Bool, turnOpen: Bool) -> Bool {
+        !confirmed && !listening && !turnOpen
+    }
+
     /// The playback makeup gain for what the canceller takes off the mic: `gainDb` of gain, capped
     /// so a block that already peaks at `peak` lands at 0.98 (no clipping), never below 1.
     public static func makeupGain(peak: Float, gainDb: Double) -> Float {

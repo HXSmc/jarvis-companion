@@ -109,7 +109,7 @@ def test_barge_stop_is_silent(client):
 
 
 def test_barge_yes_sent_as_stop_never_allows(client):
-    """Security R1: the app sends a barge "Jarvis, yes" (any route) as "stop"
+    """Security R1: on speakers the app sends a barge turn without a fresh "jarvis" as "stop"
     (BargeWords.bargeTurnText). That stop is silent and denies the pending Confirm, never allows it."""
     clock = Clock()
     pool, _ = setup(clock, push_script(clock))
@@ -119,6 +119,25 @@ def test_barge_yes_sent_as_stop_never_allows(client):
     assert says(events) == [] and not [e for e in events if e["type"] == "audio"]
     assert [e["card"]["title"] for e in events if e["type"] == "card"] == ["Not done"]
     assert overlay._take_confirm("s1") is None  # nothing left for a later yes to approve
+
+
+def test_barge_yes_never_allows_and_stays_pending(client):
+    """Hub ruling (security R2 finding 1): a turn with barge_in=true and a yes never approves a
+    pending Confirm on any route: nothing is said, the run stays pending, and a later plain
+    follow-up yes approves it as usual."""
+    clock = Clock()
+    pool, _ = setup(clock, push_script(clock))
+    turn(client, "commit and push my changes", conv_id="y1")
+    for text in ("yes", "Jarvis, yes", "hey jarvis go ahead"):
+        events = turn(client, text, conv_id="y1", followup=True, barge_in=True)
+        assert pool.made[0].responses == []
+        assert says(events) == [] and not [e for e in events if e["type"] in ("audio", "card")]
+        assert "end_listening" not in [e["type"] for e in events]  # the follow-up window stays open
+        assert "y1" in overlay._confirm
+        assert _steps("agent_confirm")[-1]["state"] == "pending"
+    events = turn(client, "yes", conv_id="y1", followup=True)
+    assert [r["behavior"] for r in pool.made[0].responses] == ["allow"]
+    assert "Pushed." in says(events)
 
 
 # --- D: a barge-in real request goes through the pipeline once (criterion 4, A5 side) ---
@@ -155,7 +174,7 @@ def test_debug_page_rows_jfollow8():
         ("playback", "ended audio_ms=12400"),
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
         ("barge_gate", "over=5 rule=name aec=1 mic_p90=0.042 out_p90=0.120 confirmed=1"),
-        ("barge_turn", "sent=stop reason=answer aec=1 words=2"),
+        ("barge_turn", "sent=stop reason=no_name aec=1 words=2"),
     ]
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
@@ -166,3 +185,30 @@ def test_debug_page_rows_jfollow8():
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()
+
+
+# --- E: round 2 Swift wiring pins (source checks; the logic is in EchoCancel/BargeWords tests) ---
+
+def _swift_func(name: str, file: str) -> str:
+    src = (ROOT / "mac/overlay/Sources/JarvisOverlay" / file).read_text()
+    start = src.index(f"func {name}(")
+    nxt = re.search(r"\n    (?:private |public |static |@MainActor )*func |\n    // MARK", src[start + 1:])
+    return src[start:start + 1 + nxt.start()] if nxt else src[start:]
+
+
+def test_barge_final_keeps_wake_words():
+    """Security R3 note: a confirmed barge final reaches bargeTurnText with its "Hey Jarvis", else
+    the speakers rule finds no name and a real request goes out as "stop"."""
+    body = _swift_func("completeTurn", "SpeechInput.swift")
+    assert "turn.barge != nil ? raw.trimmingCharacters(in: .whitespacesAndNewlines) : stripped" in body
+    assert "guard !stripped.isEmpty" in body  # a wake word alone is still nothing
+
+
+def test_ended_barge_run_restarts_on_next_clip():
+    """Security R3 finding 2 (I1): a barge run whose turn ended mid-reply is dropped before the next
+    clip's startBargeListeningIfNeeded, so a fresh run listens and raw self-hits stay ignored."""
+    src = (ROOT / "mac/overlay/Sources/JarvisOverlay/AppController.swift").read_text()
+    audio = src[src.index("case .audio(let text"):src.index("case .shape(")]
+    ended = audio.index("EchoCancel.bargeRunEnded(confirmed: run.confirmed,")
+    assert ended < audio.index("bargeRun = nil") < audio.index("startBargeListeningIfNeeded()")
+    assert 'detail: "restart reason=run_ended"' in audio

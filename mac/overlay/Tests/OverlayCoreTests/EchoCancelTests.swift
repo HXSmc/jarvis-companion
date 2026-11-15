@@ -74,4 +74,14 @@ final class EchoCancelTests: XCTestCase {
         XCTAssertEqual(EchoCancel.makeupGain(peak: 1.0, gainDb: 6), 1.0)
         XCTAssertEqual(EchoCancel.makeupGain(peak: 0, gainDb: 6), 1.995, accuracy: 0.001)
     }
+
+    /// I1 (hub ruling): a barge run whose listening turn ended unconfirmed (a reconfigure cancelled
+    /// it, or the recogniser gave up) while the reply plays on is dropped, so the next clip starts a
+    /// fresh one and raw self-hits stay ignored; a live, confirmed or turn-open run is kept.
+    func testBargeRunEndedTable() {
+        XCTAssertTrue(EchoCancel.bargeRunEnded(confirmed: false, listening: false, turnOpen: false))
+        XCTAssertFalse(EchoCancel.bargeRunEnded(confirmed: false, listening: true, turnOpen: false))
+        XCTAssertFalse(EchoCancel.bargeRunEnded(confirmed: true, listening: false, turnOpen: true))
+        XCTAssertFalse(EchoCancel.bargeRunEnded(confirmed: true, listening: false, turnOpen: false))
+    }
 }

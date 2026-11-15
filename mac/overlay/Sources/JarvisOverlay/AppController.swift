@@ -833,6 +833,12 @@ final class AppController {
             bargeRun?.reply = replyTexts
             model.orb = .speaking
             audio.enqueue(pcm: pcm, rate: rate)
+            if let run = bargeRun, EchoCancel.bargeRunEnded(confirmed: run.confirmed,
+                                                            listening: speech.bargeListening,
+                                                            turnOpen: speech.bargeTurnOpen) {
+                bargeRun = nil  // its turn ended mid-reply: a fresh run listens from this clip on
+                client.debugNote(step: "barge_gate", detail: "restart reason=run_ended")
+            }
             startBargeListeningIfNeeded()  // seeded with replyTexts, this clip included
         case .shape(let shape, let check):
             // The capture is seconds old: re-resolve once, off the main actor, before drawing.
