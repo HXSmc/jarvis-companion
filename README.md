@@ -78,6 +78,21 @@ When a session needs you, the phone rings: an in-app note, a push from your own
 [ntfy](https://ntfy.sh) server, or WhatsApp-to-self when the app is asleep. Notes sent
 while you were offline are caught up when you open the app.
 
+#### Step progress on session cards
+
+A card can show where the session is in its plan: "3/6 Render hook video" means step 3 of
+6 is running, with a thin bar under it. The total can grow: when the session adds steps,
+3/4 becomes 3/6 and the bar moves back. The session sets its steps with
+`jarvis-card steps set "Plan" "Build" "Test"`, then `steps next`, `steps add "Fix CI"` and
+`steps done`. On the board the steps stay one line until you tap the step row, and opening
+the session on the phone or on the PC shows every step: done ones ticked, the current one
+highlighted with its detail, and the ones still to come.
+
+<img src="docs/images/steps-card.png" alt="Session card on the phone with the folded step row: 3/6 Render hook video and a progress bar" width="280">
+<img src="docs/images/steps-expanded.png" alt="Open session on the phone: the full list of 6 steps, 2 done, 1 running, 3 to come" width="280">
+
+<img src="docs/images/steps-desktop.png" alt="Desktop Jarvis: the Sessions board with folded step rows and the open session panel listing every step" width="100%">
+
 ### 🔧 Hardware Mode: an agent that sees through your camera
 
 Point the phone at a PC case, a Raspberry Pi or an Arduino and talk. Jarvis looks at the
