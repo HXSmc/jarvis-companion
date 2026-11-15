@@ -521,20 +521,25 @@ _card_index: dict[str, deque] = {}
 _enlarged: dict[str, str] = {}
 # conv_id -> deps.clock() of the last content event sent (say, audio, shape, card, lines): the
 # app clears its cards 60 s after the last one (ShapeTrack.extendsIdle), unless one is enlarged.
-_screen_at: dict[str, float] = {}
+_screen_at: dict[str, tuple] = {}  # (the clock that read it, its reading)
 IDLE_CLEAR_S = 60
 _SCREEN_EVENTS = frozenset({"say", "audio", "shape", "card", "lines"})
 # conv_id -> ids of the cards the idle clear took off screen (no removal target until "show them").
 _idle_gone: dict[str, set] = {}
 
 
+def _idle_elapsed(conv_id: str, deps: OverlayDeps) -> bool:
+    """The app's idle clear has run since the last content event. Unknown (no event seen here, or
+    read on another clock, as when deps are swapped) is False: the index as at base."""
+    seen = _screen_at.get(conv_id)
+    return seen is not None and seen[0] is deps.clock and deps.clock() - seen[1] >= IDLE_CLEAR_S
+
+
 def _note_idle_clear(conv_id: str, deps: OverlayDeps) -> None:
     """At a turn's start: cards the app's idle clear took since the last content event are marked
     gone, so no later remove names them (a new `say` does not bring them back). The index keeps
     them for card_size and "show them"."""
-    at = _screen_at.get(conv_id)
-    if (at is not None and deps.clock() - at >= IDLE_CLEAR_S and conv_id not in _enlarged
-            and _card_index.get(conv_id)):
+    if (_idle_elapsed(conv_id, deps) and conv_id not in _enlarged and _card_index.get(conv_id)):
         _idle_gone.setdefault(conv_id, set()).update(c[0] for c in _card_index[conv_id])
 
 
@@ -543,8 +548,7 @@ def _shown_cards(conv_id: str, deps: OverlayDeps) -> list:
     clear. The index stays: "show them" brings the cards back.
     shortcut: parked, hidden, pointer and video holds of the idle clear are not modelled, so those
     cards read as cleared (fail closed: never "Removed" for a card not on screen)."""
-    at = _screen_at.get(conv_id)  # None: no content event seen here (a card pushed outside a turn)
-    if at is not None and deps.clock() - at >= IDLE_CLEAR_S and conv_id not in _enlarged:
+    if _idle_elapsed(conv_id, deps) and conv_id not in _enlarged:
         return []
     gone = _idle_gone.get(conv_id, set())
     return [c for c in _card_index.get(conv_id, ()) if c[0] not in gone]
@@ -967,7 +971,7 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
         async with aclosing(_run_turn(body, deps, on_step)) as events:
             async for event in events:
                 if event.get("type") in _SCREEN_EVENTS:
-                    _screen_at[conv_id] = deps.clock()
+                    _screen_at[conv_id] = (deps.clock, deps.clock())
                 yield event
     finally:
         left = _inflight.pop(conv_id, 1) - 1
@@ -2327,7 +2331,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         elif intent.kind in ("hide", "show", "aside", "restore", "move"):
             mode = intent.arg if intent.kind == "move" else intent.kind  # parse yields allow-listed modes only
             if mode == "show":  # the app brings the idle-cleared cards back
-                _screen_at[body.conv_id] = deps.clock()
+                _screen_at[body.conv_id] = (deps.clock, deps.clock())
                 _idle_gone.pop(body.conv_id, None)
             if on_step:
                 on_step("layout", mode=mode)

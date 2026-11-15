@@ -132,7 +132,7 @@ def _seed(conv, clock, titles=TITLES):
     """The index a card turn leaves (send order, oldest first) and its screen time."""
     overlay._card_index[conv] = deque(((f"k{i}", kind, intents.card_words(title))
                                        for i, (kind, title) in enumerate(titles)), maxlen=12)
-    overlay._screen_at[conv] = clock()
+    overlay._screen_at[conv] = (clock, clock())  # read on the deps clock, as run_turn does
 
 
 def _drops(events):
