@@ -134,7 +134,7 @@
   .steps-list li.todo .m { border: 1.5px solid var(--muted); opacity: .6; }
   .steps-list li.on .t { color: var(--text); font-weight: 600; }
   .steps-list .b { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .steps-list .b .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .steps-list .b .t { overflow-wrap: anywhere; }
   .steps-list .d { color: var(--muted); font-size: 12px; }
   .steps-more { color: var(--muted); font-size: 12px; }
   .ask { color: var(--accent); font-weight: 600; font-size: 14px; display: flex; gap: 7px; }
@@ -865,8 +865,9 @@ function stepsEl(s, compact) {
   const st = s.card && s.card.steps, items = (st && st.items) || [];
   if (!items.length) return null;
   const total = items.length, cur = Math.max(0, Math.min(st.current || 0, total));
-  const fin = !!st.finished || cur >= total;
-  const act = fin ? null : (st.active || null);
+  const fin = !!st.finished;
+  // `st.active` names the next todo when nothing runs, so read the running step from the items
+  const act = fin ? null : (items.find(i => i && i.status === "active") || {}).name || null;
   const next = act ? null : (items.find(i => i && i.status === "todo") || {}).name;
   const missing = "…";
   const wrap = h("div", { class: "steps-wrap" + (st.session_done ? " off" : "") });

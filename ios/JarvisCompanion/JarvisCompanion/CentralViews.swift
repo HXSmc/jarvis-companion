@@ -1775,10 +1775,15 @@ struct CardInfo: Decodable, Equatable {
             items.first { $0.status == "todo" }?.name ?? ""
         }
 
+        /// The step running now; nil when none is (the gateway's `active` then names the next todo).
+        var activeName: String? {
+            items.first { $0.status == "active" }?.name
+        }
+
         /// VoiceOver text for the collapsed row.
         var accessibilityLabel: String {
             if finished { return "All \(total) steps done" }
-            if let active = active, !active.isEmpty { return "Step \(current) of \(total): \(active)" }
+            if let name = activeName { return "Step \(current) of \(total): \(name)" }
             return "\(current) of \(total) done, next: \(nextName)"
         }
     }
@@ -1835,8 +1840,7 @@ struct StepsView: View {
 
     private var headline: String {
         if steps.finished { return "All done" }
-        if let active = steps.active, !active.isEmpty { return active }
-        return "Next: \(steps.nextName)"
+        return steps.activeName ?? "Next: \(steps.nextName)"
     }
 
     var body: some View {
@@ -1908,7 +1912,7 @@ struct StepsView: View {
     private func itemRow(_ item: CardInfo.Steps.Item) -> some View {
         switch item.status {
         case "done":
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "checkmark.circle.fill").foregroundColor(.jarvisMuted)
                 Text(item.name).foregroundColor(.jarvisMuted)
             }
@@ -1917,7 +1921,7 @@ struct StepsView: View {
             .accessibilityLabel("Done: \(item.name)")
         case "active":
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "circle.circle").foregroundColor(.jarvisAccent)
                     Text(item.name).fontWeight(.semibold).foregroundColor(.jarvisText)
                 }
@@ -1929,7 +1933,7 @@ struct StepsView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Now: \(item.name)\(detailSuffix(item))")
         default:
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "circle").foregroundColor(Color.jarvisMuted.opacity(0.6))
                 Text(item.name).foregroundColor(Color.jarvisMuted)
             }

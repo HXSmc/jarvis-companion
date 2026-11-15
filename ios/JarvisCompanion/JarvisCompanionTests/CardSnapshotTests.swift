@@ -112,8 +112,8 @@ final class CardSnapshotTests: XCTestCase {
      "last_activity_at": "\(now)", "role": "BUILDER",
      "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
               "doing": "Rendering the hook video",
-              "steps": {"items": [{"name": "A", "status": "done", "detail": ""},
-                                  {"name": "B", "status": "done", "detail": ""},
+              "steps": {"items": [{"name": "Plan the hook", "status": "done", "detail": ""},
+                                  {"name": "Write the script", "status": "done", "detail": ""},
                                   {"name": "Render hook video", "status": "active", "detail": "Rendering animations"},
                                   {"name": "Write captions", "status": "todo", "detail": ""}],
                         "current": 3, "total": 4, "active": "Render hook video", "finished": false,
@@ -128,8 +128,8 @@ final class CardSnapshotTests: XCTestCase {
      "last_activity_at": "\(now)", "role": "BUILDER",
      "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
               "doing": "Rendering the hook video",
-              "steps": {"items": [{"name": "A", "status": "done", "detail": ""},
-                                  {"name": "B", "status": "done", "detail": ""},
+              "steps": {"items": [{"name": "Plan the hook", "status": "done", "detail": ""},
+                                  {"name": "Write the script", "status": "done", "detail": ""},
                                   {"name": "Render hook video", "status": "active", "detail": "Rendering animations"},
                                   {"name": "Add sound", "status": "todo", "detail": ""},
                                   {"name": "Export clip", "status": "todo", "detail": ""},
@@ -139,8 +139,8 @@ final class CardSnapshotTests: XCTestCase {
     """
 
     static let stepsAllDone = """
-    {"session_id": "a1b2c3d4-0013", "title": "Hook video for the launch", "state": "idle",
-     "phase": "done", "health": "done", "device": "Mini PC", "project": "jarvis-companion",
+    {"session_id": "a1b2c3d4-0013", "title": "Hook video for the launch", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
      "doing": "Hook video finished",
      "recap": ["I rendered the hook video", "All 6 steps are done"],
      "last_activity_at": "\(now)", "role": "BUILDER",
@@ -153,7 +153,7 @@ final class CardSnapshotTests: XCTestCase {
                                   {"name": "Export clip", "status": "done", "detail": ""},
                                   {"name": "Write captions", "status": "done", "detail": ""}],
                         "current": 6, "total": 6, "active": null, "finished": true,
-                        "session_done": true, "updated_at": "2026-11-15T10:00:00Z"}}}
+                        "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
     """
 
     static let stepsLong = """
@@ -181,7 +181,7 @@ final class CardSnapshotTests: XCTestCase {
      "last_activity_at": "\(now)", "role": "BUILDER",
      "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
               "doing": "Hook video finished",
-              "steps": {"items": [{"name": "A", "status": "done", "detail": ""},
+              "steps": {"items": [{"name": "Plan the hook", "status": "done", "detail": ""},
                                   {"name": "Render hook video", "status": "active", "detail": "Rendering animations"},
                                   {"name": "Write captions", "status": "todo", "detail": ""},
                                   {"name": "Export clip", "status": "todo", "detail": ""}],
@@ -315,9 +315,9 @@ final class CardSnapshotTests: XCTestCase {
         {"items": [{"name": "A", "status": "done"}, {"name": "B", "status": "done"},
                    {"name": "C", "status": "todo"}, {"name": "D", "status": "todo"},
                    {"name": "E", "status": "todo"}, {"name": "F", "status": "todo"}],
-         "current": 2, "total": 6, "active": null, "finished": false}
+         "current": 2, "total": 6, "active": "C", "finished": false}
         """)
-        XCTAssertEqual(next.accessibilityLabel, "2 of 6 done, next: C")
+        XCTAssertEqual(next.accessibilityLabel, "2 of 6 done, next: C")  // gateway names the next todo in `active`
     }
 
     // MARK: screenshots
