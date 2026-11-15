@@ -171,7 +171,7 @@ def test_debug_page_rows_jfollow8():
     details = [
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=1 agc=off ducking=min gain_db=6 start_ms=310"),
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=3 src=ch0 agc=off ducking=min gain_db=6 start_ms=310"),
-        ("barge_aec", "levels src=ch0 ch_rms=0.031,0.002,0.002"),
+        ("barge_aec", "levels src=ch0 ch_rms_db=-30.2,-54.0,-120.0"),
         ("barge_aec", "failed reason=format rate=0 ch=3"),
         ("barge_aec", "failed reason=start rate=48000 ch=5 out_rate=44100 out_ch=1 err=-10875"),
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=5 src=ch0 out_rate=48000 out_ch=1 agc=off "
@@ -182,6 +182,10 @@ def test_debug_page_rows_jfollow8():
         ("barge_gate", "over=5 rule=name aec=1 mic_p90=0.042 out_p90=0.120 confirmed=1"),
         ("barge_turn", "sent=stop reason=no_name aec=1 words=2"),
         ("wake_capture", "restarted reason=reconfigure"),
+        ("mic_signal", "kind=wake src=ch0 frames=96000 ch0_zero=no peak_db=-31.5,-120.0,-120.0 "
+                       "rms_db=-48.2,-120.0,-120.0 stt_results=4"),
+        ("barge_aec", "src_switch from=ch0 to=ch2"),
+        ("barge_aec", "off reason=no_signal"),
     ]
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
@@ -190,6 +194,7 @@ def test_debug_page_rows_jfollow8():
     assert got["l"][7] == "playback"
     assert got["l"][10] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
     assert got["l"][11] == "wake mic capture"
+    assert got["l"][12] == "mic signal"
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()
@@ -260,7 +265,8 @@ def test_multichannel_voice_processing_feeds_channel0():
     assert "let format = micFormat ?? engine.inputNode.outputFormat(forBus: 0)" in listen
     src = (ROOT / "mac/overlay/Sources/JarvisOverlay/SpeechInput.swift").read_text()
     assert "let mono = on ? MicTap.monoFormat(of: format) : format" in start  # plain path as before
-    assert "mono.channelCount < buffer.format.channelCount ? Self.channel0(buffer, mono: mono)" in src
+    assert "let picking = mono.channelCount < buffer.format.channelCount" in src
+    assert "let copy = picking ? Self.channel(channel, of: buffer, mono: mono) : Self.copy(buffer)" in src
     reconf = _swift_func("reconfigure", "SpeechInput.swift")
     # a failed start prints the node's numbers: `failed reason=<r> rate=<n> ch=<n>`
     assert 'failed = "\\((error as? EngineFail) ?? .start) rate=\\(Int(seen.sampleRate)) ch=\\(seen.channelCount)"' in reconf
@@ -268,7 +274,8 @@ def test_multichannel_voice_processing_feeds_channel0():
     note = _swift_func("noteEchoCancel", "AppController.swift")
     assert "ch=\\(setup.channels) src=\\(setup.src)" in note
     levels = _swift_func("noteChannelLevels", "AppController.swift")
-    assert 'detail: "levels src=\\(src) ch_rms=\\(rms)"' in levels
+    assert 'detail: "levels src=\\(src) ch_rms_db=\\(rms)"' in levels
+    assert "EchoCancel.dbText($0)" in levels
 
 
 def test_voice_processing_output_runs_at_the_mic_rate():
@@ -318,7 +325,8 @@ def test_engine_note_restarts_wake_capture(client, monkeypatch):
     paired `reconfigured`, `deferred` and `levels` notes do not (one restart per rebuild)."""
     asked = []
     monkeypatch.setitem(sys.modules, "mac.voice.wakeword", SimpleNamespace(restart_capture=asked.append))
-    for detail in ("reconfigured reason=mode", "deferred reason=busy", "levels src=ch0 ch_rms=0.1,0.0,0.0"):
+    for detail in ("reconfigured reason=mode", "deferred reason=busy", "levels src=ch0 ch_rms_db=-20.0,-120.0",
+                   "src_switch from=ch0 to=ch2"):
         assert client.post("/overlay/debug/note", json={"step": "barge_aec", "detail": detail},
                            headers=AUTH_HEADER).status_code == 200
     client.post("/overlay/debug/note", json={"step": "lines", "detail": "on target"}, headers=AUTH_HEADER)
@@ -430,3 +438,45 @@ def test_exiting_capture_self_heals_bounded(monkeypatch):
     assert isinstance(err, SystemExit) and "mic capture ended" in str(err)
     assert rows == ["exited"] * 3 and len(procs) == 4
     assert all(p.poll() is not None for p in procs)
+
+
+# --- G: round 7, mic signal evidence, channel pick fallback, the owner's no-signal safety net ---
+
+def test_round7_mic_signal_and_no_signal_guard_wiring():
+    """Mac run c: with voice processing on, 4 of 4 wake turns heard nothing (STT results 0) and the
+    3-decimal levels row could not tell a cancelled voice from a dead channel 0. Every finished turn
+    on voice processing posts a `mic_signal` row measured from levelFrom (the replayed ring with the
+    wake word counts); two wake turns in a row that heard nothing below -70 dBFS turn voice
+    processing off for the session (`barge_aec off reason=no_signal`); the tap moves off an exact-zero
+    channel 0 only while no barge run exists, and every new tap starts at channel 0. The logic is in
+    EchoCancelTests (testDbfs, testChannelStatsZeroCheck, testMicSignalDetail, testSourcePick,
+    testNoSignalGuard)."""
+    report = _swift_func("reportSignal", "SpeechInput.swift")
+    assert "guard aecActive, let report = onTurnSignal else { return }" in report
+    assert "tap.signal(since: turn.levelFrom)" in report
+    assert "peakDb: signal.peakDb(tap.sourceChannel)" in report
+    assert 'detail: "kind=\\(kind) src=\\(src) \\(signal.detail) stt_results=\\(results)"' in report
+    complete = _swift_func("completeTurn", "SpeechInput.swift")
+    # the unconfirmed barge run returns before any report; both onNothing paths report heardNothing
+    assert complete.index("barge.end(); return") < complete.index("reportSignal(")
+    assert complete.count("reportSignal(turn, heardNothing: true)") == 2
+    assert complete.index("reportSignal(turn, heardNothing: false)") < complete.index("turn.onFinal?(")
+    src = (ROOT / "mac/overlay/Sources/JarvisOverlay/SpeechInput.swift").read_text()
+    assert "private var currentTurn: Turn? { didSet { tap.setHold(currentTurn?.barge != nil) } }" in src
+    install = src[src.index("    func install(on node: AVAudioInputNode"):src.index("    func clearRing()")]
+    assert "pick = EchoCancel.SourcePick()" in install
+    assert install.index("pick = EchoCancel.SourcePick()") < install.index("node.installTap(")
+    assert "hold: hold) : nil" in install
+    turn = _swift_func("turnSignal", "AppController.swift")
+    assert 'client.debugNote(step: "mic_signal", detail: signal.detail)' in turn
+    assert 'guard signal.kind == "wake", !aecNoSignal,' in turn
+    assert turn.index("aecNoSignal = true") < turn.index('echoCancelChanged(reason: "no_signal")')
+    want = _swift_func("wantEchoCancel", "AppController.swift")
+    assert "!aecFailedHere && !aecNoSignal && EchoCancel.wantOn(" in want
+    note = _swift_func("noteEchoCancel", "AppController.swift")
+    assert 'aecNoSignal ? "no_signal" : "failed"' in note
+    ac = (ROOT / "mac/overlay/Sources/JarvisOverlay/AppController.swift").read_text()
+    assert 'detail: "src_switch from=ch0 to=ch\\(to)"' in ac
+    # session-sticky: route and mode changes reset aecFailedHere, never aecNoSignal
+    assert re.findall(r"^\s+aecNoSignal = (\w+)$", ac, re.M) == ["true"]
+    assert "private var aecNoSignal = false" in ac

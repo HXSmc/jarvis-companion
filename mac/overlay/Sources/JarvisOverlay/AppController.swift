@@ -58,6 +58,10 @@ final class AppController {
     private var inputKind = "other"
     /// Turning the canceller on failed on this route: not retried until the route or mode changes.
     private var aecFailedHere = false
+    /// Voice processing heard nothing on two wake turns in a row (NoSignalGuard): off for the rest of
+    /// this app session (plain path, as with headphones); route and mode changes never clear it.
+    private var aecNoSignal = false
+    private var noSignal = EchoCancel.NoSignalGuard()
     /// The mic engine started once (launch); later reconfigures need it.
     private var speechStarted = false
     /// The last reconfigure found no usable input; the next one that works clears the banner.
@@ -126,6 +130,10 @@ final class AppController {
         refreshOutputRoute()
         refreshInputRoute()
         speech.onConfigurationChange = { [weak self] in self?.echoCancelChanged(reason: "config_change") }
+        speech.onSourceSwitch = { [weak self] to in
+            self?.client.debugNote(step: "barge_aec", detail: "src_switch from=ch0 to=ch\(to)")
+        }
+        speech.onTurnSignal = { [weak self] signal in self?.turnSignal(signal) }
         do {
             try reconfigureEngine(reason: nil)
             noteBargeMode()
@@ -150,7 +158,7 @@ final class AppController {
     /// Voice processing wanted now: .aec mode on a non-headphones output with a non-Bluetooth input,
     /// unless it already failed on this route.
     private func wantEchoCancel() -> Bool {
-        !aecFailedHere && EchoCancel.wantOn(aecMode: bargeMode == .aec, outputHeadphones: routeIsHeadphones,
+        !aecFailedHere && !aecNoSignal && EchoCancel.wantOn(aecMode: bargeMode == .aec, outputHeadphones: routeIsHeadphones,
                                             inputBluetooth: inputIsBluetooth)
     }
 
@@ -195,7 +203,7 @@ final class AppController {
             noteChannelLevels(src: setup.src)
         } else {
             let why = bargeMode != .aec ? "mode" : routeIsHeadphones ? "headphones"
-                : inputIsBluetooth ? "bluetooth_input" : "failed"
+                : inputIsBluetooth ? "bluetooth_input" : aecNoSignal ? "no_signal" : "failed"
             detail = "off reason=\(why)"
         }
         client.debugNote(step: "barge_aec", detail: detail)
@@ -207,9 +215,20 @@ final class AppController {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
             guard let self, self.speech.aecActive else { return }
-            let rms = self.speech.channelPeaks.map { String(format: "%.3f", $0) }.joined(separator: ",")
-            self.client.debugNote(step: "barge_aec", detail: "levels src=\(src) ch_rms=\(rms)")
+            let rms = self.speech.channelPeaks.map { EchoCancel.dbText($0) }.joined(separator: ",")
+            self.client.debugNote(step: "barge_aec", detail: "levels src=\(src) ch_rms_db=\(rms)")
         }
+    }
+
+    /// A finished turn on voice processing: its `mic_signal` row; a wake turn also feeds the owner's
+    /// safety net, which turns voice processing off when two wake turns in a row heard nothing.
+    private func turnSignal(_ signal: SpeechInput.TurnSignal) {
+        client.debugNote(step: "mic_signal", detail: signal.detail)
+        guard signal.kind == "wake", !aecNoSignal,
+              noSignal.wakeTurnEnded(heardNothing: signal.heardNothing, sttResults: signal.sttResults,
+                                     peakDb: signal.peakDb) else { return }
+        aecNoSignal = true
+        echoCancelChanged(reason: "no_signal")
     }
 
     /// A route change, a mode change from a later health read, or the engine's configuration

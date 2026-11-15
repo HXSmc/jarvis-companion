@@ -132,4 +132,82 @@ final class EchoCancelTests: XCTestCase {
         XCTAssertNil(EchoCancel.voiceOutputFormat(inputRate: 48000, inputChannels: 0, outputChannels: 1))
         XCTAssertNil(EchoCancel.voiceOutputFormat(inputRate: 0, inputChannels: 5, outputChannels: 1))
     }
+
+    /// dBFS: full scale 0.0, half -6.0, silence (and -inf) -120.0, one decimal in the rows.
+    func testDbfs() {
+        XCTAssertEqual(EchoCancel.dbfs(1), 0, accuracy: 1e-9)
+        XCTAssertEqual(EchoCancel.dbfs(0.5), -6.02, accuracy: 0.01)
+        XCTAssertEqual(EchoCancel.dbfs(0), -120)
+        XCTAssertEqual(EchoCancel.dbfs(1e-9), -120)  // below the floor
+        XCTAssertEqual(EchoCancel.dbText(0.001), "-60.0")
+        XCTAssertEqual(EchoCancel.dbText(0), "-120.0")
+    }
+
+    /// The zero check is exact: one tiny sample is not silence; interleaved data steps by the stride.
+    func testChannelStatsZeroCheck() {
+        let zeros = [Float](repeating: 0, count: 8)
+        zeros.withUnsafeBufferPointer { XCTAssertTrue(EchoCancel.channelStats($0.baseAddress!, frames: 8, stride: 1).zero) }
+        var tiny = zeros
+        tiny[5] = 1e-7
+        tiny.withUnsafeBufferPointer { XCTAssertFalse(EchoCancel.channelStats($0.baseAddress!, frames: 8, stride: 1).zero) }
+        // interleaved 2 ch: channel 0 = 0.0, channel 1 = -0.5
+        let inter: [Float] = [0, -0.5, 0, -0.5, 0, -0.5]
+        inter.withUnsafeBufferPointer { b in
+            let c0 = EchoCancel.channelStats(b.baseAddress!, frames: 3, stride: 2)
+            XCTAssertTrue(c0.zero)
+            let c1 = EchoCancel.channelStats(b.baseAddress! + 1, frames: 3, stride: 2)
+            XCTAssertFalse(c1.zero)
+            XCTAssertEqual(c1.peak, 0.5, accuracy: 1e-9)
+            XCTAssertEqual(c1.sumSq, 0.75, accuracy: 1e-9)
+        }
+    }
+
+    /// The mic_signal row: per-channel peak and RMS in dBFS, frames, ch0_zero over every buffer.
+    func testMicSignalDetail() {
+        var s = EchoCancel.MicSignal()
+        s.add(peak: [0, 0.5], sumSq: [0, 0.25 * 100], frames: 100, ch0Zero: true)
+        s.add(peak: [0, 0.1], sumSq: [0, 0.25 * 100], frames: 100, ch0Zero: true)
+        XCTAssertEqual(s.detail, "frames=200 ch0_zero=yes peak_db=-120.0,-6.0 rms_db=-120.0,-6.0")
+        s.add(peak: [0.001, 0], sumSq: [0, 0], frames: 100, ch0Zero: false)
+        XCTAssertTrue(s.detail.hasPrefix("frames=300 ch0_zero=no peak_db=-60.0,-6.0 "))
+        XCTAssertEqual(s.peakDb(0), -60, accuracy: 0.01)
+        XCTAssertEqual(EchoCancel.MicSignal().detail, "frames=0 ch0_zero=no peak_db= rms_db=")
+    }
+
+    /// Channel 0 exact silence for 1 s while another channel is live moves the source to the lowest
+    /// live channel, once; a reply playing (hold), a quiet other channel or a short gap do not.
+    func testSourcePick() {
+        var p = EchoCancel.SourcePick()
+        XCTAssertNil(p.step(ch0Zero: true, rmsDb: [-120, -120, -60], seconds: 0.6, hold: false))
+        XCTAssertNil(p.step(ch0Zero: false, rmsDb: [-80, -120, -60], seconds: 0.1, hold: false))  // gap resets
+        XCTAssertNil(p.step(ch0Zero: true, rmsDb: [-120, -120, -60], seconds: 0.6, hold: false))
+        XCTAssertEqual(p.step(ch0Zero: true, rmsDb: [-120, -95, -60, -50], seconds: 0.5, hold: false), 2)
+        XCTAssertEqual(p.channel, 2)
+        XCTAssertNil(p.step(ch0Zero: true, rmsDb: [-120, -60, -60], seconds: 5, hold: false))  // moves once
+        var q = EchoCancel.SourcePick()
+        XCTAssertNil(q.step(ch0Zero: true, rmsDb: [-120, -60], seconds: 2, hold: true))  // a reply plays
+        XCTAssertNil(q.step(ch0Zero: true, rmsDb: [-120, -95], seconds: 2, hold: false))  // nothing live
+        XCTAssertEqual(q.channel, 0)
+        var mono = EchoCancel.SourcePick()
+        XCTAssertNil(mono.step(ch0Zero: true, rmsDb: [-120], seconds: 2, hold: false))  // a mono node
+        XCTAssertEqual(EchoCancel.monoSource(channels: 5, channel: 2), "ch2")
+    }
+
+    /// Two wake turns in a row that heard nothing with the processed channel below -70 dBFS trip the
+    /// guard; a quiet real voice (above -70), a heard turn in between, or STT results never do.
+    func testNoSignalGuard() {
+        var g = EchoCancel.NoSignalGuard()
+        XCTAssertFalse(g.wakeTurnEnded(heardNothing: true, sttResults: 0, peakDb: -95))
+        XCTAssertTrue(g.wakeTurnEnded(heardNothing: true, sttResults: 0, peakDb: -120))
+        var quiet = EchoCancel.NoSignalGuard()
+        XCTAssertFalse(quiet.wakeTurnEnded(heardNothing: true, sttResults: 0, peakDb: -60))
+        XCTAssertFalse(quiet.wakeTurnEnded(heardNothing: true, sttResults: 0, peakDb: -65))  // quiet voice
+        var reset = EchoCancel.NoSignalGuard()
+        XCTAssertFalse(reset.wakeTurnEnded(heardNothing: true, sttResults: 0, peakDb: -100))
+        XCTAssertFalse(reset.wakeTurnEnded(heardNothing: false, sttResults: 3, peakDb: -30))  // heard
+        XCTAssertFalse(reset.wakeTurnEnded(heardNothing: true, sttResults: 0, peakDb: -100))
+        var stt = EchoCancel.NoSignalGuard()
+        XCTAssertFalse(stt.wakeTurnEnded(heardNothing: true, sttResults: 1, peakDb: -100))
+        XCTAssertFalse(stt.wakeTurnEnded(heardNothing: true, sttResults: 1, peakDb: -100))
+    }
 }

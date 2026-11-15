@@ -17,7 +17,9 @@ final class SpeechInput {
     private var isRunning = false
     /// startEngine succeeded once: from then on a stopped engine is a fault to rebuild.
     private var startedOnce = false
-    private var currentTurn: Turn?
+    /// The tap's channel pick waits while a barge run exists (a reply plays): the other node channels
+    /// may be raw mics or the speaker reference, never moved to over Jarvis's own voice.
+    private var currentTurn: Turn? { didSet { tap.setHold(currentTurn?.barge != nil) } }
     private var turnTask: Task<Void, Never>?
     /// How the last finished turn was heard (STT path, counters, what ended it): debug page only.
     private(set) var lastDiagnosis = ""
@@ -34,6 +36,22 @@ final class SpeechInput {
     /// The engine stopped by itself (AVAudioEngineConfigurationChange: a device or route change);
     /// AppController reconfigures it at once.
     var onConfigurationChange: (() -> Void)?
+    /// Voice processing on and channel 0 was exact digital silence for 1 s while channel `to` was live:
+    /// the tap now hands on channel `to` (the `barge_aec src_switch` row).
+    var onSourceSwitch: ((_ to: Int) -> Void)?
+    /// One per finished turn while voice processing is on: the `mic_signal` row and the no-signal guard.
+    var onTurnSignal: ((TurnSignal) -> Void)?
+    /// The input node's channel count as tapped (the `src=` field).
+    private var nodeChannels = 1
+
+    /// A finished turn's mic signal (numbers and fixed words only, never audio or words).
+    struct TurnSignal {
+        var kind: String          // wake|followup|barge
+        var heardNothing: Bool    // it ended through onNothing (no_speech on a wake turn)
+        var sttResults: Int
+        var peakDb: Double        // the handed-on channel's peak over the turn, dBFS
+        var detail: String        // the mic_signal row
+    }
 
     /// What the service's follow-up gate reads with the words: 100 ms mic levels, STT confidence.
     struct Heard {
@@ -72,6 +90,9 @@ final class SpeechInput {
     /// The loudest buffer RMS per node channel since the tap was installed (the `barge_aec levels` row
     /// shows whether channel 0 really carries the voice).
     var channelPeaks: [Double] { tap.channelPeaks }
+
+    /// What levels, the ring and the recogniser hear: `mono` (1-channel node) or `ch<n>`.
+    var src: String { EchoCancel.monoSource(channels: nodeChannels, channel: tap.sourceChannel) }
 
     /// An unconfirmed barge run is listening (the reply plays on).
     var bargeListening: Bool {
@@ -177,8 +198,11 @@ final class SpeechInput {
         // The tap keeps the node's own format (the input node does no format conversion on a device,
         // Apple's AVAudioInputNode docs). Voice processing on: it hands on channel 0 only, in `mono`;
         // off: every channel, as before.
-        tap.install(on: input, format: format, mono: mono)
+        tap.install(on: input, format: format, mono: mono) { [weak self] to in
+            Task { @MainActor in self?.onSourceSwitch?(to) }
+        }
         micFormat = mono
+        nodeChannels = Int(format.channelCount)
         tapInstalled = true
         attach(on)
         engine.prepare()
@@ -369,11 +393,17 @@ final class SpeechInput {
         // time-cap final holds Jarvis's own echo); it just ends and the reply plays on.
         if let barge = turn.barge, !barge.confirmed { barge.end(); return }
         guard !nothing, let end = turn.endOfSpeech, let raw = turn.keptText ?? rawText else {
+            reportSignal(turn, heardNothing: true)
             turn.onNothing?(turn.diagnosis)
             return
         }
         let stripped = Self.stripWake(raw, followUp: turn.followUp)
-        guard !stripped.isEmpty else { turn.onNothing?("only the wake word was heard; \(turn.diagnosis)"); return }
+        guard !stripped.isEmpty else {
+            reportSignal(turn, heardNothing: true)
+            turn.onNothing?("only the wake word was heard; \(turn.diagnosis)")
+            return
+        }
+        reportSignal(turn, heardNothing: false)
         // A barge turn keeps its wake words: the speakers rule (bargeTurnText) needs the name, and
         // freshFrom counts words of the unstripped text. The service drops the wake itself.
         let text = turn.barge != nil ? raw.trimmingCharacters(in: .whitespacesAndNewlines) : stripped
@@ -382,6 +412,18 @@ final class SpeechInput {
         turn.onFinal?(text, Date().timeIntervalSince(end) * 1000, end,
                       Heard(levels: Array(levels.suffix(LevelBlocks.maxSent)), conf: turn.confidence.mean,
                             audioFrom: turn.stats.firstAt))
+    }
+
+    /// Voice processing on: one `mic_signal` row for the finished turn, over the audio the recogniser
+    /// heard (from `levelFrom`, so a wake turn's replayed ring with "Hey Jarvis" counts).
+    private func reportSignal(_ turn: Turn, heardNothing: Bool) {
+        guard aecActive, let report = onTurnSignal else { return }
+        let signal = tap.signal(since: turn.levelFrom)
+        let kind = turn.barge != nil ? "barge" : turn.followUp ? "followup" : "wake"
+        let results = turn.stats.resultCount
+        report(TurnSignal(kind: kind, heardNothing: heardNothing, sttResults: results,
+                          peakDb: signal.peakDb(tap.sourceChannel),
+                          detail: "kind=\(kind) src=\(src) \(signal.detail) stt_results=\(results)"))
     }
 
     /// Drops a leading wake phrase (a follow-up: only at the very start), and stray punctuation.
@@ -706,6 +748,11 @@ private final class FeedStats: @unchecked Sendable {
         results += 1
     }
 
+    var resultCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return results
+    }
+
     func fail(_ message: String) {
         lock.lock(); defer { lock.unlock() }
         error = message
@@ -846,6 +893,32 @@ private final class MicTap: @unchecked Sendable {
     private var voicedAt: Date?
     private var levels: [LevelSample] = []  // the last 40 s of buffer levels (turn gates read them)
     private var peaks: [Double] = []  // loudest buffer RMS per node channel since install
+    private var signals: [(at: Date, signal: EchoCancel.MicSignal)] = []  // per buffer, same 40 s as levels
+    private var pick = EchoCancel.SourcePick()
+    private var hold = false
+
+    var sourceChannel: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return pick.channel
+    }
+
+    func setHold(_ on: Bool) {
+        lock.lock()
+        hold = on
+        lock.unlock()
+    }
+
+    /// The per-channel signal of every buffer since `since`, summed.
+    func signal(since: Date) -> EchoCancel.MicSignal {
+        lock.lock()
+        defer { lock.unlock() }
+        var out = EchoCancel.MicSignal()
+        for s in signals where s.at >= since {
+            out.add(peak: s.signal.peak, sumSq: s.signal.sumSq, frames: s.signal.frames, ch0Zero: s.signal.ch0Zero)
+        }
+        return out
+    }
 
     /// Mono, deinterleaved, same sample type and rate as the node: what the tap hands on.
     static func monoFormat(of format: AVAudioFormat) -> AVAudioFormat? {
@@ -866,15 +939,27 @@ private final class MicTap: @unchecked Sendable {
         return voicedAt
     }
 
-    func install(on node: AVAudioInputNode, format: AVAudioFormat, mono: AVAudioFormat) {
+    /// `onSwitch(to)`: the voice-processing path moved off an exact-silent channel 0 (SourcePick).
+    func install(on node: AVAudioInputNode, format: AVAudioFormat, mono: AVAudioFormat,
+                 onSwitch: @escaping @Sendable (Int) -> Void) {
         lock.lock()
         peaks = []
+        pick = EchoCancel.SourcePick()  // every new tap starts at channel 0
         lock.unlock()
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
-            let perChannel = Self.channelRms(buffer)
-            let copy = mono.channelCount < buffer.format.channelCount ? Self.channel0(buffer, mono: mono)
-                                                                      : Self.copy(buffer)
+            let signal = Self.signal(buffer)
+            let frames = Int(buffer.frameLength)
+            let perChannel = signal.peak.indices.map { signal.rms($0) }
+            let picking = mono.channelCount < buffer.format.channelCount
+            lock.lock()
+            let moved = picking ? pick.step(ch0Zero: frames > 0 && signal.ch0Zero && !signal.peak.isEmpty,
+                                            rmsDb: perChannel.map { EchoCancel.dbfs($0) },
+                                            seconds: Double(frames) / max(1, buffer.format.sampleRate),
+                                            hold: hold) : nil
+            let channel = pick.channel
+            lock.unlock()
+            let copy = picking ? Self.channel(channel, of: buffer, mono: mono) : Self.copy(buffer)
             let now = Date()
             var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
             let rms = Self.rms(copy)
@@ -884,14 +969,17 @@ private final class MicTap: @unchecked Sendable {
             }
             if vad.isVoiced(rms: rms) { voicedAt = now }
             levels.append(LevelSample(at: now, rms: rms, frames: Int(copy.frameLength)))
+            signals.append((now, signal))
             if let first = levels.first, now.timeIntervalSince(first.at) > 41 {
                 levels.removeAll { now.timeIntervalSince($0.at) > 40 }
+                signals.removeAll { now.timeIntervalSince($0.at) > 40 }
             }
             ring.append((copy, now))
             ring.removeAll { now.timeIntervalSince($0.at) > 2 }
             sink = self.sink
             lock.unlock()
             sink?(copy, now)
+            if let moved { onSwitch(moved) }
         }
     }
 
@@ -935,37 +1023,39 @@ private final class MicTap: @unchecked Sendable {
         return out
     }
 
-    /// Channel 0 of `buffer` copied into a `mono` buffer (tap buffers are only valid inside the
+    /// Channel `c` of `buffer` copied into a `mono` buffer (tap buffers are only valid inside the
     /// callback). Interleaved input steps over the other channels.
-    private static func channel0(_ buffer: AVAudioPCMBuffer, mono: AVAudioFormat) -> AVAudioPCMBuffer {
+    private static func channel(_ c: Int, of buffer: AVAudioPCMBuffer, mono: AVAudioFormat) -> AVAudioPCMBuffer {
         let frames = Int(buffer.frameLength)
-        guard let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength)
+        guard c < Int(buffer.format.channelCount),
+              let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength)
         else { return buffer }
         out.frameLength = buffer.frameLength
+        let interleaved = buffer.format.isInterleaved
         let stride = buffer.stride  // 1 when deinterleaved, the channel count when interleaved
         if let src = buffer.floatChannelData, let dst = out.floatChannelData {
-            for f in 0..<frames { dst[0][f] = src[0][f * stride] }
+            let from = interleaved ? src[0] + c : src[c]
+            for f in 0..<frames { dst[0][f] = from[f * stride] }
         } else if let src = buffer.int16ChannelData, let dst = out.int16ChannelData {
-            for f in 0..<frames { dst[0][f] = src[0][f * stride] }
+            let from = interleaved ? src[0] + c : src[c]
+            for f in 0..<frames { dst[0][f] = from[f * stride] }
         }
         return out
     }
 
-    /// RMS of each node channel (float formats; at most 8), for the channel check row.
-    private static func channelRms(_ buffer: AVAudioPCMBuffer) -> [Double] {
+    /// Peak, sum of squares and the channel-0 zero check of each node channel (float formats; at most
+    /// 8), for the mic_signal and levels rows and the channel pick.
+    private static func signal(_ buffer: AVAudioPCMBuffer) -> EchoCancel.MicSignal {
+        var out = EchoCancel.MicSignal()
         let frames = Int(buffer.frameLength)
-        guard frames > 0, let data = buffer.floatChannelData else { return [] }
-        let channels = min(8, Int(buffer.format.channelCount))
+        guard frames > 0, let data = buffer.floatChannelData else { return out }
         let stride = buffer.stride
         let interleaved = buffer.format.isInterleaved
-        return (0..<channels).map { c in
-            var sum: Float = 0
-            for f in 0..<frames {
-                let x = interleaved ? data[0][f * stride + c] : data[c][f]
-                sum += x * x
-            }
-            return Double(min(1, sqrt(sum / Float(frames))))
+        let stats = (0..<min(8, Int(buffer.format.channelCount))).map { c in
+            EchoCancel.channelStats(interleaved ? data[0] + c : data[c], frames: frames, stride: stride)
         }
+        out.add(peak: stats.map(\.peak), sumSq: stats.map(\.sumSq), frames: frames, ch0Zero: stats.first?.zero ?? false)
+        return out
     }
 
     private static func rms(_ buffer: AVAudioPCMBuffer) -> Double {

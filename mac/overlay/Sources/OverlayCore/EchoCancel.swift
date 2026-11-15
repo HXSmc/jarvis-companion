@@ -85,8 +85,102 @@ public enum EchoCancel {
     /// Which mono signal levels, the ring and the recogniser get from the tap (the `src=` field):
     /// channel 0 of a multi-channel node (the voice processor's output is 1 channel, app log
     /// `theActualVPOutputFmt = 1 ch`), the only channel of a mono one.
-    public static func monoSource(channels: Int) -> String {
-        channels > 1 ? "ch0" : "mono"
+    public static func monoSource(channels: Int, channel: Int = 0) -> String {
+        channels > 1 ? "ch\(channel)" : "mono"
+    }
+
+    /// Full-scale level of a linear amplitude (peak or RMS) in dBFS, floored at -120 (silence, -inf).
+    public static func dbfs(_ x: Double) -> Double {
+        x > 0 ? max(-120, 20 * log10(x)) : -120
+    }
+
+    /// dBFS with one decimal, for the debug rows.
+    public static func dbText(_ x: Double) -> String {
+        String(format: "%.1f", dbfs(x))
+    }
+
+    /// Peak abs, sum of squares and "every sample exactly 0.0" of one channel of a tap buffer
+    /// (`stride` 1 deinterleaved, the channel count interleaved).
+    public static func channelStats(_ data: UnsafePointer<Float>, frames: Int, stride: Int)
+        -> (peak: Double, sumSq: Double, zero: Bool) {
+        var peak: Float = 0, sum: Double = 0
+        for f in 0..<frames {
+            let x = data[f * stride]
+            peak = max(peak, abs(x))
+            sum += Double(x * x)
+        }
+        return (Double(peak), sum, peak == 0)
+    }
+
+    /// The mic's per-channel signal over a stretch of tap buffers (the `mic_signal` row: numbers only).
+    public struct MicSignal: Equatable {
+        public var peak: [Double] = []   // linear peak abs per node channel
+        public var sumSq: [Double] = []
+        public var frames = 0
+        public var ch0Zero = true        // every channel-0 sample so far was exactly 0.0
+        public init() {}
+
+        /// Adds one buffer's per-channel stats.
+        public mutating func add(peak p: [Double], sumSq s: [Double], frames n: Int, ch0Zero z: Bool) {
+            if peak.count < p.count {
+                peak += Array(repeating: 0, count: p.count - peak.count)
+                sumSq += Array(repeating: 0, count: p.count - sumSq.count)
+            }
+            for i in p.indices { peak[i] = max(peak[i], p[i]); sumSq[i] += s[i] }
+            frames += n
+            ch0Zero = ch0Zero && z
+        }
+
+        public func rms(_ c: Int) -> Double {
+            c < sumSq.count && frames > 0 ? (sumSq[c] / Double(frames)).squareRoot() : 0
+        }
+
+        public func peakDb(_ c: Int) -> Double { dbfs(c < peak.count ? peak[c] : 0) }
+
+        /// `frames=<n> ch0_zero=yes|no peak_db=<c0>,<c1>,... rms_db=<c0>,<c1>,...` (one decimal, -120.0 = silence).
+        public var detail: String {
+            "frames=\(frames) ch0_zero=\(frames > 0 && ch0Zero ? "yes" : "no") "
+                + "peak_db=\(peak.map { dbText($0) }.joined(separator: ",")) "
+                + "rms_db=\(peak.indices.map { dbText(rms($0)) }.joined(separator: ","))"
+        }
+    }
+
+    /// Which node channel the voice-processing path hands on. Apple's docs do not say which channel of a
+    /// multi-channel voice-processed input carries the processed voice; it starts at channel 0, and moves
+    /// once to the lowest other channel above `liveDb` when channel 0 has been exact digital silence for
+    /// `zeroS` of audio (a real processed signal is never exactly 0.0 for a second). `hold` (a reply plays)
+    /// blocks the move: the other channels may be raw mics or the speaker reference.
+    public struct SourcePick: Equatable {
+        public static let zeroS = 1.0
+        public static let liveDb = -90.0
+        public private(set) var channel = 0
+        private var zeroFor = 0.0  // seconds of exact-zero channel 0 in a row
+        public init() {}
+
+        /// One tap buffer: returns the new channel when it moves, else nil.
+        public mutating func step(ch0Zero: Bool, rmsDb: [Double], seconds: Double, hold: Bool) -> Int? {
+            guard channel == 0 else { return nil }
+            zeroFor = ch0Zero && !hold ? zeroFor + seconds : 0
+            guard zeroFor >= Self.zeroS,
+                  let to = rmsDb.indices.first(where: { $0 > 0 && rmsDb[$0] > Self.liveDb }) else { return nil }
+            channel = to
+            return to
+        }
+    }
+
+    /// The owner's safety net: two wake turns in a row on voice processing that heard nothing (no
+    /// speech, 0 STT results) while the processed channel peaked below `quietDb` turn voice processing
+    /// off for the app session. A quiet real voice (peak above `quietDb`) or any heard turn resets it.
+    public struct NoSignalGuard: Equatable {
+        public static let quietDb = -70.0
+        public private(set) var misses = 0
+        public init() {}
+
+        /// A wake turn ended on voice processing; true = turn voice processing off now.
+        public mutating func wakeTurnEnded(heardNothing: Bool, sttResults: Int, peakDb: Double) -> Bool {
+            misses = heardNothing && sttResults == 0 && peakDb < Self.quietDb ? misses + 1 : 0
+            return misses >= 2
+        }
     }
 
     /// The playback makeup gain for what the canceller takes off the mic: `gainDb` of gain, capped
