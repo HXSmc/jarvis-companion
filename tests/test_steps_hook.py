@@ -156,3 +156,28 @@ def test_steps_hook_only_posts_to_a_loopback_gateway(gateway, home):
         run(body, bad, home)
     run(body, url.replace("127.0.0.1", "localhost"), home)
     assert len(seen) == 1  # only the localhost run reached the stub
+
+
+def test_steps_hook_ignores_http_proxy_settings(gateway, home):
+    url, seen = gateway
+    proxied = []
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_POST(self):
+            proxied.append(self.path)
+            self.send_response(502)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    proxy = HTTPServer(("127.0.0.1", 0), Proxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    try:
+        purl = f"http://127.0.0.1:{proxy.server_port}"
+        run(payload("TaskUpdate", {"taskId": "1", "status": "completed"}), url, home,
+            http_proxy=purl, HTTP_PROXY=purl, no_proxy="", NO_PROXY="")
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+    assert proxied == [] and len(seen) == 1  # straight to the gateway, the token never met the proxy

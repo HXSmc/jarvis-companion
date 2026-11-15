@@ -3,9 +3,10 @@
 
 Wire it for TaskCreate|TaskUpdate|TodoWrite (see jarvis-steps-hook.install.md).
 It reads the hook JSON on stdin and posts one /cards/event `steps` call to the
-local gateway (plain http on 127.0.0.1, localhost or ::1 only), with the shared bearer secret read in-process from the vault
-(never printed). It writes nothing to stdout or stderr and always exits 0, so it
-can never block or slow a session: bad input, no secret or a gateway that is down
+local gateway (plain http on 127.0.0.1, localhost or ::1 only, never through a
+proxy), with the shared bearer secret read in-process from the vault (never
+printed). It writes nothing to stdout or stderr and always exits 0, so it can
+never block or slow a session: bad input, no secret or a gateway that is down
 all end silently within about 1.5 s.
 
   TaskCreate -> op task (key = the new task id, name = subject, detail = activeForm)
@@ -26,6 +27,7 @@ import urllib.request  # noqa: E402
 
 TOOLS = ("TaskCreate", "TaskUpdate", "TodoWrite")
 STATUS = {"pending": "todo", "in_progress": "active", "completed": "done", "deleted": "deleted"}
+TODO_STATUS = {"in_progress": "active", "completed": "done"}  # anything else is todo
 MAX_STEPS = 30  # the gateway's cap; a longer TodoWrite list keeps its first 30
 
 
@@ -62,8 +64,7 @@ def body_for(hook):
         if not todos:
             return None
         return {"op": "set", "source": "tasks", "names": [_text(t.get("content")) for t in todos],
-                "statuses": [{"in_progress": "active", "completed": "done"}.get(t.get("status"), "todo")
-                             for t in todos]}
+                "statuses": [TODO_STATUS.get(t.get("status"), "todo") for t in todos]}
     return None
 
 
@@ -91,10 +92,13 @@ def main():
     secret = config.get_token()
     if not secret:
         return
-    req = urllib.request.Request(gateway + "/cards/event", method="POST",
-                                 data=json.dumps({"session": session, "action": "steps", **body}).encode(),
-                                 headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=1.5).close()
+    data = json.dumps({"session": session, "action": "steps", **body}).encode()
+    headers = {"Authorization": "Bearer " + secret, "Content-Type": "application/json"}
+    req = urllib.request.Request(gateway + "/cards/event", method="POST", data=data,
+                                 headers=headers)
+    # no ProxyHandler entries: http_proxy/HTTP_PROXY must never see the bearer secret
+    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    no_proxy.open(req, timeout=1.5).close()
 
 
 if __name__ == "__main__":

@@ -1852,7 +1852,7 @@ struct StepsView: View {
                     Text("\(steps.current)/\(steps.total)")
                         .font(.subheadline.weight(.semibold).monospacedDigit())
                         .foregroundColor(.jarvisAccent)
-                        .opacity(dim)
+                        .opacity(steps.sessionDone == true ? 0.75 : 1)  // AA on the dark card
                     Text(headline)
                         .font(.subheadline)
                         .foregroundColor(.jarvisText)
@@ -1878,7 +1878,7 @@ struct StepsView: View {
         }
     }
 
-    /// A finished session fades only its count and bar, so the step names keep full contrast.
+    /// A finished session fades only its count (to 0.75, above) and bar, so the step names keep full contrast.
     private var dim: Double { steps.sessionDone == true ? 0.55 : 1 }
 
     private var bar: some View {
