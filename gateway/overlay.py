@@ -524,17 +524,18 @@ _enlarged: dict[str, str] = {}
 _screen_at: dict[str, float] = {}
 IDLE_CLEAR_S = 60
 _SCREEN_EVENTS = frozenset({"say", "audio", "shape", "card", "lines"})
-# conv_id -> the index of the cards the idle clear took off screen: "show them" puts it back.
-_idle_stash: dict[str, deque] = {}
+# conv_id -> ids of the cards the idle clear took off screen (no removal target until "show them").
+_idle_gone: dict[str, set] = {}
 
 
 def _note_idle_clear(conv_id: str, deps: OverlayDeps) -> None:
-    """At a turn's start: cards the app's idle clear took since the last content event leave the
-    index for the stash, so no later remove names them (a new `say` does not bring them back)."""
+    """At a turn's start: cards the app's idle clear took since the last content event are marked
+    gone, so no later remove names them (a new `say` does not bring them back). The index keeps
+    them for card_size and "show them"."""
     at = _screen_at.get(conv_id)
     if (at is not None and deps.clock() - at >= IDLE_CLEAR_S and conv_id not in _enlarged
             and _card_index.get(conv_id)):
-        _idle_stash[conv_id] = _card_index.pop(conv_id)
+        _idle_gone.setdefault(conv_id, set()).update(c[0] for c in _card_index[conv_id])
 
 
 def _shown_cards(conv_id: str, deps: OverlayDeps) -> list:
@@ -545,7 +546,8 @@ def _shown_cards(conv_id: str, deps: OverlayDeps) -> list:
     at = _screen_at.get(conv_id)  # None: no content event seen here (a card pushed outside a turn)
     if at is not None and deps.clock() - at >= IDLE_CLEAR_S and conv_id not in _enlarged:
         return []
-    return list(_card_index.get(conv_id, ()))
+    gone = _idle_gone.get(conv_id, set())
+    return [c for c in _card_index.get(conv_id, ()) if c[0] not in gone]
 # conv_id -> the page URLs of the last opened workspace ("open the pages"), urls only; _forget drops it.
 _ws_pages: dict[str, list[str]] = {}
 _apps_cache: tuple[float, dict] | None = None
@@ -648,7 +650,7 @@ def _forget(conv_id: str) -> None:
     _sessions_follow.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
     _screen_at.pop(conv_id, None)
-    _idle_stash.pop(conv_id, None)
+    _idle_gone.pop(conv_id, None)
     _tainted.discard(conv_id)
 
 
@@ -669,7 +671,7 @@ def _drop_cards(conv_id: str, group: str, keep: tuple[str, ...] = ()) -> dict | 
 def _forget_cards(conv_id: str) -> None:
     """After a `clear` the app holds no cards: none can be named or restored by a card_size ask."""
     _card_index.pop(conv_id, None)
-    _idle_stash.pop(conv_id, None)
+    _idle_gone.pop(conv_id, None)
     _enlarged.pop(conv_id, None)
     _card_pick.pop(conv_id, None)
 
@@ -698,7 +700,7 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     The card index and the enlarged id stay: the app still shows those cards (Mac live run 5, 37a).
     Their title words only feed intents.match_card (fixed code), never a model prompt."""
     cards, enlarged = _card_index.get(conv_id), _enlarged.get(conv_id)
-    screen_at, stash = _screen_at.get(conv_id), _idle_stash.get(conv_id)
+    screen_at, gone = _screen_at.get(conv_id), _idle_gone.get(conv_id)
     pick = _card_pick.get(conv_id)  # within its 30 s, "Hey Jarvis, the companion one" still picks
     _forget(conv_id)
     if cards is not None:
@@ -707,8 +709,8 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
         _enlarged[conv_id] = enlarged
     if screen_at is not None:
         _screen_at[conv_id] = screen_at
-    if stash is not None:
-        _idle_stash[conv_id] = stash
+    if gone is not None:
+        _idle_gone[conv_id] = gone
     if pick is not None:
         _card_pick[conv_id] = pick
     deps.conversations.drop(conv_id)
@@ -2326,9 +2328,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             mode = intent.arg if intent.kind == "move" else intent.kind  # parse yields allow-listed modes only
             if mode == "show":  # the app brings the idle-cleared cards back
                 _screen_at[body.conv_id] = deps.clock()
-                stash = _idle_stash.pop(body.conv_id, None)
-                if stash is not None:
-                    _card_index[body.conv_id] = stash
+                _idle_gone.pop(body.conv_id, None)
             if on_step:
                 on_step("layout", mode=mode)
             yield {"type": "layout", "mode": mode}
