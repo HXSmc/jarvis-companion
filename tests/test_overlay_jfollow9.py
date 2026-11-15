@@ -367,3 +367,89 @@ def test_debug_page_rows_jfollow9():
     out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True,
                                     check=True, timeout=30).stdout)
     assert out == [["barge-in check", check], ["barge-in", barge]]
+
+
+# ---- round 5 (owner voice test 2026-11-15 20:56-21:03 UTC) ----
+
+# The two owner rows that got the canned Companion line (transcripts as the ring kept them).
+_ROW_210031 = ("That's fine. The rotor automatically goes to the miniBC. Remember that for next sessions. "
+               "And sort a session on the router so that uh, Jarvis companion could use clicks uh, "
+               "for agents and for you as t")
+_ROW_210224 = ("start a session, uh, to help the Jarvis companion app, uh, allow AI agents to use remote "
+               "control for clicks on all of my devices, including the mini PC, the Mac and the normal PC")
+
+
+def _turn_kinds(client, text, conv):
+    """The intent kinds one turn logs when the fast brain wants the agent."""
+    overlay.debug_log.clear()
+    _deps(chunks=['{"agent": true}\n'])
+    events = turn(client, text, conv_id=conv)
+    return [s.get("kind") for s in _steps("intent")], events
+
+
+@pytest.mark.parametrize("text", [_ROW_210031, _ROW_210224,
+                                  "check the Jarvis Companion repo and add a capabilities page",
+                                  "create a new session to fix the Jarvis Companion app"])
+def test_companion_task_takes_the_agent_path(client, text):
+    """F1: a task that only mentions the Companion goes on as the same sentence without it."""
+    kinds, events = _turn_kinds(client, text, "j9u")
+    plain, _ = _turn_kinds(client, re.sub(r"(?i)jarvis companion", "the app", text), "j9v")
+    assert "about_companion" not in kinds and "agent" in kinds
+    assert kinds == plain
+    assert acks.PHRASES["companion_about"] not in says(events)
+    assert not [e for e in events if e["type"] == "card" and e["card"].get("title") == "Jarvis Companion"]
+    assert not about_companion(text)
+
+
+@pytest.mark.parametrize("text", ["check Jarvis Companion capabilities", "Java's companion, what can it do",
+                                  "what can Jarvis Companion do", "what is Jarvis Companion",
+                                  "tell me about the companion app", "what does the Jarvis companion include",
+                                  "companion", "I meant the Jarvis companion"])
+def test_companion_question_still_gets_the_companion_answer(client, text):
+    """F1: questions about what the Companion is or does keep the fixed answer, never the agent."""
+    kinds, events = _turn_kinds(client, text, "j9w")
+    assert "about_companion" in kinds and "agent" not in kinds
+    assert says(events) == [acks.PHRASES["companion_about"]]
+
+
+def test_answer_prompt_limits_the_companion_rule_to_questions():
+    """F1: the prompt's no-agent rule covers questions about the Companion, not tasks naming it."""
+    p = overlay.ANSWER_PROMPT
+    assert "Questions about what Jarvis, Jarvis Companion or 'the companion' is or does" in p
+    assert "A task that only mentions the Companion" in p
+
+
+@pytest.mark.parametrize("text", ["Stop. Driver stop", "okay Jarvis stop", "ok stop", "Jarvis stop it",
+                                  "hey Jarvis, stop please", "no no stop", "Driver stop", "stop it now jarvis",
+                                  "okay, cancel that, jarvis"])
+def test_stop_family_parses_as_stop(text):
+    """F2: a short stop word with only fillers and at most one mis-heard word is the stop intent."""
+    assert parse(text, apps={}).kind == "stop", text
+
+
+@pytest.mark.parametrize("text,kind", [("what does stop loss mean", "answer"), ("don't stop", "answer"),
+                                       ("stop and clear everything", "clear"), ("stop clear", "clear"),
+                                       ("stop the music", "answer"), ("cancel the timer", "answer"),
+                                       ("do not stop", "answer"), ("never stop", "answer")])
+def test_stop_family_leaves_content_alone(text, kind):
+    """F2: real content keeps its handling ("don't stop" asks to go on, so it is never a stop)."""
+    assert parse(text, apps={}).kind == kind, text
+
+
+def test_followup_stop_with_misheard_name_is_not_dropped(client):
+    """F2: row 21:02:40 replayed: 'Stop. Driver stop' at level 0.089 conf 0.5 stops, no followup_dropped."""
+    _deps(chunks=['{"say": "Here."}\n'])
+    _owner(client, "j9x")
+    overlay.debug_log.clear()
+    events = turn(client, "Stop. Driver stop", conv_id="j9x", followup=True, levels=[0.089] * 12, conf=0.5)
+    assert not _steps("followup_dropped")
+    assert _last("intent")["kind"] == "stop"
+    assert says(events) == [acks.PHRASES["stop"]]
+    # As the exact "stop": a quiet unsure one is still a stop (the base exemption, no other gate opened).
+    overlay.debug_log.clear()
+    turn(client, "okay Driver stop", conv_id="j9x", followup=True, levels=[0.003] * 12, conf=0.339)
+    assert _last("intent")["kind"] == "stop" and not _steps("followup_dropped")
+    # A short follow-up with content stays room noise.
+    overlay.debug_log.clear()
+    turn(client, "stop the music", conv_id="j9x", followup=True, levels=[0.089] * 12, conf=0.5)
+    assert _last("followup_dropped")["reason"] == "short"
