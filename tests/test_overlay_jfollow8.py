@@ -177,6 +177,7 @@ def test_debug_page_rows_jfollow8():
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
         ("barge_gate", "over=5 rule=name aec=1 mic_p90=0.042 out_p90=0.120 confirmed=1"),
         ("barge_turn", "sent=stop reason=no_name aec=1 words=2"),
+        ("wake_capture", "restarted reason=reconfigure"),
     ]
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
@@ -184,6 +185,7 @@ def test_debug_page_rows_jfollow8():
     assert got["l"][3] == "wake ignored"  # wake_ignored
     assert got["l"][4] == "playback"
     assert got["l"][7] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
+    assert got["l"][8] == "wake mic capture"
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()
@@ -272,3 +274,125 @@ def test_young_barge_run_gets_one_delayed_retry():
     assert body.index("run.retryQueued = true") < body.index("Task.sleep(")
     assert 'self?.restartEndedBargeRun(run, reason: "retry")' in body
     assert body.index("return\n") < body.index("bargeRun = nil")
+
+
+# --- F: round 5, the wake word's ffmpeg restarts after the app rebuilds its audio engine ---
+
+def test_engine_note_restarts_wake_capture(client, monkeypatch):
+    """Mac run 1: the service's ffmpeg, open while the app built its voice-processing device, went
+    deaf. The app's one state note per reconfigure (`barge_aec on|off|failed`) restarts it; the
+    paired `reconfigured`, `deferred` and `levels` notes do not (one restart per rebuild)."""
+    asked = []
+    monkeypatch.setitem(sys.modules, "mac.voice.wakeword", SimpleNamespace(restart_capture=asked.append))
+    for detail in ("reconfigured reason=mode", "deferred reason=busy", "levels src=ch0 ch_rms=0.1,0.0,0.0"):
+        assert client.post("/overlay/debug/note", json={"step": "barge_aec", "detail": detail},
+                           headers=AUTH_HEADER).status_code == 200
+    client.post("/overlay/debug/note", json={"step": "lines", "detail": "on target"}, headers=AUTH_HEADER)
+    assert asked == []
+    for detail in ("on route=speakers in=builtin rate=48000 ch=3 src=ch0 agc=off ducking=min gain_db=6 start_ms=900",
+                   "off reason=headphones", "failed reason=format"):
+        client.post("/overlay/debug/note", json={"step": "barge_aec", "detail": detail}, headers=AUTH_HEADER)
+    assert asked == ["reconfigure"] * 3
+    # no wake thread (module never imported): the note is just a row
+    monkeypatch.delitem(sys.modules, "mac.voice.wakeword")
+    assert client.post("/overlay/debug/note", json={"step": "barge_aec", "detail": "off reason=mode"},
+                       headers=AUTH_HEADER).status_code == 200
+
+
+_FAKE_FFMPEG = {
+    # 80 ms of silence every 20 ms, forever
+    "stream": "import sys,time\nwhile True:\n    sys.stdout.buffer.write(bytes(2560)); sys.stdout.flush(); time.sleep(0.02)",
+    "stall": "import sys,time\nsys.stdout.buffer.write(bytes(2560)); sys.stdout.flush(); time.sleep(60)",
+    "exit": "pass",
+}
+
+
+class _Model:
+    def __init__(self):
+        self.resets = 0
+
+    def predict(self, pcm):
+        return {"hey_jarvis": 0.0}
+
+    def reset(self):
+        self.resets += 1
+
+
+class _Stop(Exception):
+    pass
+
+
+def _live(monkeypatch, kinds, on_restart, procs=None, **consts):
+    """run_live with a python stand-in for ffmpeg (kinds[i] = the i-th process's behaviour)."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("openwakeword")
+    from mac.voice import wakeword
+    for name, value in consts.items():
+        monkeypatch.setattr(wakeword, name, value)
+    procs = [] if procs is None else procs
+
+    def popen(argv, **kw):
+        assert argv == wakeword.ffmpeg_argv()  # the same argv every time
+        kind = kinds[min(len(procs), len(kinds) - 1)]
+        procs.append(subprocess.Popen([sys.executable, "-c", _FAKE_FFMPEG[kind]], **kw))
+        return procs[-1]
+
+    model = _Model()
+    with pytest.raises((_Stop, SystemExit)) as err:
+        wakeword.run_live(on_restart=on_restart, popen=popen, model=model)
+    return wakeword, procs, model, err.value
+
+
+def test_restart_capture_replaces_the_one_ffmpeg(monkeypatch):
+    """restart_capture terminates the running ffmpeg; run_live waits for it, starts a fresh one
+    (same argv), resets the model and writes reason=reconfigure. Never two alive, none left."""
+    import threading
+    import time
+    pytest.importorskip("openwakeword")
+    from mac.voice import wakeword as ww
+    rows, procs = [], []
+
+    def on_restart(reason):
+        rows.append(reason)
+        assert [p.poll() is None for p in procs] == [False] * (len(procs) - 1) + [True]
+        if len(rows) == 2:
+            raise _Stop
+
+    def asker():
+        for n in (1, 2):
+            deadline = time.monotonic() + 10
+            while len(procs) < n and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)  # audio flowing
+            assert ww.restart_capture("reconfigure")
+
+    threading.Thread(target=asker, daemon=True).start()
+    _, _, model, _ = _live(monkeypatch, ["stream"], on_restart, procs, RESTART_GAP_S=0.0)
+    assert rows == ["reconfigure", "reconfigure"]
+    assert len(procs) == 3 and model.resets == 2
+    assert all(p.poll() is not None for p in procs)  # the finally stopped the last one
+    assert ww._capture["proc"] is None
+    assert ww.restart_capture("reconfigure") is False  # no capture running
+
+
+def test_stalled_capture_restarts(monkeypatch):
+    """An ffmpeg that stops sending audio (no exit) is replaced after STALL_S: reason=stalled."""
+    rows = []
+
+    def on_restart(reason):
+        rows.append(reason)
+        raise _Stop
+
+    _, procs, _, _ = _live(monkeypatch, ["stall", "stream"], on_restart, STALL_S=0.3, HEAL_WAIT_S=0.0)
+    assert rows == ["stalled"]
+    assert all(p.poll() is not None for p in procs)
+
+
+def test_exiting_capture_self_heals_bounded(monkeypatch):
+    """ffmpeg that keeps exiting is restarted HEAL_MAX times (reason=exited), then the thread ends
+    with the old 'mic capture ended' exit; no process is left."""
+    rows = []
+    _, procs, _, err = _live(monkeypatch, ["exit"], rows.append, HEAL_WAIT_S=0.0, HEAL_MAX=3)
+    assert isinstance(err, SystemExit) and "mic capture ended" in str(err)
+    assert rows == ["exited"] * 3 and len(procs) == 4
+    assert all(p.poll() is not None for p in procs)

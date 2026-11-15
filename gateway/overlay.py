@@ -4402,9 +4402,20 @@ async def post_wake(body: WakeBody | None = None) -> dict:
     return {"ok": True}
 
 
+def _engine_rebuilt(step: str, detail: str) -> bool:
+    """The app's one state note per mic engine reconfigure (`barge_aec on|off|failed ...`); not the
+    `reconfigured`/`deferred`/`levels` notes, so one rebuild restarts the wake capture once."""
+    return step == "barge_aec" and detail.startswith(("on ", "off ", "failed "))
+
+
 @router.post("/debug/note", dependencies=_LOOP_DEPS)
 async def post_debug_note(body: DebugNote) -> dict:
     rec = debug_log.note(body.step, body.detail)
+    # Mac run 1: the wake word's ffmpeg, open while the app rebuilt its engine, went deaf; start a
+    # fresh one now (the note comes after the rebuild). Never imported here: no wake thread, no-op.
+    wakeword = sys.modules.get("mac.voice.wakeword")
+    if wakeword is not None and _engine_rebuilt(body.step, body.detail):
+        wakeword.restart_capture("reconfigure")
     global _off_view_said
     if body.step == "lines" and _OFF_VIEW_FINAL_RE.search(body.detail):
         key, n = None, None

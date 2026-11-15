@@ -16,8 +16,11 @@ import argparse
 import json
 import logging
 import os
+import select
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import wave
 from pathlib import Path
@@ -111,23 +114,113 @@ def notify_wake(at_seconds: float, dry_run: bool, score: float | None = None) ->
     urllib.request.urlopen(req, timeout=5)
 
 
-def run_live(on_stats=None) -> None:
+# The capture restarts (one ffmpeg at a time; the old one is terminated and waited for):
+RESTART_GAP_S = 1.0  # a flood of reconfigure notes restarts it at most once a second
+STALL_S = 3.0        # no audio for this long = a stalled capture
+HEAL_WAIT_S = 1.0    # pause before a self-heal restart, so a dead device does not spin
+HEAL_MAX = 5         # self-heal restarts with no 10 s of audio between them, then give up
+FRAME_BYTES = FRAME_SAMPLES * 2
+
+_capture_lock = threading.Lock()
+_capture: dict = {"proc": None, "reason": None}
+
+
+def restart_capture(reason: str) -> bool:
+    """Restart the live capture: the app rebuilt its audio engine (Mac run 1: an ffmpeg stream open
+    while the app built its voice-processing device kept its level but never scored again; a fresh
+    one did). Terminating the current ffmpeg ends its read; run_live starts a fresh one and writes
+    the `wake_capture restarted` row. False when no capture runs."""
+    with _capture_lock:
+        proc = _capture["proc"]
+        if proc is None:
+            return False
+        _capture["reason"] = reason
+    proc.terminate()
+    return True
+
+
+def _note_restart(reason: str) -> None:
+    logger.info("wake_capture restarted reason=%s", reason)
+    from gateway.overlay import debug_log
+    debug_log.note("wake_capture", f"restarted reason={reason}")
+
+
+def _stop(proc) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    if proc.stdout is not None:
+        proc.stdout.close()
+
+
+def _read_frame(proc, timeout: float) -> bytes | None:
+    """One 80 ms frame; b"" when ffmpeg ended, None when no audio came for `timeout` s."""
+    fd = proc.stdout.fileno()
+    buf = b""
+    end = time.monotonic() + timeout
+    while len(buf) < FRAME_BYTES:
+        left = end - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            return None
+        chunk = os.read(fd, FRAME_BYTES - len(buf))
+        if not chunk:
+            return b""
+        buf += chunk
+    return buf
+
+
+def run_live(on_stats=None, on_restart=None, popen=subprocess.Popen, model=None) -> None:
     """ffmpeg mic capture -> model -> POST + callbacks on detection.
 
     on_stats(peak_score, peak_level) every ~10 s: a mic that stays at level 0
     is the wrong device or a denied permission, visible on the debug page.
+    The capture restarts on restart_capture() (reason=reconfigure), when ffmpeg exits
+    (reason=exited) or when its audio stalls (reason=stalled); on_restart(reason) after each new
+    ffmpeg starts (default: a `wake_capture` debug row). HEAL_MAX self-heals in a row end it.
     """
-    ffmpeg = subprocess.Popen(ffmpeg_argv(), stdout=subprocess.PIPE)
-    assert ffmpeg.stdout is not None
-    model = load_model()
+    on_restart = on_restart or _note_restart
+    model = model or load_model()
+    proc = None
+    reason = None    # why the next ffmpeg starts (None: the first start)
+    started = 0.0    # monotonic time of the last start
+    heals = 0        # self-heal restarts since the last 10 s of audio
+    good = 0         # frames read since the last start
     total = 0
     peak_score = peak_level = 0.0
     frames = 0
     try:
         while True:
-            chunk = ffmpeg.stdout.read(FRAME_SAMPLES * 2)
+            if proc is None:
+                wait = (HEAL_WAIT_S if reason in ("exited", "stalled")
+                        else RESTART_GAP_S - (time.monotonic() - started) if reason else 0)
+                if wait > 0:
+                    time.sleep(wait)
+                with _capture_lock:  # a restart asked for from now on terminates this new one
+                    proc = popen(ffmpeg_argv(), stdout=subprocess.PIPE, bufsize=0)
+                    _capture["proc"], _capture["reason"] = proc, None
+                started, good = time.monotonic(), 0
+                if reason:
+                    model.reset()
+                    on_restart(reason)
+            chunk = _read_frame(proc, STALL_S)
             if not chunk:
-                raise SystemExit("mic capture ended (ffmpeg exited)")
+                with _capture_lock:
+                    asked = _capture["reason"]
+                    _capture["proc"], _capture["reason"] = None, None
+                _stop(proc)
+                proc = None
+                reason = asked or ("stalled" if chunk is None else "exited")
+                if asked is None:
+                    heals += 1
+                    if heals > HEAL_MAX:
+                        raise SystemExit("mic capture ended (ffmpeg exited)")
+                continue
+            good += 1
+            if good == 125:  # 10 s of audio: the capture works again
+                heals = 0
             pcm = np.frombuffer(chunk, dtype=np.int16)
             score = max(model.predict(pcm).values())
             peak_score = max(peak_score, score)
@@ -144,7 +237,10 @@ def run_live(on_stats=None) -> None:
                 peak_score = peak_level = 0.0
             total += len(chunk) // 2
     finally:
-        ffmpeg.terminate()
+        with _capture_lock:
+            _capture["proc"], _capture["reason"] = None, None
+        if proc is not None:
+            _stop(proc)
 
 
 def main(argv: list[str] | None = None) -> int:
