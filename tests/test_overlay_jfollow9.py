@@ -389,13 +389,17 @@ def _turn_kinds(client, text, conv):
 
 @pytest.mark.parametrize("text", [_ROW_210031, _ROW_210224,
                                   "check the Jarvis Companion repo and add a capabilities page",
-                                  "create a new session to fix the Jarvis Companion app"])
+                                  "create a new session to fix the Jarvis Companion app",
+                                  "can you start a new session for the Jarvis companion features",
+                                  "okay create a session so Jarvis Companion gets the capabilities of clicking",
+                                  "check the Jarvis Companion repository for its features"])
 def test_companion_task_takes_the_agent_path(client, text):
     """F1: a task that only mentions the Companion goes on as the same sentence without it."""
     kinds, events = _turn_kinds(client, text, "j9u")
     plain, _ = _turn_kinds(client, re.sub(r"(?i)jarvis companion", "the app", text), "j9v")
-    assert "about_companion" not in kinds and "agent" in kinds
-    assert kinds == plain
+    assert "about_companion" not in kinds and kinds == plain
+    # the owner's rows reach the agent ("can you start a new session ..." is the session ask)
+    assert "agent" in kinds or kinds == ["session_start"]
     assert acks.PHRASES["companion_about"] not in says(events)
     assert not [e for e in events if e["type"] == "card" and e["card"].get("title") == "Jarvis Companion"]
     assert not about_companion(text)
@@ -430,7 +434,9 @@ def test_stop_family_parses_as_stop(text):
 @pytest.mark.parametrize("text,kind", [("what does stop loss mean", "answer"), ("don't stop", "answer"),
                                        ("stop and clear everything", "clear"), ("stop clear", "clear"),
                                        ("stop the music", "answer"), ("cancel the timer", "answer"),
-                                       ("do not stop", "answer"), ("never stop", "answer")])
+                                       ("do not stop", "answer"), ("never stop", "answer"),
+                                       ("stop music", "answer"), ("cancel order", "answer"),
+                                       ("stop loss", "answer"), ("stop driver", "answer")])
 def test_stop_family_leaves_content_alone(text, kind):
     """F2: real content keeps its handling ("don't stop" asks to go on, so it is never a stop)."""
     assert parse(text, apps={}).kind == kind, text

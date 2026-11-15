@@ -1034,7 +1034,8 @@ _COMPANION_ASK_RE = re.compile(
 # sentence without the name: a task verb opening the sentence or a clause.
 _COMPANION_TASK_RE = re.compile(
     r"(?:^|[.,;!?]\s*|\b(?:and|then|please|to|so)\s+)(?:start|sort|create|open|fix|build|change|add"
-    r"|remember|make|help|allow|let|enable|set up|implement|install|update|write|edit|delete|remove)\b")
+    r"|remember|make|help|allow|let|enable|set up|implement|install|update|write|edit|delete|remove)\b"
+    r"|\b(?:repo|repository|codebase|commits?)\b")  # "check the repository" is work on it
 _COMPANION_NAME_ONLY_RE = re.compile(
     r"(?:(?:i meant|i mean|no|yes|okay|ok) )?(?:the )?(?:jarvis |java'?s )?(?:companions?|company)(?: app)?")
 
@@ -1063,7 +1064,8 @@ def about_companion(text: str) -> bool:
     if any(_COMPANION_NAME_ONLY_RE.fullmatch(" ".join(re.sub(r"[^a-z' ]", " ", f).split()))
            for f in (raw, low)):
         return True
-    return bool(_COMPANION_ASK_RE.search(raw)) and not _COMPANION_TASK_RE.search(raw)
+    return bool(_COMPANION_ASK_RE.search(raw)) and not (
+        _COMPANION_TASK_RE.search(raw) or _COMPANION_TASK_RE.search(strip_lead(raw)))
 
 
 _CLAIM_PAST = r"cleared|removed|closed|hid|hidden|dismissed|enlarged|shrank|shrunk|taken away|got rid"
@@ -1248,7 +1250,10 @@ def is_stop_family(text: str) -> bool:
     if (not words or len(words) > STOP_FAMILY_MAX_WORDS or not _STOP_WORDS.intersection(words)
             or _STOP_NEGATIONS.intersection(words)):
         return False
-    return sum(w not in _STOP_WORDS and w not in _STOP_FILLERS for w in words) <= 1
+    other = [i for i, w in enumerate(words) if w not in _STOP_WORDS and w not in _STOP_FILLERS]
+    last_stop = max(i for i, w in enumerate(words) if w in _STOP_WORDS)
+    # The one unknown word is the mis-heard name before the stop word, never its object ("stop music").
+    return not other or (len(other) == 1 and other[0] < last_stop)
 
 
 def is_no(text: str) -> bool:

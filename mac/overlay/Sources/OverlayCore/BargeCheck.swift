@@ -21,11 +21,11 @@ public enum BargeCheck {
     public static let keepFor: TimeInterval = 2.0
     /// Echo-cancelled runs: a finished run of `holdBlocks` still holds for this long (headphones
     /// keep `wordLag`). Owner row 20:59:22 (`over=5 cand=0 run=0 last_over_ms=203`, run end
-    /// `longest_run=7 skip_hold=6 checked=0`): through the canceller his first partial landed about
-    /// 1.7 s after his run of 7 ended, past the 1.2 s `wordLag`. Same span as `keepFor`, its mirror
-    /// (a kept command word waits this long for its over blocks; here the blocks wait for the word).
+    /// `longest_run=7 skip_hold=6 checked=0`): his first partial landed more than 1.2 s after his
+    /// last run of 3. Speech-to-text trails the audio 0.2-0.8 s here and the stop word ends the
+    /// phrase about 0.5 s after the loud part: 1.5 s, the hub's upper bound (JF9-HUB2 F3).
     /// shortcut: one owner row; recalibrate from `hold_age_ms` in live `barge_check` rows.
-    public static let aecHoldMemory: TimeInterval = 2.0
+    public static let aecHoldMemory: TimeInterval = 1.5
     /// `barge_check` rows per run; later ones only count (`capped=` on the run's `barge_gate` row).
     public static let maxRows = 4
 

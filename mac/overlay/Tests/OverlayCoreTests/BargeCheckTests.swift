@@ -239,45 +239,57 @@ final class BargeCheckTests: XCTestCase {
     /// Round 5: owner row 20:59:22, replayed with its numbers. Decisive check `over=5 cand=0 run=0
     /// win=1 last_over_ms=203 mic=0.001 out=0.154 coup=0.003 ratio=0.76 fresh=0 words=3 new=3 name=0
     /// stop=1`; run end `blocks=290 over=14 longest_run=7 partials=6 checked=0 skip_over=0
-    /// skip_hold=6`. What the numbers force: 6 judge calls for 6 partials means no C2 re-check ran,
-    /// so no over block came after the first partial and none in the 2 s before it but those 5;
-    /// `skip_over=0` puts all 6 partials within 1.2 s of the block 203 ms before the first. `over=5`
-    /// in 2 s leaves room for 3 blocks of the run of 7 (+ the 203 ms block + 1 blip), so the run
-    /// ended 1.7 s before the first partial: past `wordLag` (1.2 s), inside `aecHoldMemory`.
-    /// Hand-typed: the run's place (24.8-25.4 s), the blips, the 3-word stop text.
+    /// skip_hold=6`. The numbers force: 6 judge calls for 6 partials = no C2 re-check, so no over
+    /// block after the first partial; `skip_over=0` = all 6 partials within 1.2 s of the block 203 ms
+    /// before the first; `cand=0` = the last run of 3 ended more than 1.2 s before it. They do not
+    /// say where: a run of 3 ending 1.4 s before (fixed by the 1.5 s memory, timeline 1) or the run
+    /// of 7's tail 1.7 s before (still no_hold, timeline 2; `hold_age_ms` in the next rows decides).
+    /// Hand-typed: the runs' places, the blips, the 3-word stop text.
     func testOwnerRow205922() {
         let reply: Set<String> = ["you'd", "need", "to", "open", "a", "claude", "code", "session"]
-        var mic = Array(repeating: 0.001, count: 290)
-        for i in [49, 99, 149, 179, 209, 247, 248, 249, 250, 251, 252, 253, 264, 268] { mic[i] = 0.02 }
-        let coupling = 0.003, out = 0.154
-        XCTAssertEqual(mic.filter { isOver(mic: $0, out: out, coupling: coupling) }.count, 14)
-        let first = 27.103  // the run of 7 ends at 25.4 s, the newest over block at 26.9 s
-        let partials = (0..<6).map { Partial(at: first + Double($0) * 0.15, text: "Okay okay stop") }
-        // e887b64's hold memory (`wordLag`, the headphones tracker keeps it): all 6 partials no_hold.
-        let old = replayRun(mic: mic, out: out, coupling: coupling, partials: partials, reply: reply, aec: false)
-        XCTAssertNil(old.hit)
-        XCTAssertEqual(old.tracker.checked, 0)
-        XCTAssertEqual(old.tracker.skipNoHold, 6)
-        XCTAssertEqual(old.tracker.skipNotOver, 0)
-        // With the fix: the first phrase's first partial confirms; its row carries the hold age.
-        let fixed = replayRun(mic: mic, out: out, coupling: coupling, partials: partials, reply: reply)
-        XCTAssertEqual(fixed.hit?.rule, .stop)
-        XCTAssertEqual(fixed.hit?.at ?? 99, first, accuracy: 0.001)
-        var tracker = BargeCheck.Tracker(aec: true)
-        let t0 = Date(timeIntervalSince1970: 5000)
-        for (i, m) in mic.enumerated() where Double(i + 1) * 0.1 <= first {
-            tracker.block(over: isOver(mic: m, out: out, coupling: coupling), at: t0.addingTimeInterval(Double(i + 1) * 0.1))
+        let coupling = 0.003, out = 0.154, first = 27.103  // the newest over block ends at 26.9 s
+        func mic(_ over: [Int]) -> [Double] {
+            var m = Array(repeating: 0.001, count: 290)
+            for i in over { m[i] = 0.02 }
+            return m
         }
-        let now = t0.addingTimeInterval(first)
-        XCTAssertEqual(tracker.overInWindow(at: now), 5)
-        XCTAssertEqual(tracker.run, 0)
-        XCTAssertEqual(Double(tracker.holdAgeMs(at: now) ?? 0), 1703, accuracy: 1.5)
-        let words = ["Okay", "okay", "stop"]
-        let row = tracker.check(at: now, wordCount: 3, recheck: false,
-                                commandIndex: { self.commandIndex(words, from: $0, reply: reply) },
-                                words: { self.flags(words, from: $0, reply: reply) }).row ?? ""
-        XCTAssertTrue(row.hasPrefix("res=confirm why=none rule=stop over=5 cand=1 run=0 win=1 last_over_ms=20"), row)
-        XCTAssertTrue(row.hasSuffix(" hold_age_ms=1703") || row.hasSuffix(" hold_age_ms=1702"), row)
+        // 1: the run of 7 at 20.1-20.7 s, a run of 3 at 25.5-25.7 s, blips; 2: the run of 7 at 24.8-25.4 s.
+        let short = mic([49, 99, 200, 201, 202, 203, 204, 205, 206, 254, 255, 256, 264, 268])
+        let tail7 = mic([49, 99, 149, 179, 209, 247, 248, 249, 250, 251, 252, 253, 264, 268])
+        let partials = (0..<6).map { Partial(at: first + Double($0) * 0.15, text: "Okay okay stop") }
+        for m in [short, tail7] {
+            XCTAssertEqual(m.filter { isOver(mic: $0, out: out, coupling: coupling) }.count, 14)
+            // e887b64's hold memory (`wordLag`, the headphones tracker keeps it): all 6 partials no_hold.
+            let old = replayRun(mic: m, out: out, coupling: coupling, partials: partials, reply: reply, aec: false)
+            XCTAssertNil(old.hit)
+            XCTAssertEqual(old.tracker.checked, 0)
+            XCTAssertEqual(old.tracker.skipNoHold, 6)
+            XCTAssertEqual(old.tracker.skipNotOver, 0)
+        }
+        let fixed = replayRun(mic: short, out: out, coupling: coupling, partials: partials, reply: reply)
+        XCTAssertEqual(fixed.hit?.rule, .stop)
+        XCTAssertEqual(fixed.hit?.at ?? 99, first, accuracy: 0.001)  // the first phrase's first partial
+        let tail = replayRun(mic: tail7, out: out, coupling: coupling, partials: partials, reply: reply)
+        XCTAssertNil(tail.hit)  // 1.7 s: past the 1.5 s memory
+        XCTAssertEqual(tail.tracker.skipNoHold, 6)
+        for (m, age, res) in [(short, 1403.0, "res=confirm why=none rule=stop over=5 cand=1"),
+                              (tail7, 1703.0, "res=reject why=no_hold rule=none over=5 cand=0")] {
+            var tracker = BargeCheck.Tracker(aec: true)
+            let t0 = Date(timeIntervalSince1970: 5000)
+            for (i, v) in m.enumerated() where Double(i + 1) * 0.1 <= first {
+                tracker.block(over: isOver(mic: v, out: out, coupling: coupling), at: t0.addingTimeInterval(Double(i + 1) * 0.1))
+            }
+            let now = t0.addingTimeInterval(first)
+            XCTAssertEqual(tracker.overInWindow(at: now), 5)
+            XCTAssertEqual(tracker.run, 0)
+            XCTAssertEqual(Double(tracker.holdAgeMs(at: now) ?? 0), age, accuracy: 1.5)
+            let words = ["Okay", "okay", "stop"]
+            let row = tracker.check(at: now, wordCount: 3, recheck: false,
+                                    commandIndex: { self.commandIndex(words, from: $0, reply: reply) },
+                                    words: { self.flags(words, from: $0, reply: reply) }).row ?? ""
+            XCTAssertTrue(row.hasPrefix(res + " run=0 win=1 last_over_ms=20"), row)
+            XCTAssertTrue(row.contains(" fresh=0 words=3 new=3 name=0 stop=1 hold_age_ms="), row)
+        }
     }
 
     /// Round 5, own words stay safe with the hold memory: (a) the reply's own "stop"/"Jarvis" with
@@ -311,8 +323,8 @@ final class BargeCheckTests: XCTestCase {
                                  commandIndex: { self.commandIndex(words, from: $0, reply: reply) },
                                  words: { self.flags(words, from: $0, reply: ["the", "build"]) }).verdict
         }
-        XCTAssertEqual(verdict(at: 3.35).reject, .noHold)  // 2.05 s after the run: past the memory
-        XCTAssertEqual(verdict(at: 3.25).rule, .stop)  // 1.95 s: inside
+        XCTAssertEqual(verdict(at: 2.85).reject, .noHold)  // 1.55 s after the run: past the memory
+        XCTAssertEqual(verdict(at: 2.75).rule, .stop)  // 1.45 s: inside
     }
 
     /// The longest row stays within the debug note cap and holds only fixed words and numbers.
