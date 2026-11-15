@@ -62,6 +62,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 session_start: "session start", session_stop: "session stop", session_answer: "session answered",
                 memory: "memory", workspace: "workspace",
                 barge_in: "barge-in", barge_aec: "echo canceller", barge_gate: "barge-in gate",
+                barge_check: "barge-in check",
                 wake_ignored: "wake ignored", playback: "playback", barge_turn: "barge-in turn",
                 wake_capture: "wake mic capture", mic_signal: "mic signal" };
 
@@ -96,7 +97,7 @@ function describe(s) {
       s.reason ? `reason=${s.reason}` : ""].filter(Boolean).join(" ");
     case "session_start": case "session_stop": case "session_answer": case "memory": case "workspace":
       return s.detail || "";
-    case "barge_in": case "barge_aec": case "barge_gate":
+    case "barge_in": case "barge_aec": case "barge_gate": case "barge_check":
     case "wake_ignored": case "playback": return s.detail || "";
     case "barge_turn": case "mic_signal": return s.detail || "";
     case "spoke": return null;
