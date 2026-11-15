@@ -3,7 +3,7 @@
 
 Wire it for TaskCreate|TaskUpdate|TodoWrite (see jarvis-steps-hook.install.md).
 It reads the hook JSON on stdin and posts one /cards/event `steps` call to the
-local gateway, with the shared bearer secret read in-process from the vault
+local gateway (plain http on 127.0.0.1, localhost or ::1 only), with the shared bearer secret read in-process from the vault
 (never printed). It writes nothing to stdout or stderr and always exits 0, so it
 can never block or slow a session: bad input, no secret or a gateway that is down
 all end silently within about 1.5 s.
@@ -21,6 +21,7 @@ logging.disable(logging.CRITICAL)  # common.config logs a missing vault; nothing
 import json  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
+import urllib.parse  # noqa: E402
 import urllib.request  # noqa: E402
 
 TOOLS = ("TaskCreate", "TaskUpdate", "TodoWrite")
@@ -80,13 +81,16 @@ def main():
     body = body_for(hook)
     if not body or not isinstance(session, str) or not session:
         return
+    gateway = os.environ.get("JARVIS_GATEWAY_LOCAL", "http://127.0.0.1:8788")
+    url = urllib.parse.urlsplit(gateway)
+    if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost", "::1"):
+        return  # the bearer secret only ever goes to the gateway on this machine
     sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR", os.path.expanduser("~/jarvis-gateway")))
     from common import config
 
     secret = config.get_token()
     if not secret:
         return
-    gateway = os.environ.get("JARVIS_GATEWAY_LOCAL", "http://127.0.0.1:8788")
     req = urllib.request.Request(gateway + "/cards/event", method="POST",
                                  data=json.dumps({"session": session, "action": "steps", **body}).encode(),
                                  headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"})

@@ -147,3 +147,12 @@ def test_steps_hook_capture_appends_raw_stdin_privately(gateway, home, tmp_path)
     run(b'{"tool_name": "Bash"}', url, home, JARVIS_STEPS_HOOK_CAPTURE=str(cap))
     assert cap.read_bytes().splitlines() == [first, b'{"tool_name": "Bash"}']
     assert stat.S_IMODE(cap.stat().st_mode) == 0o600
+
+
+def test_steps_hook_only_posts_to_a_loopback_gateway(gateway, home):
+    url, seen = gateway
+    body = payload("TaskUpdate", {"taskId": "1", "status": "completed"})
+    for bad in ("https://127.0.0.1:1", "http://example.com", "http://10.0.0.5:8788", "file:///etc/passwd"):
+        run(body, bad, home)
+    run(body, url.replace("127.0.0.1", "localhost"), home)
+    assert len(seen) == 1  # only the localhost run reached the stub

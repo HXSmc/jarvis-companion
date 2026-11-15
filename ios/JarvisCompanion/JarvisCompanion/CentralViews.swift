@@ -1839,7 +1839,7 @@ struct StepsView: View {
     }
 
     private var headline: String {
-        if steps.finished { return "All done" }
+        if steps.finished { return "All steps done" }
         return steps.activeName ?? "Next: \(steps.nextName)"
     }
 
@@ -1850,8 +1850,9 @@ struct StepsView: View {
             } label: {
                 HStack(spacing: 6) {
                     Text("\(steps.current)/\(steps.total)")
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
                         .foregroundColor(.jarvisAccent)
+                        .opacity(dim)
                     Text(headline)
                         .font(.subheadline)
                         .foregroundColor(.jarvisText)
@@ -1867,7 +1868,7 @@ struct StepsView: View {
             }
             .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(steps.accessibilityLabel)
+            .accessibilityLabel((steps.sessionDone == true ? "Session finished. " : "") + steps.accessibilityLabel)
             .accessibilityValue(expanded ? "expanded" : "collapsed")
             .accessibilityAddTraits(.isButton)
             bar
@@ -1875,8 +1876,10 @@ struct StepsView: View {
                 list
             }
         }
-        .opacity(steps.sessionDone == true ? 0.55 : 1)
     }
+
+    /// A finished session fades only its count and bar, so the step names keep full contrast.
+    private var dim: Double { steps.sessionDone == true ? 0.55 : 1 }
 
     private var bar: some View {
         GeometryReader { geo in
@@ -1889,6 +1892,7 @@ struct StepsView: View {
                 }
         }
         .frame(height: 3)
+        .opacity(dim)
         .animation(steps.sessionDone == true || reduceMotion ? nil : .easeOut(duration: 0.25), value: fraction)
         .accessibilityHidden(true)
     }
@@ -1920,14 +1924,13 @@ struct StepsView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Done: \(item.name)")
         case "active":
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: "circle.circle").foregroundColor(.jarvisAccent)
-                    Text(item.name).fontWeight(.semibold).foregroundColor(.jarvisText)
-                }
-                .font(.subheadline)
-                if let detail = item.detail, !detail.isEmpty {
-                    Text(detail).font(.footnote).foregroundColor(.jarvisMuted)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "circle.circle").foregroundColor(.jarvisAccent).font(.subheadline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name).font(.subheadline.weight(.semibold)).foregroundColor(.jarvisText)
+                    if let detail = item.detail, !detail.isEmpty {
+                        Text(detail).font(.footnote).foregroundColor(.jarvisMuted)
+                    }
                 }
             }
             .accessibilityElement(children: .ignore)

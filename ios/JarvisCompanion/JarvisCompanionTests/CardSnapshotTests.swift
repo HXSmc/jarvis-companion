@@ -166,7 +166,7 @@ final class CardSnapshotTests: XCTestCase {
               "doing": "Rendering the second pass of the launch video",
               "steps": {"items": [{"name": "Plan", "status": "done", "detail": ""},
                                   {"name": "Rendering the second half of the animation timeline at full…", "status": "active",
-                                   "detail": "Rendering the second half of the animations at full size"},
+                                   "detail": "Frame 412 of 900"},
                                   {"name": "Write captions", "status": "todo", "detail": ""},
                                   {"name": "Export clip", "status": "todo", "detail": ""}],
                         "current": 2, "total": 4, "active": "Rendering the second half of the animation timeline at full…",
