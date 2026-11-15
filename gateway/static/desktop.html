@@ -864,7 +864,7 @@ function needButtons(need) {
 const RECEIPT = { sent: ["Sending", "var(--muted)"], queued: ["Received, after the current step", "var(--muted)"],
   working: ["Being worked on", "var(--green)"], answered: ["Answered", "var(--green)"], failed: ["Not delivered, send again", "var(--danger)"] };
 const checks = {}; // need id -> [bool]: survives the 5 s re-render
-const stepsOpen = {}; // session id -> bool: survives the 5 s re-render
+const stepsOpen = {}; // "c:"/"p:" + session id -> bool: survives the 5 s re-render; list and panel fold apart
 function stepsEl(s, compact) {
   const st = s.card && s.card.steps, items = (st && st.items) || [];
   if (!items.length) return null;
@@ -876,11 +876,12 @@ function stepsEl(s, compact) {
   const missing = "…";
   const wrap = h("div", { class: "steps-wrap" + (st.session_done ? " off" : "") });
   const build = () => {
-    const open = !!stepsOpen[s.session_id];
+    const key = (compact ? "c:" : "p:") + s.session_id;
+    const open = stepsOpen[key] ?? !compact; // the side panel opens with every step shown
     const row = h("button", { class: "steps-row", "aria-expanded": String(open),
       "aria-label": (st.session_done ? "Session finished. " : "") + (fin ? "All " + total + " steps done"
         : act ? "Step " + cur + " of " + total + ": " + act : cur + " of " + total + " done, next: " + (next || missing)),
-      onclick: e => { e.stopPropagation(); stepsOpen[s.session_id] = !open; build(); } },
+      onclick: e => { e.stopPropagation(); stepsOpen[key] = !open; build(); } },
       h("span", { class: "n" }, cur + "/" + total),
       h("span", { class: "a" }, fin ? "All steps done" : act || "Next: " + (next || missing)),
       h("span", { class: "ch", "aria-hidden": "true" }, open ? "▴" : "▾"));

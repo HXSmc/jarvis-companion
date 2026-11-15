@@ -1992,7 +1992,8 @@ struct CardExtras: View {
         VStack(alignment: .leading, spacing: 10) {
             // First child on every refresh, so its fold state survives the 5 s poll.
             if let steps = card.steps, !steps.items.isEmpty {
-                StepsView(steps: steps, compact: compact)
+                // The open-session sheet shows every step; list cards start folded.
+                StepsView(steps: steps, compact: compact, expanded: !compact)
             }
             if let need = card.need {
                 needView(need)
