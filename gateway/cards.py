@@ -3,12 +3,17 @@
 A session on the box calls `jarvis-card` (scripts/jarvis-card), which posts here
 with the shared gateway token (same door as `jarvis-hw-request`):
 
-  POST /cards/event   {"session", "action", ...}   doing | ask | clear | delegate | link
+  POST /cards/event   {"session", "action", ...}   doing | ask | clear | delegate | link | steps
   POST /cards/file    raw body + ?session=&name=&title=   a report/plan/screenshot for the card
 
   Ask kinds: approve | choice | yesno | checklist | preview | info | hardware
   (`hardware` shows "Open in Hardware Mode" on the phone; the gateway's Hardware
   Mode report marks it answered with `done`.)
+
+  Steps (`action: "steps"`, `op` set | add | next | done | clear | task) keep an
+  ordered step list on the card, shown as "3/6 <active step>" and a thin bar.
+  `task` comes from the PostToolUse hook (scripts/jarvis-steps-hook) and is keyed
+  by the Claude task id; a hand-made list (`source: "manual"`) wins over it.
 
 `session` may be the router session id or the Claude session uuid
 ($CLAUDE_CODE_SESSION_ID); `resolve_session` maps the uuid through a read-only
@@ -34,12 +39,14 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from gateway.auth import require_bearer
 
@@ -57,6 +64,9 @@ MAX_FILES = 8  # per session; the oldest goes first
 MAX_LINKS = 6
 MAX_DELEGATIONS = 12
 MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_STEPS = 30
+STEP_STATUSES = ("done", "active", "todo")
+_STEP_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DOING_TTL = timedelta(minutes=15)  # a declared "doing" line older than this gives way to the model's
 ANSWERED_SHOW = timedelta(hours=6)  # an answered ask stays on the card as "You answered: ..."
 
@@ -136,18 +146,22 @@ def save(data: dict) -> None:
     os.replace(tmp, path)
 
 
+_UPDATE_LOCK = threading.Lock()  # one load-change-save at a time, even from worker threads
+
+
 def _update(sid: str, change) -> dict:
     """Load, apply change(entry) to this session's entry, save; returns the entry."""
-    data = load()
-    entry = data.get(sid) if isinstance(data.get(sid), dict) else {}
-    change(entry)
-    data[sid] = entry
-    try:
-        save(data)
-    except OSError as exc:
-        logger.warning("cards save failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=500, detail="could not save") from None
-    return entry
+    with _UPDATE_LOCK:
+        data = load()
+        entry = data.get(sid) if isinstance(data.get(sid), dict) else {}
+        change(entry)
+        data[sid] = entry
+        try:
+            save(data)
+        except OSError as exc:
+            logger.warning("cards save failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail="could not save") from None
+        return entry
 
 
 # --- router sqlite (read-only) -----------------------------------------------
@@ -230,9 +244,12 @@ def last_reply_at(sid: str) -> datetime | None:
 session_router = APIRouter(dependencies=[Depends(require_bearer)])
 
 
+_StepText = Annotated[str, StringConstraints(max_length=200)]
+
+
 class CardEvent(BaseModel):
     session: str = Field(pattern=ID_PATTERN)
-    action: str = Field(pattern=r"^(doing|ask|clear|delegate|link)$")
+    action: str = Field(pattern=r"^(doing|ask|clear|delegate|link|steps)$")
     text: str = Field(default="", max_length=600)
     kind: str = Field(default="approve", pattern=r"^[a-z]{1,16}$")
     options: list[str] = Field(default_factory=list, max_length=MAX_OPTIONS)
@@ -240,6 +257,15 @@ class CardEvent(BaseModel):
     file_id: str = Field(default="", max_length=32)
     url: str = Field(default="", max_length=600)
     child: str = Field(default="", max_length=64)
+    # steps
+    op: str = Field(default="", pattern=r"^(set|add|next|done|clear|task)$")
+    names: list[_StepText] = Field(default_factory=list, max_length=MAX_STEPS)
+    statuses: list[_StepText] = Field(default_factory=list, max_length=MAX_STEPS)
+    end: bool = False
+    key: str = Field(default="", max_length=64)
+    status: str = Field(default="", max_length=16)
+    detail: str = Field(default="", max_length=200)
+    source: str = Field(default="", pattern=r"^tasks$")  # only the hook sends it
 
 
 def _session_or_404(raw: str) -> str:
@@ -286,6 +312,122 @@ def post_need(sid: str, kind: str, text: str, options: list[str] | None = None,
     return need
 
 
+def _one_active(items: list[dict], keep: int | None = None) -> None:
+    """At most one active step: `keep` stays active if it is, else the first; the rest go to todo."""
+    actives = [i for i, s in enumerate(items) if s["status"] == "active"]
+    winner = keep if keep in actives else (actives[0] if actives else None)
+    for i in actives:
+        if i != winner:
+            items[i]["status"] = "todo"
+
+
+def _new_steps(names: list[str], statuses: list[str]) -> list[dict]:
+    """Rows for set: names cleaned (empty ones dropped); no statuses -> first active, rest todo."""
+    if statuses and len(statuses) != len(names):
+        raise HTTPException(status_code=422, detail="statuses must match names")
+    if any(s not in STEP_STATUSES for s in statuses):
+        raise HTTPException(status_code=422, detail="status must be done, active or todo")
+    pairs = [(_line(n, 60), statuses[i] if statuses else "todo") for i, n in enumerate(names)]
+    items = [{"name": n, "status": st, "detail": ""} for n, st in pairs if n]
+    if not items:
+        raise HTTPException(status_code=422, detail="names required")
+    if not statuses:
+        items[0]["status"] = "active"
+    _one_active(items)
+    return items
+
+
+def _apply_steps(e: dict, ev: CardEvent, now: str) -> bool:
+    """Run one steps op on a card entry; False when a hook op meets a hand-made list (ignored)."""
+    steps = e.get("steps") if isinstance(e.get("steps"), dict) else None
+    from_hook = ev.op == "task" or ev.source == "tasks"
+    if steps and from_hook and steps.get("source") == "manual":
+        return False
+    if ev.op == "clear":
+        e.pop("steps", None)
+        return True
+    items = [dict(s) for s in steps.get("items", []) if isinstance(s, dict)] if steps else []
+    op = "set" if ev.op == "add" and not items else ev.op
+    if op in ("next", "done") and not items:
+        raise HTTPException(status_code=404, detail="no steps")
+
+    if op == "set":
+        items = _new_steps(ev.names, ev.statuses)
+    elif op == "add":
+        names = [n for n in (_line(x, 60) for x in ev.names) if n]
+        if not names:
+            raise HTTPException(status_code=422, detail="names required")
+        active = next((i for i, s in enumerate(items) if s["status"] == "active"), None)
+        todo = next((i for i, s in enumerate(items) if s["status"] == "todo"), len(items))
+        at = len(items) if ev.end else (active + 1 if active is not None else todo)
+        items[at:at] = [{"name": n, "status": "todo", "detail": ""} for n in names]
+    elif op == "next":
+        active = next((i for i, s in enumerate(items) if s["status"] == "active"), -1)
+        if active >= 0:
+            items[active]["status"] = "done"
+        # the first todo after the old active step, wrapping round to the start
+        order = list(range(active + 1, len(items))) + list(range(0, active + 1))
+        nxt = next((i for i in order if items[i]["status"] == "todo"), None)
+        if nxt is not None:
+            items[nxt]["status"] = "active"
+    elif op == "done":
+        for s in items:
+            s["status"] = "done"
+    else:  # task: upsert one Claude task by its id
+        if not _STEP_KEY_RE.fullmatch(ev.key):
+            raise HTTPException(status_code=422, detail="bad key")
+        status = {"": "", "todo": "todo", "active": "active", "done": "done", "deleted": "deleted"}.get(ev.status)
+        if status is None:
+            raise HTTPException(status_code=422, detail="bad status")
+        name = next((n for n in (_line(x, 60) for x in ev.names) if n), "")
+        at = next((i for i, s in enumerate(items) if s.get("key") == ev.key), None)
+        if status == "deleted":
+            if at is not None:
+                del items[at]
+        else:
+            if at is None:
+                if not name:
+                    raise HTTPException(status_code=422, detail="name required")
+                items.append({"name": name, "status": "todo", "detail": "", "key": ev.key})
+                at = len(items) - 1
+            elif name:
+                items[at]["name"] = name
+            if ev.detail:
+                items[at]["detail"] = _line(ev.detail, 80)
+            if status:
+                items[at]["status"] = status
+            if status == "active":
+                _one_active(items, keep=at)  # the newest in_progress task wins
+
+    if len(items) > MAX_STEPS:
+        raise HTTPException(status_code=422, detail="too many steps")
+    # a hand op takes a hook list over (keys kept); a hook op never reaches a manual list (above)
+    e["steps"] = {"items": items, "source": "tasks" if from_hook else "manual", "updated_at": now}
+    return True
+
+
+def steps_view(entry: dict, session: dict) -> dict | None:
+    """`card.steps` for the app: counts and names only (`key`/`source` stay on the box)."""
+    steps = entry.get("steps") if isinstance(entry.get("steps"), dict) else {}
+    items = [{"name": s.get("name") or "", "status": s.get("status") if s.get("status") in STEP_STATUSES else "todo",
+              "detail": s.get("detail") or ""}
+             for s in steps.get("items", []) if isinstance(s, dict) and s.get("name")]
+    if not items:
+        return None
+    total = len(items)
+    done = sum(1 for s in items if s["status"] == "done")
+    active = next((i for i, s in enumerate(items) if s["status"] == "active"), None)
+    if active is not None:
+        current, name = active + 1, items[active]["name"]
+    elif done == total:
+        current, name = total, None
+    else:  # nothing active: count the done ones, name the next todo
+        current, name = done, next(s["name"] for s in items if s["status"] == "todo")
+    return {"items": items, "current": current, "total": total, "active": name,
+            "finished": done == total, "session_done": session.get("phase") == "done",
+            "updated_at": steps.get("updated_at")}
+
+
 @session_router.post("/cards/event")
 async def card_event(ev: CardEvent) -> dict:
     sid = _session_or_404(ev.session)
@@ -324,6 +466,19 @@ async def card_event(ev: CardEvent) -> dict:
             e["delegations"] = rows[-MAX_DELEGATIONS:]
         _update(sid, add_child)
         return {"ok": True, "session_id": sid, "child": child}
+
+    if ev.action == "steps":
+        if not ev.op:
+            raise HTTPException(status_code=422, detail="op required")
+        applied = []
+        entry = _update(sid, lambda e: applied.append(_apply_steps(e, ev, now)))
+        if not applied[0]:
+            return {"ok": True, "session_id": sid, "ignored": True}
+        if ev.op == "clear":
+            return {"ok": True, "session_id": sid}
+        view = steps_view(entry, {}) or {"current": 0, "total": 0, "active": None}
+        return {"ok": True, "session_id": sid, "current": view["current"], "total": view["total"],
+                "active": view["active"]}
 
     # ask
     need = post_need(sid, ev.kind, text, ev.options, ev.items, ev.file_id)
@@ -539,4 +694,5 @@ def card_for(session: dict, by_id: dict[str, dict], entries: dict | None = None)
         "parent": parent,
         "receipt": _receipt(entry, session),
         "doing": doing.get("text") if doing else None,
+        "steps": steps_view(entry, session),
     }

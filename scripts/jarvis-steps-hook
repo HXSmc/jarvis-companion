@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""PostToolUse hook: Claude's own task list feeds the steps on this session's Jarvis card.
+
+Wire it for TaskCreate|TaskUpdate|TodoWrite (see jarvis-steps-hook.install.md).
+It reads the hook JSON on stdin and posts one /cards/event `steps` call to the
+local gateway, with the shared bearer secret read in-process from the vault
+(never printed). It writes nothing to stdout or stderr and always exits 0, so it
+can never block or slow a session: bad input, no secret or a gateway that is down
+all end silently within about 1.5 s.
+
+  TaskCreate -> op task (key = the new task id, name = subject, detail = activeForm)
+  TaskUpdate -> op task (pending/in_progress/completed/deleted -> todo/active/done/deleted)
+  TodoWrite  -> op set with the whole list (source tasks, so a hand-made list still wins)
+
+Debug only: JARVIS_STEPS_HOOK_CAPTURE=/path appends the raw stdin to that file (mode 0600).
+"""
+import logging
+
+logging.disable(logging.CRITICAL)  # common.config logs a missing vault; nothing may reach stderr
+
+import json  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+import urllib.request  # noqa: E402
+
+TOOLS = ("TaskCreate", "TaskUpdate", "TodoWrite")
+STATUS = {"pending": "todo", "in_progress": "active", "completed": "done", "deleted": "deleted"}
+MAX_STEPS = 30  # the gateway's cap; a longer TodoWrite list keeps its first 30
+
+
+def _text(value, limit=200):
+    return value[:limit] if isinstance(value, str) else ""
+
+
+def body_for(hook):
+    """The /cards/event body for one hook payload, or None when there is nothing to send."""
+    tool, given = hook.get("tool_name"), hook.get("tool_input")
+    given = given if isinstance(given, dict) else {}
+    if tool == "TaskCreate":
+        result = hook.get("tool_response")
+        if isinstance(result, str):
+            result = json.loads(result)
+        task = result.get("task") if isinstance(result, dict) else None
+        key = str(task.get("id", "")) if isinstance(task, dict) else ""
+        if not key:
+            return None
+        return {"op": "task", "key": key[:64], "names": [_text(given.get("subject"))],
+                "detail": _text(given.get("activeForm")), "status": "todo"}
+    if tool == "TaskUpdate":
+        key = str(given.get("taskId", ""))[:64]
+        if not key:
+            return None
+        body = {"op": "task", "key": key, "status": STATUS.get(given.get("status"), "")}
+        if _text(given.get("subject")):
+            body["names"] = [_text(given.get("subject"))]
+        if _text(given.get("activeForm")):
+            body["detail"] = _text(given.get("activeForm"))
+        return body
+    if tool == "TodoWrite":
+        todos = [t for t in given.get("todos") or [] if isinstance(t, dict)][:MAX_STEPS]
+        if not todos:
+            return None
+        return {"op": "set", "source": "tasks", "names": [_text(t.get("content")) for t in todos],
+                "statuses": [{"in_progress": "active", "completed": "done"}.get(t.get("status"), "todo")
+                             for t in todos]}
+    return None
+
+
+def main():
+    raw = sys.stdin.buffer.read(1_000_000)
+    capture = os.environ.get("JARVIS_STEPS_HOOK_CAPTURE")
+    if capture:
+        fd = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw.rstrip(b"\n") + b"\n")
+    hook = json.loads(raw)
+    if not isinstance(hook, dict) or hook.get("tool_name") not in TOOLS:
+        return
+    session = hook.get("session_id")
+    body = body_for(hook)
+    if not body or not isinstance(session, str) or not session:
+        return
+    sys.path.insert(0, os.environ.get("JARVIS_GATEWAY_DIR", os.path.expanduser("~/jarvis-gateway")))
+    from common import config
+
+    secret = config.get_token()
+    if not secret:
+        return
+    gateway = os.environ.get("JARVIS_GATEWAY_LOCAL", "http://127.0.0.1:8788")
+    req = urllib.request.Request(gateway + "/cards/event", method="POST",
+                                 data=json.dumps({"session": session, "action": "steps", **body}).encode(),
+                                 headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=1.5).close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:  # noqa: BLE001  a hook must never fail or speak in the session
+        pass
+    sys.exit(0)
