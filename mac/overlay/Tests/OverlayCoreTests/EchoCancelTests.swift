@@ -108,13 +108,15 @@ final class EchoCancelTests: XCTestCase {
         XCTAssertEqual(EchoCancel.reconfigure(want: true, active: false, idle: false, engineStopped: stopped), .now)
     }
 
-    /// r4 finding 2: the voice-processing input must be mono; more channels fall back to the plain path.
+    /// Mac run 1: the 3-channel MacBook Air mic with voice processing on is usable (it was refused
+    /// as not mono, so the canceller never ran); levels and the recogniser read channel 0.
     func testFormatUsable() {
-        XCTAssertTrue(EchoCancel.formatUsable(rate: 48000, channels: 1, voiceProcessing: true))
-        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 3, voiceProcessing: true))
-        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 2, voiceProcessing: true))
-        XCTAssertTrue(EchoCancel.formatUsable(rate: 48000, channels: 2, voiceProcessing: false))
-        XCTAssertFalse(EchoCancel.formatUsable(rate: 0, channels: 1, voiceProcessing: false))
-        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 0, voiceProcessing: false))
+        XCTAssertTrue(EchoCancel.formatUsable(rate: 48000, channels: 1))
+        XCTAssertTrue(EchoCancel.formatUsable(rate: 48000, channels: 3))
+        XCTAssertTrue(EchoCancel.formatUsable(rate: 44100, channels: 2))
+        XCTAssertFalse(EchoCancel.formatUsable(rate: 0, channels: 1))
+        XCTAssertFalse(EchoCancel.formatUsable(rate: 48000, channels: 0))
+        XCTAssertEqual(EchoCancel.monoSource(channels: 3), "ch0")
+        XCTAssertEqual(EchoCancel.monoSource(channels: 1), "mono")
     }
 }

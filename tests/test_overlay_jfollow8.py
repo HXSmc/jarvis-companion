@@ -170,6 +170,8 @@ def test_debug_page_rows_jfollow8():
         pytest.skip("node not installed")
     details = [
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=1 agc=off ducking=min gain_db=6 start_ms=310"),
+        ("barge_aec", "on route=speakers in=builtin rate=48000 ch=3 src=ch0 agc=off ducking=min gain_db=6 start_ms=310"),
+        ("barge_aec", "levels src=ch0 ch_rms=0.031,0.002,0.002"),
         ("wake_ignored", "reason=echo_cancel"),
         ("playback", "ended audio_ms=12400"),
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
@@ -179,9 +181,9 @@ def test_debug_page_rows_jfollow8():
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
     assert got["d"] == [detail for _, detail in details]
-    assert got["l"][1] == "wake ignored"  # wake_ignored
-    assert got["l"][2] == "playback"
-    assert got["l"][5] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
+    assert got["l"][3] == "wake ignored"  # wake_ignored
+    assert got["l"][4] == "playback"
+    assert got["l"][7] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()
@@ -237,13 +239,26 @@ def test_failed_reconfigure_is_retried():
     assert "model.banner = nil" in reconf
 
 
-def test_voice_processing_format_must_be_mono():
-    """Code lens R4 finding 2: with voice processing on, a multi-channel input format throws
-    EngineFail.format (plain path, row `barge_aec failed reason=format`) before the tap is installed."""
+def test_multichannel_voice_processing_feeds_channel0():
+    """Mac run 1 (round 5): the MacBook Air mic is 3 channels with voice processing on; the old
+    mono-only guard threw EngineFail.format so the canceller never ran. Any format with a rate and a
+    channel is usable; the tap keeps the node's format (no conversion on the input node) and hands on
+    channel 0 in a mono format, which the recogniser's converter and the levels get."""
     start = _swift_func("startEngine", "SpeechInput.swift")
-    assert "EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount)," in start
-    assert "voiceProcessing: on) else { throw EngineFail.format }" in start
+    assert "EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount))," in start
+    assert "voiceProcessing: on)" not in start
+    assert "tap.install(on: input, format: format, mono: mono)" in start
     assert start.index("EchoCancel.formatUsable") < start.index("tap.install(") < start.index("attach(on)")
+    assert start.index("tap.install(") < start.index("micFormat = mono")
+    listen = _swift_func("listenAfterWake", "SpeechInput.swift")
+    assert "let format = micFormat ?? engine.inputNode.outputFormat(forBus: 0)" in listen
+    src = (ROOT / "mac/overlay/Sources/JarvisOverlay/SpeechInput.swift").read_text()
+    assert "let copy = Self.channel0(buffer, mono: mono)" in src
+    assert "Self.copy(buffer)" not in src  # the old all-channel copy fed the recogniser 3 channels
+    note = _swift_func("noteEchoCancel", "AppController.swift")
+    assert "ch=\\(setup.channels) src=\\(setup.src)" in note
+    levels = _swift_func("noteChannelLevels", "AppController.swift")
+    assert 'detail: "levels src=\\(src) ch_rms=\\(rms)"' in levels
 
 
 def test_young_barge_run_gets_one_delayed_retry():

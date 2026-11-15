@@ -28,6 +28,8 @@ final class SpeechInput {
     /// last reconfigure; the gate uses the AEC margin and the speakers rule only when true.
     private(set) var aecActive = false
     private var tapInstalled = false
+    /// The mono format the tap hands on (levels, ring, recogniser): channel 0 of the node's format.
+    private var micFormat: AVAudioFormat?
     private var configObserver: NSObjectProtocol?
     /// The engine stopped by itself (AVAudioEngineConfigurationChange: a device or route change);
     /// AppController reconfigures it at once.
@@ -48,8 +50,9 @@ final class SpeechInput {
     struct EngineSetup {
         var active: Bool       // voice processing on, read back from the input node
         var failed: String?    // enable|format|start: turning it on failed, the plain path runs
-        var rate: Double
+        var rate: Double       // the input node's real format, as tapped
         var channels: Int
+        var src: String        // ch0|mono: what levels, the ring and the recogniser hear
         var ms: Int
     }
 
@@ -58,6 +61,10 @@ final class SpeechInput {
     /// start() succeeded once, but the engine is not running now: a configuration change stopped it,
     /// or a reconfigure threw (isRunning is false then), so the next change notification retries.
     var engineStoppedOnItsOwn: Bool { EchoCancel.engineStopped(startedOnce: startedOnce, running: engine.isRunning) }
+
+    /// The loudest buffer RMS per node channel since the tap was installed (the `barge_aec levels` row
+    /// shows whether channel 0 really carries the voice).
+    var channelPeaks: [Double] { tap.channelPeaks }
 
     /// An unconfirmed barge run is listening (the reply plays on).
     var bargeListening: Bool {
@@ -100,7 +107,9 @@ final class SpeechInput {
         }
         aecActive = want && failed == nil && engine.inputNode.isVoiceProcessingEnabled
         return EngineSetup(active: aecActive, failed: failed, rate: format.sampleRate,
-                           channels: Int(format.channelCount), ms: Int(Date().timeIntervalSince(started) * 1000))
+                           channels: Int(format.channelCount),
+                           src: EchoCancel.monoSource(channels: Int(format.channelCount)),
+                           ms: Int(Date().timeIntervalSince(started) * 1000))
     }
 
     private func startPlain(attach: (Bool) -> Void) throws -> AVAudioFormat {
@@ -127,10 +136,13 @@ final class SpeechInput {
             input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
         }
         let format = input.outputFormat(forBus: 0)
-        guard EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount),
-                                      voiceProcessing: on) else { throw EngineFail.format }
+        guard EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount)),
+              let mono = MicTap.monoFormat(of: format) else { throw EngineFail.format }
         tap.clearRing()  // ring audio in the old format must never be replayed into a new-format turn
-        tap.install(on: input, format: format)
+        // The tap keeps the node's own format (the input node does no format conversion on a device,
+        // Apple's AVAudioInputNode docs) and hands on channel 0 only, in `mono`.
+        tap.install(on: input, format: format, mono: mono)
+        micFormat = mono
         tapInstalled = true
         attach(on)
         engine.prepare()
@@ -193,7 +205,7 @@ final class SpeechInput {
         let nothing: @Sendable () -> Void = { [weak self] in
             Task { @MainActor in self?.completeTurn(turn, nothing: true) }
         }
-        let format = engine.inputNode.outputFormat(forBus: 0)
+        let format = micFormat ?? engine.inputNode.outputFormat(forBus: 0)
         turnTask = Task { @MainActor [weak self] in
             guard let self else { return }
             #if compiler(>=6.2)
@@ -797,6 +809,19 @@ private final class MicTap: @unchecked Sendable {
     private var vad = VoiceActivity()
     private var voicedAt: Date?
     private var levels: [LevelSample] = []  // the last 40 s of buffer levels (turn gates read them)
+    private var peaks: [Double] = []  // loudest buffer RMS per node channel since install
+
+    /// Mono, deinterleaved, same sample type and rate as the node: what the tap hands on.
+    static func monoFormat(of format: AVAudioFormat) -> AVAudioFormat? {
+        AVAudioFormat(commonFormat: format.commonFormat, sampleRate: format.sampleRate,
+                      channels: 1, interleaved: false)
+    }
+
+    var channelPeaks: [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return peaks
+    }
 
     /// Last mic buffer clearly above the noise floor (the user is still talking).
     var lastVoicedAt: Date? {
@@ -805,14 +830,21 @@ private final class MicTap: @unchecked Sendable {
         return voicedAt
     }
 
-    func install(on node: AVAudioInputNode, format: AVAudioFormat) {
+    func install(on node: AVAudioInputNode, format: AVAudioFormat, mono: AVAudioFormat) {
+        lock.lock()
+        peaks = []
+        lock.unlock()
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
-            let copy = Self.copy(buffer)
+            let perChannel = Self.channelRms(buffer)
+            let copy = Self.channel0(buffer, mono: mono)
             let now = Date()
             var sink: (@Sendable (AVAudioPCMBuffer, Date) -> Void)?
             let rms = Self.rms(copy)
             lock.lock()
+            if peaks.count != perChannel.count { peaks = perChannel } else {
+                for i in peaks.indices { peaks[i] = max(peaks[i], perChannel[i]) }
+            }
             if vad.isVoiced(rms: rms) { voicedAt = now }
             levels.append(LevelSample(at: now, rms: rms, frames: Int(copy.frameLength)))
             if let first = levels.first, now.timeIntervalSince(first.at) > 41 {
@@ -851,19 +883,37 @@ private final class MicTap: @unchecked Sendable {
         return ring
     }
 
-    private static func copy(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
-        guard let out = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength)
+    /// Channel 0 of `buffer` copied into a `mono` buffer (tap buffers are only valid inside the
+    /// callback). Interleaved input steps over the other channels.
+    private static func channel0(_ buffer: AVAudioPCMBuffer, mono: AVAudioFormat) -> AVAudioPCMBuffer {
+        let frames = Int(buffer.frameLength)
+        guard let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength)
         else { return buffer }
         out.frameLength = buffer.frameLength
-        let channels = Int(buffer.format.channelCount)
-        let floatBytes = Int(buffer.frameLength) * MemoryLayout<Float>.size
+        let stride = buffer.stride  // 1 when deinterleaved, the channel count when interleaved
         if let src = buffer.floatChannelData, let dst = out.floatChannelData {
-            for channel in 0..<channels { memcpy(dst[channel], src[channel], floatBytes) }
+            for f in 0..<frames { dst[0][f] = src[0][f * stride] }
         } else if let src = buffer.int16ChannelData, let dst = out.int16ChannelData {
-            let int16Bytes = Int(buffer.frameLength) * MemoryLayout<Int16>.size
-            for channel in 0..<channels { memcpy(dst[channel], src[channel], int16Bytes) }
+            for f in 0..<frames { dst[0][f] = src[0][f * stride] }
         }
         return out
+    }
+
+    /// RMS of each node channel (float formats; at most 8), for the channel check row.
+    private static func channelRms(_ buffer: AVAudioPCMBuffer) -> [Double] {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0, let data = buffer.floatChannelData else { return [] }
+        let channels = min(8, Int(buffer.format.channelCount))
+        let stride = buffer.stride
+        let interleaved = buffer.format.isInterleaved
+        return (0..<channels).map { c in
+            var sum: Float = 0
+            for f in 0..<frames {
+                let x = interleaved ? data[0][f * stride + c] : data[c][f]
+                sum += x * x
+            }
+            return Double(min(1, sqrt(sum / Float(frames))))
+        }
     }
 
     private static func rms(_ buffer: AVAudioPCMBuffer) -> Double {

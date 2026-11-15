@@ -65,10 +65,17 @@ public enum EchoCancel {
         startedOnce && !running
     }
 
-    /// An input format the tap can use; with voice processing on it must be mono (levels, the ring
-    /// and the converter read one channel), else the plain path runs (`barge_aec failed reason=format`).
-    public static func formatUsable(rate: Double, channels: Int, voiceProcessing: Bool) -> Bool {
-        rate > 0 && channels > 0 && (!voiceProcessing || channels == 1)
+    /// An input format the tap can use, with or without voice processing (Mac run 1: the MacBook Air
+    /// mic is a 3-channel array; voice processing keeps the node multi-channel). Else `failed reason=format`.
+    public static func formatUsable(rate: Double, channels: Int) -> Bool {
+        rate > 0 && channels > 0
+    }
+
+    /// Which mono signal levels, the ring and the recogniser get from the tap (the `src=` field):
+    /// channel 0 of a multi-channel node (the voice processor's output is 1 channel, app log
+    /// `theActualVPOutputFmt = 1 ch`), the only channel of a mono one.
+    public static func monoSource(channels: Int) -> String {
+        channels > 1 ? "ch0" : "mono"
     }
 
     /// The playback makeup gain for what the canceller takes off the mic: `gainDb` of gain, capped

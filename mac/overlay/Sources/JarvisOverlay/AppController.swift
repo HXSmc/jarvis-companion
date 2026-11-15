@@ -189,14 +189,26 @@ final class AppController {
             detail = "failed reason=\(failed)"
         } else if setup.active {
             detail = "on route=\(outputBuiltIn ? "speakers" : "external") in=\(inputKind) "
-                + "rate=\(Int(setup.rate)) ch=\(setup.channels) agc=off ducking=min "
+                + "rate=\(Int(setup.rate)) ch=\(setup.channels) src=\(setup.src) agc=off ducking=min "
                 + "gain_db=\(Int(AudioOut.makeupGainDb)) start_ms=\(setup.ms)"
+            noteChannelLevels(src: setup.src)
         } else {
             let why = bargeMode != .aec ? "mode" : routeIsHeadphones ? "headphones"
                 : inputIsBluetooth ? "bluetooth_input" : "failed"
             detail = "off reason=\(why)"
         }
         client.debugNote(step: "barge_aec", detail: detail)
+    }
+
+    /// 10 s after the canceller came on: the loudest buffer RMS per node channel since then, so the
+    /// live run shows whether channel 0 (what the gates and the recogniser hear) carries the voice.
+    private func noteChannelLevels(src: String) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let self, self.speech.aecActive else { return }
+            let rms = self.speech.channelPeaks.map { String(format: "%.3f", $0) }.joined(separator: ",")
+            self.client.debugNote(step: "barge_aec", detail: "levels src=\(src) ch_rms=\(rms)")
+        }
     }
 
     /// A route change, a mode change from a later health read, or the engine's configuration
