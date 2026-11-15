@@ -104,6 +104,107 @@ final class CardSnapshotTests: XCTestCase {
               "files": [], "links": [], "children": [], "parent": null, "receipt": null, "doing": null}}
     """
 
+    static let steps3of4 = """
+    {"session_id": "a1b2c3d4-0011", "title": "Hook video for the launch", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Rendering the hook video",
+     "recap": ["I planned the hook", "I am rendering the hook video"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "Rendering the hook video",
+              "steps": {"items": [{"name": "Plan the hook", "status": "done", "detail": ""},
+                                  {"name": "Write the script", "status": "done", "detail": ""},
+                                  {"name": "Render hook video", "status": "active", "detail": "Rendering animations"},
+                                  {"name": "Write captions", "status": "todo", "detail": ""}],
+                        "current": 3, "total": 4, "active": "Render hook video", "finished": false,
+                        "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
+    static let stepsGrown = """
+    {"session_id": "a1b2c3d4-0012", "title": "Hook video for the launch", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Rendering the hook video",
+     "recap": ["I planned the hook", "The task grew to 6 steps"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "Rendering the hook video",
+              "steps": {"items": [{"name": "Plan the hook", "status": "done", "detail": ""},
+                                  {"name": "Write the script", "status": "done", "detail": ""},
+                                  {"name": "Render hook video", "status": "active", "detail": "Rendering animations"},
+                                  {"name": "Add sound", "status": "todo", "detail": ""},
+                                  {"name": "Export clip", "status": "todo", "detail": ""},
+                                  {"name": "Write captions", "status": "todo", "detail": ""}],
+                        "current": 3, "total": 6, "active": "Render hook video", "finished": false,
+                        "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
+    static let stepsAllDone = """
+    {"session_id": "a1b2c3d4-0013", "title": "Hook video for the launch", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Hook video finished",
+     "recap": ["I rendered the hook video", "All 6 steps are done"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "Hook video finished",
+              "steps": {"items": [{"name": "Plan", "status": "done", "detail": ""},
+                                  {"name": "Sketch", "status": "done", "detail": ""},
+                                  {"name": "Render hook video", "status": "done", "detail": ""},
+                                  {"name": "Add sound", "status": "done", "detail": ""},
+                                  {"name": "Export clip", "status": "done", "detail": ""},
+                                  {"name": "Write captions", "status": "done", "detail": ""}],
+                        "current": 6, "total": 6, "active": null, "finished": true,
+                        "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
+    static let stepsLong = """
+    {"session_id": "a1b2c3d4-0014", "title": "Launch video, second pass", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Rendering the second pass of the launch video",
+     "recap": ["I planned the second pass", "I am rendering it"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "Rendering the second pass of the launch video",
+              "steps": {"items": [{"name": "Plan", "status": "done", "detail": ""},
+                                  {"name": "Rendering the second half of the animation timeline at full…", "status": "active",
+                                   "detail": "Frame 412 of 900"},
+                                  {"name": "Write captions", "status": "todo", "detail": ""},
+                                  {"name": "Export clip", "status": "todo", "detail": ""}],
+                        "current": 2, "total": 4, "active": "Rendering the second half of the animation timeline at full…",
+                        "finished": false, "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
+    static let stepsDoneSession = """
+    {"session_id": "a1b2c3d4-0015", "title": "Hook video for the launch", "state": "idle",
+     "phase": "done", "health": "done", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "Hook video finished",
+     "recap": ["I rendered the hook video", "The session is done"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "Hook video finished",
+              "steps": {"items": [{"name": "Plan the hook", "status": "done", "detail": ""},
+                                  {"name": "Render hook video", "status": "active", "detail": "Rendering animations"},
+                                  {"name": "Write captions", "status": "todo", "detail": ""},
+                                  {"name": "Export clip", "status": "todo", "detail": ""}],
+                        "current": 2, "total": 4, "active": "Render hook video", "finished": false,
+                        "session_done": true, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
+    static let stepsArabic = """
+    {"session_id": "a1b2c3d4-0016", "title": "فيديو الإطلاق", "state": "running",
+     "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
+     "doing": "تصوير المقطع",
+     "recap": ["خططت للمقطع", "أصور المقطع الآن"],
+     "last_activity_at": "\(now)", "role": "BUILDER",
+     "card": {"need": null, "files": [], "links": [], "children": [], "parent": null, "receipt": null,
+              "doing": "تصوير المقطع",
+              "steps": {"items": [{"name": "تجهيز الخطة", "status": "done", "detail": ""},
+                                  {"name": "تصوير المقطع", "status": "active", "detail": "جاري التصوير"},
+                                  {"name": "كتابة النص", "status": "todo", "detail": ""},
+                                  {"name": "رفع الفيديو", "status": "todo", "detail": ""}],
+                        "current": 2, "total": 4, "active": "تصوير المقطع", "finished": false,
+                        "session_done": false, "updated_at": "2026-11-15T10:00:00Z"}}}
+    """
+
     static let plan = """
     # Plan: new inbox
 
@@ -164,6 +265,61 @@ final class CardSnapshotTests: XCTestCase {
                                 "Answered", "Not delivered, send again"])
     }
 
+    // MARK: steps
+
+    func testStepsDecodeFromGatewayJSON() throws {
+        let s = try Self.session(Self.steps3of4)
+        let steps = try XCTUnwrap(s.card?.steps)
+        XCTAssertEqual(steps.total, 4)
+        XCTAssertEqual(steps.current, 3)
+        XCTAssertEqual(steps.items.count, 4)
+        XCTAssertEqual(steps.active, "Render hook video")
+        XCTAssertEqual(steps.items[2].detail, "Rendering animations")
+        XCTAssertEqual(steps.sessionDone, false)
+    }
+
+    func testCardWithoutStepsStillDecodes() throws {
+        let w = try Self.session(Self.working)
+        XCTAssertNil(w.card?.steps)
+    }
+
+    func testStepsAloneMakeCardContent() throws {
+        let s = try Self.session(Self.steps3of4)
+        XCTAssertEqual(s.card?.hasContent, true)
+    }
+
+    func testStepsAccessibilityLabels() throws {
+        func steps(_ json: String) throws -> CardInfo.Steps {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(CardInfo.Steps.self, from: Data(json.utf8))
+        }
+        // Active step: "Step 3 of 6: C".
+        let active = try steps("""
+        {"items": [{"name": "A", "status": "done"}, {"name": "B", "status": "done"},
+                   {"name": "C", "status": "active"}, {"name": "D", "status": "todo"},
+                   {"name": "E", "status": "todo"}, {"name": "F", "status": "todo"}],
+         "current": 3, "total": 6, "active": "C", "finished": false}
+        """)
+        XCTAssertEqual(active.accessibilityLabel, "Step 3 of 6: C")
+        // Finished: "All 6 steps done".
+        let done = try steps("""
+        {"items": [{"name": "A", "status": "done"}, {"name": "B", "status": "done"},
+                   {"name": "C", "status": "done"}, {"name": "D", "status": "done"},
+                   {"name": "E", "status": "done"}, {"name": "F", "status": "done"}],
+         "current": 6, "total": 6, "active": null, "finished": true}
+        """)
+        XCTAssertEqual(done.accessibilityLabel, "All 6 steps done")
+        // Nothing active: "2 of 6 done, next: C".
+        let next = try steps("""
+        {"items": [{"name": "A", "status": "done"}, {"name": "B", "status": "done"},
+                   {"name": "C", "status": "todo"}, {"name": "D", "status": "todo"},
+                   {"name": "E", "status": "todo"}, {"name": "F", "status": "todo"}],
+         "current": 2, "total": 6, "active": "C", "finished": false}
+        """)
+        XCTAssertEqual(next.accessibilityLabel, "2 of 6 done, next: C")  // gateway names the next todo in `active`
+    }
+
     // MARK: screenshots
 
     private func boardCard(_ json: String) throws -> some View {
@@ -176,6 +332,20 @@ final class CardSnapshotTests: XCTestCase {
                            openChat: { _ in }, openFile: { _ in }, openSession: { _ in })
             }
         }
+    }
+
+    /// Session card with the step list rendered expanded (shots 21 and 23).
+    private func expandedSteps(_ json: String, rtl: Bool = false) throws -> some View {
+        let session = try Self.session(json)
+        return VStack(spacing: 8) {
+            SessionCard(session: session)
+            if let steps = session.card?.steps {
+                StepsView(steps: steps, compact: true, expanded: true)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.jarvisSurface.opacity(0.6)))
+            }
+        }
+        .environment(\.layoutDirection, rtl ? .rightToLeft : .leftToRight)
     }
 
     func testSnapshotsOfEveryCardState() throws {
@@ -202,6 +372,12 @@ final class CardSnapshotTests: XCTestCase {
                  screen: CardFileView(target: CardFileTarget(sessionID: "a1b2c3d4-0003", file: pdfFile),
                                       preloaded: Self.samplePDF()))
         try shot("17-hardware", fit: try boardCard(Self.hardware))
+        try shot("18-steps-3-of-4", fit: try boardCard(Self.steps3of4))
+        try shot("19-steps-grown-3-of-6", fit: try boardCard(Self.stepsGrown))
+        try shot("20-steps-all-done", fit: try boardCard(Self.stepsAllDone))
+        try shot("21-steps-long-name-expanded", fit: try expandedSteps(Self.stepsLong))
+        try shot("22-steps-done-session-greyed", fit: try boardCard(Self.stepsDoneSession))
+        try shot("23-steps-rtl-expanded", fit: try expandedSteps(Self.stepsArabic, rtl: true))
     }
 
     // MARK: drawing

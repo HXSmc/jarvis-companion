@@ -1752,6 +1752,42 @@ struct CardInfo: Decodable, Equatable {
         }
     }
 
+    /// Live step progress (`card.steps`, gateway/cards.py): the named steps a
+    /// task walks through, which one is active now, and whether the whole
+    /// session is done. Absent or null for cards without steps.
+    struct Steps: Decodable, Equatable {
+        struct Item: Decodable, Equatable {
+            let name: String
+            let status: String
+            let detail: String?
+        }
+
+        let items: [Item]
+        let current: Int
+        let total: Int
+        let active: String?
+        let finished: Bool
+        let sessionDone: Bool?
+        let updatedAt: String?
+
+        /// The first still-open step, shown as "Next:" when nothing is active.
+        var nextName: String {
+            items.first { $0.status == "todo" }?.name ?? ""
+        }
+
+        /// The step running now; nil when none is (the gateway's `active` then names the next todo).
+        var activeName: String? {
+            items.first { $0.status == "active" }?.name
+        }
+
+        /// VoiceOver text for the collapsed row.
+        var accessibilityLabel: String {
+            if finished { return "All \(total) steps done" }
+            if let name = activeName { return "Step \(current) of \(total): \(name)" }
+            return "\(current) of \(total) done, next: \(nextName)"
+        }
+    }
+
     let need: Need?
     let files: [File]?
     let links: [Link]?
@@ -1759,10 +1795,12 @@ struct CardInfo: Decodable, Equatable {
     let parent: Parent?
     let receipt: Receipt?
     let doing: String?
+    let steps: Steps?
 
     var hasContent: Bool {
         need != nil || !(files ?? []).isEmpty || !(links ?? []).isEmpty
             || !(children ?? []).isEmpty || parent != nil || receipt != nil
+            || !(steps?.items ?? []).isEmpty
     }
 
     /// The buttons a session's ask gets; nil label = opens the chat composer instead.
@@ -1776,6 +1814,141 @@ struct CardInfo: Decodable, Equatable {
         case "hardware": return [("Open in Hardware Mode", false), ("Reply", false)]
         default: return [("OK", true), ("Reply", false)]
         }
+    }
+}
+
+/// Step progress on a session card (`card.steps`): one collapsed row
+/// ("3/4  Render hook video") with a thin progress bar; tapping opens the
+/// full step list. Done sessions fade back so the live card stands out.
+struct StepsView: View {
+    let steps: CardInfo.Steps
+    let compact: Bool
+    @State private var expanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// `expanded` seeds the initial fold state; later card refreshes keep it.
+    init(steps: CardInfo.Steps, compact: Bool, expanded: Bool = false) {
+        self.steps = steps
+        self.compact = compact
+        _expanded = State(initialValue: expanded)
+    }
+
+    /// Bar fill as 0...1; the whole track goes green when the session finished.
+    private var fraction: Double {
+        steps.finished ? 1 : min(1, max(0, Double(steps.current) / Double(max(1, steps.total))))
+    }
+
+    private var headline: String {
+        if steps.finished { return "All steps done" }
+        return steps.activeName ?? "Next: \(steps.nextName)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Text("\(steps.current)/\(steps.total)")
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                        .foregroundColor(.jarvisAccent)
+                        .opacity(steps.sessionDone == true ? 0.75 : 1)  // AA on the dark card
+                    Text(headline)
+                        .font(.subheadline)
+                        .foregroundColor(.jarvisText)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 8)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.footnote.weight(.medium))
+                        .foregroundColor(.jarvisMuted)
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel((steps.sessionDone == true ? "Session finished. " : "") + steps.accessibilityLabel)
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
+            .accessibilityAddTraits(.isButton)
+            bar
+            if expanded {
+                list
+            }
+        }
+    }
+
+    /// A finished session fades only its count (to 0.75, above) and bar, so the step names keep full contrast.
+    private var dim: Double { steps.sessionDone == true ? 0.55 : 1 }
+
+    private var bar: some View {
+        GeometryReader { geo in
+            Capsule()
+                .fill(Color.jarvisMuted.opacity(0.25))
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(steps.finished ? Color.centralGreen : Color.jarvisAccent)
+                        .frame(width: geo.size.width * fraction)
+                }
+        }
+        .frame(height: 3)
+        .opacity(dim)
+        .animation(steps.sessionDone == true || reduceMotion ? nil : .easeOut(duration: 0.25), value: fraction)
+        .accessibilityHidden(true)
+    }
+
+    private var list: some View {
+        let shown = compact && steps.items.count > 8 ? Array(steps.items.prefix(8)) : steps.items
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { _, item in
+                itemRow(item)
+            }
+            if shown.count < steps.items.count {
+                Text("+\(steps.items.count - shown.count) more")
+                    .font(.footnote)
+                    .foregroundColor(.jarvisMuted)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private func itemRow(_ item: CardInfo.Steps.Item) -> some View {
+        switch item.status {
+        case "done":
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.jarvisMuted)
+                Text(item.name).foregroundColor(.jarvisMuted)
+            }
+            .font(.subheadline)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Done: \(item.name)")
+        case "active":
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "circle.circle").foregroundColor(.jarvisAccent).font(.subheadline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name).font(.subheadline.weight(.semibold)).foregroundColor(.jarvisText)
+                    if let detail = item.detail, !detail.isEmpty {
+                        Text(detail).font(.footnote).foregroundColor(.jarvisMuted)
+                    }
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Now: \(item.name)\(detailSuffix(item))")
+        default:
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "circle").foregroundColor(Color.jarvisMuted.opacity(0.6))
+                Text(item.name).foregroundColor(Color.jarvisMuted)
+            }
+            .font(.subheadline)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("To do: \(item.name)")
+        }
+    }
+
+    private func detailSuffix(_ item: CardInfo.Steps.Item) -> String {
+        if let detail = item.detail, !detail.isEmpty { return ", \(detail)" }
+        return ""
     }
 }
 
@@ -1817,6 +1990,10 @@ struct CardExtras: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // First child on every refresh, so its fold state survives the 5 s poll.
+            if let steps = card.steps, !steps.items.isEmpty {
+                StepsView(steps: steps, compact: compact)
+            }
             if let need = card.need {
                 needView(need)
             }

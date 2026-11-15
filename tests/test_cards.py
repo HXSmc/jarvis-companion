@@ -337,3 +337,209 @@ def test_digest_changes_when_session_finishes_with_same_reply():
     done = central._plain_digest({"phase": "done", "_facts": facts})
     assert working != done
     assert central._plain_digest({"phase": "done", "summary": "  "}) is None
+
+
+# --- steps: "3/6 <active step>" on the card -------------------------------------
+
+def _steps(sid, op, **body):
+    return _event({"session": sid, "action": "steps", "op": op, **body})
+
+
+def _card_steps(sid="s-run"):
+    return _sessions()[sid]["card"]["steps"]
+
+
+def _states(sid="s-run"):
+    return [(s["name"], s["status"]) for s in _card_steps(sid)["items"]]
+
+
+def test_steps_absent_is_null_for_old_cards():
+    _event({"session": "s-run", "action": "doing", "text": "x"})
+    assert _card_steps() is None
+
+
+def test_steps_set_makes_the_first_active():
+    resp = _steps("s-run", "set", names=["A", "B", "C", "D"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True, "session_id": "s-run", "current": 1, "total": 4, "active": "A"}
+    steps = _card_steps()
+    assert _states() == [("A", "active"), ("B", "todo"), ("C", "todo"), ("D", "todo")]
+    assert (steps["current"], steps["total"], steps["active"], steps["finished"]) == (1, 4, "A", False)
+    assert steps["session_done"] is False and steps["updated_at"].endswith("Z")
+
+
+def test_steps_next_moves_the_active_step_on():
+    _steps("s-run", "set", names=["A", "B", "C"])
+    assert _steps("s-run", "next").json()["active"] == "B"
+    assert _states() == [("A", "done"), ("B", "active"), ("C", "todo")]
+    assert _card_steps()["current"] == 2
+
+
+def test_steps_done_marks_every_step():
+    _steps("s-run", "set", names=["A", "B", "C"])
+    resp = _steps("s-run", "done").json()
+    assert (resp["current"], resp["total"], resp["active"]) == (3, 3, None)
+    assert {s for _, s in _states()} == {"done"}
+
+
+def test_steps_clear_removes_the_list():
+    _steps("s-run", "set", names=["A", "B"])
+    assert _steps("s-run", "clear").json() == {"ok": True, "session_id": "s-run"}
+    assert _card_steps() is None
+
+
+def test_steps_grow_mid_run_from_3_of_4_to_3_of_6():
+    _steps("s-run", "set", names=["A", "B", "C", "D"])
+    _steps("s-run", "next")
+    assert _steps("s-run", "next").json()["current"] == 3
+    resp = _steps("s-run", "add", names=["E", "F"]).json()
+    assert (resp["current"], resp["total"], resp["active"]) == (3, 6, "C")
+    assert [n for n, _ in _states()] == ["A", "B", "C", "E", "F", "D"]  # new steps at 4-5
+
+
+def test_steps_add_end_appends():
+    _steps("s-run", "set", names=["A", "B", "C"])
+    _steps("s-run", "add", names=["Z"], end=True)
+    assert [n for n, _ in _states()] == ["A", "B", "C", "Z"]
+
+
+def test_steps_add_with_nothing_active_goes_before_the_first_todo():
+    _steps("s-run", "set", names=["A", "B", "C"], statuses=["done", "todo", "todo"])
+    _steps("s-run", "add", names=["X"])
+    assert _states() == [("A", "done"), ("X", "todo"), ("B", "todo"), ("C", "todo")]
+    _steps("s-run", "done")
+    _steps("s-run", "add", names=["Y"])  # no todo left: append
+    assert _states()[-1] == ("Y", "todo")
+
+
+def test_steps_add_with_no_list_is_set():
+    resp = _steps("s-run", "add", names=["A", "B"]).json()
+    assert (resp["current"], resp["total"]) == (1, 2)
+    assert _states() == [("A", "active"), ("B", "todo")]
+
+
+def test_steps_add_with_only_empty_names_is_422():
+    _steps("s-run", "set", names=["A"])
+    assert _steps("s-run", "add", names=["  ", "​"]).status_code == 422
+    assert _steps("s-run", "set", names=[" "]).status_code == 422
+    assert _steps("s-run", "set", names=[]).status_code == 422
+
+
+def test_steps_next_or_done_with_no_list_is_404():
+    assert _steps("s-run", "next").status_code == 404
+    assert _steps("s-run", "done").status_code == 404
+
+
+def test_steps_31_names_or_201_char_detail_is_422():
+    assert _steps("s-run", "set", names=[f"S{i}" for i in range(31)]).status_code == 422
+    assert _steps("s-run", "task", key="1", names=["A"], detail="x" * 201).status_code == 422
+    assert _steps("s-run", "set", names=["x" * 201]).status_code == 422
+    assert _event({"session": "s-run", "action": "steps"}).status_code == 422  # no op
+    assert _steps("s-run", "redo").status_code == 422
+    assert "steps" not in cards.load().get("s-run", {})
+
+
+def test_steps_add_past_30_is_422_and_saves_nothing():
+    _steps("s-run", "set", names=[f"S{i}" for i in range(28)])
+    resp = _steps("s-run", "add", names=["X", "Y", "Z"])
+    assert resp.status_code == 422 and resp.json()["detail"] == "too many steps"
+    assert _card_steps()["total"] == 28
+
+
+def test_steps_long_name_is_cut_to_60_chars():
+    _steps("s-run", "set", names=["n" * 61])
+    name = _card_steps()["active"]
+    assert len(name) == 60 and name.endswith("…")
+
+
+def test_steps_statuses_length_mismatch_is_422():
+    resp = _steps("s-run", "set", names=["A", "B"], statuses=["done"])
+    assert resp.status_code == 422
+    assert _steps("s-run", "set", names=["A"], statuses=["started"]).status_code == 422
+
+
+def test_steps_two_actives_keep_the_first():
+    _steps("s-run", "set", names=["A", "B", "C"], statuses=["active", "active", "todo"])
+    assert _states() == [("A", "active"), ("B", "todo"), ("C", "todo")]
+
+
+def test_steps_task_create_update_delete_and_newer_active_wins():
+    for key, name in (("1", "Plan"), ("2", "Build"), ("3", "Test")):
+        resp = _steps("s-run", "task", key=key, names=[name], detail=f"{name}ning", status="todo")
+        assert resp.status_code == 200, resp.text
+    _steps("s-run", "task", key="1", status="active")
+    _steps("s-run", "task", key="2", status="active")  # newer in_progress demotes the older one
+    assert _states() == [("Plan", "todo"), ("Build", "active"), ("Test", "todo")]
+    _steps("s-run", "task", key="2", status="done", names=["Build it"])
+    _steps("s-run", "task", key="3", status="deleted")
+    assert _states() == [("Plan", "todo"), ("Build it", "done")]
+    assert cards.load()["s-run"]["steps"]["source"] == "tasks"
+    assert _steps("s-run", "task", key="9", status="todo").status_code == 422  # new key needs a name
+    assert _steps("s-run", "task", key="bad key", names=["x"]).status_code == 422
+    assert _steps("s-run", "task", key="4", names=["x"], status="paused").status_code == 422
+
+
+def test_steps_task_is_ignored_on_a_manual_list_until_clear():
+    _steps("s-run", "set", names=["A", "B"])
+    resp = _steps("s-run", "task", key="1", names=["Hook task"], status="active")
+    assert resp.json() == {"ok": True, "session_id": "s-run", "ignored": True}
+    hook_set = _steps("s-run", "set", names=["T1"], statuses=["todo"], source="tasks")
+    assert hook_set.json()["ignored"] is True  # TodoWrite cannot flip a hand list either
+    assert [n for n, _ in _states()] == ["A", "B"]
+    _steps("s-run", "clear")
+    assert _steps("s-run", "task", key="1", names=["Hook task"], status="active").json()["active"] == "Hook task"
+
+
+def test_steps_manual_op_takes_over_a_task_list_keeping_keys():
+    _steps("s-run", "task", key="1", names=["Plan"], status="active")
+    _steps("s-run", "next")
+    stored = cards.load()["s-run"]["steps"]
+    assert stored["source"] == "manual" and stored["items"][0]["key"] == "1"
+
+
+def test_steps_todowrite_then_task_both_land():
+    resp = _steps("s-run", "set", names=["One", "Two"], statuses=["active", "todo"], source="tasks")
+    assert resp.json()["active"] == "One"
+    _steps("s-run", "task", key="7", names=["Three"], status="todo")
+    assert _states() == [("One", "active"), ("Two", "todo"), ("Three", "todo")]
+    assert cards.load()["s-run"]["steps"]["source"] == "tasks"
+
+
+def test_steps_stay_on_a_done_session_with_session_done():
+    _steps("s-done", "set", names=["A", "B", "C"])
+    _steps("s-done", "next")
+    steps = _card_steps("s-done")
+    assert _sessions()["s-done"]["phase"] == "done"
+    assert steps["session_done"] is True and (steps["current"], steps["active"]) == (2, "B")
+
+
+def test_steps_key_and_source_never_reach_the_card():
+    _steps("s-run", "task", key="1", names=["Plan"], detail="Planning", status="active")
+    steps = _card_steps()
+    assert "source" not in steps and "key" not in steps
+    assert steps["items"] == [{"name": "Plan", "status": "active", "detail": "Planning"}]
+
+
+def test_steps_x_semantics_all_done_is_finished():
+    _steps("s-run", "set", names=["A", "B", "C"], statuses=["done", "done", "done"])
+    steps = _card_steps()
+    assert (steps["current"], steps["total"], steps["finished"], steps["active"]) == (3, 3, True, None)
+
+
+def test_steps_x_semantics_nothing_active_names_the_next_todo():
+    _steps("s-run", "set", names=["A", "B", "C", "D"], statuses=["done", "done", "todo", "todo"])
+    steps = _card_steps()
+    assert (steps["current"], steps["total"], steps["finished"], steps["active"]) == (2, 4, False, "C")
+
+
+def test_update_lock_keeps_every_thread_write():
+    import threading
+
+    def add(i):
+        cards._update("s-lock", lambda e: e.setdefault("vals", []).append(i))
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(cards.load()["s-lock"]["vals"]) == list(range(20))

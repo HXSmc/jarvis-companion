@@ -14,6 +14,11 @@ usage:
   jarvis-card link https://claude.ai/artifact/... ["title"]
   jarvis-card delegate CHILD_SESSION_ID "handed notifications"
   jarvis-card clear                                      remove the open ask
+  jarvis-card steps set "Plan" "Build" "Test"            the step list; the first step is active
+  jarvis-card steps add "Fix CI" ["Ship"] [--end]        new steps after the active one (--end: last)
+  jarvis-card steps next                                 active step done, the next one starts
+  jarvis-card steps done                                 every step done
+  jarvis-card steps clear                                remove the step list
   [--session ID]  default: $CLAUDE_CODE_SESSION_ID (the calling Claude session)
 
 The owner's answer comes back into this session as a normal message.
@@ -106,6 +111,16 @@ def main(argv):
     elif cmd == "clear":
         event(session=session, action="clear")
         print("card: ask cleared")
+    elif cmd == "steps" and args and args[0] in ("set", "add", "next", "done", "clear"):
+        op, rest = args[0], args[1:]
+        names = [a for a in rest if a != "--end"]  # a bare flag, so not take()
+        if op in ("set", "add") and not names:
+            sys.exit(__doc__)
+        out = event(session=session, action="steps", op=op, names=names, end="--end" in rest)
+        if op == "clear":
+            print("card: steps cleared")
+        else:
+            print(f"card: step {out.get('current')}/{out.get('total')} {out.get('active') or ''}".rstrip())
     else:
         sys.exit(__doc__)
 
