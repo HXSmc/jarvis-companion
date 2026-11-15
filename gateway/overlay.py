@@ -2200,8 +2200,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         return
     if body.followup and not joined and not owner_answer_due and not pick_reply:
         words = intents.noise_words(body.text)
-        if words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
-                                               body.conv_id, None).kind == "answer":
+        if (words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
+                                                body.conv_id, None).kind == "answer"
+                and not _is_card_remove(body.text, body.conv_id, deps)):  # "remove the cat": A1 upgrade
             # The room, not the owner: a short follow-up with no question in it (STT heard "Jew").
             # Nothing is said, shown or stored.
             _followup_dropped(body, "short", _followup_gate(body)[1], words, on_step)

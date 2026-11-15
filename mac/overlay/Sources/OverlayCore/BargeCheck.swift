@@ -168,9 +168,10 @@ public enum BargeCheck {
         }
 
         /// C2: the gate gained an over block since the last check and the last partial is recent:
-        /// its words are read again (they arrived before their over blocks).
+        /// its words are read again (they arrived before their over blocks). Echo-cancelled runs
+        /// only: the headphones rule is unchanged (design A).
         public func wantsRecheck(at now: Date) -> Bool {
-            overCount > checkedOverCount
+            aec && overCount > checkedOverCount
                 && lastPartialAt.map { now.timeIntervalSince($0) <= BargeCheck.keepFor } ?? false
         }
 

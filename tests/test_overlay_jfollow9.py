@@ -174,6 +174,21 @@ def test_followup_short_command_gate(client):
     assert not _drops(events) and _last("followup_dropped")["reason"] == "level"
 
 
+@pytest.mark.parametrize("text,want", [("remove the cat", "k1"), ("close the footage", "k2"),
+                                       ("remove the notes", "k3")])
+def test_short_names_only_remove_followup_acts(client, text, want):
+    """A loud 3-word names-only remove parses as `answer`: the short-noise rule must not drop it."""
+    clock = Clock()
+    _deps(clock=clock, chunks=['{"say": "Here."}\n'])
+    _owner(client, "j9s")
+    _seed("j9s", clock)
+    events = turn(client, text, conv_id="j9s", followup=True, levels=[0.049] * 12, conf=0.9)
+    assert _drops(events) == [[want]] and not _steps("followup_dropped")
+    # a 3-word names-only follow-up that names no shown card is still room noise
+    turn(client, "remove the unicorn", conv_id="j9s", followup=True, levels=[0.049] * 12, conf=0.9)
+    assert _last("followup_dropped")["reason"] == "short"
+
+
 def test_barge_combined_on_speakers(client):
     _deps(chunks=['{"say": "Here."}\n'])
     _owner(client, "j9c")
@@ -216,7 +231,7 @@ def test_remove_one_card_no_match_and_ties(client):
     assert says(events) == [acks.PHRASES["no_cards"]] and not _drops(events)
     assert _last("card_remove")["detail"] == "refused reason=empty"
     _seed("j9f", clock, [("info", "Rome history"), ("info", "Rome facts")])
-    for text in ("remove the Rome card", "remove the info card"):
+    for text in ("remove the Rome card", "remove the info card", "remove the notes"):
         events = turn(client, text, conv_id="j9f")
         assert not _drops(events) and says(events)[0].startswith("Which one")
         overlay._card_pick.pop("j9f", None)
@@ -265,7 +280,9 @@ def test_companion_question_never_goes_to_agent(client, text):
     body = " ".join(cards[0]["body"])
     for fact in ("iPhone app", "Gateway", "Mac overlay", "Claude Code sessions", "Windows", "Remote screen"):
         assert fact in body
-    assert acks.PHRASES["companion_about"] in says(events)
+    # criterion 21: one line == companion_about (the answer turn's thinking ack comes before the
+    # model hands over; it is not a companion line)
+    assert says(events).count(acks.PHRASES["companion_about"]) == 1 and len(says(events)) <= 2
     assert [s for s in _steps("intent") if s.get("kind") == "about_companion"]
 
 

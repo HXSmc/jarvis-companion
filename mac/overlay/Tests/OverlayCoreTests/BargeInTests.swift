@@ -509,6 +509,12 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(tracker.freshFrom, 4)
         for k in 1...3 { tracker.block(over: true, at: t.addingTimeInterval(2.0 + Double(k) * 0.1)) }
         XCTAssertTrue(tracker.wantsRecheck(at: t.addingTimeInterval(2.3)))
+        var phones = BargeCheck.Tracker(aec: false)  // headphones: no C2 re-check
+        for k in 1...3 { phones.block(over: true, at: t.addingTimeInterval(Double(k) * 0.1)) }
+        _ = phones.check(at: t, wordCount: 3, recheck: false,
+                         commandIndex: { _ in nil }, words: { BargeWords.check(partial: "a b c", reply: reply, freshFrom: $0) })
+        phones.block(over: true, at: t.addingTimeInterval(0.4))
+        XCTAssertFalse(phones.wantsRecheck(at: t.addingTimeInterval(0.5)))
         XCTAssertEqual(check(2.3, recheck: true).rule, .stop)
         // The echo alone, gate quiet: freshFrom moves past every word as before.
         var echo = BargeCheck.Tracker(aec: true)
