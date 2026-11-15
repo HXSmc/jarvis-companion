@@ -71,6 +71,17 @@ public enum EchoCancel {
         rate > 0 && channels > 0
     }
 
+    /// The mixer -> output connection while voice processing is on. The voice-processing IO unit
+    /// refuses to start when its client input and output formats differ (Mac run b: input 48000 Hz,
+    /// output tracked 44100 Hz, err=-10875), so the output side takes the input node's rate, with the
+    /// output client's channel count kept to 1...2. nil when the input has no rate or no channel
+    /// (the `failed reason=format` path).
+    public static func voiceOutputFormat(inputRate: Double, inputChannels: Int,
+                                         outputChannels: Int) -> (rate: Double, channels: Int)? {
+        guard formatUsable(rate: inputRate, channels: inputChannels) else { return nil }
+        return (inputRate, min(max(outputChannels, 1), 2))
+    }
+
     /// Which mono signal levels, the ring and the recogniser get from the tap (the `src=` field):
     /// channel 0 of a multi-channel node (the voice processor's output is 1 channel, app log
     /// `theActualVPOutputFmt = 1 ch`), the only channel of a mono one.

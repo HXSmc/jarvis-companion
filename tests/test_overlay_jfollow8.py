@@ -173,6 +173,9 @@ def test_debug_page_rows_jfollow8():
         ("barge_aec", "on route=speakers in=builtin rate=48000 ch=3 src=ch0 agc=off ducking=min gain_db=6 start_ms=310"),
         ("barge_aec", "levels src=ch0 ch_rms=0.031,0.002,0.002"),
         ("barge_aec", "failed reason=format rate=0 ch=3"),
+        ("barge_aec", "failed reason=start rate=48000 ch=5 out_rate=44100 out_ch=1 err=-10875"),
+        ("barge_aec", "on route=speakers in=builtin rate=48000 ch=5 src=ch0 out_rate=48000 out_ch=1 agc=off "
+                      "ducking=min gain_db=6 start_ms=900"),
         ("wake_ignored", "reason=echo_cancel"),
         ("playback", "ended audio_ms=12400"),
         ("barge_in", "at=4100 reason=aec rule=stop dropped_sentences=3 stop_ms=2 stream_open=1 voice_to_stop_ms=640"),
@@ -183,10 +186,10 @@ def test_debug_page_rows_jfollow8():
     got = _page_rows_with_node([{"step": step, "detail": detail} for step, detail in details],
                                [step for step, _ in details])
     assert got["d"] == [detail for _, detail in details]
-    assert got["l"][4] == "wake ignored"  # wake_ignored
-    assert got["l"][5] == "playback"
-    assert got["l"][8] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
-    assert got["l"][9] == "wake mic capture"
+    assert got["l"][6] == "wake ignored"  # wake_ignored
+    assert got["l"][7] == "playback"
+    assert got["l"][10] == "barge-in turn"  # a speakers barge turn cut down to a silent stop
+    assert got["l"][11] == "wake mic capture"
     # The setup row is built inside render() (no standalone function), so read the page text:
     assert "barge-in: on (echo canceller on speakers; headphones as before)" in \
         (ROOT / "gateway" / "overlay_debug.html").read_text()
@@ -266,6 +269,32 @@ def test_multichannel_voice_processing_feeds_channel0():
     assert "ch=\\(setup.channels) src=\\(setup.src)" in note
     levels = _swift_func("noteChannelLevels", "AppController.swift")
     assert 'detail: "levels src=\\(src) ch_rms=\\(rms)"' in levels
+
+
+def test_voice_processing_output_runs_at_the_mic_rate():
+    """Mac run b (round 6): the voice-processing unit failed with -10875 "client-side input and output
+    formats do not match": input 48000 Hz, the mixer -> output connection tracked 44100 Hz. With voice
+    processing on, startEngine sets that connection to the mic's rate (EchoCancel.voiceOutputFormat)
+    before the player attaches and the engine starts; the plain path gives it back to the hardware
+    format; the player connects at the mixer's format; this app's own engine stops while the player
+    lives on the shared one. The failed and on rows print the output side and the start error code."""
+    start = _swift_func("startEngine", "SpeechInput.swift")
+    assert "EchoCancel.voiceOutputFormat(inputRate: format.sampleRate," in start
+    pin = "engine.connect(engine.mainMixerNode, to: engine.outputNode, format: pinned)"
+    assert start.index("setVoiceProcessingEnabled(on)") < start.index(pin) < start.index("attach(on)") \
+        < start.index("engine.prepare()")
+    assert "engine.connect(engine.mainMixerNode, to: engine.outputNode, format: plain)" in start
+    assert "startErr = (error as NSError).code; throw EngineFail.start" in start
+    reconf = _swift_func("reconfigure", "SpeechInput.swift")
+    assert '" out_rate=\\(Int(out.sampleRate)) out_ch=\\(out.channelCount)" + (startErr.map { " err=\\($0)" } ?? "")' in reconf
+    assert reconf.index("startErr = nil") < reconf.index("try startEngine(voiceProcessing: true")
+    share = _swift_func("shareEngine", "AudioOut.swift")
+    assert "engine.connect(player, to: engine.mainMixerNode, format: mixed)" in share
+    assert "format: nil" not in share
+    move = _swift_func("move", "AudioOut.swift")
+    assert "if engine === ownEngine, target !== ownEngine, ownEngine.isRunning { ownEngine.stop() }" in move
+    note = _swift_func("noteEchoCancel", "AppController.swift")
+    assert "out_rate=\\(Int(setup.outRate)) out_ch=\\(setup.outChannels)" in note
 
 
 def test_young_barge_run_gets_one_delayed_retry():

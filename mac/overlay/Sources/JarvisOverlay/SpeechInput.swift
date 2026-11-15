@@ -53,10 +53,17 @@ final class SpeechInput {
         var rate: Double       // the input node's real format, as tapped
         var channels: Int
         var src: String        // ch0|mono: what levels, the ring and the recogniser hear
+        var outRate: Double    // mixer -> output connection while voice processing is on (0 when off)
+        var outChannels: Int
         var ms: Int
     }
 
     private enum EngineFail: Error { case enable, format, start }
+    /// The NSError code of the last failed engine.start() (Mac run b: -10875), for the failed row.
+    private var startErr: Int?
+    /// The mixer -> output connection carries an explicit voice-processing format; the plain path
+    /// gives it back to the hardware format.
+    private var outputPinned = false
 
     /// start() succeeded once, but the engine is not running now: a configuration change stopped it,
     /// or a reconfigure threw (isRunning is false then), so the next change notification retries.
@@ -94,23 +101,28 @@ final class SpeechInput {
             tell?("audio device changed")
         }
         aecActive = false
+        startErr = nil
         var failed: String?
         var format: AVAudioFormat
         if want {
             do { format = try startEngine(voiceProcessing: true, attach: attach) }
             catch {
-                // The node's format as voice processing left it, for the row (the live run needs numbers).
+                // The node's formats as voice processing left them, for the row (the live run needs numbers).
                 let seen = engine.inputNode.outputFormat(forBus: 0)
+                let out = engine.outputNode.inputFormat(forBus: 0)
                 failed = "\((error as? EngineFail) ?? .start) rate=\(Int(seen.sampleRate)) ch=\(seen.channelCount)"
+                    + " out_rate=\(Int(out.sampleRate)) out_ch=\(out.channelCount)" + (startErr.map { " err=\($0)" } ?? "")
                 format = try startPlain(attach: attach)
             }
         } else {
             format = try startPlain(attach: attach)
         }
         aecActive = want && failed == nil && engine.inputNode.isVoiceProcessingEnabled
+        let out = aecActive ? engine.outputNode.inputFormat(forBus: 0) : nil
         return EngineSetup(active: aecActive, failed: failed, rate: format.sampleRate,
                            channels: Int(format.channelCount),
                            src: EchoCancel.monoSource(channels: Int(format.channelCount)),  // printed only when on
+                           outRate: out?.sampleRate ?? 0, outChannels: Int(out?.channelCount ?? 0),
                            ms: Int(Date().timeIntervalSince(started) * 1000))
     }
 
@@ -140,6 +152,27 @@ final class SpeechInput {
         let format = input.outputFormat(forBus: 0)
         guard EchoCancel.formatUsable(rate: format.sampleRate, channels: Int(format.channelCount)),
               let mono = on ? MicTap.monoFormat(of: format) : format else { throw EngineFail.format }
+        if on {
+            // The voice-processing unit needs the same client rate on input and output (err=-10875
+            // otherwise). Left unset, the mixer -> output connection tracks the output node (44100 Hz
+            // on the MacBook Air); once set, the client keeps it right after every rebuild (Apple's
+            // mainMixerNode docs), which is this path.
+            let out = engine.outputNode.inputFormat(forBus: 0)
+            guard let pick = EchoCancel.voiceOutputFormat(inputRate: format.sampleRate,
+                                                          inputChannels: Int(format.channelCount),
+                                                          outputChannels: Int(out.channelCount)),
+                  let pinned = AVAudioFormat(standardFormatWithSampleRate: pick.rate,
+                                             channels: AVAudioChannelCount(pick.channels)) else { throw EngineFail.format }
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: pinned)
+            outputPinned = true
+        } else if outputPinned {
+            // Plain path: back to the hardware output format, as the engine tracked it before.
+            let hw = engine.outputNode.outputFormat(forBus: 0)
+            let plain = hw.sampleRate > 0 && hw.channelCount > 0
+                ? AVAudioFormat(standardFormatWithSampleRate: hw.sampleRate, channels: hw.channelCount) : nil
+            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: plain)
+            outputPinned = false
+        }
         tap.clearRing()  // ring audio in the old format must never be replayed into a new-format turn
         // The tap keeps the node's own format (the input node does no format conversion on a device,
         // Apple's AVAudioInputNode docs). Voice processing on: it hands on channel 0 only, in `mono`;
@@ -149,7 +182,7 @@ final class SpeechInput {
         tapInstalled = true
         attach(on)
         engine.prepare()
-        do { try engine.start() } catch { throw EngineFail.start }
+        do { try engine.start() } catch { startErr = (error as NSError).code; throw EngineFail.start }
         isRunning = true
         startedOnce = true
         return format

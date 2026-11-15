@@ -189,7 +189,8 @@ final class AppController {
             detail = "failed reason=\(failed)"
         } else if setup.active {
             detail = "on route=\(outputBuiltIn ? "speakers" : "external") in=\(inputKind) "
-                + "rate=\(Int(setup.rate)) ch=\(setup.channels) src=\(setup.src) agc=off ducking=min "
+                + "rate=\(Int(setup.rate)) ch=\(setup.channels) src=\(setup.src) "
+                + "out_rate=\(Int(setup.outRate)) out_ch=\(setup.outChannels) agc=off ducking=min "
                 + "gain_db=\(Int(AudioOut.makeupGainDb)) start_ms=\(setup.ms)"
             noteChannelLevels(src: setup.src)
         } else {

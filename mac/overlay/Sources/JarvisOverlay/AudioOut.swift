@@ -46,12 +46,13 @@ final class AudioOut {
 
     /// Voice processing on (speakers): the player lives on SpeechInput's engine so the canceller
     /// hears the reply. SpeechInput.reconfigure calls this while that engine is stopped, after voice
-    /// processing changed its formats. `format: nil` connects at the engine's current output format
-    /// so the voice-processing IO formats match; clips convert to that format in enqueue.
+    /// processing changed its formats and set the mixer -> output connection to the mic's rate. The
+    /// player connects at that mixer format; clips convert to it in enqueue.
     func shareEngine(_ shared: AVAudioEngine) {
         move(to: shared)
-        engine.connect(player, to: engine.mainMixerNode, format: nil)
-        fixedFormat = player.outputFormat(forBus: 0)
+        let mixed = engine.mainMixerNode.outputFormat(forBus: 0)
+        engine.connect(player, to: engine.mainMixerNode, format: mixed)
+        fixedFormat = mixed
     }
 
     /// Voice processing off (headphones, Bluetooth input, failed, opted out): this app's own
@@ -66,6 +67,9 @@ final class AudioOut {
     private func move(to target: AVAudioEngine) {
         stopPlayer()
         if tapInstalled { engine.mainMixerNode.removeTap(onBus: 0); tapInstalled = false }
+        // Leaving this app's own engine: stop it, so no second output unit runs at another rate
+        // beside the voice-processing one. enqueue starts it again after useOwnEngine.
+        if engine === ownEngine, target !== ownEngine, ownEngine.isRunning { ownEngine.stop() }
         engine.detach(player)
         engine = target
         engine.attach(player)

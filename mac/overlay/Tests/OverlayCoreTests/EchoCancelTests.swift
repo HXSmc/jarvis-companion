@@ -119,4 +119,17 @@ final class EchoCancelTests: XCTestCase {
         XCTAssertEqual(EchoCancel.monoSource(channels: 3), "ch0")
         XCTAssertEqual(EchoCancel.monoSource(channels: 1), "mono")
     }
+
+    /// Voice processing on: the output side runs at the input node's rate (Mac run b: 48000 Hz in,
+    /// 44100 Hz out failed with -10875), output channels kept to 1...2; no rate or no channel refuses.
+    func testVoiceOutputFormat() {
+        let f = EchoCancel.voiceOutputFormat(inputRate: 48000, inputChannels: 5, outputChannels: 1)
+        XCTAssertEqual(f?.rate, 48000)
+        XCTAssertEqual(f?.channels, 1)
+        XCTAssertEqual(EchoCancel.voiceOutputFormat(inputRate: 44100, inputChannels: 1, outputChannels: 2)?.channels, 2)
+        XCTAssertEqual(EchoCancel.voiceOutputFormat(inputRate: 48000, inputChannels: 3, outputChannels: 0)?.channels, 1)
+        XCTAssertEqual(EchoCancel.voiceOutputFormat(inputRate: 48000, inputChannels: 3, outputChannels: 6)?.channels, 2)
+        XCTAssertNil(EchoCancel.voiceOutputFormat(inputRate: 48000, inputChannels: 0, outputChannels: 1))
+        XCTAssertNil(EchoCancel.voiceOutputFormat(inputRate: 0, inputChannels: 5, outputChannels: 1))
+    }
 }
