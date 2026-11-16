@@ -87,7 +87,7 @@ body {
 
 #reset {
   margin-left: auto;
-  min-height: 28px;
+  min-height: 44px;
   padding: 4px 12px;
   border: 1px solid var(--line);
   border-radius: 6px;

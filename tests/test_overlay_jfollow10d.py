@@ -112,6 +112,20 @@ def test_model_intents():
     for words, kind in {"open notes": "open_app", "show me the cards": "look", "open safari": "open_app",
                         "pull up the test mug": "model_show", "open the test mug": "model_show"}.items():
         assert p(words, apps=apps, model_names=vault_names).kind == kind, words
+    # round 5: polite forms, generate/render, a trailing please, list near misses (ux round 3)
+    for words in ("can you make me a 3D model of a mug", "could you please generate a 3D model of a mug",
+                  "would you render a 3D object of a mug", "make a 3D model of a mug please",
+                  "Can you make me a 3D model of a mug, please?"):
+        a = p(words, apps={})
+        assert (a.kind, a.arg, a.sub) == ("model_create", "a mug", ""), words
+    a = p("create a 3D object called test mug please", apps={})
+    assert (a.kind, a.arg, a.sub) == ("model_create", "test mug", "test mug")
+    for words in ("list 3D objects", "show my 3D objects", "show me the 3D models", "list the 3D models",
+                  "show me my 3D objects", "list my 3D models"):
+        assert p(words, apps={}).kind == "model_list", words
+    for words in ("bring up the test mug please", "pull up the test mug, please"):
+        a = p(words, apps={}, model_names=("test-mug",))
+        assert (a.kind, a.arg) == ("model_show", "test mug"), words
     # round 2: a vault name of stop/cancel/abort never swallows a spoken stop (security round 1, finding 1)
     stops = ("stop", "cancel", "abort")
     for words, kind in {"load stop": "stop", "display stop": "stop", "display cancel": "stop",

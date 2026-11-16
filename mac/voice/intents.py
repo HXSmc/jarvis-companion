@@ -416,11 +416,12 @@ def draw_request(text: str) -> str | None:
 
 # jfollow10d: 3D objects. Whole utterance only; "show me the cards" / "open notes" keep their kinds.
 _3D = r"(?:3d|3-d|3 d|three d|three-d)"
-_MODEL_CREATE_RE = re.compile(r"(?:please )?(?:create|make|model|build|design) (?:me )?(?:a |an )?" + _3D
+_MODEL_CREATE_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
+                              r"(?:create|make|model|build|design|generate|render) (?:me )?(?:a |an )?" + _3D
                               + r"(?: (?:object|model|thing))?(?P<rest>(?:[:, ].*)?)")
 _MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?:(?:^| ?,? )(?:and )?(?:call(?:ed)? it|called|named) (?P<name>.+))?")
 _MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
-                            r"|list (?:my|the) " + _3D + r" (?:objects|models)|show me my " + _3D + r" (?:objects|models))")
+                            r"|(?:list|show)(?: me)? (?:my |the )?" + _3D + r" (?:objects|models))")
 _MODEL_SHOW_RE = re.compile(r"(?:pull up|show me|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
                             r"(?P<three> " + _3D + r" (?:object|model))?")
 
@@ -429,7 +430,7 @@ def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None
     """A 3D object ask: model_create (arg = description, sub = name, or sub "ask" when no
     description), model_list, or model_show (arg = the name words) when the name is a known object
     (slug or alias) or the words say "3D". None = not a 3D ask."""
-    low = _clean(text).lower()
+    low = re.sub(r",? please$", "", _clean(text).lower())  # "... a mug please" never names a "mug please"
     m = _MODEL_CREATE_RE.fullmatch(low)
     if m:
         rest = re.sub(r"^[\s:,]+(?:of )?", "", m["rest"]).strip()
