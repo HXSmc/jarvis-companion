@@ -222,7 +222,8 @@ def _net(tok: str, ctx: agent_policy.Ctx) -> bool:
     bases = [p] if os.path.isabs(p) else [os.path.join(ctx.cwd or ".", p), os.path.join(ctx.home, p)]
     for b in bases:
         n = ("/" + os.path.abspath(b).lstrip("/")).casefold()  # abspath keeps a leading //
-        if any(_under(n, r) for r in NET_ROOTS) or _net_walk(os.path.abspath(b)):
+        # the walk gets the unfolded path: the kernel follows a link before a later `..` (link/../net)
+        if any(_under(n, r) for r in NET_ROOTS) or _net_walk(b if os.path.isabs(b) else os.path.join(os.getcwd(), b)):
             return True
     return False
 

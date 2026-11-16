@@ -395,6 +395,29 @@ def test_automount_through_a_symlink_asks_before_any_lookup(ctx, tmp_path, monke
         assert auto_policy.classify(command, ctx) == ("auto", "ok"), command
 
 
+def test_automount_through_a_symlink_then_dotdot_asks(ctx, tmp_path, monkeypatch, auto_on):
+    """Round 1 fix (security finding 1): the kernel follows a link before it applies a later `..`, so
+    <link to />/../net/<host> lands on /net/<host>. abspath folded the `..` by text first and hid the link.
+    Absolute and relative forms ask network, marked or not, and nothing below /net is resolved."""
+    vols = tmp_path / "vols"
+    vols.mkdir()
+    (vols / "Macintosh HD").symlink_to("/")
+    seen = []
+    orig = os.path.realpath
+    monkeypatch.setattr(os.path, "realpath", lambda p, *a, **k: (seen.append(str(p)), orig(p, *a, **k))[1])
+    rel_ctx = agent_policy.Ctx(home=ctx.home, vault=None, cwd=str(vols))
+    for command, c in ((f"ls '{vols}/Macintosh HD/../net/data.evil.example'", ctx),
+                       ("ls 'Macintosh HD/../net/y'", rel_ctx), (f"cat '{vols}/Macintosh HD/../Network/h/x'", ctx)):
+        assert auto_policy.classify(command, c) == ("asked", "network"), command
+        for tainted in (False, True):
+            assert auto_policy.verdict(command, c, tainted=tainted, barge=False, gate_ok=True) == (
+                "asked", "network"), (command, tainted)
+    assert not [p for p in seen if "/net" in p.lower()], seen
+    # `..` after a plain folder still folds as text: an ordinary path stays auto
+    (tmp_path / "src" / "a").mkdir(parents=True)
+    assert auto_policy.classify(f"ls {tmp_path}/src/a/../a", ctx) == ("auto", "ok")
+
+
 def test_symlink_loop_fails_closed(ctx, tmp_path, auto_on):
     (tmp_path / "a").symlink_to(tmp_path / "b")
     (tmp_path / "b").symlink_to(tmp_path / "a")
