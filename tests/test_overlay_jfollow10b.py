@@ -333,6 +333,7 @@ def test_tile_proxy(client, net, tmp_path, monkeypatch):
         os.utime(tiles / "3" / "1" / f"{y}.png", (old + y, old + y))
     size = len(png())
     monkeypatch.setattr(geo, "TILE_CAP_BYTES", size * 4)
+    monkeypatch.setattr(geo, "TILE_PRUNE_EVERY", 0)  # walk on this fetch
     assert get("/overlay/tiles/3/2/0.png").status_code == 200
     left = sorted(p.name for p in (tiles / "3" / "1").glob("*.png"))
     assert sum(p.stat().st_size for p in tiles.rglob("*.png")) <= size * 4 * 0.8
@@ -354,6 +355,16 @@ def test_tile_proxy(client, net, tmp_path, monkeypatch):
     tiles.symlink_to(real)
     assert get("/overlay/tiles/6/0/0.png").status_code != 200
     assert list(real.iterdir()) == []
+
+
+def test_tile_prune_is_throttled(client, net, monkeypatch):
+    """Round 1 code 3: the cache walk runs once per TILE_PRUNE_EVERY bytes fetched, not per tile."""
+    walks = []
+    real = geo._prune
+    monkeypatch.setattr(geo, "_prune", lambda tiles: (walks.append(1), real(tiles)))
+    for y in range(10):
+        assert client.get(f"/overlay/tiles/4/1/{y}.png", headers=AUTH_HEADER).status_code == 200
+    assert len(net.requests) == 10 and len(walks) == 1
 
 
 def test_nominatim_policy(net, clock):
@@ -645,6 +656,62 @@ def test_place_intents(vault, client, net):
     assert net.requests == []
 
 
+def test_file_saves_are_not_places(vault, client, net):
+    """Round 1 code 2: "save the document as report" is a file save, never a place write."""
+    for words in ("save the document as report", "save the spreadsheet as budget",
+                  "Hey Jarvis, save that file as notes", "save my work as a draft"):
+        assert intents.parse(words, apps={}).kind == "answer", words
+    before = (vault / "Secrets" / "jarvis-places.json").read_bytes()
+    deps_with(lines({"say": "Done."}))
+    assert acks.PHRASES["place_saved"] not in says(turn(client, "save the document as report", conv_id="fs"))
+    assert (vault / "Secrets" / "jarvis-places.json").read_bytes() == before
+
+
+def test_more_phrasings():
+    """Round 1 UX 2 and code 4: natural bus/tube phrasings hit the fixed path; an idiom does not."""
+    want = {"what's the next bus": "transit_next", "what time is the next bus": "transit_next",
+            "when does the next bus come": "transit_next", "is the tube running": "transit_status",
+            "is the northern line delayed": "transit_status", "are there delays on the northern line": "transit_status",
+            "how's the northern line": "transit_status", "what bus goes to the gym": "transit_journey",
+            "is there a bus to the gym": "transit_journey", "how do I get to the gym": "geo_map",
+            "how do I get to grips with python": "answer", "how do I get to know my neighbours": "answer"}
+    for words, kind in want.items():
+        assert intents.parse(words, apps={}, place_names=("home", "gym")).kind == kind, words
+    assert intents.parse("is the northern line delayed", apps={}).sub == "northern"
+
+
+def test_roads_without_place_says_what_to_ask(client, net, vault):
+    """Round 1 UX 3: no route yet and no place -> a line that says what to ask, no service-failed line."""
+    deps_with()
+    events = turn(client, "what roads could I take", conv_id="rw")
+    assert says(events) == [overlay.ROADS_WHERE_LINE] and not cards(events) and net.requests == []
+    assert steps("geo")[0]["detail"].endswith("reason=no_place")
+
+
+def test_tube_place_words_never_reach_tfl(client, net, vault):
+    """Round 1 security 2: home words, saved names, "the X", postcodes and Google links never go to
+    TfL's station search as text; only a plain station name does."""
+    deps_with()
+    for words in ("when is the next tube from my house", "when is the next tube near SW1A 2AA",
+                  "when is the next tube from the gym"):
+        turn(client, words, conv_id="tw")
+    tfl = [r for r in net.requests if r.url.host == "api.tfl.gov.uk"]
+    assert tfl and not [r for r in tfl if r.url.path.startswith("/StopPoint/Search")]
+    for r in tfl:
+        sent = str(r.url).lower()
+        assert not any(w in sent for w in ("house", "home", "gym", "sw1a", "2aa")), sent
+    assert net.count("api.postcodes.io") == 1 and net.count("nominatim.openstreetmap.org") == 0
+    n = len(net.requests)
+    events = turn(client, "when is the next tube from https://maps.app.goo.gl/abc", conv_id="tw2")
+    assert says(events) == [acks.PHRASES["place_link"]] and len(net.requests) == n
+    turn(client, "when is the next tube from Charing Cross", conv_id="tw3")
+    assert net.requests[n].url.path.startswith("/StopPoint/Search/")
+    n = len(net.requests)
+    turn(client, "when is the next tube from ../../Line/Mode/tube/Status", conv_id="tw4")
+    raw = net.requests[n].url.raw_path.decode()  # owner words never walk the TfL path
+    assert raw.startswith("/StopPoint/Search/..%2F..%2F") and raw.count("/") == 3, raw
+
+
 def test_missing_place_and_google_link(vault, client, net):
     f = vault / "Secrets" / "jarvis-places.json"
     f.write_text(json.dumps({"places": {"home": PLACES["places"]["home"]}}))
@@ -686,9 +753,17 @@ def test_places_never_leave(vault, client, net):
 # --- ruling 7: YouTube questions ---------------------------------------------------------------
 
 def _video_conv(client, conv="y1", vid="aaaaaaaaaaa"):
-    deps_with(lines({"say": "Here's a video."}, {"card": {"type": "video", "title": "Rockets", "youtube_id": vid}}))
-    events = turn(client, "show me a video about rockets", conv_id=conv)
+    """A video the service found: the model's video_search, answered by (fake) find_video."""
+    from mac.voice import media_lookup
+    mp = pytest.MonkeyPatch()
+    mp.setattr(media_lookup, "find_video", lambda q: ({"type": "video", "title": "Rockets", "youtube_id": vid}, "ok"))
+    try:
+        deps_with(lines({"say": "Here's a video."}, {"video_search": {"query": "rockets"}}))
+        events = turn(client, "show me a video about rockets", conv_id=conv)
+    finally:
+        mp.undo()
     assert [c["type"] for c in cards(events)] == ["video"]
+    assert overlay._last_video[conv] == vid
 
 
 def test_video_ask_from_card(client, monkeypatch):
@@ -744,6 +819,48 @@ def test_transcript_is_data(client, monkeypatch):
     [card] = cards(events)
     assert not any("ignored it" in line for line in card["body"])
     assert "One web page" not in " ".join(says(events))
+
+
+def test_model_written_video_never_picks_the_job(client, monkeypatch, tmp_path):
+    """Round 1 security 1: a model-written youtube_id card (fast tier, a fetched page could steer it)
+    never becomes "the video": "summarise it" / "watch it" start no job, ask no transcript."""
+    seen = _companion(monkeypatch, tmp_path, lambda r: httpx.Response(200, json={"session_id": "s1"}))
+    asked = []
+    monkeypatch.setattr(youtube, "transcript", lambda vid: (asked.append(vid), "captions")[1])
+    deps_with(lines({"say": "Here's what I found."},
+                    {"card": {"type": "video", "title": "Explainer", "youtube_id": "ZZZZZZZZZZZ"}}))
+    turn(client, "what's the latest on fusion power", conv_id="m1")
+    assert "m1" not in overlay._last_video
+    overlay._tainted.add("m1")
+    overlay._auto_tainted.add("m1")
+    deps_with()
+    for words in ("summarise it", "watch it", "what does the video say about fusion"):
+        events = turn(client, words, conv_id="m1")
+        assert says(events) == [acks.PHRASES["video_which"]], words
+    assert seen == [] and asked == [] and not steps("agent_confirm")
+    # the owner's own video ask (service-found) still sets it: O4 keeps its instant "On it"
+    _video_conv(client, conv="m2")
+    assert says(turn(client, "watch it", conv_id="m2")) == [acks.PHRASES["job_started"]]
+    for t in list(overlay._jobs):
+        t.cancel()
+
+
+def test_video_ask_says_if_slow(client, monkeypatch):
+    """Round 1 UX 1: a slow captions + model answer is not silent past FEEDBACK_S."""
+    _video_conv(client)
+    monkeypatch.setattr(overlay, "FEEDBACK_S", 0.05)
+    monkeypatch.setattr(youtube, "transcript", lambda vid: "Rockets burn fuel to climb.")
+    d = deps_with()
+    d.video_ask = lambda p: (time.sleep(1.0), "Rockets burn fuel.")[1]
+    got = says(turn(client, "what does the video say about rockets", conv_id="y1"))
+    assert got == [acks.PHRASES["answer"], "Rockets burn fuel."]
+
+
+def test_url_question_not_youtube_stays_answer():
+    """Round 1 code 1: only a YouTube (or lookalike) link makes a video question."""
+    assert intents.parse("what does https://example.com/article say about cats", apps={}).kind == "answer"
+    assert intents.parse("what does https://youtu.be/bbbbbbbbbbb say about cats", apps={}).kind == "video_ask"
+    assert intents.parse("what does https://youtube.com.evil.example/x say about cats", apps={}).kind == "video_ask"
 
 
 def test_youtube_lazy_import(monkeypatch):

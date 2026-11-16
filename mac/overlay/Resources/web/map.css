@@ -5,6 +5,7 @@
   --map-ground: #cfd3d8;
   --line: rgba(255, 255, 255, 0.22);
   --hover: rgba(255, 255, 255, 0.1);
+  --press: rgba(255, 255, 255, 0.18);
   --credit-ground: rgba(255, 255, 255, 0.78);
   --credit-ink: #222428;
   --focus-on-map: #14171c;
@@ -86,6 +87,10 @@ html, body {
 
 #reset:hover {
   background: var(--hover);
+}
+
+#reset:active {
+  background: var(--press);
 }
 
 #reset:focus-visible {

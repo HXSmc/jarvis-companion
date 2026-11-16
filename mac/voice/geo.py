@@ -86,6 +86,7 @@ def reset() -> None:
         _geocodes.clear()
         _tfl_calls.clear()
         _nominatim_last.clear()
+        _since_prune[0] = TILE_PRUNE_EVERY
 
 
 def _check(url: str) -> None:
@@ -381,7 +382,7 @@ def station_by_name(name: str, budget: Budget) -> dict | None:
     hit = _cached("station", key, STOPS_TTL_S)
     if hit is not None:
         return hit or None
-    doc = _tfl("StopPoint/Search/" + quote(key[:60]), {"modes": "tube", "includeHubs": "false"}, budget)
+    doc = _tfl("StopPoint/Search/" + quote(key[:60], safe=""), {"modes": "tube", "includeHubs": "false"}, budget)
     matches = doc.get("matches") if isinstance(doc, dict) else None
     found = {}
     for m in matches or []:
@@ -575,10 +576,12 @@ def roads_line(routes: list[dict]) -> str:
 
 TILE_FRESH_S = 7 * 86400
 TILE_CAP_BYTES = 100 * 1024 * 1024
+TILE_PRUNE_EVERY = 5 * 1024 * 1024  # bytes fetched between two cache walks (a walk stats every file)
 TILE_PER_MINUTE = 120
 TILE_MAX_PX = 512
 TILE_STATS = {"served": 0, "cache_hits": 0, "fetched": 0, "refused": 0}
 _tile_fetches: deque = deque()
+_since_prune = [TILE_PRUNE_EVERY]  # the first fetch after a start walks the cache once
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 
@@ -651,6 +654,12 @@ def tile(root: Path, z: int, x: int, y: int) -> bytes:
     with os.fdopen(fd, "wb") as f:
         f.write(data)
     os.replace(tmp, path)
-    _prune(tiles)
+    with _lock:
+        _since_prune[0] += len(data)
+        walk = _since_prune[0] >= TILE_PRUNE_EVERY
+        if walk:
+            _since_prune[0] = 0
+    if walk:
+        _prune(tiles)
     TILE_STATS["served"] += 1
     return data

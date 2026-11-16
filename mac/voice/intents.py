@@ -1467,27 +1467,37 @@ _SHOW = r"(?:(?:show me|give me|pull up|get me|bring up|show) )?(?:a |the )?"
 _GEO_MAP_RES = (
     re.compile(_SHOW + r"(?:map|route|directions)(?: from (?P<a>.+?))? to (?P<b>.+)"),
     re.compile(_SHOW + r"map of (?P<a>.+)"),
-    re.compile(r"how do i get(?: from (?P<a>.+?))? to (?P<b>.+)"),
+    re.compile(r"how do i get(?: from (?P<a>.+?))? to (?!(?:grips|know|sleep|be|terms|the bottom|the point)\b)(?P<b>.+)"),
 )
 _GEO_ROADS_RE = re.compile(r"(?:(?:what|which)(?: are the)? (?:roads|routes)(?: (?:could|can|should) i take)?"
                            r"|what are the roads i (?:could|can|should) take)(?: to (?P<b>.+))?")
 _TRANSIT_NEXT_RES = (
-    re.compile(r"when(?:'s| is) the next (?P<mode>bus|tube|train|underground)(?: (?:from|near|at) (?P<a>.+))?"),
+    re.compile(r"(?:when(?:'s| is| does)|what(?:'s| is| time is)) the next (?P<mode>bus|tube|train|underground)"
+               r"(?: (?:come|arrive|leave|go))?(?: (?:from|near|at) (?P<a>.+))?"),
     re.compile(r"(?:the )?next (?P<mode>bus|tube|train)(?: times)?(?: (?:from|near|at) (?P<a>.+))?"),
 )
 _TRANSIT_STATUS_RES = (
-    re.compile(r"is the (?P<line>[a-z& ]{2,30}?) line (?:running|working|ok|okay|on time)"),
+    re.compile(r"is the (?P<line>[a-z& ]{2,30}?) line (?:running|working|ok|okay|on time|delayed|late|suspended)"),
+    re.compile(r"(?:are there )?(?:any )?(?:delays|problems) on the (?P<line>[a-z& ]{2,30}?) line"),
+    re.compile(r"how(?:'s| is) the (?P<line>[a-z& ]{2,30}?) line(?: doing| running)?"),
+    re.compile(r"is the (?:tube|underground) (?:running|working|ok|okay)"),
     re.compile(r"(?:are there )?any (?:delays|problems) on the (?:tube|underground)"),
     re.compile(r"(?:what's the |what is the )?tube status"),
 )
 _TRANSIT_JOURNEY_RES = (
     re.compile(r"which bus (?:do i|should i|can i) (?:take|get|catch)(?: from (?P<a>.+?))? to (?P<b>.+)"),
-    re.compile(r"which bus(?: goes)? to (?P<b>.+)"),
+    re.compile(r"(?:which|what) bus(?: goes)? to (?P<b>.+)"),
+    re.compile(r"is there a bus to (?P<b>.+)"),
     re.compile(r"how do i get(?: from (?P<a>.+?))? to (?P<b>.+?) by (?:bus|tube|public transport|train)"),
 )
 _PLACE_SAVE_RE = re.compile(r"save (?P<a>.+?) as (?:my |the )?(?P<n>[a-z0-9' ]{1,24})")
 _PLACE_FORGET_RE = re.compile(r"forget (?:my|the) (?P<n>[a-z0-9' ]{1,24}?)(?: (?P<w>place|address|location))?")
 _PLACE_SAVE_BLOCKED = frozenset({"this", "these", "them", "everything", "the cards", "the pages", "it", "that"})
+# "save the document as report" is a file save, never a place: these A words never name a place.
+_PLACE_SAVE_NOT_PLACE_RE = re.compile(
+    r"(?:that|it|this|these|them|everything|my work)(?: .*)?"
+    r"|(?:the|my|a|an) (?:file|document|doc|page|pages|note|notes|sheet|spreadsheet|project|work|draft|card|cards"
+    r"|tab|tabs|window|code|changes|image|picture|photo|screenshot)s?(?: .*)?")
 _HOME_WORDS = frozenset({"house", "home", "place", "flat", "my house", "my home", "my place", "my flat"})
 # Fixed TfL tube line ids: "the purple line" names none, so no call is made.
 TUBE_LINES = {
@@ -1514,7 +1524,7 @@ def geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
         return None
     low = _clean(text).lower().replace(",", "")
     m = _form_hit(_PLACE_SAVE_RE, low)
-    if m and m["a"].strip() not in _PLACE_SAVE_BLOCKED and not m["a"].startswith(("these ", "this ", "them ")):
+    if m and m["a"].strip() not in _PLACE_SAVE_BLOCKED and not _PLACE_SAVE_NOT_PLACE_RE.fullmatch(m["a"].strip()):
         return GeoAsk("place_save", m["a"].strip(), place_name(m["n"]))
     m = _form_hit(_PLACE_FORGET_RE, low)
     if m and (m["w"] or place_name(m["n"]) in place_names):
@@ -1556,6 +1566,7 @@ _QUESTION_LEAD_RE = re.compile(r"^(?:what|how|does|did|do|who|when|where|why|whi
                                r"|according to|in)\b", re.I)
 _VIDEO_WATCH_RE = re.compile(r"(?:watch|summari[sz]e) (?:it|the video|that video|this video)"
                              r"|give me a summary of (?:it|the video|that video|this video)", re.I)
+_YOUTUBE_HOSTISH_RE = re.compile(r"https?://[^\s/]*youtu", re.I)
 _VIDEO_WATCH_URL_RE = re.compile(r"(?:watch|summari[sz]e) (?P<url>https?://\S+)", re.I)
 
 
@@ -1581,7 +1592,7 @@ def video_request(text: str) -> VideoAsk | None:
     m = _VIDEO_WATCH_URL_RE.fullmatch(strip_lead(t))
     if m:
         return VideoAsk("video_watch", "", _youtube_id(m["url"]))
-    has_url = bool(_URL_RE.search(t))
+    has_url = bool(_YOUTUBE_HOSTISH_RE.search(t))  # a YouTube (or lookalike) link; other links stay answers
     if (_VIDEO_REF_RE.search(t) or has_url) and _QUESTION_LEAD_RE.match(strip_lead(t)):
         return VideoAsk("video_ask", t[:300], _youtube_id(t))
     return None

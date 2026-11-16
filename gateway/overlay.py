@@ -1021,9 +1021,6 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
             async for event in events:
                 if event.get("type") in _SCREEN_EVENTS:
                     _screen_at[conv_id] = (deps.clock, deps.clock())
-                card = event.get("card") if event.get("type") == "card" else None
-                if isinstance(card, dict) and card.get("type") == "video" and card.get("youtube_id"):
-                    _last_video[conv_id] = card["youtube_id"]  # jfollow10b: "the video" / "watch it"
                 yield event
     finally:
         left = _inflight.pop(conv_id, 1) - 1
@@ -3220,6 +3217,13 @@ def _look_miss_line(g: dict, conv_id: str, spoke: bool, text: str) -> str | None
     return "I can't see it on screen." if missed is None else NO_PIN_LINE
 
 
+def _note_found_video(conv_id: str, card: dict) -> None:
+    """jfollow10b: "the video" / "watch it" refer only to a video the service found (find_video).
+    A model-written youtube_id card never sets it: a web page could pick the video a job ingests."""
+    if card.get("type") == "video" and card.get("youtube_id"):
+        _last_video[conv_id] = card["youtube_id"]
+
+
 async def _media_result(lookup, video: bool) -> tuple[dict | None, str, str]:
     """A media lookup's card (validated, of the asked type) or its one miss line, plus a fixed result
     word for the debug page (card | none | timeout | error). Shared by the model and owner-words paths."""
@@ -3273,6 +3277,7 @@ async def _owner_media(ask: intents.MediaAsk, conv_id: str, deps: OverlayDeps, s
         key = f"{ask.kind}|{ask.count}|{ask.subject.lower()}".encode()
         card = {**card, "id": "ow" + hashlib.sha256(key).hexdigest()[:10]}
         _index_card(conv_id, card)
+        _note_found_video(conv_id, card)
         yield {"type": "card", "card": card}
     else:
         if media_lookup._BLOCK.search(ask.subject):  # find refused it before any fetch
@@ -3433,6 +3438,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         card, miss_line, _result = await _media_result(lookup, video_lookup)
         if card:
             _index_card(body.conv_id, card)  # Mac live run 5 (37b): a picture can be enlarged too
+            _note_found_video(body.conv_id, card)
             yield {"type": "card", "card": card}
             return
         async for ev in _speak(miss_line, deps):
@@ -4674,16 +4680,18 @@ _GEO_ROW_KIND = {"geo_map": "map", "geo_roads": "roads", "transit_status": "stat
                  "transit_journey": "journey", "place_save": "save", "place_forget": "forget"}
 _GEO_REASON = {"bad_host": "api_error", "no_stops": "outside_london", "bad_tile": "api_error"}
 # Words that can only mean a saved place: "my office", "the gym" (one word), home words.
+ROADS_WHERE_LINE = "Where to? Say, for example: what roads could I take to the gym."
 _SAVED_ONLY_RE = re.compile(r"^(?:my|our) |^the [a-z0-9']+$")
 TILE_ROOT: Path | None = None  # tests point the tile cache at tmp_path; None = agent.SUPPORT_DIR
 
 
 class _GeoLine(Exception):
-    """A fixed line ends the geo turn: acks.PHRASES[key] (formatted with `fmt`) + a row reason."""
+    """A fixed line ends the geo turn: acks.PHRASES[key] (formatted with `fmt`), or a fixed `line`
+    from this module, + a row reason."""
 
-    def __init__(self, key: str, reason: str, row_kind: str | None = None, **fmt):
+    def __init__(self, key: str, reason: str, row_kind: str | None = None, line: str = "", **fmt):
         super().__init__(key)
-        self.key, self.reason, self.row_kind, self.fmt = key, reason, row_kind, fmt
+        self.key, self.reason, self.row_kind, self.line, self.fmt = key, reason, row_kind, line, fmt
 
 
 @dataclass
@@ -4747,6 +4755,23 @@ def _geo_point(words: str, tp: _TurnPlaces, budget: geo.Budget) -> tuple[float, 
     return lat, lon, words.title()[:40]
 
 
+def _station_words(words: str, tp: _TurnPlaces) -> bool:
+    """True when tube place words are a station name for TfL's search. A Google link, a home word, a
+    saved name, "my X"/"the X" or a postcode never goes to TfL as text: _geo_point resolves it to numbers."""
+    words = (words or "").strip()
+    if not words:
+        return False
+    if geo.GOOGLE_MAPS_RE.search(words):
+        raise _GeoLine("place_link", "no_place", "link")
+    name = intents.place_name(words)
+    if name == "home" or _SAVED_ONLY_RE.match(words) or geo.is_postcode(words):
+        return False
+    try:
+        return name not in tp.get()
+    except _GeoLine:
+        return True  # no places file: the words cannot be a saved name
+
+
 def _pin(point: tuple) -> dict:
     return {"lat": point[0], "lon": point[1], "label": point[2]}
 
@@ -4802,8 +4827,8 @@ def _geo_answer(body: TurnBody, ask: intents.GeoAsk, budget: geo.Budget) -> _Geo
                 a, b = _geo_point("", tp, budget), _geo_point(ask.b, tp, budget)
             elif conv in _last_route:
                 a, b = _last_route[conv]
-            else:
-                raise _GeoLine("route_failed", "no_place")
+            else:  # no earlier route and no place: say what to ask, not that a service failed
+                raise _GeoLine("", "no_place", line=ROADS_WHERE_LINE)
             try:
                 routes = geo.car_routes(a[:2], b[:2], budget)
             except geo.GeoError as e:
@@ -4815,7 +4840,7 @@ def _geo_answer(body: TurnBody, ask: intents.GeoAsk, budget: geo.Budget) -> _Geo
             res.line = geo.roads_line(routes)
         elif kind == "transit_next":
             try:
-                if ask.mode == "tube" and ask.a:  # (g) a station by name: TfL's own search, never Nominatim
+                if ask.mode == "tube" and _station_words(ask.a, tp):  # (g) TfL's own search, never Nominatim
                     lines, arrivals = geo.next_departures(None, None, "tube", budget, station=ask.a)
                 else:
                     a = _geo_point(ask.a, tp, budget)
@@ -4846,7 +4871,7 @@ def _geo_answer(body: TurnBody, ask: intents.GeoAsk, budget: geo.Budget) -> _Geo
             lines, res.line = geo.journey_lines(found)
             res.card = _info("Journeys", lines)
     except _GeoLine as stop:
-        res.key, res.fmt, res.reason, res.line, res.card = stop.key, stop.fmt or None, stop.reason, "", None
+        res.key, res.fmt, res.reason, res.line, res.card = stop.key or None, stop.fmt or None, stop.reason, stop.line, None
         res.row_kind = stop.row_kind or res.row_kind
     except geo.GeoError as e:  # a geocoder failure on the way
         res.key, res.reason, res.line, res.card = "route_failed", _GEO_REASON.get(e.reason, e.reason), "", None
@@ -4946,7 +4971,14 @@ async def _video_answer(body: TurnBody, raw_text: str, deps: OverlayDeps) -> tup
 async def _video_ask_turn(body: TurnBody, raw_text: str, deps: OverlayDeps, said: list[str],
                           on_step) -> AsyncIterator[dict]:
     t0 = deps.clock()
-    key, answer, row = await _video_answer(body, raw_text, deps)
+    task = asyncio.ensure_future(_video_answer(body, raw_text, deps))
+    try:
+        async for ev in _say_if_slow(task, "answer", deps, said):  # feedback within FEEDBACK_S
+            yield ev
+    except BaseException:
+        task.cancel()
+        raise
+    key, answer, row = await task
     if on_step:
         on_step("video_ask", detail=f"src={row['src']} chars={row['chars']} found={row['found']}"
                                     f" ms={round((deps.clock() - t0) * 1000)} reason={row['reason']}")
