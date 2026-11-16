@@ -107,7 +107,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-three.js 0.187.0 (mrdoob/three.js) — MIT License
+three.js 0.187.0 (mrdoob/three.js): MIT License
 Used in: the 3D object web card (Resources/web/model.*). Source: npm package three@0.187.0,
 fetched from cdn.jsdelivr.net/npm/three@0.187.0/ (2026-11-16). Six files under
 Resources/web/vendor/three/ with upstream relative paths.
