@@ -1,5 +1,13 @@
+/* Hallmark · route map card: dark glass key over a light street map */
 :root {
   --ink: #eef0f3;
+  --page: #16181c;
+  --map-ground: #cfd3d8;
+  --line: rgba(255, 255, 255, 0.22);
+  --hover: rgba(255, 255, 255, 0.1);
+  --credit-ground: rgba(255, 255, 255, 0.78);
+  --credit-ink: #222428;
+  --focus-on-map: #14171c;
   --ink-soft: #a9b0bb;
   --glass: rgba(18, 20, 24, 0.84);
   --best: #3d8bfd;
@@ -9,8 +17,8 @@
 html, body {
   margin: 0;
   height: 100%;
-  overflow: hidden;
-  background: #16181c;
+  overflow: clip;
+  background: var(--page);
   color: var(--ink);
   font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
 }
@@ -18,7 +26,7 @@ html, body {
 #map {
   position: absolute;
   inset: 0;
-  background: #cfd3d8;
+  background: var(--map-ground);
 }
 
 #panel {
@@ -28,9 +36,9 @@ html, body {
   z-index: 1000;
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 8px;
   max-width: calc(100% - 16px);
-  padding: 6px 8px;
+  padding: 8px;
   border-radius: 8px;
   background: var(--glass);
 }
@@ -44,7 +52,7 @@ html, body {
 #legend li {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   white-space: nowrap;
 }
 
@@ -66,8 +74,9 @@ html, body {
 
 #reset {
   flex: none;
+  min-height: 32px;
   padding: 4px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
   color: var(--ink);
@@ -76,7 +85,7 @@ html, body {
 }
 
 #reset:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--hover);
 }
 
 #reset:focus-visible {
@@ -104,7 +113,26 @@ html, body {
   margin: 0;
   padding: 1px 4px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.78);
-  color: #222;
-  font-size: 10px;
+  background: var(--credit-ground);
+  color: var(--credit-ink);
+  font-size: 11px;
+}
+
+/* The map and Leaflet's zoom buttons sit on the light map ground: a dark ring keeps focus visible there. */
+#map:focus-visible {
+  outline: 2px solid var(--focus-on-map);
+  outline-offset: -2px;
+}
+
+.leaflet-bar a:focus-visible {
+  outline: 2px solid var(--focus-on-map);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .leaflet-zoom-anim .leaflet-zoom-animated,
+  .leaflet-fade-anim .leaflet-tile,
+  .leaflet-fade-anim .leaflet-popup {
+    transition: none;
+  }
 }

@@ -18,12 +18,16 @@
   var map = L.map("map", {attributionControl: false, zoomSnap: 0.25, maxZoom: 19});
   map.setView([51.5, -0.12], 12);
   var tileErrors = 0;
-  L.tileLayer("tiles/{z}/{x}/{y}.png", {maxZoom: 19}).on("tileerror", function () {
-    tileErrors += 1;
-    if (tileErrors === 1) {
-      say("Map tiles unavailable");
-    }
-  }).addTo(map);
+
+  // Tiles load only once the route data has arrived, so a failed data.json fetches no tiles.
+  function addTiles() {
+    L.tileLayer("tiles/{z}/{x}/{y}.png", {maxZoom: 19}).on("tileerror", function () {
+      tileErrors += 1;
+      if (tileErrors === 1) {
+        say("Map tiles unavailable");
+      }
+    }).addTo(map);
+  }
 
   var bounds = null;
 
@@ -93,7 +97,10 @@
 
   fetch("data.json").then(function (r) {
     return r.json();
-  }).then(draw).catch(function () {
+  }).then(function (data) {
+    draw(data);
+    addTiles();
+  }).catch(function () {
     say("Map data unavailable");
   });
 })();
