@@ -49,7 +49,72 @@
     legendEl.appendChild(li);
   }
 
+  // jfollow10f: credit keys from data.json map to these fixed lines; no text from the data itself.
+  var CREDITS = {
+    osm: ATTRIBUTION,
+    tfl: "Powered by TfL Open Data",
+    clusterflick: "Screening data from Clusterflick (CC BY 4.0)"
+  };
+  var NOTES = {times_not_listed: "times not listed", none: "no showings left"};
+
+  function addLine(parent, cls, text) {
+    var p = document.createElement("p");
+    p.className = cls;
+    p.textContent = text;
+    parent.appendChild(p);
+  }
+
+  // The ranked places under the map: one numbered item per row, every part through textContent.
+  function addPlaces(data) {
+    var rows = Array.isArray(data.rows) ? data.rows : [];
+    if (!rows.length) {
+      return false;
+    }
+    document.body.classList.add("places");
+    var box = document.createElement("section");
+    box.id = "places";
+    box.setAttribute("aria-label", "Places, best first");
+    var list = document.createElement("ol");
+    rows.forEach(function (r, n) {
+      var li = document.createElement("li");
+      addLine(li, "name", (n + 1) + ". " + String(r.name || "") + (r.road ? ", " + String(r.road) : ""));
+      var facts = [];
+      if (typeof r.min === "number") {
+        facts.push(String(r.mode || "walk") + " " + r.min + " min");
+      }
+      facts.push(Number(r.km).toFixed(1) + " km");
+      if (r.hours) {
+        facts.push(String(r.hours));
+      }
+      addLine(li, "facts", facts.join(" · "));
+      var times = Array.isArray(r.times) ? r.times : [];
+      if (times.length) {
+        addLine(li, "times", times.map(function (t) {
+          return String(t.at) + " " + String(t.film || "");
+        }).join(" · "));
+      } else if (NOTES[r.note]) {
+        addLine(li, "times", NOTES[r.note]);
+      }
+      list.appendChild(li);
+    });
+    box.appendChild(list);
+    var keys = Array.isArray(data.credits) ? data.credits.slice() : [];
+    if (keys.indexOf("osm") < 0) {
+      keys.unshift("osm");  // the map tiles always carry the OSM credit
+    }
+    keys.forEach(function (k) {
+      if (Object.prototype.hasOwnProperty.call(CREDITS, k)) {
+        var asof = k === "clusterflick" && data.asof ? " · as of " + String(data.asof) : "";
+        addLine(box, "credit", CREDITS[k] + asof);
+      }
+    });
+    document.body.appendChild(box);
+    map.invalidateSize();
+    return true;
+  }
+
   function draw(data) {
+    var places = addPlaces(data);
     var layers = [];
     var routes = Array.isArray(data.routes) ? data.routes : [];
     var pins = Array.isArray(data.pins) ? data.pins : [];
@@ -64,12 +129,16 @@
       }).addTo(map));
     }
     routes.forEach(function (r, n) {
-      addLegend(n === 0 ? "best" : "alt", Math.round(r.min) + " min, " + Number(r.km).toFixed(1) + " km");
+      if (!places) {  // with places the numbered list says it
+        addLegend(n === 0 ? "best" : "alt", Math.round(r.min) + " min, " + Number(r.km).toFixed(1) + " km");
+      }
     });
     pins.forEach(function (p, n) {
       layers.push(L.marker([p.lat, p.lon], {keyboard: false, interactive: false}).addTo(map));
       var role = pins.length === 2 ? (n === 0 ? "Start: " : "End: ") : "";
-      addLegend("pin", role + String(p.label || ""));
+      if (!places) {
+        addLegend("pin", role + String(p.label || ""));
+      }
     });
     if (layers.length) {
       bounds = L.featureGroup(layers).getBounds();

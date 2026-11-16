@@ -134,6 +134,79 @@ html, body {
   outline-offset: 1px;
 }
 
+/* jfollow10f: ranked places. The map keeps the top half; the numbered list scrolls under it. */
+.places #map {
+  bottom: 54%;
+}
+
+.places #panel {
+  top: 6px;
+  right: 6px;
+  bottom: auto;
+  left: auto;
+  padding: 0;
+  background: none;
+}
+
+.places #reset {
+  background: var(--glass);
+}
+
+.places #attribution {
+  display: none;
+}
+
+#places {
+  position: absolute;
+  top: 46%;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow-y: auto;
+  padding: 6px 10px 8px;
+  background: var(--page);
+  border-top: 1px solid var(--line);
+}
+
+#places ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#places li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+#places li:last-child {
+  border-bottom: 0;
+}
+
+#places p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#places .name {
+  font-weight: 600;
+}
+
+#places .facts,
+#places .times {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+#places .credit {
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  white-space: normal;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .leaflet-zoom-anim .leaflet-zoom-animated,
   .leaflet-fade-anim .leaflet-tile,

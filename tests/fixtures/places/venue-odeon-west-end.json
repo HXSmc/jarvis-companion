@@ -1,0 +1,162 @@
+[
+ {
+  "title": "Avengers: Doomsday",
+  "themoviedb": {
+   "overview": "(dropped at parse)"
+  },
+  "performances": [
+   {
+    "time": 1797400800000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14714"
+   },
+   {
+    "time": 1797415200000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14715"
+   },
+   {
+    "time": 1797498000000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14805"
+   },
+   {
+    "time": 1797512400000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14804"
+   }
+  ]
+ },
+ {
+  "title": "Dune: Part Three",
+  "themoviedb": {
+   "overview": "(dropped at parse)"
+  },
+  "performances": [
+   {
+    "time": 1797361200000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14649"
+   },
+   {
+    "time": 1797374700000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14728"
+   },
+   {
+    "time": 1797584400000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14712"
+   },
+   {
+    "time": 1797597900000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-14711"
+   }
+  ]
+ },
+ {
+  "title": "Ebenezer",
+  "themoviedb": {
+   "overview": "(dropped at parse)"
+  },
+  "performances": [
+   {
+    "time": 1794852000000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15306"
+   },
+   {
+    "time": 1794861900000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15274"
+   },
+   {
+    "time": 1794918600000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15276"
+   },
+   {
+    "time": 1794928500000,
+    "screen": "1",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15277"
+   }
+  ]
+ },
+ {
+  "title": "I Play Rocky",
+  "themoviedb": {
+   "overview": "(dropped at parse)"
+  },
+  "performances": [
+   {
+    "time": 1794925800000,
+    "screen": "2",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15291"
+   },
+   {
+    "time": 1794936600000,
+    "screen": "2",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15292"
+   },
+   {
+    "time": 1794946800000,
+    "screen": "2",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15290"
+   },
+   {
+    "time": 1795021200000,
+    "screen": "2",
+    "status": {
+     "soldOut": false
+    },
+    "bookingUrl": "https://www.odeon.co.uk/ticketing/seat-picker/?showtimeId=155-15350"
+   }
+  ]
+ }
+]

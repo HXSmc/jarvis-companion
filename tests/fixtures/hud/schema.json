@@ -504,6 +504,97 @@
                     },
                     "attribution": {
                       "const": "© OpenStreetMap contributors"
+                    },
+                    "rows": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 5,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 40,
+                            "minLength": 1
+                          },
+                          "road": {
+                            "type": "string",
+                            "maxLength": 40
+                          },
+                          "min": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 600
+                          },
+                          "mode": {
+                            "enum": [
+                              "walk",
+                              "bus",
+                              "tube",
+                              "train"
+                            ]
+                          },
+                          "km": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 50
+                          },
+                          "hours": {
+                            "type": "string",
+                            "pattern": "^(?:open 24 hours|closed now|hours not listed|open until (?:midnight|(?:[01]\\d|2[0-3]):[0-5]\\d))$"
+                          },
+                          "times": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 3,
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "at": {
+                                  "type": "string",
+                                  "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$"
+                                },
+                                "film": {
+                                  "type": "string",
+                                  "maxLength": 40
+                                }
+                              },
+                              "required": [
+                                "at",
+                                "film"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "note": {
+                            "enum": [
+                              "times_not_listed",
+                              "none"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "km"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "credits": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 3,
+                      "items": {
+                        "enum": [
+                          "osm",
+                          "tfl",
+                          "clusterflick"
+                        ]
+                      }
+                    },
+                    "asof": {
+                      "type": "string",
+                      "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$"
                     }
                   },
                   "required": [
