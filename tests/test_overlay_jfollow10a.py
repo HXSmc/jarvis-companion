@@ -366,6 +366,41 @@ def test_automount_path_asks_before_any_lookup(ctx, monkeypatch, auto_on):
     assert not [p for p in seen if "/net" in p.lower()], seen
 
 
+def test_automount_through_a_symlink_asks_before_any_lookup(ctx, tmp_path, monkeypatch, auto_on):
+    """Round 5 (security): /Volumes/Macintosh HD is a symlink to / on macOS, so <vol>/net/<host> names
+    the automount point. It asks network marked or not (read_only no longer lets it through), and the
+    classifier never resolves, stats or reads a link below /net itself."""
+    vols = tmp_path / "vols"
+    vols.mkdir()
+    (vols / "Macintosh HD").symlink_to("/")
+    (vols / "hop").symlink_to("Macintosh HD/net/h")  # a relative link straight into /net/<host>
+    seen = []
+    for fn in ("realpath", "islink"):
+        orig = getattr(os.path, fn)
+        monkeypatch.setattr(os.path, fn, lambda p, *a, _o=orig, **k: (seen.append(str(p)), _o(p, *a, **k))[1])
+    orig_readlink = os.readlink
+    monkeypatch.setattr(os, "readlink", lambda p, *a, **k: (seen.append(str(p)), orig_readlink(p, *a, **k))[1])
+    for command in (f"ls '{vols}/Macintosh HD/net/data.evil.example'", f"cat '{vols}/Macintosh HD/Network/h/x'",
+                    f"stat {vols}/hop/x", f"ls '{vols}/Macintosh HD/NET'"):
+        assert auto_policy.classify(command, ctx) == ("asked", "network"), command
+        for tainted in (False, True):
+            assert auto_policy.verdict(command, ctx, tainted=tainted, barge=False, gate_ok=True) == (
+                "asked", "network"), (command, tainted)
+    assert not [p for p in seen if auto_policy._is_net(os.path.normpath(p.replace(str(vols / "Macintosh HD"), "/")))
+                or "/net/" in p.lower()], seen
+    # an ordinary folder named network, or a link to a normal place, stays auto
+    (tmp_path / "src" / "network").mkdir(parents=True)
+    (vols / "docs").symlink_to(tmp_path / "src")
+    for command in (f"ls {tmp_path}/src/network", f"ls {vols}/docs/network", f"ls '{vols}/Macintosh HD/tmp'"):
+        assert auto_policy.classify(command, ctx) == ("auto", "ok"), command
+
+
+def test_symlink_loop_fails_closed(ctx, tmp_path, auto_on):
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    assert auto_policy.classify(f"ls {tmp_path}/a/x", ctx) == ("asked", "network")
+
+
 def test_chain_with_push_asks_network(ctx):
     assert auto_policy.classify("git -C r add a && git -C r commit -m x && git -C r push", ctx) == (
         "asked", "network")

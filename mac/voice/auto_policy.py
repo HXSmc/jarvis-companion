@@ -214,16 +214,52 @@ def _places(tok: str, ctx: agent_policy.Ctx) -> list[str]:
 
 
 def _net(tok: str, ctx: agent_policy.Ctx) -> bool:
-    """The token names a path under an automount point (NET_ROOTS), by text only: no realpath, no stat.
-    Relative ones are checked against the scratch dir and home, like _places."""
+    """The token names a path under an automount point (NET_ROOTS), by text or through a symlink
+    (/Volumes/Macintosh HD -> /). Relative ones are checked against the scratch dir and home, like _places."""
     if not _is_path(tok):
         return False
     p = os.path.expanduser(tok.replace("~", ctx.home, 1) if tok.startswith("~") else tok)
     bases = [p] if os.path.isabs(p) else [os.path.join(ctx.cwd or ".", p), os.path.join(ctx.home, p)]
     for b in bases:
         n = ("/" + os.path.abspath(b).lstrip("/")).casefold()  # abspath keeps a leading //
-        if any(_under(n, r) for r in NET_ROOTS):
+        if any(_under(n, r) for r in NET_ROOTS) or _net_walk(b):
             return True
+    return False
+
+
+def _is_net(path: str) -> bool:
+    return any(_under(path.casefold(), r) for r in NET_ROOTS)
+
+
+def _net_walk(path: str) -> bool:
+    """Resolve the path one component at a time, following symlinks by hand, and stop as soon as the
+    text lands on or under a NET_ROOT: nothing on or below /net is ever stat'ed, so no host lookup
+    (realpath on a prefix would follow a link into /net/<host> and look it up)."""
+    todo = [c for c in reversed(path.split("/"))]
+    cur, hops = "/", 0
+    while todo:
+        c = todo.pop()
+        if c in ("", "."):
+            continue
+        if c == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, c)
+        if _is_net(nxt):
+            return True
+        if not os.path.islink(nxt):
+            cur = nxt
+            continue
+        hops += 1
+        try:
+            target = os.readlink(nxt)
+        except OSError:
+            return True  # fail closed
+        if hops > 40:
+            return True  # a link loop: fail closed
+        todo.extend(reversed(target.split("/")))
+        if target.startswith("/"):
+            cur = "/"
     return False
 
 
