@@ -212,8 +212,10 @@ def test_probe_refuses_redirect(setup, servers, capsys, monkeypatch):
     a, b = servers(), servers()
     a.answer = (302, {"Location": b.url + "/"}, b"")
     real = setup["route"].real
-    assert ca.probe(a.url, FAKE) is False  # the module's real probe() and opener
+    monkeypatch.setattr(ca, "_OPENER", real)  # the module's real probe() and bare opener, no wrapper
+    assert ca.probe(a.url, FAKE) is False
     assert len(a.requests) == 1 and b.requests == []
+    monkeypatch.setattr(ca, "_OPENER", setup["route"])
     # the full flow: the candidate redirects -> the loopback gateway
     loop = servers()
     setup["route"].map[CAND] = a.url
