@@ -324,7 +324,7 @@ _AUTO_OFF_RE = re.compile(_WRAP_LEAD + r"(?:(?:always )?ask (?:me )?" + _BEFORE 
 _AUTO_ON_RE = re.compile(_WRAP_LEAD + r"(?:(?:stop|quit) asking (?:me )?(?:" + _BEFORE + r"|to confirm " + _CMDS + r")"
                         + r"|(?:don't|do not) ask (?:me )?" + _BEFORE
                         + r"|(?:turn|switch) off " + _CONFIRMS
-                        + r"|run commands without asking(?: me)?|(?:go|switch) (?:to )?full auto(?: mode)?)"
+                        + r"|run commands without asking(?: me)?|(?:go|switch to) full auto)"
                         + _WRAP_TRAIL)
 _SESSION_ANSWER_RE = re.compile(
     r"(?:tell (?P<tname>the .+? session) (?P<tyn>yes|no|to go ahead)"

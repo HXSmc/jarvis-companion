@@ -169,8 +169,7 @@ ON_TEXTS = ("Jarvis, stop asking before commands", "stop asking me before runnin
             "don't ask before commands", "run commands without asking", "go full auto",
             # round 1 (ux findings 1-2)
             "don't ask me before running anything", "stop asking before running a command",
-            "turn off confirmations", "switch off confirmations", "stop asking me to confirm commands",
-            "go to full auto mode")
+            "turn off confirmations", "switch off confirmations", "stop asking me to confirm commands")
 
 
 def test_auto_mode_intent_variants():
@@ -183,7 +182,7 @@ def test_auto_mode_intent_variants():
     assert intents.parse("stop asking", apps={}).kind != "auto_mode"
     assert intents.parse("don't", apps={}).kind != "auto_mode"
     # whole utterance only: a last sentence or a near phrase never flips the switch
-    for t in ("I told Bob about it. Go full auto.", "Thanks. Ask before commands.", "full auto",
+    for t in ("I told Bob about it. Go full auto.", "Thanks. Ask before commands.", "go to full auto", "full auto",
               "should I ask before commands", "stop asking me questions", "ask first", "stop asking",
               "ask me before you leave", "turn off the lights", "stop asking me to confirm"):
         assert intents.parse(t, apps={}).kind != "auto_mode", t
@@ -302,7 +301,7 @@ ASKS = [
     ("cpio -i", "delete"), ("pax -r", "delete"),
     # round 1 (security finding 4): an option-attached path is a target too
     ("tar -xf SCRATCH/a.tar -C~", "delete"), ("tar -xf SCRATCH/a.tar -C/tmp", "delete"),
-    ("grep -f~/.ssh/id_rsa x", "secret"),
+    ("ls -dSUPPORT", "guard"), ("cat -v~/.ssh/config", "secret"),
 ]
 AUTOS = ["echo hi", "date", "ls /tmp", "df -h", "uptime", "rm SCRATCH/scratch.txt", "git -C r add a.py",
          "git -C r add a.py && git -C r commit -m 'x'", "memory_pressure", "tool-x --check", "git -C r stash",
@@ -683,3 +682,13 @@ def test_web_answer_history_marks_the_next_agent_turn(client, auto_on):
     overlay._tainted.add("w2")
     turn(client, "what is the news today", conv_id="w2")
     assert "w2" not in overlay._auto_tainted
+
+
+def test_web_handover_alone_sets_no_mark(client, auto_on):
+    """answer -> agent is the normal route: a web brain that only hands over put no text in history."""
+    from test_overlay_service import FakeConversations
+    clock = Clock()
+    pool, deps = setup(clock, bash("echo a", "tool-x")(clock),
+                       conversations=FakeConversations(['{"agent": true}\n']))
+    turn(client, "how much disk is free on this mac", conv_id="w3")
+    assert deps.conversations.sessions and "w3" not in overlay._auto_tainted

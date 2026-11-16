@@ -3280,8 +3280,6 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         _mark_untrusted(body.conv_id)
     pool = deps.quiet_conversations if body.conv_id in _tainted else deps.conversations
     quiet = pool is deps.quiet_conversations  # screen text may be in play: no outside fetch, no media
-    if not quiet:
-        _web_replied.add(body.conv_id)  # the web tools may run: its reply is not the owner's words
     session = await asyncio.to_thread(pool.get, body.conv_id)
 
     loop = asyncio.get_running_loop()
@@ -3314,6 +3312,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     async def speak_say(say_text: str) -> AsyncIterator[dict]:
         nonlocal model_spoke
         model_spoke = True
+        if not quiet:  # a web-pool line (it may echo a fetched page) reaches _history: mark at turn end
+            _web_replied.add(body.conv_id)
         yield _say(say_text)
         said.append(say_text)
         audio = await _audio(say_text, deps)
