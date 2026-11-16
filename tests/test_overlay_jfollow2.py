@@ -229,9 +229,9 @@ def test_quiet_prompt_gives_the_reason():
     assert "show me a picture of" in overlay.QUIET_PROMPT
     for bad in ("image_search", "video_search", "WebSearch"):
         assert bad not in overlay.QUIET_PROMPT
-    # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3: persona "sir" line
+    # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3 (persona "sir" line), jfollow9 D2 (About you), jfollow9 R5 F1 (questions only)
     assert hashlib.sha256(overlay.ANSWER_PROMPT.encode()).hexdigest() == \
-        "e59ca076229f9066437f35e74dcf12ad458ba1995d66d39608e5d9469b29e432"
+        "87c3724bd7aaa52aa6134f05fcca21c02a6a6c13e8ed901e35202b9d37ab0713"
 
 
 def test_media_turn_joined_continuation_falls_back(client, monkeypatch):
@@ -505,11 +505,14 @@ def test_known_commands_are_never_dropped(client, tmp_path):
     turn(client, "highlight the changes", conv_id="g6", screen=_on_screen(repo))
     events = turn(client, "next change", conv_id="g6", **quiet)
     assert _lines(events) or any(s.get("kind") == "hunk" for s in _steps("intent"))
+    # jfollow9 hub question 3: clear and one-card remove now pass the level/confidence gate,
+    # so a quiet room "clear" is dropped; stop / yes / no below still never are.
     events = turn(client, "clear", conv_id="g6", **quiet)
-    assert {"type": "clear"} in events
+    assert {"type": "clear"} not in events
+    assert [s["reason"] for s in _steps("followup_dropped")] == ["level"]
     for text in ("stop", "yes", "no"):
         turn(client, text, conv_id="g6", **quiet)
-    assert not _steps("followup_dropped")
+    assert len(_steps("followup_dropped")) == 1
 
 
 def test_confirm_answer_with_room_level_is_not_dropped(client):

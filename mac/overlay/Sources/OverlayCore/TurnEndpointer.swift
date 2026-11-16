@@ -339,13 +339,8 @@ public enum WakeGate {
     /// heard: the open turn's words so far. A follow-up window whose words start with the wake
     /// phrase is the owner's new wake request, not an answer: it gets its own turn (Mac run r5: the
     /// window heard "Hey Jarvis" first, the wake was ignored and the request was lost).
-    /// weak: a playback-only weak hit (wakeword.py WEAK_THRESHOLD). It may only cut a reply that is
-    /// playing on speakers with barge-in off (the owner's voice over Jarvis's own audio scores under
-    /// the full threshold); anything else, idle included, ignores it.
     public static func decide(audioBusy: Bool, streaming: Bool, listening: Bool,
-                              followUp: Bool, hasSpeech: Bool, heard: String = "",
-                              weak: Bool = false, bargeInOn: Bool = false) -> Action {
-        if weak { return audioBusy && !bargeInOn ? .cutReply : .ignore }
+                              followUp: Bool, hasSpeech: Bool, heard: String = "") -> Action {
         if audioBusy || streaming { return .cutReply }
         if listening && !followUp { return .ignore }
         if listening && followUp && hasSpeech && !leadsWithWake(heard) { return .ignore }
@@ -374,19 +369,6 @@ public enum WakeGate {
         return StopPhrase.matches(t) || t.range(
             of: #"^(?:(?:yes|yeah|yep|no|nope)(?: (?:please|sir))?(?: (?:do it|go ahead|don't|do not|thanks|thank you))?|do it|go ahead|don't|do not|confirm(?:ed)?)$"#,
             options: .regularExpression) != nil
-    }
-
-    /// What a weak hit's turn does with its words (hub, round 8). A weak hit is barge-in only: a stop
-    /// phrase ends the reply it cut; anything else, a "yes" or "go ahead" to a pending Confirm
-    /// included, is dropped. There is no "send": a weak turn never reaches the service.
-    public enum WeakAction: Equatable { case stopReply, ignore(reason: String) }
-
-    public static func weakFinal(_ text: String) -> WeakAction {
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .ignore(reason: "no_speech") }
-        // "Be quiet, Jarvis": a trailing name would make stripWake drop the words before it.
-        let unnamed = text.replacingOccurrences(of: #"[\s,.!?]*\bjarvis[\s,.!?]*$"#, with: "",
-                                                options: [.regularExpression, .caseInsensitive])
-        return StopPhrase.matches(unnamed) ? .stopReply : .ignore(reason: "not_stop")
     }
 
     /// The words start like a wake: "hey"/"hi" (also a misheard "Hey Jervis"), or "jarvis" at the

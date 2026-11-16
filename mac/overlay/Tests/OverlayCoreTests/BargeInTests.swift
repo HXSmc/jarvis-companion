@@ -363,4 +363,225 @@ final class BargeInTests: XCTestCase {
         XCTAssertEqual(BargeWords.snapped(["weather"], to: ["rome"]), ["weather"])
         XCTAssertEqual(BargeWords.newWordCount(partial: "um uh what", reply: []), 1)
     }
+
+    // MARK: Round 8 (echo canceller): the aec margin and the speakers word rule
+
+    /// Residual echo at the aec margin: the mic at a tenth of a steady 0.3 out never lifts over the
+    /// learned coupling.
+    func testAecMarginEchoOnly() {
+        var gate = EchoGate(margin: EchoGate.aecMargin)
+        var at = Date()
+        for i in 0..<50 {
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: 0.1 * 0.3, out: 0.3, at: at)
+            XCTAssertFalse(gate.isCandidate, "block \(i)")
+        }
+    }
+
+    /// At the aec margin the reply's first second never makes a candidate; over the echo, the
+    /// speakers rule rejects reply words alone ("landed on the moon" is the reply's own text).
+    func testAecMarginFirstSecond() {
+        var gate = EchoGate(margin: EchoGate.aecMargin)
+        var at = Date()
+        for i in 0..<10 {
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: 0.6 * 0.3, out: 0.3, at: at)
+            XCTAssertFalse(gate.isCandidate, "block \(i)")
+        }
+        gate = EchoGate(margin: EchoGate.aecMargin)
+        for _ in 0..<4 {
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: 1.2 * 0.3, out: 0.3, at: at)
+        }
+        let reply = ["The Apollo eleven crew landed on the moon"]
+        XCTAssertNil(BargeDecision.decide(gateCandidate: gate.candidate(at: at), partial: "landed on the moon",
+                                          reply: reply, wake: false, enabled: true, aec: true, speakers: true))
+    }
+
+    /// Residual echo teaches the coupling down, so the owner's real voice lifts over it after the
+    /// hold and his stop cuts the reply.
+    func testAecMarginOwnerOverResidual() {
+        var gate = EchoGate(margin: EchoGate.aecMargin)
+        var at = Date()
+        for _ in 0..<30 {
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: 0.03, out: 0.3, at: at)
+        }
+        for _ in 0..<4 {
+            at = at.addingTimeInterval(0.1)
+            gate.block(mic: 0.15, out: 0.3, at: at)
+        }
+        XCTAssertTrue(gate.isCandidate)
+        XCTAssertEqual(BargeDecision.decide(gateCandidate: true, partial: "hey jarvis stop",
+                                            reply: ["The Apollo eleven crew landed on the moon"],
+                                            wake: false, enabled: true, aec: true, speakers: true), .aec)
+    }
+
+    /// Through the canceller (speakers) only a stop phrase or a fresh "jarvis" confirms; bare room
+    /// words never cut there, headphones keep the >= 2-words rule.
+    func testSpeakersRuleNeedsNameOrStop() {
+        let reply = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
+        XCTAssertEqual(BargeWords.confirmRule(partial: "hey jarvis stop", reply: reply, speakers: true), .stop)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "jarvis stop", reply: reply, speakers: true), .stop)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "stop", reply: reply, speakers: true), .stop)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "jarvis what time is it", reply: reply, speakers: true), .name)
+        XCTAssertNil(BargeWords.confirmRule(partial: "what time is it", reply: reply, speakers: true))
+        XCTAssertEqual(BargeWords.confirmRule(partial: "what time is it", reply: reply), .words)
+        XCTAssertNil(BargeWords.confirmRule(partial: "turn it down please", reply: reply, speakers: true))
+        XCTAssertEqual(BargeWords.confirmRule(partial: "turn it down please", reply: reply), .words)
+        XCTAssertNil(BargeDecision.decide(gateCandidate: true, partial: "what time is it", reply: reply,
+                                          wake: false, enabled: true, aec: true, speakers: true))
+        XCTAssertEqual(BargeDecision.decide(gateCandidate: true, partial: "what time is it", reply: reply,
+                                            wake: false, enabled: true, aec: true, speakers: false), .aec)
+    }
+
+    /// A stop or a name that the reply itself holds is the reply's echo, never the owner's.
+    func testSpeakersRuleReplyLeakNeverCuts() {
+        let reply = ["Jarvis here. I will stop the music now."]
+        XCTAssertNil(BargeWords.confirmRule(partial: "jarvis stop", reply: reply, speakers: true))
+        XCTAssertNil(BargeWords.confirmRule(partial: "jarvis stop", reply: reply, speakers: false))
+        XCTAssertNil(BargeWords.confirmRule(partial: "jarvis said hello there", reply: reply, speakers: true))
+    }
+
+    /// On speakers without a fresh "jarvis" a barge turn sends only "stop" (the silent barge stop);
+    /// stop phrases go as heard. A Confirm answer with the name goes as heard: the service keeps the
+    /// Confirm pending on any barge-in yes (hub ruling), so the app does not rewrite it.
+    func testBargeTurnTextStopsOnly() {
+        func text(_ owned: String, _ reply: [String], speakers: Bool) -> String {
+            BargeWords.bargeTurnText(owned, reply: reply, speakers: speakers).text
+        }
+        let question = ["Commit and push your changes to main?"]
+        XCTAssertEqual(text("Jarvis, yes", question, speakers: true), "Jarvis, yes")
+        XCTAssertEqual(text("Jarvis go ahead", question, speakers: true), "Jarvis go ahead")
+        XCTAssertEqual(text("yes please", question, speakers: true), "stop")
+        XCTAssertEqual(text("Jarvis, yes", question, speakers: false), "Jarvis, yes")
+        XCTAssertEqual(text("Yes, do it.", question, speakers: false), "Yes, do it.")
+        let story = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
+        XCTAssertEqual(text("enough push my changes", story, speakers: true), "stop")
+        XCTAssertEqual(BargeWords.bargeTurnText("enough push my changes", reply: story, speakers: true).cut, .noName)
+        XCTAssertEqual(text("stop open safari", story, speakers: true), "stop")
+        XCTAssertEqual(text("stop", story, speakers: true), "stop")
+        XCTAssertNil(BargeWords.bargeTurnText("Hey Jarvis, stop.", reply: story, speakers: true).cut)
+        XCTAssertEqual(text("jarvis stop what time is it", story, speakers: true), "jarvis stop what time is it")
+        XCTAssertEqual(text("Hey Jarvis, what time is it?", story, speakers: true), "Hey Jarvis, what time is it?")
+        XCTAssertNil(BargeWords.bargeTurnText("Hey Jarvis, what time is it?", reply: story, speakers: true).cut)
+        XCTAssertEqual(text("enough push my changes", story, speakers: false), "enough push my changes")
+        XCTAssertEqual(text("What time is it?", story, speakers: false), "What time is it?")
+        // A "jarvis" the reply itself said is not fresh: the words go no further than a stop.
+        XCTAssertEqual(text("jarvis open safari", ["Jarvis is here."], speakers: true), "stop")
+    }
+
+    /// The barge final keeps its wake words (SpeechInput.completeTurn): the stripped form of the
+    /// owner's "Hey Jarvis, what time is it?" has no name left and would go out as "stop".
+    func testBargeFinalKeepsTheName() {
+        let story = ["The Apollo eleven crew landed on the moon in nineteen sixty nine."]
+        let final = "Hey Jarvis, what time is it?"
+        let owned = BargeWords.turnText(final: final, reply: story, confirmed: true) ?? ""
+        XCTAssertEqual(BargeWords.bargeTurnText(owned, reply: story, speakers: true).text, final)
+        let stripped = TurnEndpointer.stripWake(final, followUp: true)
+        XCTAssertEqual(BargeWords.bargeTurnText(stripped, reply: story, speakers: true).text, "stop")
+    }
+
+    // MARK: jfollow9 (BargeCheck wiring through BargeWords)
+
+    /// BargeCheck copies EchoGate's hold and lag (it builds alone on Linux): they stay equal.
+    func testBargeCheckMatchesEchoGate() {
+        XCTAssertEqual(BargeCheck.holdBlocks, EchoGate.holdBlocks)
+        XCTAssertEqual(BargeCheck.wordLag, EchoGate.wordLag)
+    }
+
+    /// C1: a "hey jarvis stop" partial that lands 1.6 s after its over blocks (the gate is quiet
+    /// by then) keeps its command words fresh; the next run of 3 over blocks confirms it on the
+    /// re-check (C2). The echo before it does not count.
+    func testFreshFromKeepsOwnerCommand() {
+        let reply = ["The empire grew under Trajan and its roads ran everywhere."]
+        var tracker = BargeCheck.Tracker(aec: true)
+        let t = Date(timeIntervalSince1970: 500)
+        for k in 1...3 { tracker.block(over: true, at: t.addingTimeInterval(Double(k) * 0.1)) }
+        tracker.block(over: false, at: t.addingTimeInterval(0.4))
+        let partial = "the empire grew hey jarvis stop"
+        func check(_ at: Double, recheck: Bool) -> BargeCheck.Verdict {
+            tracker.check(at: t.addingTimeInterval(at), wordCount: 6, recheck: recheck,
+                          commandIndex: { BargeWords.commandIndex(partial: partial, reply: reply, from: $0) },
+                          words: { BargeWords.check(partial: partial, reply: reply, freshFrom: $0) }).verdict
+        }
+        XCTAssertEqual(check(0.3 + 1.6, recheck: false).reject, .notOver)
+        XCTAssertEqual(tracker.freshFrom, 4)
+        for k in 1...3 { tracker.block(over: true, at: t.addingTimeInterval(2.0 + Double(k) * 0.1)) }
+        XCTAssertTrue(tracker.wantsRecheck(at: t.addingTimeInterval(2.3)))
+        var phones = BargeCheck.Tracker(aec: false)  // headphones: no C2 re-check
+        for k in 1...3 { phones.block(over: true, at: t.addingTimeInterval(Double(k) * 0.1)) }
+        _ = phones.check(at: t, wordCount: 3, recheck: false,
+                         commandIndex: { _ in nil }, words: { BargeWords.check(partial: "a b c", reply: reply, freshFrom: $0) })
+        phones.block(over: true, at: t.addingTimeInterval(0.4))
+        XCTAssertFalse(phones.wantsRecheck(at: t.addingTimeInterval(0.5)))
+        XCTAssertEqual(check(2.3, recheck: true).rule, .stop)
+        // The echo alone, gate quiet: freshFrom moves past every word as before.
+        var echo = BargeCheck.Tracker(aec: true)
+        _ = echo.check(at: t, wordCount: 3, recheck: false,
+                       commandIndex: { BargeWords.commandIndex(partial: "the empire grew", reply: reply, from: $0) },
+                       words: { BargeWords.check(partial: "the empire grew", reply: reply, freshFrom: $0) })
+        XCTAssertEqual(echo.freshFrom, 3)
+    }
+
+    /// C5: the reply holds "stop"; a fresh "jarvis stop" is the name rule, not a miss.
+    func testStopFallsThroughToName() {
+        let reply = ["Press stop on the timer when it rings."]
+        XCTAssertEqual(BargeWords.confirmRule(partial: "jarvis stop", reply: reply, speakers: true), .name)
+        XCTAssertNil(BargeWords.confirmRule(partial: "stop", reply: reply, speakers: true))
+    }
+
+    /// C5: repeats and lead words before a stop phrase still say stop; a lone "no" does not.
+    func testStopPhraseRepeats() {
+        let reply = ["The Apollo crew landed on the moon in nineteen sixty nine."]
+        for text in ["no no no stop", "stop stop", "okay stop. stop", "No, no, Jarvis, stop."] {
+            XCTAssertEqual(BargeWords.confirmRule(partial: text, reply: reply, speakers: true), .stop, text)
+        }
+        XCTAssertNil(BargeWords.confirmRule(partial: "no", reply: reply, speakers: true))
+        XCTAssertFalse(StopPhrase.endsInStop("no no"))
+        XCTAssertFalse(StopPhrase.endsInStop("please stop the build"))
+    }
+
+    /// C4: a restarted run starts at the ended run's coupling (clamped); the default is unchanged.
+    func testRestartedRunKeepsCoupling() {
+        XCTAssertEqual(EchoGate(margin: EchoGate.aecMargin, coupling: 0.05).coupling, 0.05)
+        XCTAssertEqual(EchoGate(margin: EchoGate.aecMargin, coupling: 0.001).coupling, 0.01)
+        XCTAssertEqual(EchoGate(margin: EchoGate.aecMargin, coupling: 5).coupling, EchoGate.startCoupling)
+        XCTAssertEqual(EchoGate().coupling, 1.0)
+    }
+
+    /// Jarvis's own words as BargeCheck sees them: a misheard "Jarvis" of "Jervis" and a "quiet"
+    /// heard for "quite" are the reply's (never kept fresh, never a clean stop).
+    func testOwnWordsFlags() {
+        let jervis = ["Hey Jervis, Travis says the build is ready."]
+        let w = BargeWords.check(partial: "Hey Jarvis, Travis says the build is ready", reply: jervis)
+        XCTAssertFalse(w.freshName)
+        XCTAssertNil(BargeCheck.wordRule(w, speakers: true))
+        XCTAssertNil(BargeWords.commandIndex(partial: "Hey Jarvis, Travis says", reply: jervis, from: 0))
+        let ready = ["Jarvis is ready when you are."]
+        let echo = BargeWords.check(partial: "Jarvis is ready when you are", reply: ready)
+        XCTAssertFalse(echo.freshName)
+        XCTAssertNil(BargeCheck.wordRule(echo, speakers: true))
+        XCTAssertTrue(BargeWords.check(partial: "Jarvis", reply: ready).nameInReply)
+        let quite = ["That was quite a day."]
+        let q = BargeWords.check(partial: "quiet", reply: quite)
+        XCTAssertTrue(q.stop)
+        XCTAssertFalse(q.stopClean)
+        XCTAssertNil(BargeWords.commandIndex(partial: "that was quiet", reply: quite, from: 0))
+        XCTAssertNil(BargeWords.confirmRule(partial: "quiet", reply: quite, speakers: true))
+    }
+
+    /// R1 (lens note 4): C5 and the lead words act through the canceller only; headphones keep the
+    /// jfollow8 rule (the whole text one stop phrase, no word of it in the reply).
+    func testHeadphonesStopRuleUnchanged() {
+        let reply = ["That's the plan for today."]
+        XCTAssertNil(BargeWords.confirmRule(partial: "thank you that's all", reply: reply))
+        XCTAssertEqual(BargeWords.confirmRule(partial: "thank you that's all", reply: reply, speakers: true), nil)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "stop", reply: reply), .stop)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "no no stop", reply: reply), .words)
+        XCTAssertEqual(BargeWords.confirmRule(partial: "no no stop", reply: reply, speakers: true), .stop)
+        let quite = ["That was quite a day."]
+        XCTAssertEqual(BargeWords.confirmRule(partial: "quiet", reply: quite), .stop)  // as at jfollow8
+        XCTAssertNil(BargeWords.confirmRule(partial: "quiet", reply: quite, speakers: true))
+    }
 }

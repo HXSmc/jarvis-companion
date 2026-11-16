@@ -420,3 +420,22 @@ def test_forwarder_imports_without_overlay_stack(monkeypatch):
     assert SECRET_OUTPUT not in json.dumps(body)  # re-redacted even though the Mac sent it raw
     assert set(body["turns"][0]["steps"][0]) == {"step", "at", "tool", "decision"}
     assert body["commit"] == "abc123"
+
+
+def test_keep_steps_jfollow9():
+    """jfollow9: the barge-in, mic and card_remove rows keep their detail (numbers and fixed
+    words only); a step not on the list still keeps only {step, at}."""
+    from gateway import overlay_log
+    gate = ("coupling=0.05 blocks=80 over=6 longest_run=2 peak_ratio=4.1 partials=9 checked=2 "
+            "max_new=3 rule=stop aec=1 mic_p90=0.031 out_p90=0.120 confirmed=1")
+    rows = {"barge_gate": gate,
+            "barge_check": "res=reject why=no_hold rule=none over=1 cand=0 run=1 win=1 last_over_ms=300",
+            "mic_signal": "kind=barge src=ch0 frames=100800 ch0_zero=no stt_results=19",
+            "playback": "ended audio_ms=6214", "card_remove": "removed match=title cards=1",
+            "barge_aec": "src_switch from=ch0 to=ch1", "wake_ignored": "reason=echo_cancel",
+            "barge_turn": "rule=name words=3", "wake_capture": "frames=4800 ch0_zero=no"}
+    snap = {"turns": [{"id": "t1", "steps": [{"step": k, "at": 1.0, "detail": v} for k, v in rows.items()]
+                       + [{"step": "screen", "at": 1.0, "detail": "SCREEN-TEXT"}]}]}
+    steps = overlay_log.redact(snap)["turns"][0]["steps"]
+    assert {s["step"]: s["detail"] for s in steps if "detail" in s} == rows
+    assert steps[-1] == {"step": "screen", "at": 1.0}

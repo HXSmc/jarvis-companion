@@ -24,8 +24,6 @@ final class AppController {
     private var turnDone = false
     /// The listenSerial of the open follow-up turn a wake was kept in (WakeGate .ignore).
     private var wokenSerial: Int?
-    /// The listenSerial of the open turn a weak hit started: barge-in only, its words never sent.
-    private var weakSerial: Int?
     /// Bumped by every wake; a follow-up window opens only if no new wake came meanwhile.
     private var listenSerial = 0
     private var heldLine = HeldLine<OverlayEvent>()
@@ -50,10 +48,33 @@ final class AppController {
     private var routeIsHeadphones = false
     /// Device the data-source listener sits on (the default-device listener is on the system object).
     private var listenedDevice: AudioDeviceID = 0
-    /// Route listeners installed (.headphones mode only).
+    /// Route listeners installed (at launch, every mode).
     private var routeListenersInstalled = false
+    /// Default output is a built-in device (route=speakers in the barge_aec note; else external).
+    private var outputBuiltIn = false
+    /// Default input is Bluetooth: voice processing would force it into the HFP profile.
+    private var inputIsBluetooth = false
+    /// The default input's transport for the barge_aec note: builtin|usb|other.
+    private var inputKind = "other"
+    /// Turning the canceller on failed on this route: not retried until the route or mode changes.
+    private var aecFailedHere = false
+    /// Voice processing heard nothing on two wake turns in a row (NoSignalGuard): off for the rest of
+    /// this app session (plain path, as with headphones); route and mode changes never clear it.
+    private var aecNoSignal = false
+    private var noSignal = EchoCancel.NoSignalGuard()
+    /// The mic engine started once (launch); later reconfigures need it.
+    private var speechStarted = false
+    /// The last reconfigure found no usable input; the next one that works clears the banner.
+    private var micDown = false
+    /// A reconfigure waiting for the next idle moment (its reason), and the task that waits.
+    private var pendingReconfigure: String?
+    private var reconfigurePoll: Task<Void, Never>?
+    /// The current reply's `playback ended` note was written.
+    private var playbackNoted = false
     /// The barge listening run of the current turn, nil while its audio is not playing.
     private var bargeRun: BargeRun?
+    /// The ended run's coupling for the restart in the same reply (C4); used once.
+    private var handOverCoupling: Double?
     /// The reply texts a wake cut (A4): stripped from that wake turn's text.
     private var cutReply: [String] = []
     /// Every .audio/.say text of the current turn so far, also the ones before the barge run
@@ -102,62 +123,170 @@ final class AppController {
 
     private func launch() async {
         await requestPermissionsIfNeeded()
+        // A failed health read starts in .off; the events loop's health read applies the real mode
+        // later (applyBargeMode reconfigures the engine then).
+        let health = try? await client.health()
+        bargeMode = BargeMode.from(health: health?.bargeMode, bargeIn: health?.bargeIn,
+                                   bargeAec: health?.bargeAec)
+        installOutputRouteListeners()
+        refreshOutputRoute()
+        refreshInputRoute()
+        speech.onConfigurationChange = { [weak self] in self?.echoCancelChanged(reason: "config_change") }
+        speech.onSourceSwitch = { [weak self] to in
+            self?.client.debugNote(step: "barge_aec", detail: "src_switch from=ch0 to=ch\(to)")
+        }
+        speech.onTurnSignal = { [weak self] signal in self?.turnSignal(signal) }
         do {
-            // Engine wiring is decided before start(): .aec mode plays through SpeechInput's
-            // engine, so the input's voice processing also cancels the reply audio.
-            let health = try? await client.health()
-            bargeMode = BargeMode.from(health: health?.bargeMode, bargeIn: health?.bargeIn,
-                                       bargeAec: health?.bargeAec)
-            if bargeMode == .headphones { installOutputRouteListeners() }
-            if bargeMode == .aec {
-                speech.aecEnabled = true
-                audio.shareEngine(speech.audioEngine)
-            }
-            try speech.start()
-            if speech.aecEnabled && !speech.aecActive { aecFailed() }
-            refreshOutputRoute()
-            updateBargeInEnabled()
+            try reconfigureEngine(reason: nil)
             noteBargeMode()
         } catch {
-            if speech.aecEnabled && !speech.aecActive { aecFailed() }
-            model.orb = .error
-            let line = "Microphone unavailable. Check System Settings > Privacy & Security > Microphone."
-            model.banner = line
-            audio.speakLocally(line)
+            micUnavailable()
         }
         await runEventsLoop()
     }
 
-    /// The AEC probe did not stick: back to the app's own engine (today's two-engine path),
-    /// barge-in off (only a headphones route or a healthy AEC gates it).
-    private func aecFailed() {
-        speech.aecEnabled = false
-        audio.useOwnEngine()
-        bargeMode = .off
-        bargeInEnabled = false
-        client.debugNote(step: "barge_aec", detail: "failed")
+    private func micUnavailable() {
+        guard !micDown else { return }  // a retry that fails again (route/config change) says it once
+        micDown = true
+        client.debugNote(step: "barge_aec", detail: "failed reason=no_input")
+        model.orb = .error
+        let line = "Microphone unavailable. Check System Settings > Privacy & Security > Microphone."
+        model.banner = line
+        audio.speakLocally(line)
+    }
+
+    // MARK: - Echo canceller (voice processing on the mic engine)
+
+    /// Voice processing wanted now: .aec mode on a non-headphones output with a non-Bluetooth input,
+    /// unless it already failed on this route.
+    private func wantEchoCancel() -> Bool {
+        !aecFailedHere && !aecNoSignal && EchoCancel.wantOn(aecMode: bargeMode == .aec, outputHeadphones: routeIsHeadphones,
+                                            inputBluetooth: inputIsBluetooth)
+    }
+
+    /// Nothing is listening, playing or streaming: the engine may stop and restart.
+    private var isIdle: Bool {
+        speech.openTurn == nil && !speech.bargeListening && !speech.bargeTurnOpen && !audio.isBusy && !turnStreaming
+    }
+
+    /// (Re)starts the mic engine for the current mode and route. Voice processing on: the player
+    /// shares the mic's engine (the canceller hears the reply). Off: the player plays on its own
+    /// engine as before. A failure turning it on keeps the plain path: barge-in then works as in
+    /// .headphones mode (headphones barge, a full wake hit stops a reply on speakers), never off.
+    private func reconfigureEngine(reason: String?) throws {
+        let want = wantEchoCancel()
+        let speech = self.speech, audio = self.audio
+        let setup = try speech.reconfigure(voiceProcessing: want) { on in
+            if on { audio.shareEngine(speech.audioEngine) } else { audio.useOwnEngine() }
+        }
+        speechStarted = true
+        pendingReconfigure = nil
+        if micDown {  // a retry after a failed reconfigure brought the mic back
+            micDown = false
+            model.banner = nil
+            if model.orb == .error { model.orb = .idle }
+        }
+        if setup.failed != nil { aecFailedHere = true }
+        if let reason { client.debugNote(step: "barge_aec", detail: "reconfigured reason=\(reason)") }
+        noteEchoCancel(setup)
+        updateBargeInEnabled()
+    }
+
+    /// One fixed-words note per reconfigure (numbers and fixed words only, never a device name).
+    private func noteEchoCancel(_ setup: SpeechInput.EngineSetup) {
+        let detail: String
+        if let failed = setup.failed {
+            detail = "failed reason=\(failed)"
+        } else if setup.active {
+            detail = "on route=\(outputBuiltIn ? "speakers" : "external") in=\(inputKind) "
+                + "rate=\(Int(setup.rate)) ch=\(setup.channels) src=\(setup.src) "
+                + "out_rate=\(Int(setup.outRate)) out_ch=\(setup.outChannels) agc=off ducking=min "
+                + "gain_db=\(Int(AudioOut.makeupGainDb)) start_ms=\(setup.ms)"
+            noteChannelLevels(src: setup.src)
+        } else {
+            let why = bargeMode != .aec ? "mode" : routeIsHeadphones ? "headphones"
+                : inputIsBluetooth ? "bluetooth_input" : aecNoSignal ? "no_signal" : "failed"
+            detail = "off reason=\(why)"
+        }
+        client.debugNote(step: "barge_aec", detail: detail)
+    }
+
+    /// 10 s after the canceller came on: the loudest buffer RMS per node channel since then, so the
+    /// live run shows whether channel 0 (what the gates and the recogniser hear) carries the voice.
+    private func noteChannelLevels(src: String) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let self, self.speech.aecActive else { return }
+            let rms = self.speech.channelPeaks.map { EchoCancel.dbText($0) }.joined(separator: ",")
+            self.client.debugNote(step: "barge_aec", detail: "levels src=\(src) ch_rms_db=\(rms)")
+        }
+    }
+
+    /// A finished turn on voice processing: its `mic_signal` row; a wake turn also feeds the owner's
+    /// safety net, which turns voice processing off when two wake turns in a row heard nothing.
+    private func turnSignal(_ signal: SpeechInput.TurnSignal) {
+        client.debugNote(step: "mic_signal", detail: signal.detail)
+        guard signal.kind == "wake", !aecNoSignal,
+              noSignal.wakeTurnEnded(heardNothing: signal.heardNothing, sttResults: signal.sttResults,
+                                     peakDb: signal.peakDb) else { return }
+        aecNoSignal = true
+        echoCancelChanged(reason: "no_signal")
+    }
+
+    /// A route change, a mode change from a later health read, or the engine's configuration
+    /// change: reconfigure now when idle (or when the engine stopped by itself), else at the next
+    /// idle moment, so a reply's words are never cut by an engine restart.
+    private func echoCancelChanged(reason: String) {
+        guard speechStarted else { return }  // the mic never started (no input or permission)
+        switch EchoCancel.reconfigure(want: wantEchoCancel(), active: speech.aecActive, idle: isIdle,
+                                      engineStopped: speech.engineStoppedOnItsOwn) {
+        case .none:
+            updateBargeInEnabled()
+        case .now:
+            do { try reconfigureEngine(reason: reason) } catch { micUnavailable() }
+        case .later:
+            if pendingReconfigure == nil { client.debugNote(step: "barge_aec", detail: "deferred reason=busy") }
+            pendingReconfigure = reason
+            pollPendingReconfigure()
+        }
+    }
+
+    /// Applies a deferred reconfigure at the first idle moment (checked every 0.5 s).
+    private func pollPendingReconfigure() {
+        guard reconfigurePoll == nil else { return }
+        reconfigurePoll = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self else { return }
+                guard let reason = self.pendingReconfigure else { self.reconfigurePoll = nil; return }
+                if self.isIdle {
+                    self.reconfigurePoll = nil
+                    self.pendingReconfigure = nil
+                    self.echoCancelChanged(reason: reason)
+                    return
+                }
+            }
+        }
     }
 
     // MARK: - Barge mode and output route
 
-    /// A barge_mode verdict from a later health read (a service restart may change it); the
-    /// engines stay as launch wired them — sharing is decided once, before start().
+    /// A barge_mode verdict from a later health read (a service restart may change it): the
+    /// engine is reconfigured for it (now when idle, else at the next idle moment).
     private func applyBargeMode(_ mode: BargeMode) {
         guard mode != bargeMode else { return }
         bargeMode = mode
-        if mode == .headphones { installOutputRouteListeners() }
+        aecFailedHere = false
         refreshOutputRoute()
         updateBargeInEnabled()
+        echoCancelChanged(reason: "mode")
     }
 
-    /// Barge-in allowed right now: .aec with the voice-processing probe stuck, or .headphones
-    /// while the default output device is a headphones route; .off never.
+    /// Barge-in allowed right now (EchoCancel.bargeInEnabled): .aec on a headphones route or with
+    /// the canceller really on; .headphones on a headphones route; .off never.
     private func updateBargeInEnabled() {
-        switch bargeMode {
-        case .off: bargeInEnabled = false
-        case .headphones: bargeInEnabled = routeIsHeadphones
-        case .aec: bargeInEnabled = speech.aecActive
-        }
+        bargeInEnabled = EchoCancel.bargeInEnabled(mode: bargeMode.rawValue, headphones: routeIsHeadphones,
+                                                   active: speech.aecActive)
     }
 
     /// One fixed-words note of the mode and the current route: at launch and on route changes.
@@ -174,6 +303,30 @@ final class AppController {
                                                  mElement: kAudioObjectPropertyElementMain)
         AudioObjectAddPropertyListener(AudioObjectID(kAudioObjectSystemObject), &address,
                                        outputRouteChangedProc, Unmanaged.passUnretained(self).toOpaque())
+        var input = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                               mScope: kAudioObjectPropertyScopeGlobal,
+                                               mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListener(AudioObjectID(kAudioObjectSystemObject), &input,
+                                       outputRouteChangedProc, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    /// Reads the default input device's transport (Bluetooth input = no voice processing).
+    /// Returns true when the Bluetooth verdict changed.
+    @discardableResult
+    private func refreshInputRoute() -> Bool {
+        var device: AudioDeviceID = 0
+        var transport: UInt32 = 0
+        guard Self.readAudioProperty(AudioObjectID(kAudioObjectSystemObject),
+                                     kAudioHardwarePropertyDefaultInputDevice,
+                                     kAudioObjectPropertyScopeGlobal, &device),
+              Self.readAudioProperty(device, kAudioDevicePropertyTransportType,
+                                     kAudioDevicePropertyScopeInput, &transport) else { return false }
+        let bluetooth = transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+        inputKind = transport == kAudioDeviceTransportTypeBuiltIn ? "builtin"
+            : transport == kAudioDeviceTransportTypeUSB ? "usb" : "other"
+        let changed = bluetooth != inputIsBluetooth
+        inputIsBluetooth = bluetooth
+        return changed
     }
 
     /// Reads the default output device's transport (and, on built-in devices, its data source);
@@ -193,6 +346,7 @@ final class AppController {
         var transport: UInt32 = 0
         guard Self.readAudioProperty(device, kAudioDevicePropertyTransportType,
                                      kAudioDevicePropertyScopeOutput, &transport) else { return false }
+        outputBuiltIn = transport == kAudioDeviceTransportTypeBuiltIn
         var dataSource: UInt32?
         if transport == kAudioDeviceTransportTypeBuiltIn {
             var source: UInt32 = 0
@@ -205,11 +359,16 @@ final class AppController {
         return changed
     }
 
-    /// The default device or its data source changed: re-read the route, re-gate, re-note.
+    /// The default output or input device, or the output's data source, changed: re-read both,
+    /// re-gate, re-note, and reconfigure the canceller for the new route.
     fileprivate func outputRouteChanged() {
-        guard refreshOutputRoute() else { return }
+        let output = refreshOutputRoute()
+        let input = refreshInputRoute()
+        guard output || input else { return }
+        aecFailedHere = false  // a new route: the canceller may work on it
         updateBargeInEnabled()
         noteBargeMode()
+        echoCancelChanged(reason: "route")
     }
 
     private static func toggleDataSourceListener(on device: AudioDeviceID,
@@ -291,14 +450,11 @@ final class AppController {
                 speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
                 applyBargeMode(BargeMode.from(health: health.bargeMode, bargeIn: health.bargeIn,
                                                bargeAec: health.bargeAec))
-                speech.aecEnabled = bargeMode == .aec  // takes effect on the next start()
                 endOutage()
                 for try await event in client.events() {
                     endOutage()
                     if event.name == "wake" {
                         await handleWake()
-                    } else if event.name == "wake_weak" {
-                        await handleWeakWake()
                     } else if event.name == "hud" {
                         handlePush(OverlayEvent.decode(line: Data(event.data.utf8)))
                     }
@@ -386,76 +542,21 @@ final class AppController {
         return sound
     }()
 
-    /// A weak wake hit (only sent below the full threshold): honoured only while a reply plays on
-    /// speakers with barge-in off, where the owner's "Hey Jarvis" over Jarvis's own audio never
-    /// reaches the full score (Mac run 3, criterion 28). It is barge-in ONLY (hub, round 8): it cuts
-    /// the reply as a full wake does with barge-in off, then listens; a stop phrase ends there and
-    /// anything else is dropped. Its words never reach the service, so it never answers a pending
-    /// Confirm (that still needs a full wake or the follow-up window) and never opens a request.
-    /// A full hit that follows (the same "Hey Jarvis" scoring up) turns it into a normal wake turn.
-    private func handleWeakWake() async {
-        let open = speech.openTurn
-        guard WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: open != nil,
-                              followUp: open?.followUp ?? false, hasSpeech: open?.hasSpeech ?? false,
-                              weak: true, bargeInOn: bargeInEnabled) == .cutReply else { return }
-        client.debugNote(step: "wake", detail: "weak hit during playback (speakers)")
-        cutReply = replyTexts
-        audio.stop()
-        utteranceTask?.cancel()
-        turnStreaming = false
-        heldLine.drop()
-        turnDone = false
-        listenSerial += 1
-        let serial = listenSerial
-        weakSerial = serial
-        let echoOf = cutReply
-        model.orb = .listening
-        speech.listenAfterWake(
-            onPartial: { _ in },
-            onFinal: { [weak self] heardText, _, _, _ in
-                let heardUntil = Date()
-                Task { @MainActor in
-                    guard let self, self.listenSerial == serial else { return }
-                    self.lastHeardUntil = heardUntil
-                    let text = echoOf.isEmpty ? heardText : BargeWords.wakeTurnText(final: heardText, reply: echoOf)
-                    self.endWeakTurn(WakeGate.weakFinal(text))
-                }
-            },
-            onNothing: { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.listenSerial == serial else { return }
-                    self.endWeakTurn(.ignore(reason: "no_speech"))
-                }
-            })
-    }
-
-    private func endWeakTurn(_ action: WakeGate.WeakAction) {
-        weakSerial = nil
-        // Ring audio up to now (the cut Confirm question's echo, the dropped words) is never replayed:
-        // the window below replays from max(lastDrainAt, now), and lastDrainAt may predate the cut.
-        lastHeardUntil = Date()
-        model.orb = .idle
-        switch action {
-        case .stopReply:
-            client.debugNote(step: "weak_wake", detail: "stop")  // the reply was cut at the hit
-        case .ignore(let reason):
-            client.debugNote(step: "weak_wake", detail: "ignored reason=\(reason)")
-            // A Confirm question it cut stays pending: open the normal follow-up window (level gate)
-            // the question's end would have opened, so a yes/no can still answer it.
-            if BargeWords.confirmPending(model.cards) { replyFinished() }
-        }
-    }
-
     /// followUp: the open-mic window after a reply (no wake word, same conversation);
     /// replayFrom: the reply's drain time, so only post-reply ring audio is replayed.
     private func handleWake(followUp: Bool = false, replayFrom: Date? = nil) async {
+        // Echo-cancelled playback: the app's own stream decides a barge-in. A raw wake hit (Jarvis's
+        // own voice included) while a barge run listens, or a confirmed barge turn is open, is ignored:
+        // no stop, no chime, no cancel of that turn.
+        if !followUp, case .ignore(let reason) = EchoCancel.wakeAction(
+            audioBusy: audio.isBusy, streaming: turnStreaming, echoCancelled: speech.aecActive,
+            bargeListening: speech.bargeListening, bargeTurnOpen: speech.bargeTurnOpen) {
+            client.debugNote(step: "wake_ignored", detail: "reason=\(reason)")
+            return
+        }
         // A wake inside the owner's open turn (a name inside the request) is ignored: the turn,
         // its words and its 30 s cap go on untouched. A reply playing or streaming still cuts.
-        // A full hit inside a weak hit's turn upgrades it to a normal wake turn (no ignore).
-        // (openTurn: a barge run or other listen that replaced the weak turn leaves nothing to upgrade.)
-        let upgrade = !followUp && weakSerial != nil && weakSerial == listenSerial && speech.openTurn != nil
-        weakSerial = nil
-        if !followUp, !upgrade, let open = speech.openTurn,
+        if !followUp, let open = speech.openTurn,
            WakeGate.decide(audioBusy: audio.isBusy, streaming: turnStreaming, listening: true,
                            followUp: open.followUp, hasSpeech: open.hasSpeech, heard: open.heard) == .ignore {
             if open.followUp { wokenSerial = listenSerial }  // that window now carries a wake: never silent
@@ -482,7 +583,7 @@ final class AppController {
                     turnStreaming = false
                     heldLine.drop()
                 }
-            } else if !upgrade {  // an upgrade keeps the cut reply's echo list; its audio already stopped
+            } else {
                 cutReply = []
                 audio.stop()
             }
@@ -612,6 +713,7 @@ final class AppController {
         bargeRun = nil
         replyTexts = []  // the new turn's reply texts collect from scratch
         bargeFirstAudioAt = nil
+        playbackNoted = false
         lateAudioCount = 0
         noFollowUp = false
         let screen = await screenTask.value
@@ -667,34 +769,56 @@ final class AppController {
 
     /// One barge-in path (A3): silence the reply, cut its stream, drop held lines, listen.
     /// stop_ms = the confirmation to audio.stop() returning; at = ms since the reply's first audio.
+    /// voice_to_stop_ms (gate barge-ins) = the confirming run's first over-echo block to audio.stop()
+    /// returning; rule = the word rule that confirmed (name|stop|words).
     private func bargeIn(reason: BargeReason) {
+        let run = reason == .wake ? nil : bargeRun
         let confirmedAt = Date()
         let at = bargeFirstAudioAt.map { Int(confirmedAt.timeIntervalSince($0) * 1000) } ?? 0
         let pending = audio.pendingBuffers
         let streamOpen = turnStreaming  // the model was still sending: later sentences never came
         audio.stop()  // silence first: the target is 300 ms from the confirmation
-        let stopMs = Int(Date().timeIntervalSince(confirmedAt) * 1000)
+        let stoppedAt = Date()
+        let stopMs = Int(stoppedAt.timeIntervalSince(confirmedAt) * 1000)
+        let rule = run?.rule.map { " rule=\($0.rawValue)" } ?? ""
+        let voice = run?.voiceFrom.map { " voice_to_stop_ms=\(Int(stoppedAt.timeIntervalSince($0) * 1000))" } ?? ""
+        // First try: from the first partial that held the name or stop word, and how many such
+        // partials the gate turned down before this one.
+        let command = run.map { r in
+            (r.tracker.commandAt.map { " cmd_to_stop_ms=\(Int(stoppedAt.timeIntervalSince($0) * 1000))" } ?? "")
+                + " cmd_rejects=\(r.tracker.cmdRejects)"
+        } ?? ""
         utteranceTask?.cancel()
         turnStreaming = false
         turnDone = false  // the stop's stale drains must not start a follow-up
         heldLine.drop()
         model.orb = .listening
         client.debugNote(step: "barge_in",
-                         detail: "at=\(at) reason=\(reason.rawValue) "
+                         detail: "at=\(at) reason=\(reason.rawValue)\(rule) "
                              + "dropped_sentences=\(pending + lateAudioCount) stop_ms=\(stopMs) "
-                             + "stream_open=\(streamOpen ? 1 : 0)")
+                             + "stream_open=\(streamOpen ? 1 : 0)\(voice)\(command)")
     }
 
     /// A2: with the first .audio of the turn playing, one recognition turn listens for a barge-in:
     /// no ring replay, never ends on silence, and while unconfirmed no final/nothing. On confirm it
     /// runs on as the owner's ordinary follow-up turn; at the reply's drain it is cancelled silently.
+    /// A restart within the same reply starts at the ended run's coupling (`handOverCoupling`, C4).
     private func startBargeListeningIfNeeded() {
+        let coupling = handOverCoupling  // only the restart right after a run ended hands one over
+        handOverCoupling = nil
         guard bargeInEnabled, bargeRun == nil, model.missingPermissions.isEmpty else { return }
         let audioOut = audio
-        let run = BargeRun(enabled: true, aec: speech.aecActive, outLevels: { audioOut.outputLevels })
+        let run = BargeRun(enabled: true, aec: speech.aecActive, coupling: coupling,
+                           outLevels: { audioOut.outputLevels })
         run.onConfirmed = { [weak self] reason in self?.bargeIn(reason: reason) }
-        // One note per run with the gate's numbers (live tuning: coupling, peak ratio, runs).
-        run.onEnded = { [weak self] summary in self?.client.debugNote(step: "barge_gate", detail: summary) }
+        run.onCheck = { [weak self] row in self?.client.debugNote(step: "barge_check", detail: row) }
+        // One note per run with the gate's numbers (live tuning: coupling, peak ratio, runs). An
+        // unconfirmed end mid-reply restarts the run on the next tick, after any cancel() that
+        // ended it (listenAfterWake, reconfigure) has settled.
+        run.onEnded = { [weak self, weak run] summary in
+            self?.client.debugNote(step: "barge_gate", detail: summary)
+            Task { @MainActor in self?.restartEndedBargeRun(run, reason: "ended") }
+        }
         run.reply = replyTexts
         bargeRun = run
         // Screen capture starts when the barge turn starts; only awaited when its utterance lands.
@@ -716,13 +840,42 @@ final class AppController {
                         return
                     }
                     self.lastHeardUntil = Date()
-                    self.startUtterance(text: owned, followUp: true, bargeIn: true,
+                    let (sent, cut) = BargeWords.bargeTurnText(owned, reply: run.reply, speakers: run.aec)
+                    if let cut {
+                        self.client.debugNote(step: "barge_turn", detail: "sent=stop reason=\(cut.rawValue) "
+                                                  + "aec=\(run.aec ? 1 : 0) words=\(BargeWords.wordCount(owned))")
+                    }
+                    self.startUtterance(text: sent, followUp: true, bargeIn: true,
                                         sttFinalMs: sttFinalMs,
                                         audioMs: endOfSpeech.timeIntervalSince(listenStart) * 1000,
                                         endOfSpeech: endOfSpeech, heard: heard, screenTask: screenTask)
                 }
             },
             onNothing: { _ in })
+    }
+
+    /// I1: the barge run `ended` (still the current one) stopped listening unconfirmed while its
+    /// reply plays: a fresh run listens on (EchoCancel.restartBargeRun), so raw self-hits stay ignored.
+    private func restartEndedBargeRun(_ ended: BargeRun?, reason: String) {
+        guard let run = bargeRun, run === ended else { return }
+        let anyTurn = speech.openTurn != nil || speech.bargeListening || speech.bargeTurnOpen
+        guard let wait = EchoCancel.restartBargeRun(confirmed: run.confirmed, anyTurnOpen: anyTurn,
+                                                    audioBusy: audio.isBusy,
+                                                    ranFor: Date().timeIntervalSince(run.createdAt),
+                                                    retried: run.retryQueued) else { return }
+        if wait > 0 {  // ended young: one retry when it is minBargeRunS old, every check made again then
+            run.retryQueued = true
+            Task { @MainActor [weak self, weak run] in
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                self?.restartEndedBargeRun(run, reason: "retry")
+            }
+            return
+        }
+        bargeRun = nil
+        client.debugNote(step: "barge_gate", detail: "restart reason=run_ended after=\(reason)")
+        // C4: the new run in the same reply starts at this run's learned coupling.
+        handOverCoupling = run.aec == speech.aecActive ? run.gate.coupling : nil
+        startBargeListeningIfNeeded()
     }
 
     /// Control events steer the overlay itself: end_listening closes the follow-up window for
@@ -764,6 +917,7 @@ final class AppController {
             bargeRun?.reply = replyTexts
             model.orb = .speaking
             audio.enqueue(pcm: pcm, rate: rate)
+            restartEndedBargeRun(bargeRun, reason: "clip")
             startBargeListeningIfNeeded()  // seeded with replyTexts, this clip included
         case .shape(let shape, let check):
             // The capture is seconds old: re-resolve once, off the main actor, before drawing.
@@ -992,6 +1146,11 @@ final class AppController {
     /// Reply over: keep the mic open ~8 s so the user can go on without "Jarvis" (also how a
     /// trailing-off request gets its rest). 300 ms first so the room echo of the reply dies out.
     private func replyFinished() {
+        // Once per reply, when its audio has fully played: a live driver times its next words by it.
+        if !playbackNoted, let first = bargeFirstAudioAt {
+            playbackNoted = true
+            client.debugNote(step: "playback", detail: "ended audio_ms=\(Int(Date().timeIntervalSince(first) * 1000))")
+        }
         // An owner turn is listening (a wake cut this reply): its end must not idle the orb or open
         // a follow-up window, whose listenAfterWake would cancel that turn.
         if let open = speech.openTurn, !open.followUp { return }

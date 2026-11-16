@@ -33,6 +33,13 @@ public struct EchoGate {
         self.margin = margin
     }
 
+    /// A run restarted within the same reply keeps the ended run's learned coupling (clamped):
+    /// from `startCoupling` the owner would have to beat the reply's own level for seconds.
+    public init(margin: Double, coupling: Double) {
+        self.margin = margin
+        self.coupling = min(max(coupling, 0.01), EchoGate.startCoupling)
+    }
+
     /// The echo the gate expects on the mic for a next block with this `out`.
     public func echoEstimate(nextOut out: Double) -> Double {
         coupling * max(recentOut.suffix(Self.tailBlocks - 1).max() ?? 0, out)
@@ -114,7 +121,33 @@ public enum StopPhrase {
     public static func matches(_ text: String) -> Bool {
         phrases.contains(normalized(text))
     }
+
+    /// Lead words the stop rule lets stand before a stop phrase: "no no no stop", "okay stop".
+    static let leadWords: Set<String> = ["no", "okay", "ok", "hey", "jarvis", "um", "uh", "oh"]
+
+    /// The text ends in a stop phrase and everything before it is lead words or the phrase again
+    /// ("stop stop", "okay stop. stop", "no, no, Jarvis, stop"); a lone "no" is not a stop.
+    public static func endsInStop(_ text: String) -> Bool {
+        var words = normalized(text).split(separator: " ").map(String.init)
+        let split = phrases.map { $0.split(separator: " ").map(String.init) }.sorted { $0.count > $1.count }
+        var matched = false
+        while !words.isEmpty {
+            if let p = split.first(where: { words.count >= $0.count && Array(words.suffix($0.count)) == $0 }) {
+                words.removeLast(p.count)
+                matched = true
+            } else if leadWords.contains(words[words.count - 1]) {
+                words.removeLast()
+            } else {
+                return false
+            }
+        }
+        return matched
+    }
 }
+
+/// Which word rule confirmed a barge-in: the wake name in the fresh words, a stop phrase, or
+/// >= 2 words not in the reply (headphones only).
+public enum BargeRule: String { case name, stop, words }
 
 /// Word checks on the partial against the reply being spoken: the owner's words must not be
 /// words the reply itself contains.
@@ -210,18 +243,65 @@ public enum BargeWords {
     /// so far), with their echo lead dropped (`ownerWords`). Then:
     /// (b) a stop phrase confirms only when none of its words is in the reply;
     /// (a) otherwise >= 2 words outside the reply and the words not a contiguous run of it.
+    /// Headphones rule; `confirmRule(speakers:)` names the rule.
     public static func confirms(partial: String, reply: [String], freshFrom: Int = 0) -> Bool {
+        confirmRule(partial: partial, reply: reply, freshFrom: freshFrom) != nil
+    }
+
+    /// The rule that confirms, or nil. Through the echo canceller (`speakers`, hub Q5) the fresh words
+    /// must say a stop phrase or name Jarvis; >= 2 words not in the reply alone never cut there (room
+    /// talk, a TV, residual echo). A name or stop word that the reply itself holds is not fresh.
+    /// A stop phrase holding a reply word falls through to the name rule (C5, BargeCheck.wordRule).
+    public static func confirmRule(partial: String, reply: [String], freshFrom: Int = 0,
+                                   speakers: Bool = false) -> BargeRule? {
+        BargeCheck.wordRule(check(partial: partial, reply: reply, freshFrom: freshFrom, speakers: speakers),
+                            speakers: speakers)
+            .flatMap { BargeRule(rawValue: $0.rawValue) }
+    }
+
+    /// The wake name and the one-word stop words: what keeps a late partial's words fresh (C1).
+    static let commandWords: Set<String> = ["jarvis", "stop", "quiet", "enough", "cancel", "abort", "nevermind"]
+
+    /// A command word the reply's echo may have made: the reply holds it, the same letters
+    /// ("quiet" for "quite") or, from 4 letters, one edit away ("jarvis" for "jervis").
+    static func echoLike(_ token: String, reply: Set<String>) -> Bool {
+        reply.contains(token) || reply.contains {
+            $0.sorted() == token.sorted() || (token.count >= 4 && editDistance($0, token, limit: 1) <= 1)
+        }
+    }
+
+    /// The flags `BargeCheck` decides on, for the partial's words from `freshFrom` (echo lead dropped).
+    /// Headphones (`speakers: false`): the stop flags as at jfollow8 (the whole text one stop phrase,
+    /// clean = no word in the reply); the lead words and echo-like checks are for the canceller only.
+    public static func check(partial: String, reply: [String], freshFrom: Int = 0,
+                             speakers: Bool = true) -> BargeCheck.Words {
         let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
         let owned = ownerWords(partial: fresh, reply: reply)
         let r = reply.flatMap(tokens)
         let p = snapped(tokens(owned), to: r)
         let rs = Set(r)
-        if StopPhrase.matches(owned) {
-            return !p.isEmpty && p.allSatisfy { !rs.contains($0) }
+        let named = p.contains("jarvis")
+        let freshName = named && !echoLike("jarvis", reply: rs)
+        let stop = StopPhrase.matches(owned) || (speakers && StopPhrase.endsInStop(owned))
+        let clean = !p.isEmpty && p.allSatisfy {
+            !rs.contains($0) && !(speakers && commandWords.contains($0) && echoLike($0, reply: rs))
         }
-        guard newWords(p, replySet: rs) >= 2 else { return false }
-        return !isContiguous(p, in: r)
+        return BargeCheck.Words(freshName: freshName, nameInReply: named && !freshName, stop: stop,
+                                stopClean: stop && clean, newWords: newWords(p, replySet: rs),
+                                contiguous: isContiguous(p, in: r))
+    }
+
+    /// C1: the first whitespace word from `from` on that holds a wake name or stop word the reply's
+    /// echo cannot explain, or nil.
+    public static func commandIndex(partial: String, reply: [String], from: Int) -> Int? {
+        let raw = partial.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let r = reply.flatMap(tokens)
+        let rs = Set(r)
+        guard from < raw.count else { return nil }
+        return (max(from, 0)..<raw.count).first { i in
+            snapped(tokens(raw[i]), to: r).contains { commandWords.contains($0) && !echoLike($0, reply: rs) }
+        }
     }
 
     /// How many of the partial's fresh words (from `freshFrom`, echo lead dropped) the reply does
@@ -260,6 +340,21 @@ public enum BargeWords {
         let fresh = raw.dropFirst(min(max(freshFrom, 0), raw.count)).joined(separator: " ")
         let owned = dropEchoAnswer(ownerWords(partial: fresh, reply: reply), reply: reply)
         return owned.isEmpty ? nil : owned
+    }
+
+    /// Why a confirmed barge turn was sent as "stop" (`bargeTurnText`, the `barge_turn` note).
+    public enum TurnCut: String { case noName = "no_name" }
+
+    /// The text a confirmed barge turn sends, and why it was cut to "stop" (nil: sent unchanged).
+    /// Through the echo canceller (`speakers`, hub Q5) words without a fresh "jarvis" ("enough,
+    /// push my changes" from a TV) become "stop", the service's silent barge stop. A plain stop
+    /// phrase goes as heard. `owned` must keep its wake words (SpeechInput does not strip a barge
+    /// final). A Confirm answer goes as heard: the service never lets a barge-in approve (it stays
+    /// pending for a plain yes; hub ruling).
+    public static func bargeTurnText(_ owned: String, reply: [String], speakers: Bool) -> (text: String, cut: TurnCut?) {
+        if StopPhrase.matches(owned) { return (owned, nil) }
+        guard speakers, confirmRule(partial: owned, reply: reply, speakers: true) != .name else { return (owned, nil) }
+        return ("stop", .noName)
     }
 
     /// A heard text that reads as a Confirm answer (`TailGate.isAnswer`) and whose every word is in
@@ -334,11 +429,12 @@ public enum BargeWords {
 /// The barge-in call: when unsure, never interrupt (nil).
 public enum BargeDecision {
     public static func decide(gateCandidate: Bool, partial: String?, reply: [String],
-                              wake: Bool, enabled: Bool, aec: Bool, freshFrom: Int = 0) -> BargeReason? {
+                              wake: Bool, enabled: Bool, aec: Bool, freshFrom: Int = 0,
+                              speakers: Bool = false) -> BargeReason? {
         if wake { return .wake }  // the wake word interrupts even when barge-in is off
         guard enabled else { return nil }
         if gateCandidate, let partial, !partial.isEmpty,
-           BargeWords.confirms(partial: partial, reply: reply, freshFrom: freshFrom) {
+           BargeWords.confirmRule(partial: partial, reply: reply, freshFrom: freshFrom, speakers: speakers) != nil {
             return aec ? .aec : .level
         }
         return nil

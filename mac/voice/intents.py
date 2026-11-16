@@ -183,9 +183,14 @@ _HIDE_RE = re.compile(_WRAP_LEAD + r"(?:(?:hide|hyde)(?: " + _OBJECT + r")?"
 # A bare "show" (whole utterance) is show too: Mac live run 2 sent it to the model.
 _SHOW_RE = re.compile(_WRAP_LEAD + r"(?:show(?: (?:it|them|everything|the overlay|the cards?))?(?: again)?"
                       r"|bring (?:it|them|everything) back|unhide(?: " + _OBJECT + r")?|come back)" + _WRAP_TRAIL)
-_CLEAR_RE = re.compile(_WRAP_LEAD + r"(?:clear(?: it| them| all| everything| the (?:screen|overlay|cards?))?"
+_CLEAR_RE = re.compile(_WRAP_LEAD
+                       # "stop and clear everything": the barge-in lead rides along.
+                       + r"(?:(?:stop|stop it|stop talking)(?: and| then|,)? )?"
+                       r"(?:clear(?: it| them| all| everything| the (?:screen|overlay|cards?))?"
                        r"|dismiss(?: it| them| that| all| everything)?"
-                       r"|close (?:it|this|that|them|everything)|remove the cards|get rid of the cards)" + _WRAP_TRAIL)
+                       r"|close (?:it|this|that|them|everything)|remove the cards|get rid of the cards"
+                       r"|remove everything|remove all(?: the cards| of them)?"
+                       r"|get rid of everything|close all(?: the)? cards|delete everything)" + _WRAP_TRAIL)
 _ASIDE_RE = re.compile(_WRAP_LEAD + r"(?:move (?:it|them) (?:out of the way|aside)"
                        r"|get (?:it|this|that|them|everything) out of (?:the|my) way"
                        r"|park (?:it|the cards))" + _WRAP_TRAIL)
@@ -231,7 +236,7 @@ _CARD_TARGET_LEAD_RE = re.compile(r"^(?:the|that|this|my) ")
 # Remove ONE card ("close the phone diagram"); fixed code, never a model. Whole utterance.
 # "clear" joins for one NAMED card only (the stop set below refuses its pointer and
 # whole-overlay forms); _CLEAR_RE still wins first in the fast path.
-_CARD_REMOVE_RE = re.compile(r"(?:(?:remove|close|dismiss|get rid of|take away|take down|lose|clear)"
+_CARD_REMOVE_RE = re.compile(r"(?:(?:remove|close|dismiss|get rid of|take away|take down|lose|clear|delete)"
                              r" (?P<t1>.+)|take (?P<t2>.+) (?:away|down))")
 # A trailing overlay/screen place is politeness, not part of the name: cut before the
 # blocked-word check ("from the overlay" would otherwise block the whole ask).
@@ -396,6 +401,10 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         return Intent("vault_secrets")
     ask = workspace_request(text, ws_names)
     # An installed app or a site wins over a saved name sharing a word ("open notes").
+    # "delete the cat card" is a card ask even when a saved name shares the words; a saved
+    # "shopping list" or "meeting notes" (kind words) stays a workspace delete.
+    if ask and ask.action == "delete" and "card" in ask.name.split():
+        ask = None
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
     if _form_hit(_SESSIONS_TOPIC_RE, low.replace(",", "")):
@@ -475,6 +484,8 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if low.startswith("open "):
         arg = t[5:].strip()
         return _open_intent(t, apps) or Intent("open_app", arg)
+    if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
+        return Intent("stop")
     return Intent("answer", t)
 
 
@@ -534,13 +545,41 @@ def _strip_tail(text: str) -> str:
     return stripped if stripped.strip() else text
 
 
+def destutter(text: str) -> str:
+    """Stuttered words off ("clear the over, overlay" -> "clear the overlay"): a word
+    repeated at once ("the the") keeps its second copy only, and a word with STT
+    punctuation whose letters start the next word's ("over," before "overlay") is dropped. Comparison strips
+    ,.;:!? from each word's ends; kept words keep their punctuation."""
+    words = text.split()
+    bare = [w.strip(",.;:!?") for w in words]
+    kept: list[str] = []
+    for i, w in enumerate(words):
+        b = bare[i]
+        nxt = bare[i + 1] if i + 1 < len(words) else ""
+        if b and nxt:
+            if b == nxt:  # an immediate repeat: the second copy stays
+                continue
+            # A strict prefix of the next word, cut off by STT punctuation ("over, overlay"):
+            # without the comma "the car cards" is two words, not a stutter.
+            if len(b) >= 2 and nxt.startswith(b) and w != b:
+                continue
+        kept.append(w)
+    return " ".join(kept)
+
+
 def _match_forms(t: str):
-    """A fixed-phrase matcher's tries: the lead-stripped text, then its tail-stripped form."""
+    """A fixed-phrase matcher's tries: the lead-stripped text, then its tail-stripped
+    form, then either of those with a stutter collapsed ("the the cat" -> "the cat")."""
     lead = strip_lead(t)
-    yield lead
     tail = _strip_tail(lead)
-    if tail != lead:
-        yield tail
+    forms = [lead] if tail == lead else [lead, tail]
+    seen = set(forms)
+    yield from forms
+    for form in forms:
+        d = destutter(form)
+        if d != form and d not in seen:
+            seen.add(d)
+            yield d
 
 
 def _media_count(amt: str, plural: str, max_count: int) -> int:
@@ -652,11 +691,19 @@ def card_remove_request(text: str) -> CardRemoveAsk | None:
             target = cut_place
         if clear_verb and set(target.split()) & _WHOLE_SET:
             return None  # "clear every single card": many cards, the model's ask as at base
-        card = "card" in target.split() or any(w in KIND_WORDS for w in target.split())
+        card = "card" in target.split() or any(w in KIND_WORDS and w not in _SOFT_KIND_WORDS
+                                               for w in target.split())
         if target in _CARD_REMOVE_POINTERS:
             if clear_verb:  # "clear that" never one-card-removes, whatever calls this
                 return None
             return CardRemoveAsk(target, True, card)
+        m_about = re.fullmatch(r"(?:the |that |this )?card (?:about|called|named|titled) (?P<x>.+)",
+                               target)
+        if m_about and not m_about["x"].startswith(("my ", "our ")):
+            # "the card about X": X is the name. A possessive topic ("about my calendar")
+            # is owner-data talk, not a card name, and keeps today's kind.
+            target = m_about["x"]
+            card = True
         if target.startswith(("on ", "upon ")) or set(target.split()) & _CARD_REMOVE_BLOCKED:
             return None
         cut = _first_sentence(target)
@@ -789,10 +836,39 @@ KIND_WORDS: dict[str, frozenset[str]] = {
     "photo": frozenset({"image"}), "photos": frozenset({"image"}), "pic": frozenset({"image"}),
     "video": frozenset({"video"}), "videos": frozenset({"video"}),
     "list": frozenset({"bar", "info"}), "changes": frozenset({"bar", "info"}),
+    # jfollow9: kinds for title matching only — these never flag a card remove by
+    # themselves (_SOFT_KIND_WORDS below), so "close the notes" keeps today's parse.
+    "note": frozenset({"info"}), "notes": frozenset({"info"}), "text": frozenset({"info"}),
+    "info": frozenset({"info"}), "summary": frozenset({"info"}),
+    "stat": frozenset({"stat"}), "stats": frozenset({"stat"}), "number": frozenset({"stat"}),
+    "figure": frozenset({"stat"}),
+    "link": frozenset({"link"}), "links": frozenset({"link"}),
+    "clip": frozenset({"video"}), "clips": frozenset({"video"}),
 }
+# The jfollow9 additions: kind words too weak to make "close the notes" a card remove.
+_SOFT_KIND_WORDS = frozenset({"note", "notes", "text", "info", "summary", "stat", "stats",
+                              "number", "figure", "link", "links", "clip", "clips"})
 # Words that never name a card: pointers and politeness around the real words.
 _CARD_FILLERS = frozenset({"the", "a", "an", "that", "this", "these", "those", "my", "one",
                            "card", "please", "it"})
+
+
+def _fold_word(w: str) -> str:
+    """A word folded to its singular-ish form for STT tolerance: trailing "es" off a
+    5+ letter word ending ses/xes/ches/shes ("boxes" -> "box"), else a trailing "s" off
+    a 4+ letter word not ending "ss" ("cats" -> "cat"); "glass"/"smartphone" stay."""
+    if len(w) >= 5 and w.endswith(("ses", "xes", "ches", "shes")):
+        return w[:-2]
+    if len(w) >= 4 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _title_hit(t: str, w: str) -> bool:
+    """A title word covers a spoken word: equal, or the spoken word (4+ letters) ends it,
+    or the folded forms are equal ("notes" hears "note", "Cat's" was tokenized to "cats")."""
+    return (t == w or (len(w) >= 4 and t.endswith(w))
+            or _fold_word(t) == _fold_word(w))
 
 
 def _ranked_title(names: list[str], kind: set[str],
@@ -834,7 +910,7 @@ def match_card(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) -> tu
         return None
     # A name of 4+ letters may end a compound title word ("phone" names "Smartphone block diagram").
     hits = [c for c in reversed(cards)
-            if all(any(t == w or (len(w) >= 4 and t.endswith(w)) for t in c[2]) for w in names)]
+            if all(any(_title_hit(t, w) for t in c[2]) for w in names)]
     if kind:  # a spoken kind is a preference, not a requirement
         typed = [c for c in hits if c[1] in kind]
         if typed:
@@ -851,6 +927,14 @@ def card_matches(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) \
         by_id.pop(c[0], None)
         by_id[c[0]] = c
     cards = list(by_id.values())
+    # "remove the second card": one ordinal/number word counts the cards in order
+    # (first = the oldest here); out of range means no card answers.
+    pwords = [w for w in card_words(target)
+              if w not in _CARD_FILLERS and w not in ("card", "number")]
+    if len(pwords) == 1 and pwords[0] in _POSITIONS:
+        i = _POSITIONS[pwords[0]]
+        i = i if i >= 0 else len(cards) + i
+        return ("position", [cards[i][0]]) if 0 <= i < len(cards) else None
     words = [w for w in card_words(target)
              if w not in _CARD_FILLERS and w not in ("last", "newest")]
     kind: set[str] = set()
@@ -872,7 +956,7 @@ def card_matches(target: str, cards: list[tuple[str, str, tuple[str, ...]]]) \
     # A name of 4+ letters may end a compound title word ("phone" names "Smartphone block
     # diagram"); a spoken kind is a preference, not a requirement.
     hits = [c for c in reversed(cards)
-            if all(any(t == w or (len(w) >= 4 and t.endswith(w)) for t in c[2]) for w in names)]
+            if all(any(_title_hit(t, w) for t in c[2]) for w in names)]
     if kind:
         typed = [c for c in hits if c[1] in kind]
         if typed:
@@ -887,6 +971,10 @@ _PICK_VERB_RE = re.compile(r"^(?:remove|close|dismiss|clear|enlarge|maximi[sz]e|
                            r"|get rid of) ")
 _PICK_ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "last": -1}
 _PICK_NUMBERS = {"one": 0, "two": 1, "three": 2}
+# One-card removal by position: the spoken word -> the index into the cards in order.
+_POSITIONS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4, "last": -1,
+              "one": 0, "two": 1, "three": 2, "four": 3, "five": 4,
+              "1": 0, "2": 1, "3": 2, "4": 3, "5": 4}
 _PICK_ALL = frozenset({"both", "both of them", "all", "all of them", "all three",
                        "all of those"})
 
@@ -931,6 +1019,53 @@ def card_pick(text: str, names: list[tuple[str, ...]]) -> list[int] | None:
         if m and m[0] == "title" and len(m[1]) == 1:
             return [int(m[1][0])]
     return None
+
+
+# jfollow9: the ways the companion itself is spoken of ("what can the Jarvis company do").
+_COMPANION_ALIAS_RE = re.compile(
+    r"\b(?:jarvis companions?|java'?s companions?|jarvis company|companion app"
+    r"|the companion)\b")
+# Round 5 (owner rows 21:00:31, 21:02:24): naming the Companion is not asking about it. Only a
+# question about what it is, does, can do, covers or includes counts, or the bare name as a reply.
+_COMPANION_ASK_RE = re.compile(
+    r"\b(?:what(?:'s| is| are| does| do| can| could| else)|how does|how do|tell me (?:more )?about"
+    r"|explain|describe|capabilit\w*|features?|abilities|cover(?:s|ed)?|includes?|consists? of)\b")
+# A task naming it ("start a session to help the Jarvis companion app ...") goes on as the same
+# sentence without the name: a task verb opening the sentence or a clause.
+_COMPANION_TASK_RE = re.compile(
+    r"(?:^|[.,;!?]\s*|\b(?:and|then|please|to|so)\s+)(?:start|sort|create|open|fix|build|change|add"
+    r"|remember|make|help|allow|let|enable|set up|implement|install|update|write|edit|delete|remove)\b"
+    r"|\b(?:repo|repository|codebase|commits?)\b")  # "check the repository" is work on it
+_COMPANION_NAME_ONLY_RE = re.compile(
+    r"(?:(?:i meant|i mean|no|yes|okay|ok) )?(?:the )?(?:jarvis |java'?s )?(?:companions?|company)(?: app)?")
+
+
+def about_companion(text: str) -> bool:
+    """True when the transcript asks about Jarvis Companion itself (any spoken alias): what it
+    is, does, can do, covers or includes, or the bare name. A task that only names it, a card
+    ask, a pick reply or a sessions ask: False."""
+    raw = text.strip().lower().replace("’", "'")
+    low = _clean(text).lower().replace("’", "'")
+    # The wake-word strip eats a leading "Jarvis " ("Jarvis companions features"), so the
+    # aliases are searched on the raw text as well as the cleaned one.
+    if not (_COMPANION_ALIAS_RE.search(raw) or _COMPANION_ALIAS_RE.search(low)):
+        bare = re.sub(r"^(?:hey |jarvis )+", "",
+                      re.sub(r"[^a-z ]", " ", low)).strip()
+        if bare not in ("companion", "companions"):
+            return False
+    if _form_hit(_SESSIONS_RE, low.replace(",", "")) or _form_hit(_SESSIONS_TOPIC_RE,
+                                                                  low.replace(",", "")):
+        return False
+    words = raw.split()
+    if "card" in words or "cards" in words or card_remove_request(text) is not None:
+        return False
+    if pick_shaped(text):
+        return False
+    if any(_COMPANION_NAME_ONLY_RE.fullmatch(" ".join(re.sub(r"[^a-z' ]", " ", f).split()))
+           for f in (raw, low)):
+        return True
+    return bool(_COMPANION_ASK_RE.search(raw)) and not (
+        _COMPANION_TASK_RE.search(raw) or _COMPANION_TASK_RE.search(strip_lead(raw)))
 
 
 _CLAIM_PAST = r"cleared|removed|closed|hid|hidden|dismissed|enlarged|shrank|shrunk|taken away|got rid"
@@ -1097,6 +1232,28 @@ def is_cancel(text: str) -> bool:
 def is_stop(text: str) -> bool:
     """Whole utterance stops the turn: silence, a cancel, or both."""
     return any(_STOP_RE.fullmatch(f) for f in _match_forms(_answer(text)))
+
+
+# Round 5 (owner row 21:02:40: "okay Jarvis stop" came out "Stop. Driver stop" and was dropped as a
+# short follow-up): a stop word with only filler or address words around it and at most one unknown
+# word (the mis-heard name) is a stop. A negation ("don't stop") never is.
+_STOP_WORDS = frozenset({"stop", "cancel", "abort"})
+_STOP_FILLERS = frozenset({"okay", "ok", "hey", "please", "now", "no", "jarvis", "sir", "it", "that",
+                           "just", "right", "enough"})
+_STOP_NEGATIONS = frozenset({"don't", "dont", "not", "never", "can't", "won't"})
+STOP_FAMILY_MAX_WORDS = 5
+
+
+def is_stop_family(text: str) -> bool:
+    """A short stop phrase with fillers and at most one unknown word ("Stop. Driver stop")."""
+    words = _answer(text).split()
+    if (not words or len(words) > STOP_FAMILY_MAX_WORDS or not _STOP_WORDS.intersection(words)
+            or _STOP_NEGATIONS.intersection(words)):
+        return False
+    other = [i for i, w in enumerate(words) if w not in _STOP_WORDS and w not in _STOP_FILLERS]
+    last_stop = max(i for i, w in enumerate(words) if w in _STOP_WORDS)
+    # The one unknown word is the mis-heard name before the stop word, never its object ("stop music").
+    return not other or (len(other) == 1 and other[0] < last_stop)
 
 
 def is_no(text: str) -> bool:

@@ -388,7 +388,7 @@ def test_health_barge_mode(client, monkeypatch):
     monkeypatch.delenv("OVERLAY_BARGE_AEC", raising=False)
     # The shipped default matches the report's decision line "D2 DECISION: 2C (...)".
     health = client.get("/overlay/health", headers=AUTH_HEADER).json()
-    assert health["barge_mode"] == "headphones" and health["barge_in"] is True and not health["barge_aec"]
+    assert health["barge_mode"] == "aec" and health["barge_in"] is True and health["barge_aec"] is True
     for off in ("0", "false", "off"):
         monkeypatch.setenv("OVERLAY_BARGE_IN", off)
         health = client.get("/overlay/health", headers=AUTH_HEADER).json()
@@ -398,7 +398,7 @@ def test_health_barge_mode(client, monkeypatch):
     monkeypatch.delenv("OVERLAY_BARGE_AEC")
     monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
     health = client.get("/overlay/health", headers=AUTH_HEADER).json()
-    assert health["barge_mode"] == "headphones" and health["barge_in"] is True
+    assert health["barge_mode"] == "aec" and health["barge_in"] is True
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
     health = client.get("/overlay/health", headers=AUTH_HEADER).json()
     assert health["barge_mode"] == "aec" and health["barge_in"] is True and health["barge_aec"] is True

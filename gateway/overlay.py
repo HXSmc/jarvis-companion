@@ -75,7 +75,23 @@ No humour for lost work, money, health, security, permissions, refusals, bad new
 "Sir" once per reply, never twice in one sentence. Never claim what you did not do; say if unsure.
 Wit and "sir" only in spoken English lines; cards stay factual. Other languages: warm, brief."""
 
-ANSWER_PROMPT = PERSONA + """
+# Public README facts only (no host, address or name): what "Jarvis Companion" is.
+COMPANION_ABOUT = ("Jarvis Companion is the whole open-source system around this voice: the iPhone app (sessions"
+                   " board, cards, Hardware Mode, focused inbox), a gateway on the owner's own machines reached "
+                   "over Tailscale, this Mac overlay (voice and cards), a session router that runs Claude Code "
+                   "sessions on a mini PC, a Windows PC agent, remote screen control of the Mac, the Windows PC "
+                   "and the mini PC, and \"Hey Jarvis\" on Mac and Windows. Setting it up needs Python 3.11+, "
+                   "Tailscale, a Claude Code login, and the iPhone app sideloaded with Xcode or AltStore.")
+
+# The fixed "Jarvis Companion" card (jfollow9 D3): the same public facts, one per line.
+COMPANION_CARD_LINES = ("iPhone app: sessions board, cards, Hardware Mode, focused inbox",
+                        "Gateway on your own machines, reached over Tailscale",
+                        "Mac overlay: voice and cards (this app)",
+                        "Session router: Claude Code sessions on the mini PC",
+                        "Windows PC agent; \"Hey Jarvis\" on Mac and Windows",
+                        "Remote screen control: Mac, Windows PC and mini PC")
+
+ANSWER_PROMPT = PERSONA + "\n\nAbout you: " + COMPANION_ABOUT + """ Questions about what Jarvis, Jarvis Companion or 'the companion' is or does (speech-to-text may write Java's companion, Jarvis company, Jarvis companions, companion app) are about this whole system: answer from this paragraph, never with {"agent": true}. A task that only mentions the Companion (start a session, fix, build, change or add something, check the repository) is handled like the same sentence without the name. 'What can you do' with no other subject means here on this Mac: answer for the overlay (voice, cards, pictures and videos, opening apps, the code on screen), then one short line that the Companion does more.
 
 Reply ONLY as JSON Lines - one JSON object per line, nothing else:
   {"say": "..."}    one or two short sentences, spoken immediately
@@ -238,7 +254,7 @@ class WakeBody(BaseModel):
     type: str = Field("wake", max_length=16)
     source: str = Field("mac", max_length=32)
     score: float | None = None
-    weak: bool = False  # a playback-only weak hit: only the app may honour it (WakeGate)
+    weak: bool = False  # a stale poster's weak hit; post_wake drops it
 
 
 class DebugNote(BaseModel):
@@ -503,6 +519,39 @@ _card_text: dict[str, deque] = {}
 _card_index: dict[str, deque] = {}
 # conv_id -> the id of the card a `card_size` turn enlarged, until a restore (or _forget).
 _enlarged: dict[str, str] = {}
+# conv_id -> deps.clock() of the last content event sent (say, audio, shape, card, lines): the
+# app clears its cards 60 s after the last one (ShapeTrack.extendsIdle), unless one is enlarged.
+_screen_at: dict[str, tuple] = {}  # (the clock that read it, its reading)
+IDLE_CLEAR_S = 60
+_SCREEN_EVENTS = frozenset({"say", "audio", "shape", "card", "lines"})
+# conv_id -> ids of the cards the idle clear took off screen (no removal target until "show them").
+_idle_gone: dict[str, set] = {}
+
+
+def _idle_elapsed(conv_id: str, deps: OverlayDeps) -> bool:
+    """The app's idle clear has run since the last content event. Unknown (no event seen here, or
+    read on another clock, as when deps are swapped) is False: the index as at base."""
+    seen = _screen_at.get(conv_id)
+    return seen is not None and seen[0] is deps.clock and deps.clock() - seen[1] >= IDLE_CLEAR_S
+
+
+def _note_idle_clear(conv_id: str, deps: OverlayDeps) -> None:
+    """At a turn's start: cards the app's idle clear took since the last content event are marked
+    gone, so no later remove names them (a new `say` does not bring them back). The index keeps
+    them for card_size and "show them"."""
+    if (_idle_elapsed(conv_id, deps) and conv_id not in _enlarged and _card_index.get(conv_id)):
+        _idle_gone.setdefault(conv_id, set()).update(c[0] for c in _card_index[conv_id])
+
+
+def _shown_cards(conv_id: str, deps: OverlayDeps) -> list:
+    """The indexed cards the app still shows (one-card removal targets, H3); [] after its idle
+    clear. The index stays: "show them" brings the cards back.
+    shortcut: parked, hidden, pointer and video holds of the idle clear are not modelled, so those
+    cards read as cleared (fail closed: never "Removed" for a card not on screen)."""
+    if _idle_elapsed(conv_id, deps) and conv_id not in _enlarged:
+        return []
+    gone = _idle_gone.get(conv_id, set())
+    return [c for c in _card_index.get(conv_id, ()) if c[0] not in gone]
 # conv_id -> the page URLs of the last opened workspace ("open the pages"), urls only; _forget drops it.
 _ws_pages: dict[str, list[str]] = {}
 _apps_cache: tuple[float, dict] | None = None
@@ -604,6 +653,8 @@ def _forget(conv_id: str) -> None:
     _card_pick.pop(conv_id, None)
     _sessions_follow.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
+    _screen_at.pop(conv_id, None)
+    _idle_gone.pop(conv_id, None)
     _tainted.discard(conv_id)
 
 
@@ -624,6 +675,7 @@ def _drop_cards(conv_id: str, group: str, keep: tuple[str, ...] = ()) -> dict | 
 def _forget_cards(conv_id: str) -> None:
     """After a `clear` the app holds no cards: none can be named or restored by a card_size ask."""
     _card_index.pop(conv_id, None)
+    _idle_gone.pop(conv_id, None)
     _enlarged.pop(conv_id, None)
     _card_pick.pop(conv_id, None)
 
@@ -652,12 +704,17 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
     The card index and the enlarged id stay: the app still shows those cards (Mac live run 5, 37a).
     Their title words only feed intents.match_card (fixed code), never a model prompt."""
     cards, enlarged = _card_index.get(conv_id), _enlarged.get(conv_id)
+    screen_at, gone = _screen_at.get(conv_id), _idle_gone.get(conv_id)
     pick = _card_pick.get(conv_id)  # within its 30 s, "Hey Jarvis, the companion one" still picks
     _forget(conv_id)
     if cards is not None:
         _card_index[conv_id] = cards
     if enlarged is not None:
         _enlarged[conv_id] = enlarged
+    if screen_at is not None:
+        _screen_at[conv_id] = screen_at
+    if gone is not None:
+        _idle_gone[conv_id] = gone
     if pick is not None:
         _card_pick[conv_id] = pick
     deps.conversations.drop(conv_id)
@@ -888,31 +945,6 @@ def _voice_text(text: str) -> str:
     return _WAKE_WORD_RE.sub("", text).strip()
 
 
-# Jarvis's own voice can reach the playback-only weak wake band (scripts/wake_margin.py): a greeting
-# before a name ("Hey, Travis." 0.29, "Hi, Charles." 0.39, "Okay, Jarvik." 0.92) or a Jarvis-like stem
-# ("Jarvik." 0.26, "Jervis." 0.15); without either, own lines stay under 0.01. While such a line may
-# still be playing, a weak hit is Jarvis itself and is dropped. Full hits are untouched (base barge-in).
-_NEAR_NAME_RE = re.compile(r"\b(?:hey|hi|hay|okay|ok)\b|\bj[ae]rv", re.IGNORECASE)
-SELF_NAME_SLACK_S = 2.0  # app start-up + network lag past the synth clock
-_speech_end = 0.0  # monotonic: when the audio synthesized so far ends, played back to back
-_self_name_until = 0.0
-
-
-def _playback_cut() -> None:
-    """A new turn or a full wake: the app stopped (or drained) what it was playing."""
-    global _speech_end, _self_name_until
-    _speech_end = _self_name_until = 0.0
-
-
-def _note_playback(voice: str, seconds: float) -> None:
-    # shortcut: assumes the app plays clips in order from synth time; an app that starts a clip
-    # later than SELF_NAME_SLACK_S past that shortens the hold (move the hold app-side then).
-    global _speech_end, _self_name_until
-    _speech_end = max(time.monotonic(), _speech_end) + seconds
-    if _NEAR_NAME_RE.search(voice):
-        _self_name_until = _speech_end + SELF_NAME_SLACK_S
-
-
 async def _audio(text: str, deps: OverlayDeps) -> dict | None:
     """Synthesized say line, or None when there is no voice / synth fails."""
     voice = _voice_text(text.replace("`", ""))
@@ -923,7 +955,6 @@ async def _audio(text: str, deps: OverlayDeps) -> dict | None:
         pcm, rate = await asyncio.to_thread(deps.synth, voice)
     except Exception:
         return None
-    _note_playback(voice, len(pcm) / 2 / rate)  # 16-bit mono
     return {"type": "audio", "text": text, "rate": rate,
             "pcm_b64": base64.b64encode(pcm).decode()}
 
@@ -936,8 +967,11 @@ async def run_turn(body: TurnBody, deps: OverlayDeps,
     conv_id = body.conv_id
     _inflight[conv_id] = _inflight.get(conv_id, 0) + 1
     try:
+        _note_idle_clear(conv_id, deps)
         async with aclosing(_run_turn(body, deps, on_step)) as events:
             async for event in events:
+                if event.get("type") in _SCREEN_EVENTS:
+                    _screen_at[conv_id] = (deps.clock, deps.clock())
                 yield event
     finally:
         left = _inflight.pop(conv_id, 1) - 1
@@ -1268,6 +1302,25 @@ def _drop_pick(conv_id: str) -> None:
         _card_pick.pop(conv_id, None)
 
 
+# Words a spoken name never starts (after "the ") or ends on: "the the roman", "rise and fall of".
+_NAME_EDGE_WORDS = frozenset({"the", "a", "an", "of", "and", "or", "in", "on", "at", "to", "for",
+                              "with", "from", "by", "about"})
+
+
+def _title_name(title: tuple) -> str:
+    """At most 4 title words for speech: a lead article dropped, no dangling edge word; "" if none."""
+    words = list(title[1:] if title[:1] and title[0] in ("the", "a", "an") else title)[:4]
+    while words and words[-1] in _NAME_EDGE_WORDS:
+        words.pop()
+    return " ".join(words)
+
+
+def _card_name(card: tuple) -> str:
+    """A spoken card name: "the " + its title name, else its kind ("the picture")."""
+    return "the " + (_title_name(card[2])
+                     or {"image": "picture", "video": "video"}.get(card[1], "card"))
+
+
 def _which_one(conv_id: str, action: str, hit_ids: list[str], cards: list, deps: OverlayDeps) -> str:
     """The "Which one" line for 2+ matching cards (first 4 title words each, max 3 names); it sets
     the conv's pick to exactly the ids it names. The caller has checked 2+ distinct names."""
@@ -1275,8 +1328,8 @@ def _which_one(conv_id: str, action: str, hit_ids: list[str], cards: list, deps:
     names: list[str] = []
     titles: list[tuple[str, ...]] = []
     for i in hit_ids:
-        title = next(c for c in reversed(cards) if c[0] == i)[2]
-        name = "the " + " ".join(title[:4])
+        card = next(c for c in reversed(cards) if c[0] == i)
+        title, name = card[2], _card_name(card)
         if name in names:  # a same-name twin: the newest (first) one stands for it
             continue
         ids.append(i)
@@ -2113,8 +2166,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     pick_reply = pick is not None and (pick_hit is not None or intents.pick_shaped(body.text))
     if body.followup and not owner_answer_due:
         # Room talk is not the owner: a quiet or unsure follow-up is dropped before it can join a
-        # pending head or reach a model. A known command ("next change", "clear", "stop") never is.
-        if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind == "answer"
+        # pending head or reach a model. A known command ("next change", "stop") never is; "clear"
+        # and a one-card remove are (jfollow9: they act on the screen, room talk must not).
+        if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind
+                in ("answer", "clear", "card_remove")
                 and not (intents.is_cancel(body.text) or intents.is_confirm(body.text)
                          or intents.is_no(body.text) or intents.is_stop(body.text))):
             reason, level = _followup_gate(body)
@@ -2157,8 +2212,17 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         return
     if body.followup and not joined and not owner_answer_due and not pick_reply:
         words = intents.noise_words(body.text)
-        if words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
-                                               body.conv_id, None).kind == "answer":
+        if (words is not None and _hunk_rewrite(intents.parse(body.text, apps={}), body.text,
+                                                body.conv_id, None).kind == "answer"
+                # "remove the cat": the A1 upgrade. Only when the dispatch's own parse (real apps,
+                # saved names) can still upgrade it: "delete the cat" with a saved "cat" is a
+                # workspace delete and stays dropped (security R1).
+                and not (_is_card_remove(body.text, body.conv_id, deps)
+                         and intents.parse(
+                             body.text,
+                             apps=deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps),
+                             workspace_names=await asyncio.to_thread(_ws_names),
+                         ).kind in ("answer", "card_remove"))):
             # The room, not the owner: a short follow-up with no question in it (STT heard "Jew").
             # Nothing is said, shown or stored.
             _followup_dropped(body, "short", _followup_gate(body)[1], words, on_step)
@@ -2194,7 +2258,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         if intent.kind == "answer" and not joined:
             rm_ask = intents.first_form(raw_text, intents.card_remove_request)
             if (rm_ask is not None and intents.card_matches(
-                    rm_ask.target, list(_card_index.get(body.conv_id, ()))) is not None):
+                    rm_ask.target, _shown_cards(body.conv_id, deps)) is not None):
                 intent = intents.Intent("card_remove",
                                         "pointer" if rm_ask.pointer else "target", rm_ask.target)
         intent = _hunk_rewrite(intent, body.text, body.conv_id, on_step)
@@ -2243,6 +2307,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
               and _MEDIA_NOUN_RE.search(body.text)):
             # Tainted + a media noun: the reply is the owner-words search or the refusal, no thinking ack.
             ack_phrase_key = None
+        elif (intent.kind == "answer" and pick is None and intents.about_companion(raw_text)
+              and intents._agent_sub(intents._clean(raw_text).lower()) == ""):
+            ack_phrase_key = None  # D3: the companion line (or the model's answer) is the whole speech
         if ack_phrase_key in ("answer", "generic"):
             _pool_key, ack_text, ack_pcm, ack_rate = deps.acks.thinking(intent.kind)
         elif ack_phrase_key:
@@ -2258,13 +2325,16 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
 
         if intent.kind == "stop":
             # B1/B2: the stop word closes the turn: "OK.", close the follow-up window, done.
-            # No ack, model, card or clear; nothing new is tainted.
-            async for ev in _line("stop", deps):
-                yield ev
-            said.append(acks.PHRASES["stop"])
+            # No ack, model, card or clear; nothing new is tainted. A barge-in stop stays silent
+            # (jfollow8): the owner is talking over Jarvis's own speech, so no reply over it.
+            if not body.barge_in:
+                async for ev in _line("stop", deps):
+                    yield ev
+                said.append(acks.PHRASES["stop"])
             yield {"type": "end_listening"}
             if on_step:
-                on_step("followup_closed", detail="stop")
+                on_step("followup_closed",
+                        detail="stop (barge-in, silent)" if body.barge_in else "stop")
 
         elif intent.kind == "clear":
             _hunks.pop(body.conv_id, None)
@@ -2284,6 +2354,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
 
         elif intent.kind in ("hide", "show", "aside", "restore", "move"):
             mode = intent.arg if intent.kind == "move" else intent.kind  # parse yields allow-listed modes only
+            if mode == "show":  # the app brings the idle-cleared cards back
+                _screen_at[body.conv_id] = (deps.clock, deps.clock())
+                _idle_gone.pop(body.conv_id, None)
             if on_step:
                 on_step("layout", mode=mode)
             yield {"type": "layout", "mode": mode}
@@ -2386,7 +2459,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield ev
                 said.append(acks.PHRASES.get("not_confirmed", ""))
             else:
-                cards = list(_card_index.get(body.conv_id, ()))
+                cards = _shown_cards(body.conv_id, deps)  # H3: only cards still on screen
                 if pick_ids is not None:  # B: only ids the "Which one" line named, each still held
                     held = {c[0] for c in cards}
                     hit = ("pick", pick_ids) if pick_ids and all(i in held for i in pick_ids) else None
@@ -2419,14 +2492,23 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                             yield _lines_event(str(nav.repo / nav.rel), [])
                     if drop is not None:
                         yield drop
-                    key = "removed_both" if len(drop_ids) == 2 else "removed"
-                    async for ev in _line(key, deps):
-                        yield ev
-                    said.append(acks.PHRASES[key])
+                    if len(drop_ids) == 1:  # name the card: its title (maybe untrusted) reaches speech
+                        gone = next((c for c in cards if c[0] == drop_ids[0]), None)
+                        line = acks.PHRASES["removed_named"].format(
+                            name=_card_name(gone) if gone else "the card")
+                        _tainted.add(body.conv_id)
+                        async for ev in _speak(line, deps):
+                            yield ev
+                        said.append(line)
+                    else:
+                        async for ev in _line("removed_both", deps):
+                            yield ev
+                        said.append(acks.PHRASES["removed_both"])
+                    detail = f"removed match={hit[0]} cards={len(drop_ids)}"  # ids and numbers only
                     if on_step and len(drop_ids) == 1:
-                        on_step("card_remove", card=drop_ids[0], match=hit[0])
+                        on_step("card_remove", card=drop_ids[0], match=hit[0], detail=detail)
                     elif on_step:
-                        on_step("card_remove", cards=len(drop_ids), match=hit[0])
+                        on_step("card_remove", cards=len(drop_ids), match=hit[0], detail=detail)
                 elif hit is not None:  # two or more names matched: name them, remove nothing
                     line = _which_one(body.conv_id, "remove", hit[1][:3], cards, deps)
                     _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
@@ -2435,10 +2517,20 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     said.append(line)
                     if on_step:
                         on_step("card_remove", detail="refused reason=ambiguous")
-                else:
-                    async for ev in _line("no_card", deps):
+                elif not cards:
+                    async for ev in _line("no_cards", deps):
                         yield ev
-                    said.append(acks.PHRASES["no_card"])
+                    said.append(acks.PHRASES["no_cards"])
+                    if on_step:
+                        on_step("card_remove", detail="refused reason=empty")
+                else:  # say what is on screen: the 3 newest titles (maybe untrusted) reach speech
+                    shown = [_card_name(c) for c in reversed(cards)][:3]
+                    line = acks.PHRASES["no_card_named"].format(
+                        names=", ".join(shown[:-1]) + " and " + shown[-1] if len(shown) > 1 else shown[0])
+                    _tainted.add(body.conv_id)
+                    async for ev in _speak(line, deps):
+                        yield ev
+                    said.append(line)
                     if on_step:
                         on_step("card_remove", detail="refused reason=none")
 
@@ -2799,7 +2891,19 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                             pick_open=pick is not None,
                                             owner_text=None if joined else raw_text):
                 yield event
-            if escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
+            if (escalate and pick is None and intents.about_companion(raw_text)
+                    and intents._agent_sub(intents._clean(raw_text).lower()) == ""):
+                # D3: a question about Jarvis Companion itself is answered from fixed public facts,
+                # never by an agent hunting the owner's repos (owner test 17:00:55).
+                if on_step:
+                    on_step("intent", kind="about_companion")
+                yield _keep_card(body.conv_id, "agent", hud.validate_card(
+                    {"id": "jarvis-companion", "type": "info", "title": "Jarvis Companion",
+                     "body": list(COMPANION_CARD_LINES)}))
+                async for ev in _line("companion_about", deps):
+                    yield ev
+                said.append(acks.PHRASES["companion_about"])
+            elif escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
                 if on_step:
                     on_step("intent", kind="agent", arg="handed over by the fast brain")
                 async for event in _agent_turn(body, intent.arg, deps, metrics, said, start, on_step):
@@ -3649,14 +3753,14 @@ def _settled_card(summary: str, outcome: str) -> dict:
     return {"type": "card", "card": card}
 
 
-def _is_card_remove(text: str, conv_id: str) -> bool:
+def _is_card_remove(text: str, conv_id: str, deps: OverlayDeps) -> bool:
     """A one-card remove ask (A3): parse says card_remove, or a names-only target that a card
     this conv holds answers to (the dispatch's A1 upgrade)."""
     if intents.parse(text, apps={}).kind == "card_remove":
         return True
     ask = intents.first_form(text, intents.card_remove_request)
     return ask is not None and intents.card_matches(
-        ask.target, list(_card_index.get(conv_id, ()))) is not None
+        ask.target, _shown_cards(conv_id, deps)) is not None
 
 
 async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, said: list[str],
@@ -3715,7 +3819,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         yield _settled_card(ask.summary, "Not done")
         if on_step:
             on_step(step, detail=f"{word} cancelled".strip())
-        if _is_card_remove(body.text, body.conv_id):
+        if _is_card_remove(body.text, body.conv_id, deps):
             # A3: removing a card is not an answer to the ask; the turn ends, nothing is removed.
             async for ev in _line("not_confirmed", deps):
                 yield ev
@@ -3733,6 +3837,14 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         async for ev in _line("expired", deps):
             yield ev
         said.append(acks.PHRASES.get("expired", ""))
+        yield _finish(body, deps, metrics, said, start)
+        return
+    with _confirm_lock:
+        pending = body.conv_id in _confirm
+    if pending and body.barge_in and intents.is_confirm(body.text):
+        # hub ruling: a barge-in never approves; the run stays pending for a plain yes
+        if on_step:
+            on_step("agent_confirm", state="pending")
         yield _finish(body, deps, metrics, said, start)
         return
     run = _take_confirm(body.conv_id)
@@ -3756,9 +3868,10 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         await asyncio.to_thread(_deny_and_drop, run, deps)
         yield _settled_card(run.confirm_summary, "Not done: it timed out" if late else "Not done")
         key = "expired" if late else "stop" if stopped else "not_confirmed"
-        async for ev in _line(key, deps):
-            yield ev
-        said.append(acks.PHRASES.get(key, ""))
+        if not (stopped and body.barge_in):  # a barge-in stop stays silent; the card says "Not done"
+            async for ev in _line(key, deps):
+                yield ev
+            said.append(acks.PHRASES.get(key, ""))
         if late:
             yield _finish(body, deps, metrics, said, start)
             return
@@ -3769,7 +3882,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
         if intents.is_cancel(body.text) or intents.is_no(body.text):
             yield _finish(body, deps, metrics, said, start)
             return
-        if _is_card_remove(body.text, body.conv_id):
+        if _is_card_remove(body.text, body.conv_id, deps):
             # A3: the "Very well, I won't." above already settled it; the remove never runs.
             yield _finish(body, deps, metrics, said, start)
             return
@@ -3791,9 +3904,10 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
             if barge or clearing:  # cancelled quietly; the turn continues in the normal pipeline
                 return
             if stopped:
-                async for ev in _line("stop", deps):
-                    yield ev
-                said.append(acks.PHRASES["stop"])
+                if not body.barge_in:
+                    async for ev in _line("stop", deps):
+                        yield ev
+                    said.append(acks.PHRASES["stop"])
                 yield {"type": "end_listening"}
                 yield _finish(body, deps, metrics, said, start)
                 return
@@ -4346,7 +4460,6 @@ async def post_workspace_snapshot(nonce: str, body: WorkspaceSnapshotBody) -> di
 @router.post("/utterance", dependencies=_LOOP_DEPS)
 async def post_utterance(body: TurnBody) -> StreamingResponse:
     deps = get_deps()
-    _playback_cut()
 
     async def stream() -> AsyncIterator[str]:
         rec = debug_log.for_utterance()
@@ -4409,21 +4522,27 @@ async def get_events() -> StreamingResponse:
 @router.post("/wake", dependencies=_LOOP_DEPS)
 async def post_wake(body: WakeBody | None = None) -> dict:
     if body is not None and body.weak:
-        if time.monotonic() < _self_name_until:
-            logger.info("wake_weak dropped reason=self_name")
-            return {"ok": True}
-        # Its own event, never "wake": no debug turn here; the app logs one only when it honours it.
-        bus.publish("wake_weak", {"source": body.source})
+        logger.info("wake_weak dropped reason=removed")
         return {"ok": True}
-    _playback_cut()
     debug_log.wake_hit(body.score if body else None, body.source if body else "mac")
     bus.publish("wake", {"source": body.source if body else "mac"})
     return {"ok": True}
 
 
+def _engine_rebuilt(step: str, detail: str) -> bool:
+    """The app's one state note per mic engine reconfigure (`barge_aec on|off|failed ...`); not the
+    `reconfigured`/`deferred`/`levels` notes, so one rebuild restarts the wake capture once."""
+    return step == "barge_aec" and detail.startswith(("on ", "off ", "failed "))
+
+
 @router.post("/debug/note", dependencies=_LOOP_DEPS)
 async def post_debug_note(body: DebugNote) -> dict:
     rec = debug_log.note(body.step, body.detail)
+    # Mac run 1: the wake word's ffmpeg, open while the app rebuilt its engine, went deaf; start a
+    # fresh one now (the note comes after the rebuild). Never imported here: no wake thread, no-op.
+    wakeword = sys.modules.get("mac.voice.wakeword")
+    if wakeword is not None and _engine_rebuilt(body.step, body.detail):
+        wakeword.restart_capture("reconfigure")
     global _off_view_said
     if body.step == "lines" and _OFF_VIEW_FINAL_RE.search(body.detail):
         key, n = None, None
@@ -4501,13 +4620,13 @@ def _app_commit() -> str | None:
 
 
 def barge_mode() -> str:
-    """D2 DECISION 2C: "headphones" by default (the app barges in only while the output is a
-    headphones route, never on speakers); "off" with OVERLAY_BARGE_IN set to anything but "1";
-    "aec" only with OVERLAY_BARGE_IN=1 and OVERLAY_BARGE_AEC=1 (the unproven 2B path, opt-in)."""
+    """D2 DECISION 2C: "aec" by default — barge-in cancels speech through the echo canceller, on
+    speakers too; "headphones" only with OVERLAY_BARGE_AEC=0 (the app barges in only on a
+    headphones route); "off" with OVERLAY_BARGE_IN set to anything but "1"."""
     flag = os.environ.get("OVERLAY_BARGE_IN", "")
     if flag not in ("", "1"):
         return "off"
-    return "aec" if flag == "1" and os.environ.get("OVERLAY_BARGE_AEC", "0") == "1" else "headphones"
+    return "headphones" if os.environ.get("OVERLAY_BARGE_AEC", "") == "0" else "aec"
 
 
 def barge_in_on() -> bool:

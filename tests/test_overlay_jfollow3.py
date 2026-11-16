@@ -173,13 +173,15 @@ def test_barge_in_turn_cancels_running_agent_quietly(client, monkeypatch):
 
 
 def test_barge_in_never_answers_a_confirm(client):
-    """B2: barge alone never answers a Confirm; the spoken yes/no paths are unchanged."""
+    """B2: a barge-in never approves a Confirm (jfollow8 hub ruling): a barge yes leaves the run
+    pending and silent; a barge no still denies."""
     clock = Clock()
     pool, deps = setup(clock, push_script(clock))
     turn(client, "commit and push my changes", conv_id="b1")
     events = turn(client, "yes", conv_id="b1", barge_in=True)
-    assert [r["behavior"] for r in pool.made[0].responses] == ["allow"]
-    assert "Pushed." in says(events)
+    assert pool.made[0].responses == []
+    assert "Pushed." not in says(events)
+    assert "b1" in overlay._confirm
     assert "end_listening" not in [e["type"] for e in events]
 
     turn(client, "commit and push my changes", conv_id="b2")
@@ -385,9 +387,8 @@ def test_sessions_with_no_rows_say_a_fixed_line(client, monkeypatch, tmp_path):
 
 
 def test_health_has_barge_switches(client, monkeypatch):
-    """A6; jfollow4 D2 DECISION 2C replaces hub amendment R6's "off unless OVERLAY_BARGE_IN=1":
-    the default is headphones only (barge_in true, the app gates it on the output route), AEC only
-    with OVERLAY_BARGE_IN=1, and OVERLAY_BARGE_IN=0 still turns it all off."""
+    """A6; jfollow8 makes the default "aec" (echo canceller on speakers too; OVERLAY_BARGE_AEC=0
+    opts back to headphones only), OVERLAY_BARGE_IN=0 still turns it all off."""
     overlay.set_deps(make_deps())
     monkeypatch.delenv("OVERLAY_BARGE_IN", raising=False)
     monkeypatch.delenv("OVERLAY_BARGE_AEC", raising=False)
@@ -395,9 +396,9 @@ def test_health_has_barge_switches(client, monkeypatch):
     def health():
         return client.get("/overlay/health", headers=AUTH_HEADER).json()
 
-    assert (health()["barge_in"], health()["barge_aec"], health()["barge_mode"]) == (True, False, "headphones")
+    assert (health()["barge_in"], health()["barge_aec"], health()["barge_mode"]) == (True, True, "aec")
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "1")
-    assert (health()["barge_in"], health()["barge_aec"]) == (True, False)
+    assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
     monkeypatch.setenv("OVERLAY_BARGE_IN", "1")
     assert (health()["barge_in"], health()["barge_aec"]) == (True, True)
     monkeypatch.setenv("OVERLAY_BARGE_AEC", "0")
@@ -433,7 +434,8 @@ def test_barge_in_off_in_the_app_and_the_debug_page(client, monkeypatch):
     assert "private var bargeInEnabled = false" in ctl
     # jfollow4 D2: the mode comes from health (off / headphones only / echo canceller); speakers never barge.
     assert "BargeMode.from(health:" in ctl
-    assert "case .headphones: bargeInEnabled = routeIsHeadphones" in ctl
+    # jfollow8: one pure rule (EchoCancel.bargeInEnabled): headphones route, or the canceller really on.
+    assert "EchoCancel.bargeInEnabled(mode: bargeMode.rawValue, headphones: routeIsHeadphones," in ctl
     wake = _swift_func(APP_SRC / "AppController.swift", "handleWake")
     gated = wake.index("if bargeInEnabled {")
     assert gated < wake.index("bargeIn(reason: .wake)") < wake.index("audio.stop()", gated)
@@ -549,7 +551,8 @@ def test_hyde_is_hide_and_who_wrote_needs_code():
 def test_barge_gate_note_and_debug_label():
     """Live 32: no gate numbers could be read. Every barge run posts one numbers-only barge_gate note."""
     start = _swift_func(APP_SRC / "AppController.swift", "startBargeListeningIfNeeded")
-    assert 'run.onEnded = { [weak self] summary in self?.client.debugNote(step: "barge_gate", detail: summary) }' in start
+    assert 'run.onEnded = { [weak self, weak run] summary in' in start  # jfollow8 R2: + the I1 restart
+    assert 'self?.client.debugNote(step: "barge_gate", detail: summary)' in start
     speech = (APP_SRC / "SpeechInput.swift").read_text()
     cancel = _swift_func(APP_SRC / "SpeechInput.swift", "cancel")
     assert "turn.barge?.end()" in cancel
@@ -557,10 +560,11 @@ def test_barge_gate_note_and_debug_label():
     assert "barge.end(); return" in _swift_func(APP_SRC / "SpeechInput.swift", "completeTurn")
     assert "func end()" in speech and "guard !ended else { return }" in speech
     # Live run 2 (32): checked=6 confirmed=0 could not say whether STT heard the owner's words.
-    assert "checked=\\(checked) max_new=\\(maxNew) confirmed=" in speech
+    assert "checked=\\(checked) max_new=\\(maxNew) " in speech and "confirmed=\\(confirmed ? 1 : 0)" in speech
     assert "BargeWords.newWordCount(partial: partial" in _swift_func(APP_SRC / "SpeechInput.swift", "checkBarge")
     assert "barge_gate" in overlay.DEBUG_PAGE
-    assert 'case "barge_gate": return s.detail' in overlay.DEBUG_PAGE.replace('case "barge_in": case "barge_aec": ', "")
+    assert ('case "barge_gate":\n    case "wake_ignored": case "playback": return s.detail || ""'
+            in overlay.DEBUG_PAGE.replace('case "barge_in": case "barge_aec": ', ""))
 
 
 def test_barge_check_uses_the_lagged_candidate_and_fresh_words():

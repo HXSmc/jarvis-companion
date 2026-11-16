@@ -100,6 +100,11 @@ PHRASES = {
     "card_hint": "Remove it by name.",
     # jfollow7: the model's reply was only a note about a web result's instruction (dropped).
     "note_only": "That's all, sir.",
+    # jfollow9: one-card removal replies and the companion question's answer.
+    "removed_named": "Removed {name}, sir.",
+    "no_card_named": "I don't see that card. On screen: {names}.",
+    "no_cards": "There are no cards to remove.",
+    "companion_about": "The Companion is your phone app, gateway, this overlay, sessions and screens.",
 }
 
 # Thinking lines said while the model works: (key, text, tag). "look" = an answer/lookup is

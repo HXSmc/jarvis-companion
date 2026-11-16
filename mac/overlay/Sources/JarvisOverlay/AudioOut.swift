@@ -44,27 +44,43 @@ final class AudioOut {
         }
     }
 
-    /// AEC mode (barge_mode aec): the player moves onto SpeechInput's engine — call before it
-    /// starts and before any playback. `format: nil` connects at the engine's own output format
-    /// so the voice-processing IO formats match; clips convert to that format in enqueue.
+    /// Voice processing on (speakers): the player lives on SpeechInput's engine so the canceller
+    /// hears the reply. SpeechInput.reconfigure calls this while that engine is stopped, after voice
+    /// processing changed its formats and set the mixer -> output connection to the mic's rate. The
+    /// player connects at that mixer format; clips convert to it in enqueue.
     func shareEngine(_ shared: AVAudioEngine) {
-        engine.detach(player)
-        engine = shared
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: nil)
-        fixedFormat = player.outputFormat(forBus: 0)
-        connectedRate = nil
+        move(to: shared)
+        let mixed = engine.mainMixerNode.outputFormat(forBus: 0)
+        engine.connect(player, to: engine.mainMixerNode, format: mixed)
+        fixedFormat = mixed
     }
 
-    /// The AEC probe failed: the player returns to this app's own engine and per-clip rates.
+    /// Voice processing off (headphones, Bluetooth input, failed, opted out): this app's own
+    /// engine and per-clip rates, exactly as before the canceller existed.
     func useOwnEngine() {
-        guard fixedFormat != nil else { return }
-        engine.disconnectNodeOutput(player)
+        guard engine !== ownEngine else { return }
+        move(to: ownEngine)
+    }
+
+    /// The player and the level tap leave the current engine; the tap is reinstalled on the new
+    /// engine's mixer at the next clip.
+    private func move(to target: AVAudioEngine) {
+        stopPlayer()
+        if tapInstalled { engine.mainMixerNode.removeTap(onBus: 0); tapInstalled = false }
+        // Leaving this app's own engine: stop it, so no second output unit runs at another rate
+        // beside the voice-processing one. enqueue starts it again after useOwnEngine.
+        if engine === ownEngine, target !== ownEngine, ownEngine.isRunning { ownEngine.stop() }
         engine.detach(player)
-        engine = ownEngine
+        engine = target
+        engine.attach(player)
         fixedFormat = nil
         connectedRate = nil
     }
+
+    /// Voice processing lowers the built-in speakers' output; each clip gets this back while it
+    /// is on (capped so a clip never passes 0.98 full scale).
+    /// shortcut: one fixed constant, the live run's reply-loudness check calibrates it.
+    static let makeupGainDb = 6.0
 
     /// 16-bit mono little-endian PCM -> float buffer at `rate`, played in schedule order.
     func enqueue(pcm: Data, rate: Int) {
@@ -81,11 +97,17 @@ final class AudioOut {
         else { return }
 
         buffer.frameLength = AVAudioFrameCount(frames)
+        var peak: Float = 0
         pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             let src = raw.bindMemory(to: Int16.self)
             for i in 0..<frames {
                 channel[i] = Float(Int16(littleEndian: src[i])) / 32768.0
+                peak = max(peak, abs(channel[i]))
             }
+        }
+        if fixedFormat != nil {  // shared engine = voice processing on
+            let gain = EchoCancel.makeupGain(peak: peak, gainDb: Self.makeupGainDb)
+            if gain != 1 { for i in 0..<frames { channel[i] *= gain } }
         }
 
         var clip = buffer

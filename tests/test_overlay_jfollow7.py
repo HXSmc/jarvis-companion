@@ -32,7 +32,6 @@ from test_overlay_service import POOL_TEXTS, FakeConversations, FakeSession, mak
 @pytest.fixture(autouse=True)
 def fresh_debug_log():
     overlay.debug_log.clear()
-    overlay._playback_cut()  # no self-name hold left by an earlier test's synth
     yield
     overlay.debug_log.clear()
 
@@ -438,64 +437,6 @@ def test_sessions_cards_replace_not_pile_up(client, monkeypatch, tmp_path):
     assert overlay._short_time("") == "" and overlay._short_time("soon") == "soon"
 
 
-# --- Round 7 (Mac run 3, criterion 28): a weak wake hit, honoured by the app only during playback ---
-
-def test_weak_wake_is_its_own_event_and_opens_no_turn(client, monkeypatch):
-    from test_overlay_agent import BusRecorder
-    bus = BusRecorder()
-    monkeypatch.setattr(overlay, "bus", bus)
-    overlay.debug_log.clear()
-    client.post("/overlay/wake", json={"score": 0.21, "weak": True}, headers=AUTH_HEADER)
-    assert bus.events == [("wake_weak", {"source": "mac"})]  # never "wake": idle never wakes on it
-    assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["turns"] == []
-    client.post("/overlay/wake", json={"score": 0.8}, headers=AUTH_HEADER)
-    assert bus.events[-1] == ("wake", {"source": "mac"})
-    # The app's notes when it honours one are fixed words: the wake row, then how its turn ended
-    # (round 8: a weak turn's words are never sent, so no voice row follows).
-    overlay.debug_log.clear()
-    client.post("/overlay/debug/note", json={"step": "wake", "detail": "weak hit during playback (speakers)"},
-                headers=AUTH_HEADER)
-    client.post("/overlay/debug/note", json={"step": "weak_wake", "detail": "stop"}, headers=AUTH_HEADER)
-    (only,) = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["turns"]
-    assert [(s["step"], s["detail"]) for s in only["steps"]] == [
-        ("wake", "weak hit during playback (speakers)"), ("weak_wake", "stop")]
-    assert _describe_with_node([{"step": "wake", "detail": "weak hit during playback (speakers)"}]) == [
-        "weak hit during playback (speakers)"] if shutil.which("node") else True
-
-
-def test_wakeword_weak_hits_rate_limited(monkeypatch):
-    """run_live: >= 0.5 is a full hit (reset); 0.1-0.5 a weak hit, at most one per WEAK_GAP_S of audio."""
-    np = pytest.importorskip("numpy")
-    pytest.importorskip("openwakeword")
-    from mac.voice import wakeword
-    frames = [0.0, 0.2, 0.3, 0.0, 0.6, 0.05] + [0.0] * 20 + [0.15]  # 80 ms each
-    scores = iter(frames)
-
-    class FakeModel:
-        def predict(self, pcm):
-            return {"hey_jarvis": next(scores)}
-
-        def reset(self):
-            sent.append(("reset",))
-
-    class FakeFfmpeg:
-        def __init__(self, *a, **k):
-            import io
-            self.stdout = io.BytesIO(b"\x00\x00" * wakeword.FRAME_SAMPLES * len(frames))
-
-        def terminate(self):
-            pass
-
-    sent: list = []
-    monkeypatch.setattr(wakeword.subprocess, "Popen", FakeFfmpeg)
-    monkeypatch.setattr(wakeword, "load_model", FakeModel)
-    monkeypatch.setattr(wakeword, "notify_wake", lambda at, dry_run, score=None, weak=False: sent.append((round(at, 2), score, weak)))
-    with pytest.raises(SystemExit):
-        wakeword.run_live()
-    # frame 1 weak (0.2); frame 2 (0.3) inside the gap: not sent; frame 4 full + reset; 0.05 nothing;
-    # the last frame (0.15) is 26 x 80 ms = 2.08 s in: past the 1.5 s gap from frame 1, sent.
-    assert sent == [(0.08, 0.2, True), (0.32, 0.6, False), ("reset",), (2.08, 0.15, True)]
-    assert wakeword.THRESHOLD == 0.5 and wakeword.WEAK_THRESHOLD == 0.1  # the idle threshold is unchanged
 
 
 def _host_stop_ask(clock, conv):
@@ -504,30 +445,6 @@ def _host_stop_ask(clock, conv):
         payload={"id": "s9", "title": "build runner"})
 
 
-def test_weak_hit_never_answers_a_pending_confirm(client, monkeypatch, tmp_path):
-    """Round 8: a weak hit is barge-in only. Over the Confirm question it posts only its event and the
-    app's fixed notes; the ask stays pending, nothing reaches the router, then a real yes answers it."""
-    from test_overlay_agent import BusRecorder
-    clock = Clock()
-    _deps(clock)
-    seen = _session_env(monkeypatch, tmp_path)
-    bus = BusRecorder()
-    monkeypatch.setattr(overlay, "bus", bus)
-    _host_stop_ask(clock, "p1")
-    client.post("/overlay/wake", json={"score": 0.12, "weak": True}, headers=AUTH_HEADER)
-    client.post("/overlay/debug/note", json={"step": "wake", "detail": "weak hit during playback (speakers)"},
-                headers=AUTH_HEADER)
-    client.post("/overlay/debug/note", json={"step": "weak_wake", "detail": "ignored reason=not_stop"},
-                headers=AUTH_HEADER)
-    assert bus.events == [("wake_weak", {"source": "mac"})]
-    assert "p1" in overlay._host_ask  # still pending
-    assert seen == [] and _steps("session_stop") == [] and _steps("agent") == []
-    assert _steps("weak_wake")[-1]["detail"] == "ignored reason=not_stop"
-    # The owner's full-wake (or follow-up window) yes, with his name on the end, answers it.
-    events = turn(client, "Yes, Jarvis", conv_id="p1")
-    assert says(events) == ["Stopped."]
-    assert [e["card"]["title"] for e in events if e["type"] == "card"][0] == "Going ahead"
-    assert "p1" not in overlay._host_ask and [m for m, *_ in seen if m != "GET"]  # the stop ran only now
 
 
 @pytest.mark.parametrize("reply", ["No, Jarvis", "Cancel it, Jarvis"])
@@ -541,58 +458,3 @@ def test_no_or_cancel_naming_jarvis_answers_the_confirm(client, monkeypatch, tmp
     assert "p2" not in overlay._host_ask
     assert "Stopped." not in says(events)
     assert all(m == "GET" for m, _u, _a, _b in seen)
-
-
-# --- Round 9 (glm-cross 5): Jarvis's own near-name ("Hey, Travis." scores 0.29) never weak-cuts its reply ---
-
-def test_weak_hit_dropped_while_own_near_name_line_plays(client, monkeypatch):
-    import asyncio
-    from types import SimpleNamespace
-    from test_overlay_agent import BusRecorder
-    bus = BusRecorder()
-    monkeypatch.setattr(overlay, "bus", bus)
-    monkeypatch.setattr(overlay, "_speech_end", 0.0)
-    monkeypatch.setattr(overlay, "_self_name_until", 0.0)
-    deps = SimpleNamespace(synth=lambda text: (b"\0" * 48000, 24000))  # 1 s of 16-bit mono
-    weak = {"score": 0.29, "weak": True}
-
-    asyncio.run(overlay._audio("The harvest notes are on screen.", deps))  # no near-name: no hold
-    client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
-    assert bus.events == [("wake_weak", {"source": "mac"})]
-
-    for line in ("Hey, Travis.", "Hey Jervis", "Okay, Jarvik."):
-        bus.events.clear()
-        overlay._speech_end = overlay._self_name_until = 0.0
-        asyncio.run(overlay._audio(line, deps))
-        assert 2.5 < overlay._self_name_until - overlay.time.monotonic() <= 1 + overlay.SELF_NAME_SLACK_S
-        client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
-        assert bus.events == [], line  # Jarvis's own voice: the app never sees the weak hit
-        client.post("/overlay/wake", json={"score": 0.9}, headers=AUTH_HEADER)
-        assert bus.events == [("wake", {"source": "mac"})]  # a full hit is unchanged (base barge-in)
-        # ... and it cut the reply: no hold is left behind for the next reply's weak "stop".
-        client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
-        assert bus.events[-1] == ("wake_weak", {"source": "mac"})
-
-    # A cut reply's audio never stacks onto the next turn's: a new utterance clears the clock.
-    overlay._speech_end = overlay._self_name_until = 0.0
-    for _ in range(20):
-        asyncio.run(overlay._audio("A long story line.", deps))  # 20 s queued, then cut by a new turn
-    asyncio.run(overlay._audio("Hey, Travis.", deps))
-    assert overlay._self_name_until - overlay.time.monotonic() > 20
-    overlay.set_deps(make_deps(chunks=['{"say": "Fine."}\n'], synth=lambda t: (b"\0" * 48000, 24000)))
-    client.post("/overlay/utterance", json={"text": "what time is it", "conv_id": "r9cut"}, headers=AUTH_HEADER)
-    assert overlay._self_name_until == 0.0 and overlay._speech_end - overlay.time.monotonic() < 2
-    client.post("/overlay/wake", json=weak, headers=AUTH_HEADER)
-    assert bus.events[-1] == ("wake_weak", {"source": "mac"})
-
-
-def test_near_name_rule():
-    near = overlay._NEAR_NAME_RE
-    assert all(near.search(overlay._voice_text(t)) for t in (
-        "Hey, Travis.", "Hey Jervis", "The Jervis branch is merged.", "Hey, nervous?", "Jervis.",
-        "Jarvik.", "Hi, Charles.", "Okay, Garvey.", "Hay, Jarvik.", "OK, sir."))
-    assert not any(near.search(overlay._voice_text(t)) for t in (
-        "Your service is running, sir.", "The harvest notes are on screen.", "Elvis", "Jarvis, sir.",
-        "Travis sent the build report.", "Davis.", "It lives in the repo.", "It moves the card.",
-        "Shall I push the branch to GitHub?", "Visit the page.", "Revisit it.", "They left at noon.",
-        "Ask Charles about it.", "This is a high bar."))
