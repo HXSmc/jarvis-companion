@@ -235,10 +235,15 @@ def test_model_link_card_needs_link_words(client):
 
 
 def test_prompt_show_dont_link():
-    sentence = ("Show the answer itself in a card (text, chart, picture or video). Give a link card only when "
-                "the owner asks for a link, a URL or a website, or says to open it.")
+    # hub ruling 2: the spoken line carries the full answer; a card adds to it, never replaces it
+    spoken = ('Speak the whole answer; a card (text, chart, picture or video) only adds to what you say, never '
+              'replaces it, so never say "the card shows" in place of the answer.')
+    link = ("Show the thing itself in that card, not a link: give a link card only when the owner asks for a "
+            "link, a URL or a website, or says to open it.")
     assert "For a website, show a link card instead." not in overlay.ANSWER_PROMPT
-    assert sentence in overlay.ANSWER_PROMPT and sentence in overlay.QUIET_PROMPT
+    assert "Show the answer itself in a card" not in overlay.ANSWER_PROMPT
+    for prompt in (overlay.ANSWER_PROMPT, overlay.QUIET_PROMPT):
+        assert spoken + " " + link in prompt
 
 
 # --- ruling 2: routes, tiles, geocoding -------------------------------------------------------

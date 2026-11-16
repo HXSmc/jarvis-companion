@@ -229,9 +229,9 @@ def test_quiet_prompt_gives_the_reason():
     assert "show me a picture of" in overlay.QUIET_PROMPT
     for bad in ("image_search", "video_search", "WebSearch"):
         assert bad not in overlay.QUIET_PROMPT
-    # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3 (persona "sir" line), jfollow9 D2 (About you), jfollow9 R5 F1 (questions only), jfollow10b A3 (show, don't link)
+    # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3 (persona "sir" line), jfollow9 D2 (About you), jfollow9 R5 F1 (questions only), jfollow10b A3 (show, don't link), jfollow10b hub ruling 2 (spoken answer stays whole)
     assert hashlib.sha256(overlay.ANSWER_PROMPT.encode()).hexdigest() == \
-        "38c345a5dd28fb4df18f51781063b6e562d788fb72b493c6c7c6af74fa3211dc"
+        "f6ea73f6f6e7be82fdf6496101e97f8fb2a585b6f00b415cdd8151f801dbebba"
 
 
 def test_media_turn_joined_continuation_falls_back(client, monkeypatch):
