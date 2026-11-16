@@ -44,6 +44,7 @@ extension HUDCard {
         case .image(let p): return p.title
         case .video(let p): return p.title
         case .web(let p): return p.title
+        case .chart(let p): return p.title
         }
     }
 }

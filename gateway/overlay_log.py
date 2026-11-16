@@ -36,6 +36,8 @@ KEEP_STEPS = frozenset({
     "cmd_run",
     # jfollow10b: maps/TfL/places, video questions, the watch job, dropped link cards, the app's web card.
     "geo", "video_ask", "watch_job", "link_dropped", "web_card",
+    # jfollow10c: one row per drawing and per model chart card (fixed words and counts only).
+    "draw", "chart",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})

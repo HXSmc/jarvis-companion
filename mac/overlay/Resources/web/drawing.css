@@ -1,0 +1,123 @@
+/* Hallmark · drawing card: the model's sanitised SVG as an image, zoom and pan, the parts below */
+:root {
+  --page: #141414;
+  --ink: #eef0f3;
+  --ink-soft: #a9b0bb;
+  --line: rgba(255, 255, 255, 0.22);
+  --hover: rgba(255, 255, 255, 0.1);
+  --press: rgba(255, 255, 255, 0.18);
+  --glass: rgba(18, 20, 24, 0.88);
+  --focus: #ff3b30;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: clip;
+  background: var(--page);
+  color: var(--ink);
+  font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+#stage.dragging {
+  cursor: grabbing;
+}
+
+#stage:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+#drawing {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: 0 0;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+#status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+#status[hidden] {
+  display: none;
+}
+
+#panel {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-height: 38%;
+  padding: 8px;
+  border-top: 1px solid var(--line);
+  background: var(--glass);
+}
+
+#legend {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+#legend li {
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+#legend:empty {
+  display: none;
+}
+
+#reset {
+  flex: none;
+  margin-left: auto;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+#reset:hover {
+  background: var(--hover);
+}
+
+#reset:active {
+  background: var(--press);
+}
+
+#reset:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}

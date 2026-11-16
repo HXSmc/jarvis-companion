@@ -16,7 +16,7 @@ public enum WebCardPolicy {
     public static let scheme = "jarvisweb"
     public static let host = "app"
     /// Page name (the card's `page`) -> its start file.
-    public static let pages: [String: String] = ["map": "map.html"]
+    public static let pages: [String: String] = ["map": "map.html", "drawing": "drawing.html"]
     /// Request path (no leading "/") -> (bundle file under Resources/web, MIME type). Exact hits only.
     public static let resources: [String: (file: String, mime: String)] = [
         "map.html": ("map.html", "text/html"),
@@ -27,7 +27,14 @@ public enum WebCardPolicy {
         "vendor/leaflet/images/marker-icon.png": ("vendor/leaflet/images/marker-icon.png", "image/png"),
         "vendor/leaflet/images/marker-icon-2x.png": ("vendor/leaflet/images/marker-icon-2x.png", "image/png"),
         "vendor/leaflet/images/marker-shadow.png": ("vendor/leaflet/images/marker-shadow.png", "image/png"),
+        // jfollow10c: the drawing page. drawing.svg is not a bundle file: the handler serves the
+        // drawing card's sanitised SVG under this name, as an image, to the drawing page only.
+        "drawing.html": ("drawing.html", "text/html"),
+        "drawing.js": ("drawing.js", "text/javascript"),
+        "drawing.css": ("drawing.css", "text/css"),
+        "drawing.svg": ("", "image/svg+xml"),
     ]
+    public static let drawingImagePath = "drawing.svg"
     public static let dataPath = "data.json"
     public static let csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'"
     /// Block every load, then let only the app scheme through (WKContentRuleList JSON).
