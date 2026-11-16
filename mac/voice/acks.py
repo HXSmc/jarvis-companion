@@ -127,7 +127,7 @@ PHRASES = {
     "video_no_captions": "That video has no captions I can read. Say: watch it.",
     "job_started": "On it, I'll tell you when it's ready.",
     # jfollow10d: 3D objects ({name} lines are templates: spoken through the synth, never prerendered).
-    "model_what": "What should I make? Say: create a 3D object of a mug.",
+    "model_what": "Tell me what to make, like: create a 3D mug.",
     "model_unset": "Notes vault not set, so I can't keep 3D objects.",
     "model_missing": "I don't have a 3D object called that.",
     "model_none": "You don't have any 3D objects yet.",

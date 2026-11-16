@@ -5247,8 +5247,9 @@ def _summary_lines(text: str) -> list[str]:
 
 
 def _job_note(state: str, sid: str, reason: str, job: str = "watch") -> None:
+    # a "watch it" row stays stage B's exact text; other jobs add job=<kind> at the end
     debug_log.note("watch_job", f"state={state} id={sid if _SESSION_ID_RE.fullmatch(sid) else 'none'} reason={reason}"
-                                f" job={job}")
+                                + ("" if job == "watch" else f" job={job}"))
 
 
 def _push_line(key: str, deps: OverlayDeps) -> None:
