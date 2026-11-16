@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -414,9 +414,47 @@ def draw_request(text: str) -> str | None:
     return subject
 
 
+# jfollow10d: 3D objects. Whole utterance only; "show me the cards" / "open notes" keep their kinds.
+_3D = r"(?:3d|3-d|3 d|three d|three-d)"
+_MODEL_CREATE_RE = re.compile(r"(?:please )?(?:create|make|model|build|design) (?:me )?(?:a |an )?" + _3D
+                              + r"(?: (?:object|model|thing))?(?P<rest>(?:[:, ].*)?)")
+_MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?: ?,? (?:and )?(?:call(?:ed)? it|called) (?P<name>.+))?")
+_MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
+                            r"|list (?:my|the) " + _3D + r" (?:objects|models)|show me my " + _3D + r" (?:objects|models))")
+_MODEL_SHOW_RE = re.compile(r"(?:pull up|show me|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
+                            r"(?P<three> " + _3D + r" (?:object|model))?")
+
+
+def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None:
+    """A 3D object ask: model_create (arg = description, sub = name, or sub "ask" when no
+    description), model_list, or model_show (arg = the name words) when the name is a known object
+    (slug or alias) or the words say "3D". None = not a 3D ask."""
+    low = _clean(text).lower()
+    m = _MODEL_CREATE_RE.fullmatch(low)
+    if m:
+        rest = re.sub(r"^[\s:,]+(?:of )?", "", m["rest"]).strip()
+        parts = _MODEL_NAME_RE.fullmatch(rest)
+        desc = (parts["desc"] if parts else rest).strip(" ,:")
+        name = ((parts["name"] or "") if parts else "").strip(" ,:")
+        return Intent("model_create", desc, name) if desc else Intent("model_create", "", "ask")
+    if _MODEL_LIST_RE.fullmatch(low.replace(",", "")):
+        return Intent("model_list")
+    m = _MODEL_SHOW_RE.fullmatch(low)
+    if m and (m["three"] or re.search(_3D, m["name"]) is None and _model_key(m["name"]) in model_names):
+        return Intent("model_show", m["name"].strip())
+    return None
+
+
+def _model_key(words: str) -> str:
+    """models3d.slugify without the import (same rule): the key model_names holds."""
+    out = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w and w not in ("a", "an", "the", "my")]
+    return "-".join(out)[:40].strip("-") or "object"
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
-                 place_names: tuple[str, ...] = ()) -> Intent | None:
+                 place_names: tuple[str, ...] = (),
+                 model_names: tuple[str, ...] = ()) -> Intent | None:
     """Every fixed fast-path kind for one utterance form; None = this form matches none.
     `last` (the last-sentence pass) skips clock and hunk: those stay whole-utterance
     ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
@@ -428,6 +466,10 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)
+    if not last:
+        model = model_request(text, model_names)
+        if model is not None:
+            return model
     t = _clean(text)
     low = t.lower()
     subject = draw_request(text)
@@ -497,18 +539,21 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
 
 def parse(text: str, apps: dict[str, str] | None = None,
           workspace_names: tuple[str, ...] | None = None,
-          place_names: tuple[str, ...] | None = None) -> Intent:
+          place_names: tuple[str, ...] | None = None,
+          model_names: tuple[str, ...] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
     Fast-path kinds run on the whole text, then once more on its last sentence
     (fast_forms); the model kinds always see the whole cleaned transcript.
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
     to a real installed app before the domain check. `workspace_names` (saved
-    workspace names) lets "open <name>" resolve to a workspace ask.
+    workspace names) lets "open <name>" resolve to a workspace ask; `model_names` (3D
+    object slugs + aliases) lets "pull up <name>" resolve to a 3D object.
     """
     forms = fast_forms(text)
     for i, form in enumerate(forms):
-        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or ())
+        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or (),
+                              model_names=model_names or ())
         if intent is not None:
             return intent
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()

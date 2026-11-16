@@ -38,6 +38,8 @@ KEEP_STEPS = frozenset({
     "geo", "video_ask", "watch_job", "link_dropped", "web_card",
     # jfollow10c: one row per drawing and per model chart card (fixed words and counts only).
     "draw", "chart",
+    # jfollow10d: one row per 3D object step (fixed words and numbers; never a name, slug or path).
+    "model3d",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})
