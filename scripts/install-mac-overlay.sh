@@ -7,9 +7,11 @@ usage() {
   cat <<'EOF'
 install-mac-overlay.sh — build and install the Jarvis macOS voice overlay.
 
-Usage: scripts/install-mac-overlay.sh [--dry-run] [--help]
-  --dry-run  print every mutating step as "would: <cmd>", list missing tools, exit 0
-  --help     show this help
+Usage: scripts/install-mac-overlay.sh [--dry-run] [--companion-url https://<host>:<port>] [--help]
+  --dry-run        print every mutating step as "would: <cmd>", list missing tools, exit 0
+  --companion-url  the mini PC gateway to try first for Companion sessions access
+                   (default: https on port 8790 at the host of MINIPC_ROUTER_URL in .env)
+  --help           show this help
 
 Steps: tool checks (swift, brew, ffmpeg, espeak-ng, claude) -> brew install ffmpeg/espeak-ng
 -> .venv with the service deps -> Kokoro TTS model download (sha256-verified)
@@ -20,7 +22,8 @@ Steps: tool checks (swift, brew, ffmpeg, espeak-ng, claude) -> brew install ffmp
 file this script writes is the Companion sessions one, after the gateway answers a probe)
 -> set OVERLAY_VAULT in .env from Obsidian's vault list (only when exactly one vault)
 -> set up Companion sessions access: companion-token (0600) from the vault ios_token after
-   the gateway answers an authorized probe, then OVERLAY_COMPANION_URL in .env
+   a gateway answers an authorized probe (the mini PC gateway first, else the local one),
+   then OVERLAY_COMPANION_URL in .env (scripts/companion_access.py)
 -> render launchd/ templates into $HOME/Library/LaunchAgents and bootstrap them (last, so the
    service starts with the .env keys above)
 -> refuse a taken OVERLAY_PORT -> print the TCC permissions to grant.
@@ -28,14 +31,25 @@ EOF
 }
 
 DRY_RUN=0
-case "${1:-}" in
-  "") ;;
-  --dry-run) DRY_RUN=1 ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+COMPANION_URL=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --companion-url)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      COMPANION_URL="$2"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# A bad --companion-url stops here, before any build step or network call.
+if [ -n "$COMPANION_URL" ] && ! (cd "$REPO" && python3 scripts/companion_access.py --check-url "$COMPANION_URL"); then
+  echo "install-mac-overlay: --companion-url must be https://<host>:<port> (no user, path or query)" >&2
+  exit 2
+fi
 PY="$REPO/.venv/bin/python"
 APP="$HOME/Applications/JarvisOverlay.app"
 TTS_DIR="${HWMODE_TTS_DIR:-$HOME/.local/share/kokoro}"
@@ -294,49 +308,28 @@ print(found[0] if len(found) == 1 else "")
   fi
 fi
 
-# (i3) Companion sessions access: write the phone-only token file (0600) from the vault's
-# ios_token, but only after the local gateway answers an authorized probe; then aim the
-# overlay service at it via .env (gateway/overlay.py _sessions_access accepts loopback http
-# or https and refuses a token file readable by group/other). The token itself never leaves
-# the helper below: not in argv, an env var, a log, a plist or stdout.
+# (i3) Companion sessions access: scripts/companion_access.py probes the mini PC gateway
+# (--companion-url, else https://<host of MINIPC_ROUTER_URL>:8790) and then the local gateway with
+# an authorized GET /central/sessions (no redirects, TLS verified), writes the phone-only token file
+# (0600) from the vault's ios_token and sets OVERLAY_COMPANION_URL in .env to the gateway that
+# answered (an owner-set value is kept). gateway/overlay.py _sessions_access accepts https or
+# loopback http and refuses a token file readable by group/other. The token itself never leaves
+# the helper: not in argv, an env var, a log, a plist or stdout.
 JARVIS_DIR="$HOME/Library/Application Support/JarvisOverlay"
 TOKEN_FILE="$JARVIS_DIR/companion-token"
 GATEWAY_PORT="$(cd "$REPO" && python3 -c 'from common.config import PORT; print(PORT)' 2>/dev/null || echo 8788)"
 if (( DRY_RUN )); then
   echo "would: create companion-token (mode 600) from the Companion ios_token via common.config.get_token"
-  echo "would: set OVERLAY_COMPANION_URL=http://127.0.0.1:$GATEWAY_PORT in .env when GET /central/sessions answers 200"
+  echo "would: set OVERLAY_COMPANION_URL in .env to the mini PC gateway (https, port 8790, host of MINIPC_ROUTER_URL) when its GET /central/sessions answers 200, else to http://127.0.0.1:$GATEWAY_PORT"
 else
   mkdir -p "$JARVIS_DIR"  # create only; never delete or move anything already in this dir
   chmod 700 "$JARVIS_DIR"
-  # exits 3 when the vault has no ios_token, 4 when the probe fails or the status is not 200;
-  # SystemExit is a BaseException, so the catch-all below never swallows the codes.
-  SESS_PROG='
-import os, sys, urllib.request
-try:
-    from common import config
-    tok = config.get_token(name="ios_token")
-    if tok is None:
-        sys.exit(3)
-    req = urllib.request.Request("http://127.0.0.1:%d/central/sessions" % config.PORT,
-                                 headers={"Authorization": "Bearer " + tok})
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        status = resp.status
-    if status != 200:
-        sys.exit(4)
-    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(tok.encode())
-    os.chmod(sys.argv[1], 0o600)
-except Exception:
-    sys.exit(4)
-'
+  # exits 3 when the vault has no ios_token, 4 when no gateway answered (nothing written).
   RC=0
-  (cd "$REPO" && umask 077 && python3 -c "$SESS_PROG" "$TOKEN_FILE") || RC=$?
+  (cd "$REPO" && umask 077 && python3 scripts/companion_access.py "$TOKEN_FILE" "$REPO/.env" "$GATEWAY_PORT" ${COMPANION_URL:+"$COMPANION_URL"}) || RC=$?
   case "$RC" in
-    0)
-      grep -qs '^OVERLAY_COMPANION_URL=' "$REPO/.env" || append_env OVERLAY_COMPANION_URL "http://127.0.0.1:$GATEWAY_PORT"
-      echo "Sessions access: set"
-      ;;
+    0) ;;
+    2) exit 2 ;;
     3) echo "Sessions access: no ios_token found; the owner runs: bash scripts/install-mac-overlay.sh" ;;
     *) echo "Sessions access: the gateway on 127.0.0.1:$GATEWAY_PORT did not answer, not set" ;;
   esac
