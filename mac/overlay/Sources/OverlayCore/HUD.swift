@@ -407,6 +407,7 @@ public struct WebCard: Codable, Equatable {
     public var page: String
     public var data: MapData
     public var drawing: DrawingData?
+    public var model: ModelData?  // jfollow10d: the model page's data (then `data` is MapData.none)
 
     private enum CodingKeys: String, CodingKey { case id, title, page, data }
 
@@ -421,6 +422,9 @@ public struct WebCard: Codable, Equatable {
         if page == "drawing" {
             drawing = try c.decode(DrawingData.self, forKey: .data)
             data = .none
+        } else if page == "model" {
+            model = try c.decode(ModelData.self, forKey: .data)
+            data = .none
         } else {
             data = try c.decode(MapData.self, forKey: .data)
         }
@@ -433,6 +437,8 @@ public struct WebCard: Codable, Equatable {
         try c.encode(page, forKey: .page)
         if let drawing {
             try c.encode(drawing, forKey: .data)
+        } else if let model {
+            try c.encode(model, forKey: .data)
         } else {
             try c.encode(data, forKey: .data)
         }
@@ -494,7 +500,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .link: return "LINK"
         case .image: return "IMAGE"
         case .video: return "VIDEO"
-        case .web(let p): return ["map": "MAP", "drawing": "DRAWING"][p.page] ?? "WEB"
+        case .web(let p): return ["map": "MAP", "drawing": "DRAWING", "model": "3D"][p.page] ?? "WEB"
         case .chart: return "GRAPH"
         }
     }
