@@ -110,6 +110,9 @@ def test_wrapper_exact_sudo_line(box):
             "-p", f"BindPaths={d}", "-p", f"BindReadOnlyPaths={b}", "-p", f"BindReadOnlyPaths={r}",
             "-p", "PrivateTmp=yes", "-p", "NoNewPrivileges=yes", "-p", "MemoryMax=4G", "-p", "TasksMax=64",
             "-p", "RuntimeMaxSec=120", "-p", "CapabilityBoundingSet=", "-p", "RestrictAddressFamilies=AF_UNIX",
+            # round 1 security fix: no host uid view (/proc/<pid>/root), no host /run sockets, private shm + IPC
+            "-p", "PrivateUsers=yes", "-p", "TemporaryFileSystem=/run:ro", "-p", "TemporaryFileSystem=/dev/shm",
+            "-p", "PrivateIPC=yes",
             f"{b}/blender", "-b", "--factory-startup", "--python-exit-code", "1", "--python",
             f"{r}/blender_job_runner.py", "--", str(d)]
     assert calls(box) == [want]

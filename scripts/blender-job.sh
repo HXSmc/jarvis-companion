@@ -6,7 +6,9 @@
 # a real dir owned by you, holding object.py (<= 256 KB) and no old outputs. Nothing from the job
 # reaches sudo or systemd-run except that checked path. The sandbox: no network, an empty $HOME
 # except the job dir (read-write) and the Blender + runner dirs (read-only), read-only system, private
-# /tmp, no new privileges, no capabilities, 4 GB, 64 tasks, 120 s.
+# /tmp, no new privileges, no capabilities, 4 GB, 64 tasks, 120 s. PrivateUsers=yes hides every other
+# process of the same uid (no /proc/<pid>/root way into the real home); an empty read-only /run cuts the
+# host's unix sockets (docker, tailscale, snapd, system D-Bus); /dev/shm and IPC are private.
 # Prints one JSON line: {"ok":true,"glb_bytes":N,"png_bytes":N,"ms":N} (exit 0) or
 # {"ok":false,"reason":"<code>"} (exit 2 = refused before Blender ran, 1 = Blender or output failed).
 set -u
@@ -52,6 +54,7 @@ OUT=$(sudo -n systemd-run --uid="$USER_NAME" --gid="$USER_NAME" --wait --pipe --
   -p BindPaths="$JOB" -p BindReadOnlyPaths="$BD" -p BindReadOnlyPaths="$RUNNER_DIR" \
   -p PrivateTmp=yes -p NoNewPrivileges=yes -p MemoryMax=4G -p TasksMax=64 -p RuntimeMaxSec=120 \
   -p CapabilityBoundingSet= -p RestrictAddressFamilies=AF_UNIX \
+  -p PrivateUsers=yes -p TemporaryFileSystem=/run:ro -p TemporaryFileSystem=/dev/shm -p PrivateIPC=yes \
   "$BD/blender" -b --factory-startup --python-exit-code 1 --python "$RUNNER_DIR/blender_job_runner.py" -- "$JOB" \
   </dev/null 2>&1)
 RC=$?
