@@ -7,6 +7,8 @@ import { GLTFLoader } from "./vendor/three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "./vendor/three/examples/jsm/controls/OrbitControls.js";
 
 const MAX_GLB = 50 * 1024 * 1024;
+const PAGE = 0x141414; // model.css --page: the canvas clears to the page colour
+const GROUND = 0x3a3e45;
 const FAIL_TEXT = "Couldn't open this 3D object.";
 const stage = document.getElementById("stage");
 const status = document.getElementById("status");
@@ -48,6 +50,7 @@ function makeRenderer() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setClearColor(PAGE);
     return renderer;
   } catch {
     return null;
@@ -77,13 +80,17 @@ function frame(scene, object, camera, controls, light) {
   controls.update();
   controls.saveState();
 
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(radius * 8, radius * 8), new THREE.ShadowMaterial({ opacity: 0.3 }));
+  // A lit floor disc a shade above the page, so the shadow reads as a darker patch (a bare
+  // ShadowMaterial on the dark canvas was invisible: Mac live run, criterion 37).
+  const floor = new THREE.MeshStandardMaterial({ color: GROUND, roughness: 1, metalness: 0 });
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(radius * 3, 64), floor);
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(sphere.center.x, box.min.y, sphere.center.z);
   ground.receiveShadow = true;
   scene.add(ground);
 
-  light.position.copy(sphere.center).add(new THREE.Vector3(radius * 2, radius * 4, radius * 1.5));
+  // From back-left of the camera, so the shadow falls to the right of the object, in view.
+  light.position.copy(sphere.center).add(new THREE.Vector3(-radius * 1.5, radius * 4, radius * 2));
   light.target.position.copy(sphere.center);
   scene.add(light.target);
   const cam = light.shadow.camera;

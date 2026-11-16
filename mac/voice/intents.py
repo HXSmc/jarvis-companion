@@ -10,6 +10,7 @@ work, plain questions) comes back as an Intent for the turn pipeline.
 
 from __future__ import annotations
 
+import difflib
 import re
 import subprocess
 from dataclasses import dataclass
@@ -447,6 +448,23 @@ def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None
     return None
 
 
+def model_near(text: str, model_names: tuple[str, ...]) -> Intent | None:
+    """A show ask whose name is a speech-to-text near miss of a known object ("bring up the test
+    cue" for test-cube; Mac live run). Only for an utterance that would otherwise be a free answer,
+    a name of two or more words where exactly one word was misheard (one-word asks like "pull up the
+    weather" stay answers whatever the vault holds), at the service's close-match cutoff (0.8)."""
+    m = _MODEL_SHOW_RE.fullmatch(re.sub(r",? please$", "", _clean(text).lower()))
+    if not m or m["three"] or re.search(_3D, m["name"]):
+        return None
+    key = _model_key(m["name"])
+    words = key.split("-")
+    near = [n for n in model_names if len(n.split("-")) == len(words) > 1
+            and sum(a != b for a, b in zip(n.split("-"), words)) == 1]
+    if not difflib.get_close_matches(key, near, n=1, cutoff=0.8):
+        return None
+    return Intent("model_show", m["name"].strip())
+
+
 def _model_key(words: str) -> str:
     """models3d.slugify without the import (same rule): the key model_names holds."""
     out = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w and w not in ("a", "an", "the", "my")]
@@ -597,7 +615,8 @@ def parse(text: str, apps: dict[str, str] | None = None,
         return Intent("open_app", t[5:].strip())
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
-    return Intent("answer", t)
+    near = model_near(text, model_names) if model_names else None  # a misheard name, before a free answer
+    return near or Intent("answer", t)
 
 
 def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:

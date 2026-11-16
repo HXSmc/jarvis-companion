@@ -545,3 +545,177 @@ def test_debug_page_model_row():
     out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True,
                                     check=True, timeout=30).stdout)
     assert out == [["3D object", detail]]
+
+
+# --- round 3: Mac live run fixes ---------------------------------------------------------------------
+
+def test_ready_line_is_audio(monkeypatch, tmp_path, mvault):
+    """O1: the app drops a pushed `say` while the service has a voice, so every out-of-turn 3D line
+    goes out as audio (its caption in `text`); no voice or a failing synth -> the say text."""
+    def synth(text):
+        return b"\x01\x00" * 8, 24000
+    put(mvault, "test-mug")
+    cases = {"ready": ("status: ok\nslug: test-mug\n", "model_ready"),
+             "failed": ("status: failed\nslug: test-mug\n", "model_failed")}
+    for result, key in cases.values():
+        for voice, kind in ((synth, "audio"), (None, "say"), (lambda _t: 1 / 0, "say")):
+            _companion(monkeypatch, tmp_path, _job_handler(result))
+            monkeypatch.setattr(overlay, "JOB_POLL_S", 0)
+            monkeypatch.setattr(overlay, "MODEL_SYNC_POLL_S", 0)
+            pushed = []
+            monkeypatch.setattr(overlay.bus, "publish", lambda k, ev=None: pushed.append(ev))
+            d = make_deps(apps={}, synth=voice)
+            asyncio.run(overlay._job_runner("blender", models3d.blender_job_prompt("test-mug", "a mug"),
+                                            models3d.RESULT_NAME, "b1", d, slug="test-mug"))
+            lines = [ev for ev in pushed if ev.get("type") in ("say", "audio")]
+            assert [(ev["type"], ev["text"]) for ev in lines] == \
+                [(kind, acks.PHRASES[key].format(name="test mug"))], (key, kind)
+            if kind == "audio":
+                assert lines[0]["pcm_b64"] and lines[0]["rate"] == 24000
+    # not synced: the third out-of-turn line takes the same path
+    (mvault / "3D" / "test-mug" / "test-mug.glb").unlink()
+    ticks = iter(range(0, 10**6, 30))
+    _companion(monkeypatch, tmp_path, _job_handler("status: ok\nslug: test-mug\n"))
+    pushed = []
+    monkeypatch.setattr(overlay.bus, "publish", lambda k, ev=None: pushed.append(ev))
+    d = make_deps(apps={}, synth=synth)
+    d.clock = lambda: next(ticks)
+    asyncio.run(overlay._job_runner("blender", models3d.blender_job_prompt("test-mug", "a mug"),
+                                    models3d.RESULT_NAME, "b1", d, slug="test-mug"))
+    assert [(ev["type"], ev["text"]) for ev in pushed] == \
+        [("audio", acks.PHRASES["model_not_synced"].format(name="test mug"))]
+
+
+def test_near_miss_show(mvault):
+    """A misheard name ("test cue" for test-cube; Mac live run) still reaches model_show, but only
+    where the words would otherwise be a free answer: vault names close to fixed words take nothing."""
+    p = intents.parse
+    names = ("jf10d-test-cube", "test-cube")
+    for words in ("Bring up the test cue", "pull up the test cue please", "show me the tst cube"):
+        a = p(words, apps={}, model_names=names)
+        assert a.kind == "model_show", words
+    put(mvault, "jf10d-test-cube", note="---\naliases: [test cube]\n---\n")
+    assert models3d.resolve(str(mvault), "test cue") == "jf10d-test-cube"
+    assert p("bring up the cube", apps={}, model_names=("cubes",)).kind == "answer"  # one word: exact only
+    assert p("bring up the rocket", apps={}, model_names=names).kind == "answer"
+    hostile = ("stopp", "cancl", "cardz", "notez", "weathr", "the-weathr", "clear-it", "the-cards", "picture-of-a-cat",
+               "a-note", "session-to-fix-the-build", "what-time-is-it")
+    for words, kind in {**BASE_KINDS, "stop": "stop", "load stop": "stop", "display cancel": "stop",
+                        "what time is it": "clock", "clear": "clear"}.items():
+        assert p(words, apps={}, model_names=hostile).kind == kind, words
+
+
+def test_show_replaces_model_card(client, mvault):
+    """A second show (or a list) in one conv replaces the conv's last model card instead of stacking."""
+    put(mvault, "test-mug")
+    put(mvault, "pawn")
+    first = cards(turn(client, "pull up the test mug", conv_id="r3"))
+    events = turn(client, "pull up the pawn", conv_id="r3")
+    drops = [ev for ev in events if ev.get("type") == "drop_cards"]
+    assert [d["ids"] for d in drops] == [[first[0]["id"]]] and len(cards(events)) == 1
+    listed = turn(client, "what 3D objects do I have", conv_id="r3")
+    assert [ev["ids"] for ev in listed if ev.get("type") == "drop_cards"] == [[cards(events)[0]["id"]]]
+    other = turn(client, "pull up the test mug", conv_id="r3-other")
+    assert not [ev for ev in other if ev.get("type") == "drop_cards"]
+
+
+def _chrome():
+    import shutil
+    for name in (os.environ.get("CHROME_PATH", ""), "hallmark-chrome", "chromium", "chromium-browser",
+                 "google-chrome"):
+        if name and shutil.which(name):
+            return shutil.which(name)
+    return None
+
+
+def _cube_glb() -> bytes:
+    """A real 1 m cube resting on y=0 (positions, normals, indices), so three.js draws and shadows it."""
+    pos, nor, idx = [], [], []
+    for axis in range(3):
+        for sign in (1, -1):
+            n = [0.0, 0.0, 0.0]
+            n[axis] = float(sign)
+            u, v = [a for a in range(3) if a != axis]
+            base = len(pos)
+            for du, dv in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                p = [0.0, 0.0, 0.0]
+                p[axis], p[u], p[v] = 0.5 * sign, 0.5 * du, 0.5 * dv
+                pos.append((p[0], p[1] + 0.5, p[2]))
+                nor.append(tuple(n))
+            e1 = [pos[base + 1][i] - pos[base][i] for i in range(3)]
+            e2 = [pos[base + 2][i] - pos[base][i] for i in range(3)]
+            cross = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
+            out = sum(cross[i] * n[i] for i in range(3)) > 0
+            idx += [base, base + 1, base + 2, base, base + 2, base + 3] if out else \
+                [base, base + 2, base + 1, base, base + 3, base + 2]
+    pb = b"".join(struct.pack("<3f", *q) for q in pos)
+    nb = b"".join(struct.pack("<3f", *q) for q in nor)
+    ib = b"".join(struct.pack("<H", i) for i in idx)
+    binc = pb + nb + ib + b"\0" * (-len(ib) % 4)
+    doc = {"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+           "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2, "material": 0}]}],
+           "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.2, 0.45, 0.9, 1], "metallicFactor": 0}}],
+           "buffers": [{"byteLength": len(binc)}],
+           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(pb)},
+                           {"buffer": 0, "byteOffset": len(pb), "byteLength": len(nb)},
+                           {"buffer": 0, "byteOffset": len(pb) + len(nb), "byteLength": len(ib)}],
+           "accessors": [{"bufferView": 0, "componentType": 5126, "count": len(pos), "type": "VEC3",
+                          "min": [-0.5, 0, -0.5], "max": [0.5, 1, 0.5]},
+                         {"bufferView": 1, "componentType": 5126, "count": len(nor), "type": "VEC3"},
+                         {"bufferView": 2, "componentType": 5123, "count": len(idx), "type": "SCALAR"}]}
+    j = json.dumps(doc).encode()
+    j += b" " * (-len(j) % 4)
+    body = struct.pack("<I4s", len(j), b"JSON") + j + struct.pack("<I4s", len(binc), b"BIN\0") + binc
+    return b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body
+
+
+def test_model_page_shadow_visible(tmp_path):
+    """Criterion 37 (Mac live run: no ground shadow, every pixel around the cube was 0). The page
+    renders a cube in headless Chromium (software WebGL); the stage must show the page colour, a lit
+    floor and a darker shadow patch on it. Needs a Chromium; skipped without one (CI on macOS)."""
+    import functools
+    import shutil
+    import subprocess
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from PIL import Image
+    chrome = _chrome()
+    if chrome is None:
+        pytest.skip("no Chromium on PATH (set CHROME_PATH)")
+    site = tmp_path / "web"
+    shutil.copytree(ROOT / "mac" / "overlay" / "Resources" / "web", site)
+    build = site / "vendor" / "three" / "build"
+    shutil.copy(build / "three.core.min.js", build / "three.core.js")  # the app's handler maps this name
+    page = site / "model.html"  # a plain http origin: the scratch copy drops the app's meta CSP
+    page.write_text("\n".join(x for x in page.read_text().splitlines() if "Content-Security-Policy" not in x))
+    (site / "data.json").write_text(json.dumps({"slug": "test-cube", "view": "model"}))
+    (site / "object.glb").write_bytes(_cube_glb())
+
+    class Quiet(SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(site)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    shot = tmp_path / "shot.png"
+    try:
+        subprocess.run([chrome, "--no-sandbox", "--headless=new", "--use-angle=swiftshader",
+                        "--enable-unsafe-swiftshader", "--virtual-time-budget=8000", "--window-size=360,300",
+                        f"--user-data-dir={tmp_path / 'profile'}", f"--screenshot={shot}",
+                        f"http://127.0.0.1:{server.server_port}/model.html"],
+                       capture_output=True, timeout=90, check=False)
+    finally:
+        server.shutdown()
+        server.server_close()
+    im = Image.open(shot).convert("RGB")
+    greys = {}
+    for y in range(0, 230):  # the stage, above the Reset view panel
+        for x in range(im.width):
+            r, g, b = im.getpixel((x, y))
+            if abs(r - g) < 8 and abs(g - b) < 10:
+                lum = (r + g + b) // 3
+                greys[lum] = greys.get(lum, 0) + 1
+    page_lum = max(greys, key=greys.get)
+    assert page_lum > 5, "the canvas is black: no floor or shadow can show"
+    floor = sum(n for lum, n in greys.items() if lum >= page_lum + 30)
+    shadow = sum(n for lum, n in greys.items() if page_lum + 10 <= lum <= page_lum + 30)
+    assert floor > 3000 and shadow > 1000, (page_lum, floor, shadow)

@@ -5379,8 +5379,10 @@ def _model_names(text: str) -> tuple[str, ...]:
     return models3d.known_names(_vault()) if _MODEL_SHOW_HINT.search(text) else ()
 
 
-def _push_say(text: str) -> None:
-    bus.publish("hud", _say(text))
+async def _push_spoken(text: str, deps: OverlayDeps) -> None:
+    """A templated line pushed outside a turn: its audio when there is a voice, else the say text.
+    The app drops a pushed `say` while the service has a voice (Mac live run: a silent ready line)."""
+    bus.publish("hud", await _audio(text, deps) or _say(text))
 
 
 async def _blender_done(outcome: str, text: str | None, sid: str, conv_id: str, deps: OverlayDeps,
@@ -5403,7 +5405,7 @@ async def _blender_done(outcome: str, text: str | None, sid: str, conv_id: str, 
     elif outcome == "no_file":
         _job_note("no_summary", sid, "ok", "blender")
     debug_log.note("model3d", _model_detail("failed", slug, reason))
-    _push_say(acks.PHRASES["model_failed"].format(name=name))
+    await _push_spoken(acks.PHRASES["model_failed"].format(name=name), deps)
 
 
 async def _model_sync(slug: str, deps: OverlayDeps) -> None:
@@ -5418,7 +5420,7 @@ async def _model_sync(slug: str, deps: OverlayDeps) -> None:
         if size is not None and size == last:
             ms = round((deps.clock() - t0) * 1000)
             debug_log.note("model3d", _model_detail("ready", slug, "ok", size, ms))
-            _push_say(acks.PHRASES["model_ready"].format(name=models3d.name_of(slug)))
+            await _push_spoken(acks.PHRASES["model_ready"].format(name=models3d.name_of(slug)), deps)
             card = models3d.card(slug, "preview")
             if card:
                 bus.publish("hud", {"type": "card", "card": card})
@@ -5428,7 +5430,7 @@ async def _model_sync(slug: str, deps: OverlayDeps) -> None:
             break
         await asyncio.sleep(MODEL_SYNC_POLL_S)
     debug_log.note("model3d", _model_detail("not_synced", slug, "timeout", 0, round((deps.clock() - t0) * 1000)))
-    _push_say(acks.PHRASES["model_not_synced"].format(name=models3d.name_of(slug)))
+    await _push_spoken(acks.PHRASES["model_not_synced"].format(name=models3d.name_of(slug)), deps)
 
 
 _JOB_DONE = {"watch": _watch_done, "blender": _blender_done}
@@ -5485,8 +5487,12 @@ async def _model_turn(body: TurnBody, intent: intents.Intent, deps: OverlayDeps,
                 key, kind, reason = "model_bad_file", "bad_file", e.reason
     if on_step:
         on_step("model3d", detail=_model_detail(kind, slug, reason, size, round((deps.clock() - t0) * 1000)))
-    if card:
-        yield {"type": "card", "card": card}
+    if card:  # a new show or list replaces this conv's last model card instead of stacking
+        drop = _drop_cards(body.conv_id, "model")
+        if drop:
+            yield drop
+        _card_ids.setdefault(body.conv_id, set()).add(card["id"])
+        yield _keep_card(body.conv_id, "model", card)
     if key:
         async for ev in _line(key, deps):
             yield ev
