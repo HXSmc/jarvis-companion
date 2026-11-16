@@ -310,7 +310,7 @@ ASKS = [
     # round 2 (security finding 2): the automount points make a plain look-up contact a host
     ("ls /net/data.evil.example", "network"), ("cat /NET/h/x", "network"), ("ls //net/h", "network"),
     ("stat /Network/Servers/h", "network"), ("head -c1 /net", "network"), ("cat -v/net/h/x", "network"),
-    ("ls SCRATCH/../../../../../../../../net/h", "network"), ("/net/h/bin/tool", "network"),
+    ("ls SCRATCH/" + "../" * 30 + "net/h", "network"), ("/net/h/bin/tool", "network"),  # any tmp depth
     ("ls --color=/net/h", "network"), ("ln -s /net/h SCRATCH/l", "network"),
     # round 2 (security finding 4): more stock senders
     ("ssh-keyscan h", "network"), ("whois x", "network"), ("traceroute h", "network"),
