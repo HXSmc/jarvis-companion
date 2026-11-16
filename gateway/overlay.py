@@ -3217,6 +3217,9 @@ def _look_miss_line(g: dict, conv_id: str, spoke: bool, text: str) -> str | None
     return "I can't see it on screen." if missed is None else NO_PIN_LINE
 
 
+OWNER_VIDEO_RE = re.compile(r"\b(?:videos?|clips?|youtube)\b", re.IGNORECASE)
+
+
 def _note_found_video(conv_id: str, card: dict) -> None:
     """jfollow10b: "the video" / "watch it" refer only to a video the service found (find_video).
     A model-written youtube_id card never sets it: a web page could pick the video a job ingests."""
@@ -3438,7 +3441,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         card, miss_line, _result = await _media_result(lookup, video_lookup)
         if card:
             _index_card(body.conv_id, card)  # Mac live run 5 (37b): a picture can be enlarged too
-            _note_found_video(body.conv_id, card)
+            # R2 security 1: a page can steer the model's query, never the owner's words.
+            if OWNER_VIDEO_RE.search(owner_text if owner_text is not None else body.text):
+                _note_found_video(body.conv_id, card)
             yield {"type": "card", "card": card}
             return
         async for ev in _speak(miss_line, deps):

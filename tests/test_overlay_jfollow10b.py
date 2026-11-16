@@ -858,6 +858,28 @@ def test_model_written_video_never_picks_the_job(client, monkeypatch, tmp_path):
         t.cancel()
 
 
+def test_model_video_search_without_owner_video_ask_never_picks_the_job(client, monkeypatch, tmp_path):
+    """Round 2 security 1: a model video_search the owner never asked for (a fetched page could
+    steer its query) shows the card but never becomes "the video": no job, no Confirm bypass."""
+    from mac.voice import media_lookup
+    seen = _companion(monkeypatch, tmp_path, lambda r: httpx.Response(200, json={"session_id": "s1"}))
+    monkeypatch.setattr(youtube, "transcript", lambda vid: "captions")
+    monkeypatch.setattr(media_lookup, "find_video",
+                        lambda q: ({"type": "video", "title": "Explainer", "youtube_id": "ZZZZZZZZZZZ"}, "ok"))
+    deps_with(lines({"say": "Fusion is progressing."}, {"video_search": {"query": "zqx fusion explainer"}}))
+    events = turn(client, "what's the latest on fusion power", conv_id="m3")
+    assert [c["type"] for c in cards(events)] == ["video"]
+    assert "m3" not in overlay._last_video
+    overlay._tainted.add("m3")
+    overlay._auto_tainted.add("m3")
+    deps_with()
+    for words in ("summarise it", "watch it"):
+        assert says(turn(client, words, conv_id="m3")) == [acks.PHRASES["video_which"]], words
+    assert seen == [] and not steps("agent_confirm")
+    for t in list(overlay._jobs):
+        t.cancel()
+
+
 def test_video_ask_says_if_slow(client, monkeypatch):
     """Round 1 UX 1: a slow captions + model answer is not silent past FEEDBACK_S."""
     _video_conv(client)
