@@ -805,3 +805,37 @@ def test_web_handover_alone_sets_no_mark(client, auto_on):
                        conversations=FakeConversations(['{"agent": true}\n']))
     turn(client, "how much disk is free on this mac", conv_id="w3")
     assert deps.conversations.sessions and "w3" not in overlay._auto_tainted
+
+
+def test_colon_list_pieces_are_checked(ctx, auto_on):
+    """Round 2 fix (security finding 1): `file -m` takes a colon list of magic files and prints the
+    lines it cannot parse. Each piece of a colon list goes through the network, guard and secret rows,
+    and a `file` that reads a named list (-m, --magic-file, -C, -f) is not a plain look-up."""
+    gh = f"{ctx.home}/.config/gh/hosts.yml"
+    for command, code in ((f"file -m x:{gh} n", "secret"),
+                          (f"file -m x:{_support('token')} n", "guard"),
+                          ("file -m x:/net/h/m n", "network"),
+                          ("file '--magic-file=x:/net/h/m' n", "network"),
+                          ("file '-m/usr/share/file/magic.mgc:/net/h/m' n", "network")):
+        assert auto_policy.classify(command, ctx) == ("asked", code), command
+        for tainted in (False, True):
+            assert auto_policy.verdict(command, ctx, tainted=tainted, barge=False, gate_ok=True) == (
+                "asked", code), (command, tainted)
+    for command in ("file -m x n", "file --magic-file=x n", "file -C", "file -f names", "file -bm x n"):
+        assert not auto_policy.read_only(command), command
+    assert auto_policy.read_only("file -b notes.md")
+    assert auto_policy.verdict("file -m x n", ctx, tainted=True, barge=False, gate_ok=True) == (
+        "asked", "untrusted")
+
+
+def test_data_volume_alias_of_home_asks(ctx, auto_on):
+    """Round 2 fix (security finding 2): on macOS /System/Volumes/Data/Users/... is the same file as
+    /Users/... (a firmlink realpath does not fold), so the secret and guard rows also check the path
+    with that prefix removed."""
+    data = "/System/Volumes/Data"
+    for command, code in ((f"cat '{data}{ctx.home}/.config/gh/hosts.yml'", "secret"),
+                          (f"cat '{data.lower()}{ctx.home}/.config/gh/hosts.yml'", "secret"),
+                          ("cat " + shlex.quote(data + str(auto_policy.SETTINGS_FILE.parent / "token")), "guard")):
+        for tainted in (False, True):
+            assert auto_policy.verdict(command, ctx, tainted=tainted, barge=False, gate_ok=True) == (
+                "asked", code), (command, tainted)

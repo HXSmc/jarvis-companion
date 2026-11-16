@@ -78,6 +78,7 @@ NETWORK_PREFIXES = ("mount_",)
 # Round 2: the macOS automount points. Any look-up of a path under them contacts the named host, so a
 # path there is a send (and is never resolved here). Compared case-folded: APFS is case-insensitive.
 NET_ROOTS = ("/net", "/network", "/system/volumes/data/net", "/system/volumes/data/network")
+DATA_VOLUME = "/system/volumes/data"  # compared case-folded, like NET_ROOTS
 GIT_AUTO = frozenset({"add", "commit", "fetch", "stash"})
 STASH_AUTO = frozenset({"push", "list", "show"})
 GUARD = frozenset({"launchctl", "defaults", "kill", "killall", "pkill", "tccutil", "csrutil", "spctl",
@@ -147,14 +148,16 @@ def _attached(a: str) -> str | None:
 
 
 def _values(argv: list[str]) -> list[str]:
-    """Every argument and every option-attached value: the strings that may name a file."""
+    """Every argument and every option-attached value: the strings that may name a file. A value with a
+    colon also gives each piece: `file -m a:b` reads every file in the list (round 2)."""
     out = []
     for a in argv[1:]:
-        out.append(a)
+        vals = [a]
         if a.startswith("-") and "=" in a:
-            out.append(a.split("=", 1)[1])
+            vals.append(a.split("=", 1)[1])
         elif (v := _attached(a)) is not None:
-            out.append(v)
+            vals.append(v)
+        out += vals + [p for v in vals if ":" in v for p in v.split(":") if p]
     return out
 
 
@@ -207,10 +210,15 @@ def _resolve(tok: str, ctx: agent_policy.Ctx, base: str | None = None) -> str:
 
 def _places(tok: str, ctx: agent_policy.Ctx) -> list[str]:
     """Where a path may point: relative ones against the scratch dir AND home, since the shell's
-    working directory is not ours to know once any cd ran (fail closed)."""
+    working directory is not ours to know once any cd ran (fail closed). A path on the macOS data
+    volume (/System/Volumes/Data/Users/...) is also checked without that prefix: a firmlink makes it
+    the same file, and realpath does not fold it (round 2)."""
     if os.path.isabs(os.path.expanduser(tok)) or tok.startswith("~"):
-        return [_resolve(tok, ctx)]
-    return [_resolve(tok, ctx), _resolve(tok, ctx, ctx.home)]
+        places = [_resolve(tok, ctx)]
+    else:
+        places = [_resolve(tok, ctx), _resolve(tok, ctx, ctx.home)]
+    return places + [os.path.realpath(p[len(DATA_VOLUME):] or "/") for p in places
+                     if _under(p.casefold(), DATA_VOLUME)]
 
 
 def _net(tok: str, ctx: agent_policy.Ctx) -> bool:
@@ -359,7 +367,16 @@ def classify(command, ctx: agent_policy.Ctx) -> tuple[str, str]:
 def read_only(command) -> bool:
     """Every part is a plain look-up (READ_ONLY): may run auto after untrusted text."""
     argvs = _parts(command)
-    return argvs is not None and all(_base(a) in READ_ONLY for a in argvs)
+    return argvs is not None and all(_base(a) in READ_ONLY and not _file_reads_list(a) for a in argvs)
+
+
+def _file_reads_list(argv: list[str]) -> bool:
+    """`file` with -m/--magic-file (prints the lines of magic files it cannot parse), -C or -f (reads
+    names from a file): not a plain look-up (round 2)."""
+    return _base(argv) == "file" and any(
+        a.startswith(("--magic-file", "--compile", "--files-from"))
+        or (a.startswith("-") and not a.startswith("--") and any(c in a[1:] for c in "mCf"))
+        for a in argv[1:])
 
 
 def marks(command) -> bool:
