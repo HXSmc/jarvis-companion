@@ -46,12 +46,12 @@ def https_origin(raw: str | None, port: int | None = None) -> str | None:
     if not raw or any(c in raw for c in "?# \t\\"):
         return None
     try:
-        parts = urllib.parse.urlsplit(raw)
-        own_port = parts.port  # ValueError on a non-numeric or out-of-range port
+        split = urllib.parse.urlsplit(raw)
+        own_port = split.port  # ValueError on a non-numeric or out-of-range port
     except ValueError:
         return None
-    host = parts.hostname or ""
-    if (parts.scheme != "https" or "@" in parts.netloc or parts.path not in ("", "/")
+    host = split.hostname or ""
+    if (split.scheme != "https" or "@" in split.netloc or split.path not in ("", "/")
             or not _HOST.fullmatch(host)):
         return None
     port = port if port is not None else own_port
