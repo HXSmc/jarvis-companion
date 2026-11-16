@@ -19,6 +19,8 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
       video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
              .mp4/.mov/.m4v (no HLS), thumbnail_url? (file urls only), source_page?;
              no usable media -> link card on source_page/url, else dropped
+      web:   page: one of WEB_PAGES ("map"), data: that page's validated JSON. Service-only: dropped
+             unless the caller passes allow_web=True (model, agent, workspace and fast-tier cards never do)
     hud   = {shapes: [shape], cards: [card]}
 """
 
@@ -30,7 +32,7 @@ import uuid
 from urllib.parse import parse_qs, urlsplit
 
 SHAPE_KINDS = ("rect", "circle", "triangle")
-CARD_TYPES = ("info", "stat", "bar", "flow", "link", "image", "video")
+CARD_TYPES = ("info", "stat", "bar", "flow", "link", "image", "video", "web")
 
 MAX_LABEL = 40
 MAX_TITLE = 60
@@ -306,13 +308,81 @@ def _video(raw: dict, out: dict) -> dict | None:
     return _link_fallback(out, link)
 
 
+MAP_ATTRIBUTION = "© OpenStreetMap contributors"
+MAX_ROUTES = 3
+MAX_ROUTE_POINTS = 300
+MAX_PINS = 2
+
+
+def _coord(lat, lon) -> list[float] | None:
+    """[lat, lon] rounded to 5 decimals, or None when not two in-range finite numbers."""
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (lat, lon)):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    return [round(float(lat), 5), round(float(lon), 5)]
+
+
+def _amount(value) -> float | None:
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    return round(float(value), 1) if ok else None
+
+
+def _map_data(raw) -> dict | None:
+    """The map page's data: <= 3 routes of <= 300 in-range points, <= 2 pins, the fixed attribution.
+    Labels are plain text (the page puts them in with textContent only)."""
+    if not isinstance(raw, dict):
+        return None
+    routes = []
+    for r in raw["routes"] if isinstance(raw.get("routes"), list) else []:
+        if not isinstance(r, dict) or not isinstance(r.get("points"), list):
+            continue
+        pts = [c for c in (_coord(*p) if isinstance(p, (list, tuple)) and len(p) == 2 else None
+                           for p in r["points"][:MAX_ROUTE_POINTS]) if c]
+        km, mins = _amount(r.get("km")), _amount(r.get("min"))
+        if len(pts) < 2 or km is None or mins is None:
+            continue
+        routes.append({"points": pts, "km": km, "min": mins})
+        if len(routes) == MAX_ROUTES:
+            break
+    pins = []
+    for p in raw["pins"] if isinstance(raw.get("pins"), list) else []:
+        c = _coord(p.get("lat"), p.get("lon")) if isinstance(p, dict) else None
+        if c:
+            pins.append({"lat": c[0], "lon": c[1], "label": _text(p.get("label"), MAX_LABEL)})
+        if len(pins) == MAX_PINS:
+            break
+    if not routes and not pins:
+        return None
+    return {"routes": routes, "pins": pins, "attribution": MAP_ATTRIBUTION}
+
+
+# The bundled pages a web card may name -> their data validator. Adding a page: the files under
+# mac/overlay/Resources/web/, one entry in WebCardPolicy.resources (Swift), one validator here.
+WEB_PAGES = {"map": _map_data}
+
+
+def _web(raw: dict, out: dict) -> dict | None:
+    page = raw.get("page")
+    if not isinstance(page, str) or page not in WEB_PAGES:
+        return None
+    data = WEB_PAGES[page](raw.get("data"))
+    if data is None:
+        return None
+    out["page"], out["data"] = page, data
+    return out
+
+
 _CARD_BODY = {"info": _info, "stat": _stat, "bar": _bar, "flow": _flow, "link": _link,
-              "image": _image, "video": _video}
+              "image": _image, "video": _video, "web": _web}
 
 
-def validate_card(raw) -> dict | None:
-    """One card or None. Unknown types and unsafe URLs are dropped; text is clamped."""
+def validate_card(raw, allow_web: bool = False) -> dict | None:
+    """One card or None. Unknown types and unsafe URLs are dropped; text is clamped. A `web` card
+    is kept only when service code passes allow_web=True: a model can never name a web card."""
     if not isinstance(raw, dict) or raw.get("type") not in CARD_TYPES:
+        return None
+    if raw["type"] == "web" and not allow_web:
         return None
     title = _text(raw.get("title"), MAX_TITLE)
     if not title:
@@ -321,7 +391,7 @@ def validate_card(raw) -> dict | None:
     return _CARD_BODY[raw["type"]](raw, out)
 
 
-def validate_hud(msg) -> dict:
+def validate_hud(msg, allow_web: bool = False) -> dict:
     """{shapes, cards} -> same shape with every invalid entry dropped (never raises)."""
     if not isinstance(msg, dict):
         return {"shapes": [], "cards": []}
@@ -329,7 +399,7 @@ def validate_hud(msg) -> dict:
     cards = msg.get("cards") if isinstance(msg.get("cards"), list) else []
     return {
         "shapes": [s for s in map(validate_shape, shapes) if s][:MAX_SHAPES],
-        "cards": [c for c in map(validate_card, cards) if c][:MAX_CARDS],
+        "cards": [c for c in (validate_card(c, allow_web) for c in cards) if c][:MAX_CARDS],
     }
 
 
@@ -411,6 +481,27 @@ def schema_json() -> dict:
                         "url": https, "thumbnail_url": https, "source_page": https,
                     }, []),
                      "anyOf": [{"required": ["youtube_id"]}, {"required": ["url"]}]},
+                    card("web", {"page": {"enum": list(WEB_PAGES)}, "data": {
+                        "type": "object",
+                        "properties": {
+                            "routes": {"type": "array", "maxItems": MAX_ROUTES, "items": {
+                                "type": "object",
+                                "properties": {
+                                    "points": {"type": "array", "minItems": 2, "maxItems": MAX_ROUTE_POINTS,
+                                               "items": {"type": "array", "items": {"type": "number"},
+                                                         "minItems": 2, "maxItems": 2}},
+                                    "km": {"type": "number", "minimum": 0},
+                                    "min": {"type": "number", "minimum": 0}},
+                                "required": ["points", "km", "min"], "additionalProperties": False}},
+                            "pins": {"type": "array", "maxItems": MAX_PINS, "items": {
+                                "type": "object",
+                                "properties": {"lat": {"type": "number", "minimum": -90, "maximum": 90},
+                                               "lon": {"type": "number", "minimum": -180, "maximum": 180},
+                                               "label": _str(MAX_LABEL)},
+                                "required": ["lat", "lon", "label"], "additionalProperties": False}},
+                            "attribution": {"const": MAP_ATTRIBUTION}},
+                        "required": ["routes", "pins", "attribution"], "additionalProperties": False}},
+                        ["page", "data"]),
                 ]
             },
         },

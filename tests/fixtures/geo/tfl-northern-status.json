@@ -1,0 +1,13 @@
+[
+ {
+  "id": "northern",
+  "name": "Northern",
+  "lineStatuses": [
+   {
+    "statusSeverity": 9,
+    "statusSeverityDescription": "Minor Delays",
+    "reason": "Northern Line: Minor delays due to train cancellations. "
+   }
+  ]
+ }
+]

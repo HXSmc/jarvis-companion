@@ -1,0 +1,123 @@
+[
+ {
+  "id": "bakerloo",
+  "name": "Bakerloo",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "central",
+  "name": "Central",
+  "lineStatuses": [
+   {
+    "statusSeverity": 9,
+    "statusSeverityDescription": "Minor Delays",
+    "reason": "Central Line: Minor delays between White City and Ealing Broadway/West Ruislip and between Leytonstone and Epping/Hainault via Newbury Park due to train cancellations. GOOD SERVICE on the rest of the line. "
+   }
+  ]
+ },
+ {
+  "id": "circle",
+  "name": "Circle",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "district",
+  "name": "District",
+  "lineStatuses": [
+   {
+    "statusSeverity": 9,
+    "statusSeverityDescription": "Minor Delays",
+    "reason": "District Line: Minor delays due to train cancellations. "
+   }
+  ]
+ },
+ {
+  "id": "hammersmith-city",
+  "name": "Hammersmith & City",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "jubilee",
+  "name": "Jubilee",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "metropolitan",
+  "name": "Metropolitan",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "northern",
+  "name": "Northern",
+  "lineStatuses": [
+   {
+    "statusSeverity": 9,
+    "statusSeverityDescription": "Minor Delays",
+    "reason": "Northern Line: Minor delays due to train cancellations. "
+   }
+  ]
+ },
+ {
+  "id": "piccadilly",
+  "name": "Piccadilly",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "victoria",
+  "name": "Victoria",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ },
+ {
+  "id": "waterloo-city",
+  "name": "Waterloo & City",
+  "lineStatuses": [
+   {
+    "statusSeverity": 10,
+    "statusSeverityDescription": "Good Service",
+    "reason": ""
+   }
+  ]
+ }
+]

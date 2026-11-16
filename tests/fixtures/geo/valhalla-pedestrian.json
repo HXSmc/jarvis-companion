@@ -1,0 +1,121 @@
+{
+ "trip": {
+  "summary": {
+   "time": 2002.418,
+   "length": 5.581
+  },
+  "legs": [
+   {
+    "shape": "}pxfaB`eyFkA_BlCgPZ_K~@]xHqCx@aAb@g@\\_@r@y@r@w@|A}D\\{B^gBf@kCJiCpD_A|@bA`@XtBiLjB}FPeAr@sHjFcg@rC}WzAwNTsBTwBdAyJdLwfA`CcHhAsM~@_JnAoKtBePlBiBpAs@O_AB}Al@y@\\uBf@aDJc@pCxADOJe@P}@TkA_MeHeUiPyHuFn@aDsIgGVmAlBsJnCnBb@eChgI`pBgfB_xAmjCucBiyDu~DcuAypVdBkkH~p@ocJvaAmcKf]y~H|jA}lNhWmjBcBqBkLwGi@]kAbFg@~DAhCn@|LYhNuFtQQf@qCvBaD?{F}AaCeAm@YgA]gHeEQfA}EiBEdAE|@|DrAzAvCtEnB~JbGdf@tYbHnEjDpBtQrK",
+    "maneuvers": [
+     {
+      "street_names": [
+       "Trafalgar Square"
+      ],
+      "length": 0.005
+     },
+     {
+      "street_names": [
+       "Trafalgar Square"
+      ],
+      "length": 0.034
+     },
+     {
+      "street_names": [
+       "Trafalgar Square"
+      ],
+      "length": 0.026
+     },
+     {
+      "street_names": [],
+      "length": 0.038
+     },
+     {
+      "street_names": [],
+      "length": 0.01
+     },
+     {
+      "street_names": [],
+      "length": 0.006
+     },
+     {
+      "street_names": [
+       "Northumberland Avenue",
+       "A400"
+      ],
+      "length": 0.316
+     },
+     {
+      "street_names": [
+       "Northumberland Avenue",
+       "A400"
+      ],
+      "length": 0.012
+     },
+     {
+      "street_names": [],
+      "length": 0.004
+     },
+     {
+      "street_names": [],
+      "length": 0.029
+     },
+     {
+      "street_names": [
+       "Victoria Embankment"
+      ],
+      "length": 0.09
+     },
+     {
+      "street_names": [],
+      "length": 0.027
+     },
+     {
+      "street_names": [],
+      "length": 0.031
+     },
+     {
+      "street_names": [],
+      "length": 4.557
+     },
+     {
+      "street_names": [],
+      "length": 0.036
+     },
+     {
+      "street_names": [],
+      "length": 0.127
+     },
+     {
+      "street_names": [],
+      "length": 0.018
+     },
+     {
+      "street_names": [],
+      "length": 0.003
+     },
+     {
+      "street_names": [
+       "Tower Bridge Approach"
+      ],
+      "length": 0.013
+     },
+     {
+      "street_names": [],
+      "length": 0.004
+     },
+     {
+      "street_names": [
+       "A100"
+      ],
+      "length": 0.194
+     },
+     {
+      "street_names": [],
+      "length": 0.0
+     }
+    ]
+   }
+  ]
+ }
+}

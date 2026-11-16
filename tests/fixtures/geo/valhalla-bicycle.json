@@ -1,0 +1,103 @@
+{
+ "trip": {
+  "summary": {
+   "time": 955.675,
+   "length": 4.723
+  },
+  "legs": [
+   {
+    "shape": "kxwfaBnmyFx@Ch@AlACGsCWgG]cKWuBSsB}CoMs@eDwBiH}@wGkA{DmCaF_GgNsDaJ{G}QoGcNaByCaDoGwC{GaBoDm@sA{@qB_A{BkE_Km@qA{KgYePs`@q@eB_CoG}Pgc@qFePaByEkHcSuLy_@mDyLsBsGaDqK{@}CoFmRiAcEwJi^aJw\\kD{Lk@{BeAaEgBqGg@sBaAcD_@sABmIaAeCu@{AlCiCx@i@~AgADCdH}EpPoL`JcHnEiDrAqClGcFr`@{[d`@}\\brC}`CtN{LjGqCbYqVza@y]pAqAhDwCbEoEzBuCd@{@Xe@|@mBt@uChBgNCcDOsC_@{C[oB]wAk@uBo@_Cm@uGcCeJkGsUm@wBqKg`@o@}B]sA{BwI_CqIa@yAm@wBoVe~@mJu]gBmH_Kg]yAgFiBsGcE_OkBgHcAyEs@iFsGkl@Gq@S}BaBkTIuBKuF?qHAsHIyN?q@D{O?aB?mBDwJ?W?w@D_JHgWcA{F@}E@iB@{BB_DBaD^cGvA_Ht@iCbAaD~AgD~B_@p@qAdCkH`@oAt@_Cv@_ClC_KnAwEd@eBhBkHt@{C`Iu\\\\_BnAcG`BaI`@qBj@sCxDoRpKui@f@oCTqAjA}GtAgIRsAb@iChKut@NeA^eC\\eCfIwk@`@uDtDa^VeC~CwZXoCTeCrAoNrAaMtBiTn@_Hn@cHjBuYX{DJ{An@mM`@eJFuAPuDhA_XHaBZqHRcFl@}OPoEJ}BJ_DToFPgG~Bcr@@oAPwZB{HAs\\MaV[eVk@kOiAeBwAmQgAcNMoCQ_KeBwFI}BeC{D}BmDa@q@iBKMQi@w@eBiCsE{FaAoAC_EKOyD_FgEkAmDkDgDwEg@q@iCkDyC{CcFoEmAeA_A{@e@a@]}@Yo@Sc@_@o@[m@[m@K_@EYA_@JqCr@eEx@gGFi@R_BTwBPiB`Ead@Fu@zAoOr@mHfA}MXkDXqDTgDp@oI\\oDTaCNeAt@mEdA{EzAkG`DmMzDeMlGiR|DaMpAcEvAqE|AaFbEyLbD}J|AkEbCoH|@oC|@qCt@yB|AyEzBqGZgA`CwIh@oC^iBX{APw@dAcFvBgKd@{BrBuJx@cEv@qDf@cBv@aCjAsDVu@lCqIdAsCxAwDx@eCdDoJ~@oCx@cCxF}Q`AqEb@uB|@yFp@gE|@qFvAwIdAuGNeARqAv@}E`BwHdByGt@wCr@sCr@qCpAuE|@kDfEuOp@iCzEyQgA}BQc@WoAWoBHwB|@wCpAsIT}AdAuH~BgPVeBRaBp@wHaG{DgAiAcBoCIEGCECCAsHiE_Q{JoHeEgCyAcB^cAm@aAk@k@iCkVqN_k@q\\qHmEyBqAmDqByQuK",
+    "maneuvers": [
+     {
+      "street_names": [],
+      "length": 0.008
+     },
+     {
+      "street_names": [
+       "Trafalgar Square",
+       "A4"
+      ],
+      "length": 0.028
+     },
+     {
+      "street_names": [
+       "Charing Cross"
+      ],
+      "length": 0.008
+     },
+     {
+      "street_names": [
+       "A4"
+      ],
+      "length": 0.73
+     },
+     {
+      "street_names": [
+       "Lancaster Place",
+       "A301"
+      ],
+      "length": 0.108
+     },
+     {
+      "street_names": [
+       "Lancaster Place"
+      ],
+      "length": 0.024
+     },
+     {
+      "street_names": [
+       "Waterloo Bridge"
+      ],
+      "length": 0.66
+     },
+     {
+      "street_names": [],
+      "length": 0.018
+     },
+     {
+      "street_names": [
+       "A3200"
+      ],
+      "length": 1.739
+     },
+     {
+      "street_names": [
+       "Borough High Street",
+       "A3"
+      ],
+      "length": 0.081
+     },
+     {
+      "street_names": [
+       "A3"
+      ],
+      "length": 0.098
+     },
+     {
+      "street_names": [
+       "A200"
+      ],
+      "length": 0.798
+     },
+     {
+      "street_names": [
+       "Queen Elizabeth Street",
+       "A200"
+      ],
+      "length": 0.092
+     },
+     {
+      "street_names": [
+       "A100"
+      ],
+      "length": 0.33
+     },
+     {
+      "street_names": [],
+      "length": 0.0
+     }
+    ]
+   }
+  ]
+ }
+}

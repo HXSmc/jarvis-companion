@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -387,7 +387,8 @@ def _form_hit(rx: re.Pattern, low: str) -> re.Match | None:
 
 
 def _fast_intent(text: str, apps: dict[str, str] | None,
-                 ws_names: tuple[str, ...], last: bool = False) -> Intent | None:
+                 ws_names: tuple[str, ...], last: bool = False,
+                 place_names: tuple[str, ...] = ()) -> Intent | None:
     """Every fixed fast-path kind for one utterance form; None = this form matches none.
     `last` (the last-sentence pass) skips clock and hunk: those stay whole-utterance
     ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
@@ -416,6 +417,13 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         return Intent("auto_mode", "on")
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
+    if not last:  # jfollow10b: whole-utterance kinds, before workspace and open
+        geo = geo_request(text, place_names)
+        if geo:
+            return Intent(geo.kind, geo.b or geo.a, geo.mode)
+        vid = video_request(text)
+        if vid:
+            return Intent(vid.kind, vid.question, vid.video_id)
     ask = workspace_request(text, ws_names)
     # An installed app or a site wins over a saved name sharing a word ("open notes").
     # "delete the cat card" is a card ask even when a saved name shares the words; a saved
@@ -457,7 +465,8 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
 
 
 def parse(text: str, apps: dict[str, str] | None = None,
-          workspace_names: tuple[str, ...] | None = None) -> Intent:
+          workspace_names: tuple[str, ...] | None = None,
+          place_names: tuple[str, ...] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
     Fast-path kinds run on the whole text, then once more on its last sentence
@@ -468,7 +477,7 @@ def parse(text: str, apps: dict[str, str] | None = None,
     """
     forms = fast_forms(text)
     for i, form in enumerate(forms):
-        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0)
+        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or ())
         if intent is not None:
             return intent
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
@@ -861,10 +870,11 @@ KIND_WORDS: dict[str, frozenset[str]] = {
     "figure": frozenset({"stat"}),
     "link": frozenset({"link"}), "links": frozenset({"link"}),
     "clip": frozenset({"video"}), "clips": frozenset({"video"}),
+    "map": frozenset({"web"}), "maps": frozenset({"web"}),  # jfollow10b (soft)
 }
 # The jfollow9 additions: kind words too weak to make "close the notes" a card remove.
 _SOFT_KIND_WORDS = frozenset({"note", "notes", "text", "info", "summary", "stat", "stats",
-                              "number", "figure", "link", "links", "clip", "clips"})
+                              "number", "figure", "link", "links", "clip", "clips", "map", "maps"})
 # Words that never name a card: pointers and politeness around the real words.
 _CARD_FILLERS = frozenset({"the", "a", "an", "that", "this", "these", "those", "my", "one",
                            "card", "please", "it"})
@@ -1432,3 +1442,146 @@ def sessions_followup(text: str) -> bool:
     """True when a reply right after a sessions answer is still about sessions (pure, no state)."""
     low = _clean(text).lower().replace(",", "")
     return bool(_FOLLOW_SESSIONS_RE.search(low)) and not _FOLLOW_VERB_RE.search(low)
+
+
+
+# --- jfollow10b: show, don't link; maps, roads, TfL, saved places, YouTube questions ------------------
+
+_LINK_WORDS_RE = re.compile(r"\b(?:links?|url|web ?site|webpage|web page|open it|open that|in the browser)\b", re.I)
+
+
+def wants_link(text: str) -> bool:
+    """The owner's own words ask for a link, a URL or a website, or to open it."""
+    return bool(_LINK_WORDS_RE.search(text or ""))
+
+
+@dataclass
+class GeoAsk:
+    kind: str       # geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget
+    a: str = ""     # from-place words ("" = home), or the place text to save
+    b: str = ""     # to-place words, or the saved name
+    mode: str = ""  # transit_next: bus | tube; transit_status: line id or "tube"
+
+
+_SHOW = r"(?:(?:show me|give me|pull up|get me|bring up|show) )?(?:a |the )?"
+_GEO_MAP_RES = (
+    re.compile(_SHOW + r"(?:map|route|directions)(?: from (?P<a>.+?))? to (?P<b>.+)"),
+    re.compile(_SHOW + r"map of (?P<a>.+)"),
+    re.compile(r"how do i get(?: from (?P<a>.+?))? to (?P<b>.+)"),
+)
+_GEO_ROADS_RE = re.compile(r"(?:(?:what|which)(?: are the)? (?:roads|routes)(?: (?:could|can|should) i take)?"
+                           r"|what are the roads i (?:could|can|should) take)(?: to (?P<b>.+))?")
+_TRANSIT_NEXT_RES = (
+    re.compile(r"when(?:'s| is) the next (?P<mode>bus|tube|train|underground)(?: (?:from|near|at) (?P<a>.+))?"),
+    re.compile(r"(?:the )?next (?P<mode>bus|tube|train)(?: times)?(?: (?:from|near|at) (?P<a>.+))?"),
+)
+_TRANSIT_STATUS_RES = (
+    re.compile(r"is the (?P<line>[a-z& ]{2,30}?) line (?:running|working|ok|okay|on time)"),
+    re.compile(r"(?:are there )?any (?:delays|problems) on the (?:tube|underground)"),
+    re.compile(r"(?:what's the |what is the )?tube status"),
+)
+_TRANSIT_JOURNEY_RES = (
+    re.compile(r"which bus (?:do i|should i|can i) (?:take|get|catch)(?: from (?P<a>.+?))? to (?P<b>.+)"),
+    re.compile(r"which bus(?: goes)? to (?P<b>.+)"),
+    re.compile(r"how do i get(?: from (?P<a>.+?))? to (?P<b>.+?) by (?:bus|tube|public transport|train)"),
+)
+_PLACE_SAVE_RE = re.compile(r"save (?P<a>.+?) as (?:my |the )?(?P<n>[a-z0-9' ]{1,24})")
+_PLACE_FORGET_RE = re.compile(r"forget (?:my|the) (?P<n>[a-z0-9' ]{1,24}?)(?: (?P<w>place|address|location))?")
+_PLACE_SAVE_BLOCKED = frozenset({"this", "these", "them", "everything", "the cards", "the pages", "it", "that"})
+_HOME_WORDS = frozenset({"house", "home", "place", "flat", "my house", "my home", "my place", "my flat"})
+# Fixed TfL tube line ids: "the purple line" names none, so no call is made.
+TUBE_LINES = {
+    "bakerloo": "bakerloo", "central": "central", "circle": "circle", "district": "district",
+    "hammersmith and city": "hammersmith-city", "hammersmith & city": "hammersmith-city",
+    "jubilee": "jubilee", "metropolitan": "metropolitan", "northern": "northern",
+    "piccadilly": "piccadilly", "victoria": "victoria", "waterloo and city": "waterloo-city",
+    "waterloo & city": "waterloo-city", "elizabeth": "elizabeth",
+}
+
+
+def place_name(words: str) -> str:
+    """Spoken place words -> a saved-place key: "my" or "the" off; house, home, my place, flat -> home."""
+    w = " ".join((words or "").lower().replace("’", "'").split()).strip(" .,?!")
+    if w in _HOME_WORDS:
+        return "home"
+    w = re.sub(r"^(?:my|the|our) ", "", w)
+    return "home" if w in _HOME_WORDS else w
+
+
+def geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
+    """A whole-utterance map / roads / TfL / saved-place ask, or None. Fixed code, owner words only."""
+    if len(text) > 300:
+        return None
+    low = _clean(text).lower().replace(",", "")
+    m = _form_hit(_PLACE_SAVE_RE, low)
+    if m and m["a"].strip() not in _PLACE_SAVE_BLOCKED and not m["a"].startswith(("these ", "this ", "them ")):
+        return GeoAsk("place_save", m["a"].strip(), place_name(m["n"]))
+    m = _form_hit(_PLACE_FORGET_RE, low)
+    if m and (m["w"] or place_name(m["n"]) in place_names):
+        return GeoAsk("place_forget", "", place_name(m["n"]))
+    for rx in _TRANSIT_JOURNEY_RES:  # before map: "how do I get to X by bus" is a journey
+        m = _form_hit(rx, low)
+        if m:
+            return GeoAsk("transit_journey", (m.groupdict().get("a") or "").strip(), m["b"].strip())
+    for rx in _TRANSIT_STATUS_RES:
+        m = _form_hit(rx, low)
+        if m:
+            line = (m.groupdict().get("line") or "").strip()
+            return GeoAsk("transit_status", "", "", TUBE_LINES.get(line, "?") if line else "tube")
+    for rx in _TRANSIT_NEXT_RES:
+        m = _form_hit(rx, low)
+        if m:
+            return GeoAsk("transit_next", (m["a"] or "").strip(), "", "bus" if m["mode"] == "bus" else "tube")
+    m = _form_hit(_GEO_ROADS_RE, low)
+    if m:
+        return GeoAsk("geo_roads", "", (m["b"] or "").strip())
+    for rx in _GEO_MAP_RES:
+        m = _form_hit(rx, low)
+        if m:
+            g = m.groupdict()
+            return GeoAsk("geo_map", (g.get("a") or "").strip(), (g.get("b") or "").strip())
+    return None
+
+
+@dataclass
+class VideoAsk:
+    kind: str       # video_ask | video_watch
+    question: str   # the owner's question ("" for watch)
+    video_id: str   # from a YouTube link in the words, else "" (the conversation's last video)
+
+
+_VIDEO_REF_RE = re.compile(r"\b(?:the|this|that) video\b", re.I)
+_URL_RE = re.compile(r"https?://\S+", re.I)
+_QUESTION_LEAD_RE = re.compile(r"^(?:what|how|does|did|do|who|when|where|why|which|is|are|can|could|tell me"
+                               r"|according to|in)\b", re.I)
+_VIDEO_WATCH_RE = re.compile(r"(?:watch|summari[sz]e) (?:it|the video|that video|this video)"
+                             r"|give me a summary of (?:it|the video|that video|this video)", re.I)
+_VIDEO_WATCH_URL_RE = re.compile(r"(?:watch|summari[sz]e) (?P<url>https?://\S+)", re.I)
+
+
+def _youtube_id(text: str) -> str:
+    from common import hud  # lazy: intents stays importable without the shared package path
+    for url in _URL_RE.findall(text or ""):
+        vid = hud.youtube_id_from_url(url.rstrip(".,?!"))
+        if vid:
+            return vid
+    return ""
+
+
+def video_request(text: str) -> VideoAsk | None:
+    """"watch it" / "summarise the video" (video_watch), or a question about the/this/that video or a
+    YouTube link (video_ask). The id comes only from a link in the owner's own words."""
+    if len(text) > 300:
+        return None
+    t = _clean(text)
+    low = t.lower()
+    for form in _match_forms(low):
+        if _VIDEO_WATCH_RE.fullmatch(form):
+            return VideoAsk("video_watch", "", "")
+    m = _VIDEO_WATCH_URL_RE.fullmatch(strip_lead(t))
+    if m:
+        return VideoAsk("video_watch", "", _youtube_id(m["url"]))
+    has_url = bool(_URL_RE.search(t))
+    if (_VIDEO_REF_RE.search(t) or has_url) and _QUESTION_LEAD_RE.match(strip_lead(t)):
+        return VideoAsk("video_ask", t[:300], _youtube_id(t))
+    return None

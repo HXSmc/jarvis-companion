@@ -1,0 +1,28 @@
+{
+ "stopPoints": [
+  {
+   "id": "490013767C",
+   "naptanId": "490013767C",
+   "commonName": "Trafalgar Sq / Charing Cross Stn",
+   "stopLetter": "C",
+   "distance": 54.10449434966147,
+   "stopType": "NaptanPublicBusCoachTram"
+  },
+  {
+   "id": "490013767D",
+   "naptanId": "490013767D",
+   "commonName": "Trafalgar Square / Charing Cross Stn",
+   "stopLetter": "D",
+   "distance": 68.4592945852119,
+   "stopType": "NaptanPublicBusCoachTram"
+  },
+  {
+   "id": "490013766E",
+   "naptanId": "490013766E",
+   "commonName": "Charing Cross Stn  / Trafalgar Square",
+   "stopLetter": "E",
+   "distance": 104.68942161383274,
+   "stopType": "NaptanPublicBusCoachTram"
+  }
+ ]
+}

@@ -1,0 +1,232 @@
+{
+ "journeys": [
+  {
+   "startDateTime": "2026-11-16T09:43:00",
+   "duration": 38,
+   "legs": [
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 4,
+     "departureTime": "2026-11-16T09:43:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Gamma Road"
+     }
+    },
+    {
+     "mode": {
+      "id": "bus"
+     },
+     "duration": 12,
+     "departureTime": "2026-11-16T09:47:00",
+     "routeOptions": [
+      {
+       "name": "176"
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Delta Street"
+     }
+    },
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 3,
+     "departureTime": "2026-11-16T10:00:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Epsilon Lane"
+     }
+    },
+    {
+     "mode": {
+      "id": "bus"
+     },
+     "duration": 10,
+     "departureTime": "2026-11-16T10:03:00",
+     "routeOptions": [
+      {
+       "name": "188"
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Zeta Place"
+     }
+    },
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 8,
+     "departureTime": "2026-11-16T10:13:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Eta Way"
+     }
+    }
+   ]
+  },
+  {
+   "startDateTime": "2026-11-16T09:53:00",
+   "duration": 38,
+   "legs": [
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 4,
+     "departureTime": "2026-11-16T09:53:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Theta Close"
+     }
+    },
+    {
+     "mode": {
+      "id": "bus"
+     },
+     "duration": 12,
+     "departureTime": "2026-11-16T09:57:00",
+     "routeOptions": [
+      {
+       "name": "176"
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Iota Row"
+     }
+    },
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 3,
+     "departureTime": "2026-11-16T10:10:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Kappa Yard"
+     }
+    },
+    {
+     "mode": {
+      "id": "bus"
+     },
+     "duration": 10,
+     "departureTime": "2026-11-16T10:13:00",
+     "routeOptions": [
+      {
+       "name": "188"
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Omega Road"
+     }
+    },
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 8,
+     "departureTime": "2026-11-16T10:23:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Omega Road"
+     }
+    }
+   ]
+  },
+  {
+   "startDateTime": "2026-11-16T09:57:00",
+   "duration": 44,
+   "legs": [
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 4,
+     "departureTime": "2026-11-16T09:57:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Omega Road"
+     }
+    },
+    {
+     "mode": {
+      "id": "bus"
+     },
+     "duration": 5,
+     "departureTime": "2026-11-16T10:01:00",
+     "routeOptions": [
+      {
+       "name": "139"
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Omega Road"
+     }
+    },
+    {
+     "mode": {
+      "id": "bus"
+     },
+     "duration": 21,
+     "departureTime": "2026-11-16T10:12:00",
+     "routeOptions": [
+      {
+       "name": "188"
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Omega Road"
+     }
+    },
+    {
+     "mode": {
+      "id": "walking"
+     },
+     "duration": 8,
+     "departureTime": "2026-11-16T10:33:00",
+     "routeOptions": [
+      {
+       "name": ""
+      }
+     ],
+     "arrivalPoint": {
+      "commonName": "Omega Road"
+     }
+    }
+   ]
+  }
+ ]
+}
