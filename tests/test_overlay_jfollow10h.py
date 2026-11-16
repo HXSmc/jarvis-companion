@@ -469,3 +469,49 @@ def test_job_runner_carries_3d_result(https_upstream, monkeypatch):
     card = next(ev["card"] for _k, ev in pushed if ev.get("type") == "card")
     assert card["body"] == ["Model saved."]
     assert _rows()[-1].startswith("state=done id=sess-9")
+
+
+# --- round 1 (ux lens area): failure lines ----------------------------------------------------------
+
+def test_upstream_down_keeps_stage_b_lines(https_upstream, monkeypatch):
+    """The mini PC gateway is down at runtime: stage b's own lines and rows, nothing new."""
+    use, _token = https_upstream
+    pushed = []
+    monkeypatch.setattr(overlay.bus, "publish", lambda kind, ev=None: pushed.append((kind, ev)))
+    monkeypatch.setattr(overlay, "JOB_POLL_S", 0)
+
+    def down(request):
+        raise httpx.ConnectError("refused", request=request)
+    seen = use(down)  # down before the start: the job never starts
+    d = make_deps(apps={})
+    asyncio.run(overlay._job_runner("watch", overlay.watch_job_prompt("aaaaaaaaaaa"), overlay.WATCH_RESULT, "d1", d))
+    assert [ev.get("text") for _k, ev in pushed] == [acks.PHRASES["watch_failed"]]
+    assert _rows()[-1] == "state=failed id=none reason=unreachable" and seen
+
+    pushed.clear()  # up for the start, down for every poll after: the 60 min wait ends in a timeout
+    seen = use(lambda r: httpx.Response(200, json={"session_id": "sess-7"}) if r.method == "POST" else down(r))
+    ticks = iter(range(0, 10**6, 600))
+    d.clock = lambda: next(ticks)
+    asyncio.run(overlay._job_runner("watch", overlay.watch_job_prompt("aaaaaaaaaaa"), overlay.WATCH_RESULT, "d2", d))
+    assert [ev.get("text") for _k, ev in pushed] == [acks.PHRASES["watch_timeout"]]
+    assert _rows()[-1].startswith("state=timeout id=sess-7")
+    assert {r.url.host for r in seen} == {"gw.example.invalid"}
+
+
+def test_installer_result_lines():
+    """Each companion_access.py exit code prints a true line: an unexpected error (exit 1, e.g. a
+    read-only .env or a broken import) never claims the gateway did not answer."""
+    src = (ROOT / "scripts/install-mac-overlay.sh").read_text()
+    block = src[src.index('case "$RC" in', src.index("scripts/companion_access.py \"$TOKEN_FILE\"")):]
+    block = block[:block.index("esac") + 4]
+
+    def lines(rc: int):
+        res = subprocess.run(["bash", "-c", f"set -u\nGATEWAY_PORT=8788\nRC={rc}\n{block}\necho END"],
+                             capture_output=True, text=True, timeout=10)
+        return res.returncode, res.stdout.splitlines()
+    assert lines(0) == (0, ["END"])
+    assert lines(2)[0] == 2
+    assert lines(3) == (0, ["Sessions access: no ios_token found; the owner runs: bash scripts/install-mac-overlay.sh", "END"])
+    assert lines(4) == (0, ["Sessions access: the gateway on 127.0.0.1:8788 did not answer, not set", "END"])
+    rc, out = lines(1)
+    assert rc == 0 and out == ["Sessions access: stopped on an error (see above)", "END"]

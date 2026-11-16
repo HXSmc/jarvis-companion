@@ -324,14 +324,16 @@ if (( DRY_RUN )); then
 else
   mkdir -p "$JARVIS_DIR"  # create only; never delete or move anything already in this dir
   chmod 700 "$JARVIS_DIR"
-  # exits 3 when the vault has no ios_token, 4 when no gateway answered (nothing written).
+  # exits 3 when the vault has no ios_token, 4 when no gateway answered (nothing written),
+  # 1 on an unexpected error (its traceback is printed above the line below).
   RC=0
   (cd "$REPO" && umask 077 && python3 scripts/companion_access.py "$TOKEN_FILE" "$REPO/.env" "$GATEWAY_PORT" ${COMPANION_URL:+"$COMPANION_URL"}) || RC=$?
   case "$RC" in
     0) ;;
     2) exit 2 ;;
     3) echo "Sessions access: no ios_token found; the owner runs: bash scripts/install-mac-overlay.sh" ;;
-    *) echo "Sessions access: the gateway on 127.0.0.1:$GATEWAY_PORT did not answer, not set" ;;
+    4) echo "Sessions access: the gateway on 127.0.0.1:$GATEWAY_PORT did not answer, not set" ;;
+    *) echo "Sessions access: stopped on an error (see above)" ;;
   esac
 fi
 
