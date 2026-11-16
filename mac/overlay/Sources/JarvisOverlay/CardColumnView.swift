@@ -29,6 +29,8 @@ struct CardTile: View {
         switch card {
         case .image, .video:
             LiveMediaCard(card: card, active: active, remeasure: remeasure)
+        case .web(let p):  // jfollow10b: the sandboxed web card (bundled page, scheme handler only)
+            WebCardChrome(title: p.title) { WebCardView(card: p) }
         default:
             CardView(card: card)
         }

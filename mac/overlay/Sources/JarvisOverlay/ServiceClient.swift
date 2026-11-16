@@ -107,6 +107,16 @@ final class ServiceClient {
         }
     }
 
+    /// One map tile for the web card, through the service's tile cache (the token stays here,
+    /// never in the web view).
+    func tile(z: Int, x: Int, y: Int) async throws -> Data {
+        var request = try authorizedRequest(path: "/overlay/tiles/\(z)/\(x)/\(y).png", method: "GET")
+        request.timeoutInterval = 10
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.check(response)
+        return data
+    }
+
     // MARK: - Internals
 
     private func authorizedRequest(path: String, method: String) throws -> URLRequest {

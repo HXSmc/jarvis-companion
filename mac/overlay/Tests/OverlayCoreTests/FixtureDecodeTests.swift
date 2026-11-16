@@ -35,7 +35,22 @@ final class FixtureDecodeTests: XCTestCase {
             types.formUnion(msg.cards.map(\.typeName))
         }
         XCTAssertEqual(kinds, Set<HUDShape.Kind>([.rect, .circle, .triangle]))
-        XCTAssertEqual(types, Set(["info", "stat", "bar", "flow", "link", "image", "video"]))
+        XCTAssertEqual(types, Set(["info", "stat", "bar", "flow", "link", "image", "video", "web"]))
+    }
+
+    /// jfollow10b: the web card (page "map") decodes; an unknown page is skipped like an unknown type.
+    func testWebCardDecodesAndUnknownPageIsSkipped() throws {
+        let file = try XCTUnwrap(try fixtureFiles().first { $0.lastPathComponent == "web.json" })
+        let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(contentsOf: file))
+        guard case .web(let web) = msg.cards.first else { return XCTFail("expected a web card, got \(msg.cards)") }
+        XCTAssertEqual(msg.cards.first?.typeTag, "MAP")
+        XCTAssertEqual(web.page, "map")
+        XCTAssertEqual(web.data.routes.count, 2)
+        XCTAssertEqual(web.data.pins.count, 2)
+        XCTAssertEqual(web.data.attribution, MapData.osmAttribution)
+        let odd = #"{"shapes":[],"cards":[{"id":"w1","type":"web","title":"T","page":"evil","data":{"routes":[],"pins":[{"lat":1,"lon":2,"label":"x"}],"attribution":"x"}},{"id":"i1","type":"info","title":"Yes","body":["kept"]}]}"#
+        let out = try JSONDecoder().decode(HUDMessage.self, from: Data(odd.utf8))
+        XCTAssertEqual(out.cards.map(\.typeName), ["info"])
     }
 
     func testLossyArraysSkipUnknownKindAndType() throws {

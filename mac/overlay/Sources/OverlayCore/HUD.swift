@@ -319,6 +319,76 @@ public struct VideoCard: Codable, Equatable {
     }
 }
 
+// MARK: - Web card (jfollow10b)
+
+/// One route on the map page: [lat, lon] points (<= 300), km, minutes.
+public struct MapRoute: Codable, Equatable {
+    public var points: [[Double]]
+    public var km: Double
+    public var min: Double
+}
+
+/// One pin; the label is plain text (the page puts it in with textContent only).
+public struct MapPin: Codable, Equatable {
+    public var lat: Double
+    public var lon: Double
+    public var label: String
+}
+
+/// The map page's data, re-checked here like common/hud.py _map_data: <= 3 routes, <= 2 pins,
+/// in-range points only; the attribution is always the fixed OSM line.
+public struct MapData: Codable, Equatable {
+    public var routes: [MapRoute]
+    public var pins: [MapPin]
+    public var attribution: String
+
+    public static let osmAttribution = "© OpenStreetMap contributors"
+
+    private static func inRange(_ lat: Double, _ lon: Double) -> Bool {
+        lat.isFinite && lon.isFinite && (-90...90).contains(lat) && (-180...180).contains(lon)
+    }
+
+    private enum CodingKeys: String, CodingKey { case routes, pins, attribution }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let rawRoutes = (try? c.decode([MapRoute].self, forKey: .routes)) ?? []
+        routes = rawRoutes.prefix(3).compactMap { r in
+            let pts = r.points.prefix(300).filter { $0.count == 2 && Self.inRange($0[0], $0[1]) }
+            return pts.count >= 2 ? MapRoute(points: Array(pts), km: r.km, min: r.min) : nil
+        }
+        let rawPins = (try? c.decode([MapPin].self, forKey: .pins)) ?? []
+        pins = rawPins.prefix(2).filter { Self.inRange($0.lat, $0.lon) }
+            .map { MapPin(lat: $0.lat, lon: $0.lon, label: String($0.label.prefix(40))) }
+        attribution = Self.osmAttribution
+        guard !routes.isEmpty || !pins.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .routes, in: c, debugDescription: "empty map")
+        }
+    }
+}
+
+/// A sandboxed web card: one bundled page (WebCardPolicy.pages) and its data. An unknown page
+/// throws, so the card is skipped like an unknown type.
+public struct WebCard: Codable, Equatable {
+    public var id: String?
+    public var title: String
+    public var page: String
+    public var data: MapData
+
+    private enum CodingKeys: String, CodingKey { case id, title, page, data }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        page = try c.decode(String.self, forKey: .page)
+        guard WebCardPolicy.pages[page] != nil else {
+            throw DecodingError.dataCorruptedError(forKey: .page, in: c, debugDescription: "unknown page")
+        }
+        data = try c.decode(MapData.self, forKey: .data)
+    }
+}
+
 // MARK: - Card
 
 /// One explanation card. Mirrors common/hud.py validate_card; unknown types throw
@@ -331,6 +401,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
     case link(LinkCard)
     case image(ImageCard)
     case video(VideoCard)
+    case web(WebCard)
 
     /// Identifiable over the payload ids (nil when absent; ForEach by index instead).
     public var id: String? {
@@ -342,6 +413,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .link(let p): return p.id
         case .image(let p): return p.id
         case .video(let p): return p.id
+        case .web(let p): return p.id
         }
     }
 
@@ -355,6 +427,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .link: return "link"
         case .image: return "image"
         case .video: return "video"
+        case .web: return "web"
         }
     }
 
@@ -368,6 +441,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .link: return "LINK"
         case .image: return "IMAGE"
         case .video: return "VIDEO"
+        case .web(let p): return p.page == "map" ? "MAP" : "WEB"
         }
     }
 
@@ -383,6 +457,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case "link": self = .link(try LinkCard(from: decoder))
         case "image": self = .image(try ImageCard(from: decoder))
         case "video": self = .video(try VideoCard(from: decoder))
+        case "web": self = .web(try WebCard(from: decoder))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown card type \(other)")
         }
@@ -399,6 +474,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .link(let p): try p.encode(to: encoder)
         case .image(let p): try p.encode(to: encoder)
         case .video(let p): try p.encode(to: encoder)
+        case .web(let p): try p.encode(to: encoder)
         }
     }
 }

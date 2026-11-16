@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content ="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'">
+<meta name="viewport" content ="width=device-width, initial-scale=1">
+<title>Route map</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="map.css">
+</head>
+<body>
+<main id="map" aria-label="Route map"></main>
+<section id="panel" aria-label="Map key">
+  <ol id="legend"></ol>
+  <button id="reset" type="button">Reset view</button>
+</section>
+<p id="status" role="status" hidden></p>
+<p id="attribution"></p>
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="map.js"></script>
+</body>
+</html>
