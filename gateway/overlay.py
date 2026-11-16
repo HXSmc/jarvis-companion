@@ -2888,6 +2888,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     elif len(quiet) == 1:
                         _set_session_ref(body.conv_id, [quiet[0]["id"]])
                 _tainted.add(body.conv_id)  # before the model call: the rows are untrusted data
+                if any(r["doing"] for r in rows):  # H1 exempts titles only: host agents write doing text
+                    _auto_tainted.add(body.conv_id)
                 for row in [r for r in rows if r["needs_owner"]][:4]:  # fixed code, never the model
                     # One host id per session row: asking again replaces its card, never piles up.
                     card = hud.validate_card({"id": _session_card_id(row["id"]), "type": "info",

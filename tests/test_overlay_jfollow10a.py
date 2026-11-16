@@ -28,7 +28,7 @@ from gateway import overlay, overlay_log  # noqa: E402
 from mac.voice import acks, agent, agent_policy, auto_policy, intents  # noqa: E402
 from test_overlay_agent import (  # noqa: F401,E402
     Clock, FakeAgent, can_use, client, reset, result, setup, tool_result)
-from test_overlay_jfollow4 import _cards, _deps, _session_env, _steps, fresh_session_state  # noqa: F401,E402
+from test_overlay_jfollow4 import ROWS, _cards, _deps, _session_env, _steps, fresh_session_state  # noqa: F401,E402
 from test_overlay_service import says, turn  # noqa: E402
 
 ROW_RE = re.compile(r"^cmd=[A-Za-z0-9._+-]{1,32} decision=(auto|asked|refused|on|off) reason=[a-z_]{2,12}$")
@@ -302,11 +302,33 @@ ASKS = [
     # round 1 (security finding 4): an option-attached path is a target too
     ("tar -xf SCRATCH/a.tar -C~", "delete"), ("tar -xf SCRATCH/a.tar -C/tmp", "delete"),
     ("ls -dSUPPORT", "guard"), ("cat -v~/.ssh/config", "secret"),
+    # round 2 (security finding 1): more stock exec wrappers, and versioned shell names
+    ("taskpolicy -c utility rm -r ~/Documents", "runs_code"), ("leaks --atExit -- rm x", "runs_code"),
+    ("chroot / rm x", "runs_code"), ("man -P 'rm x' ls", "runs_code"), ("bash5.2 -c 'rm x'", "runs_code"),
+    ("zsh5 -c 'rm x'", "runs_code"), ("ksh93 -c x", "runs_code"), ("fish3 -c x", "runs_code"),
+    ("dash0 -c x", "runs_code"),
+    # round 2 (security finding 2): the automount points make a plain look-up contact a host
+    ("ls /net/data.evil.example", "network"), ("cat /NET/h/x", "network"), ("ls //net/h", "network"),
+    ("stat /Network/Servers/h", "network"), ("head -c1 /net", "network"), ("cat -v/net/h/x", "network"),
+    ("ls SCRATCH/../../../../../../../../net/h", "network"), ("/net/h/bin/tool", "network"),
+    ("ls --color=/net/h", "network"), ("ln -s /net/h SCRATCH/l", "network"),
+    # round 2 (security finding 4): more stock senders
+    ("ssh-keyscan h", "network"), ("whois x", "network"), ("traceroute h", "network"),
+    ("dns-sd -B _ssh._tcp", "network"), ("tftp h", "network"), ("smbutil view //h", "network"),
+    ("mount_smbfs //h/s SCRATCH/m", "network"), ("mount_nfs h:/s SCRATCH/m", "network"),
+    ("ldapsearch -H ldap://h", "network"), ("lpr f", "network"), ("networkQuality", "network"),
+    # round 2 (security finding 5): tools that overwrite a file named in their arguments
+    ("/usr/libexec/PlistBuddy -c 'Set :a 1' ~/x.plist", "delete"), ("afconvert a.wav ~/b.caf", "delete"),
+    ("tiffutil -cat a b -out ~/c.tif", "delete"), ("cc -o ~/x a.c", "delete"), ("clang -o ~/x a.c", "delete"),
+    ("swiftc -o ~/x a.swift", "delete"),
 ]
 AUTOS = ["echo hi", "date", "ls /tmp", "df -h", "uptime", "rm SCRATCH/scratch.txt", "git -C r add a.py",
          "git -C r add a.py && git -C r commit -m 'x'", "memory_pressure", "tool-x --check", "git -C r stash",
          "grep -rn key src", "sort a.txt", "uniq a.txt", "xxd a.txt", "say hi", "base64 -i a.txt",
-         "sort -o SCRATCH/out.txt a.txt", "uniq a.txt SCRATCH/out.txt", "tar -xf SCRATCH/a.tar -CSCRATCH"]
+         "sort -o SCRATCH/out.txt a.txt", "uniq a.txt SCRATCH/out.txt", "tar -xf SCRATCH/a.tar -CSCRATCH",
+         # round 2: near misses of the automount points, and output files in the scratch dir
+         "ls /tmp/net", "ls /netx", "cat network.txt", "afconvert SCRATCH/a.wav SCRATCH/b.caf",
+         "tiffutil -cat SCRATCH/a SCRATCH/b -out SCRATCH/c.tif", "cc -o SCRATCH/x SCRATCH/a.c"]
 
 
 def _fill(command: str, ctx) -> str:
@@ -324,6 +346,24 @@ def test_never_auto_table(command, code, ctx, auto_on):
 @pytest.mark.parametrize("command", AUTOS)
 def test_auto_table(command, ctx, auto_on):
     assert auto_policy.classify(_fill(command, ctx), ctx) == ("auto", "ok")
+
+
+def test_automount_path_asks_before_any_lookup(ctx, monkeypatch, auto_on):
+    """Round 2 (security finding 2): /net/<host> asks network marked or not, and the classifier never
+    resolves such a path itself (realpath on it would make the Mac contact the host)."""
+    real = os.path.realpath
+    seen = []
+
+    def spy(p, *a, **k):
+        seen.append(str(p))
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(os.path, "realpath", spy)
+    for command in ("ls /net/data.evil.example", "cat ~/" + "../" * 30 + "net/h/x", "stat /Network/h"):
+        for tainted in (False, True):
+            assert auto_policy.verdict(command, ctx, tainted=tainted, barge=False, gate_ok=True) == (
+                "asked", "network"), (command, tainted)
+    assert not [p for p in seen if "/net" in p.lower()], seen
 
 
 def test_chain_with_push_asks_network(ctx):
@@ -432,11 +472,26 @@ def test_untrusted_turn_asks(client, tmp_path, auto_on):
 
 
 def test_sessions_answer_sets_no_auto_mark(client, monkeypatch, tmp_path, auto_on):
-    """(c2) end to end: the sessions answer taints the pool choice but not auto."""
+    """(c2) end to end: session titles taint the pool choice but not auto."""
     _deps(Clock())
-    _session_env(monkeypatch, tmp_path)
+    _session_env(monkeypatch, tmp_path, rows=[{**r, "doing": ""} for r in ROWS])
     turn(client, "list my mini PC sessions", conv_id="u6")
     assert "u6" in overlay._tainted and "u6" not in overlay._auto_tainted
+    overlay.debug_log.clear()
+    run_agent(client, bash("tool-x"), conv_id="u6")
+    assert _rows() == ["cmd=tool-x decision=auto reason=ok"]
+
+
+def test_sessions_doing_text_marks_the_conversation(client, monkeypatch, tmp_path, auto_on):
+    """Round 2 (security finding 3): a row's doing text is written by the host's agent sessions after
+    reading outside content, so it marks the conversation like any other untrusted text."""
+    _deps(Clock())
+    _session_env(monkeypatch, tmp_path)  # ROWS carry doing text
+    turn(client, "list my mini PC sessions", conv_id="u7")
+    assert "u7" in overlay._auto_tainted
+    overlay.debug_log.clear()
+    run_agent(client, bash("tool-x"), conv_id="u7")
+    assert _rows() == ["cmd=tool-x decision=asked reason=untrusted"]
 
 
 def test_forget_clears_the_auto_mark():

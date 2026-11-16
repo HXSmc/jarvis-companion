@@ -35,9 +35,12 @@ RUNS_CODE = frozenset(agent_policy._WRAPPERS) | frozenset({
     "watch", "parallel", "script", "tmux", "screen", "automator", "git-shell", "sqlite3",
     # round 1: stock macOS shells and exec wrappers (each runs another program), debuggers, dc (runs !cmd)
     "csh", "tcsh", "arch", "xcrun", "lockf", "apply", "ssh-agent", "sandbox-exec", "lldb", "gdb", "dc",
+    # round 2: more stock wrappers (taskpolicy, leaks --atExit --, chroot run a program; man -P names one)
+    "taskpolicy", "leaks", "chroot", "man",
 })
-# python3, python3.12, pip3, perl5.34, ruby3.2, ipython, pypy3 ...
-RUNS_CODE_PREFIXES = ("python", "pip", "perl", "ruby", "php", "tclsh", "ipython", "pypy", "jython")
+# python3, python3.12, pip3, perl5.34, ruby3.2, ipython, pypy3, bash5.2, zsh5 ...
+RUNS_CODE_PREFIXES = ("python", "pip", "perl", "ruby", "php", "tclsh", "ipython", "pypy", "jython",
+                      "bash", "zsh", "ksh", "fish", "dash", "csh", "tcsh")
 FIND_RUNS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
                        "-fls"})
 DELETE = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "trash", "truncate", "dd", "mv", "cp", "ln",
@@ -45,11 +48,15 @@ DELETE = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "trash", "truncate"
                     # builder additions: other tools that overwrite or move files
                     "zip", "gzip", "bzip2", "xz", "csplit", "sips", "textutil", "plutil",
                     # round 1: archivers that extract over any path
-                    "cpio", "pax"})
+                    "cpio", "pax",
+                    # round 2: edits the plist named in its arguments
+                    "PlistBuddy"})
 # round 1: tools that write a file named by -o/--output (sort, base64, say, osacompile) or by their 2nd
 # operand (uniq, xxd); that file counts as a delete target, with the same scratch-dir exception.
-OUTPUT_OPT = frozenset({"sort", "base64", "say", "osacompile"})
-OUTPUT_OPERAND = frozenset({"uniq", "xxd"})
+OUTPUT_OPT = frozenset({"sort", "base64", "say", "osacompile",
+                        # round 2: tiffutil -out f; compilers -o f
+                        "tiffutil", "cc", "gcc", "clang", "c++", "g++", "clang++", "swiftc"})
+OUTPUT_OPERAND = frozenset({"uniq", "xxd", "afconvert"})
 SECRET = frozenset({"security", "printenv", "env", "set", "export", "pbpaste", "screencapture", "keychain",
                     # builder additions: other ways to dump the environment or the clipboard/screen
                     "declare", "typeset",
@@ -63,7 +70,14 @@ NETWORK = frozenset({"curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp
                      # builder additions: other senders
                      "ping", "dig", "nslookup", "host", "socat",
                      # round 1: Apple's HTTP client, TLS client, other HTTP / cloud / VPN senders
-                     "nscurl", "openssl", "http", "https", "xh", "aws", "gcloud", "rclone", "tailscale"})
+                     "nscurl", "openssl", "http", "https", "xh", "aws", "gcloud", "rclone", "tailscale",
+                     # round 2: more stock senders (mount_smbfs, mount_nfs ... by the mount_ prefix)
+                     "ssh-keyscan", "whois", "traceroute", "traceroute6", "dns-sd", "tftp", "smbutil",
+                     "ldapsearch", "lpr", "networkQuality"})
+NETWORK_PREFIXES = ("mount_",)
+# Round 2: the macOS automount points. Any look-up of a path under them contacts the named host, so a
+# path there is a send (and is never resolved here). Compared case-folded: APFS is case-insensitive.
+NET_ROOTS = ("/net", "/network", "/system/volumes/data/net", "/system/volumes/data/network")
 GIT_AUTO = frozenset({"add", "commit", "fetch", "stash"})
 STASH_AUTO = frozenset({"push", "list", "show"})
 GUARD = frozenset({"launchctl", "defaults", "kill", "killall", "pkill", "tccutil", "csrutil", "spctl",
@@ -150,7 +164,11 @@ def _outputs(name: str, args: list[str]) -> list[str] | None:
         return [a for a in args if not a.startswith("-")][1:]
     out = []
     for i, a in enumerate(args):
-        if a.startswith("--o"):  # --output, --output-file
+        if a == "-out":  # tiffutil
+            if i + 1 >= len(args):
+                return None
+            out.append(args[i + 1])
+        elif a.startswith("--o"):  # --output, --output-file
             if "=" in a:
                 out.append(a.split("=", 1)[1])
             elif i + 1 < len(args):
@@ -195,6 +213,20 @@ def _places(tok: str, ctx: agent_policy.Ctx) -> list[str]:
     return [_resolve(tok, ctx), _resolve(tok, ctx, ctx.home)]
 
 
+def _net(tok: str, ctx: agent_policy.Ctx) -> bool:
+    """The token names a path under an automount point (NET_ROOTS), by text only: no realpath, no stat.
+    Relative ones are checked against the scratch dir and home, like _places."""
+    if not _is_path(tok):
+        return False
+    p = os.path.expanduser(tok.replace("~", ctx.home, 1) if tok.startswith("~") else tok)
+    bases = [p] if os.path.isabs(p) else [os.path.join(ctx.cwd or ".", p), os.path.join(ctx.home, p)]
+    for b in bases:
+        n = ("/" + os.path.abspath(b).lstrip("/")).casefold()  # abspath keeps a leading //
+        if any(_under(n, r) for r in NET_ROOTS):
+            return True
+    return False
+
+
 def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
@@ -219,6 +251,8 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
     name = _base(argv)
     args = argv[1:]
     values = _values(argv)
+    if any(_net(v, ctx) for v in [argv[0], *values]):  # before any realpath below
+        return "network"
     if name in SUDO:
         return "sudo"
     if (name in RUNS_CODE or name.startswith(RUNS_CODE_PREFIXES)
@@ -230,7 +264,7 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
     if name in GUARD or any(_is_path(v) and any(_under(p, r) for p in _places(v, ctx) for r in guard_roots)
                             for v in values):
         return "guard"
-    if name in NETWORK:
+    if name in NETWORK or name.startswith(NETWORK_PREFIXES):
         return "network"
     if name == "git":
         sub, rest = _git_sub(argv)
