@@ -587,8 +587,9 @@ def parse(text: str, apps: dict[str, str] | None = None,
         if hit:
             return hit
     # A bare 3D name ("pull up the test mug") comes from the vault (folders, mini PC-written
-    # aliases), so it is tried only after every fixed kind and a real app or site.
-    model = model_request(text, model_names or ()) if model_names else None
+    # aliases), so it is tried only after every fixed kind and a real app or site, and never
+    # for a stop phrase: a name like "stop" must not swallow a spoken stop ("load stop").
+    model = model_request(text, model_names) if model_names and not is_stop_family(text) else None
     if model is not None:
         return model
     if low.startswith("open "):

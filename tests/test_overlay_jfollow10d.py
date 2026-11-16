@@ -112,6 +112,13 @@ def test_model_intents():
     for words, kind in {"open notes": "open_app", "show me the cards": "look", "open safari": "open_app",
                         "pull up the test mug": "model_show", "open the test mug": "model_show"}.items():
         assert p(words, apps=apps, model_names=vault_names).kind == kind, words
+    # round 2: a vault name of stop/cancel/abort never swallows a spoken stop (security round 1, finding 1)
+    stops = ("stop", "cancel", "abort")
+    for words, kind in {"load stop": "stop", "display stop": "stop", "display cancel": "stop",
+                        "load cancel": "stop", "display abort": "stop", "open stop": "open_app",
+                        "stop": "stop", "cancel": "stop"}.items():
+        assert p(words, apps={}, model_names=stops).kind == kind, words
+        assert p(words, apps={}).kind == kind, words
 
 
 def test_slugify():
