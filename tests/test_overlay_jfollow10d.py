@@ -100,6 +100,18 @@ def test_model_intents():
     assert (a.kind, a.arg) == ("model_show", "pawn")
     for words, kind in BASE_KINDS.items():
         assert p(words, apps={}, model_names=("test-mug",)).kind == kind, words
+    # round 1: called/named with no description; the name is also the description
+    for words in ("create a 3D object called test mug", "make a 3D model named test mug"):
+        a = p(words, apps={})
+        assert (a.kind, a.arg, a.sub) == ("model_create", "test mug", "test mug"), words
+    a = p("create a 3D object: a coffee mug named test mug", apps={})
+    assert (a.kind, a.arg, a.sub) == ("model_create", "a coffee mug", "test mug")
+    # round 1: a vault name (mini PC-written alias or folder) never takes a fixed command's words
+    apps = {"notes": "Notes", "safari": "Safari"}
+    vault_names = ("notes", "cards", "safari", "test-mug")
+    for words, kind in {"open notes": "open_app", "show me the cards": "look", "open safari": "open_app",
+                        "pull up the test mug": "model_show", "open the test mug": "model_show"}.items():
+        assert p(words, apps=apps, model_names=vault_names).kind == kind, words
 
 
 def test_slugify():

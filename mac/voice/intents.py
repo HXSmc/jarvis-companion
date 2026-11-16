@@ -418,7 +418,7 @@ def draw_request(text: str) -> str | None:
 _3D = r"(?:3d|3-d|3 d|three d|three-d)"
 _MODEL_CREATE_RE = re.compile(r"(?:please )?(?:create|make|model|build|design) (?:me )?(?:a |an )?" + _3D
                               + r"(?: (?:object|model|thing))?(?P<rest>(?:[:, ].*)?)")
-_MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?: ?,? (?:and )?(?:call(?:ed)? it|called) (?P<name>.+))?")
+_MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?:(?:^| ?,? )(?:and )?(?:call(?:ed)? it|called|named) (?P<name>.+))?")
 _MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
                             r"|list (?:my|the) " + _3D + r" (?:objects|models)|show me my " + _3D + r" (?:objects|models))")
 _MODEL_SHOW_RE = re.compile(r"(?:pull up|show me|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
@@ -436,6 +436,7 @@ def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None
         parts = _MODEL_NAME_RE.fullmatch(rest)
         desc = (parts["desc"] if parts else rest).strip(" ,:")
         name = ((parts["name"] or "") if parts else "").strip(" ,:")
+        desc = desc or name  # "create a 3D object called test mug": the name is all we have
         return Intent("model_create", desc, name) if desc else Intent("model_create", "", "ask")
     if _MODEL_LIST_RE.fullmatch(low.replace(",", "")):
         return Intent("model_list")
@@ -453,8 +454,7 @@ def _model_key(words: str) -> str:
 
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
-                 place_names: tuple[str, ...] = (),
-                 model_names: tuple[str, ...] = ()) -> Intent | None:
+                 place_names: tuple[str, ...] = ()) -> Intent | None:
     """Every fixed fast-path kind for one utterance form; None = this form matches none.
     `last` (the last-sentence pass) skips clock and hunk: those stay whole-utterance
     ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
@@ -467,7 +467,7 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     if ask:
         return Intent("card_size", ask.action, ask.target)
     if not last:
-        model = model_request(text, model_names)
+        model = model_request(text)  # no names here: a bare vault name is tried in parse, after fixed kinds
         if model is not None:
             return model
     t = _clean(text)
@@ -552,8 +552,7 @@ def parse(text: str, apps: dict[str, str] | None = None,
     """
     forms = fast_forms(text)
     for i, form in enumerate(forms):
-        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or (),
-                              model_names=model_names or ())
+        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or ())
         if intent is not None:
             return intent
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
@@ -584,8 +583,16 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if look and _LOOK_REF_RE.search(low, look.end()):
         return Intent("look", t)
     if low.startswith("open "):
-        arg = t[5:].strip()
-        return _open_intent(t, apps) or Intent("open_app", arg)
+        hit = _open_intent(t, apps)
+        if hit:
+            return hit
+    # A bare 3D name ("pull up the test mug") comes from the vault (folders, mini PC-written
+    # aliases), so it is tried only after every fixed kind and a real app or site.
+    model = model_request(text, model_names or ()) if model_names else None
+    if model is not None:
+        return model
+    if low.startswith("open "):
+        return Intent("open_app", t[5:].strip())
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
     return Intent("answer", t)
