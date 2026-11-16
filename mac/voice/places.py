@@ -72,9 +72,16 @@ def _parse(data: bytes, raw: bool = False) -> dict[str, dict]:
     return out
 
 
+def _damaged(raw: bool) -> dict:
+    if raw:
+        raise Unreadable()
+    return {}
+
+
 def load(raw: bool = False) -> dict[str, dict]:
     """The saved places ({} when missing or damaged). Raises Unset / Unreadable for the two lines.
-    raw=True: the entries as stored (for a write-back that leaves the others untouched)."""
+    raw=True: the entries as stored (for a write-back that leaves the others untouched); a file that
+    is there but refused or damaged raises Unreadable, so a write never replaces the owner's places."""
     path = places_file()
     secrets = path.parent
     try:
@@ -83,15 +90,15 @@ def load(raw: bool = False) -> dict[str, dict]:
         return {}
     except OSError:  # a symlink (ELOOP) or no access
         logger.warning("places file refused")
-        return {}
+        return _damaged(raw)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BYTES:
             logger.warning("places file refused")
-            return {}
+            return _damaged(raw)
         if os.path.realpath(path) != os.path.join(os.path.realpath(secrets), FILE_NAME):
             logger.warning("places file refused")
-            return {}
+            return _damaged(raw)
         if st.st_uid != os.getuid():
             raise Unreadable()
         if st.st_mode & 0o077:
@@ -101,12 +108,12 @@ def load(raw: bool = False) -> dict[str, dict]:
     finally:
         os.close(fd)
     if len(data) > MAX_BYTES:
-        return {}
+        return _damaged(raw)
     try:
         return _parse(data, raw)
     except (ValueError, UnicodeDecodeError):
         logger.warning("places file damaged")
-        return {}
+        return _damaged(raw)
 
 
 def names() -> tuple[str, ...]:

@@ -656,6 +656,19 @@ def test_place_intents(vault, client, net):
     assert net.requests == []
 
 
+def test_damaged_places_file_never_overwritten(vault, client, net):
+    """Round 1 security advisory: save / forget on a damaged or 21-place file says places_unreadable and
+    leaves the owner's file byte-identical (before: it was replaced by a one-entry file)."""
+    f = vault / "Secrets" / "jarvis-places.json"
+    many = {"places": {f"p{i}": {"label": "x", "query": "x"} for i in range(21)}}
+    for content in ('{"places": {"home": ', json.dumps(many)):
+        f.write_text(content)
+        deps_with()
+        for words in ("save Gamma Gardens as office", "forget my office place"):
+            assert says(turn(client, words, conv_id="dm")) == [acks.PHRASES["places_unreadable"]], words
+            assert f.read_text() == content
+
+
 def test_file_saves_are_not_places(vault, client, net):
     """Round 1 code 2: "save the document as report" is a file save, never a place write."""
     for words in ("save the document as report", "save the spreadsheet as budget",

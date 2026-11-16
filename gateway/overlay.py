@@ -4792,13 +4792,20 @@ def _geo_answer(body: TurnBody, ask: intents.GeoAsk, budget: geo.Budget) -> _Geo
             if geo.GOOGLE_MAPS_RE.search(ask.a):
                 raise _GeoLine("place_link", "no_place", "link")
             tp.get()
-            places.put(ask.b, {"label": ask.a.title()[:120], "query": ask.a[:120]})  # lat/lon on first use
+            try:
+                places.put(ask.b, {"label": ask.a.title()[:120], "query": ask.a[:120]})  # lat/lon on first use
+            except (places.Unreadable, OSError, ValueError):  # a damaged file is never overwritten
+                raise _GeoLine("places_unreadable", "unset") from None
             res.key = "place_saved"
         elif kind == "place_forget":
             if body.barge_in:
                 raise _GeoLine("geo_barge", "barge")
             tp.get()
-            if not places.remove(ask.b):
+            try:
+                found = places.remove(ask.b)
+            except (places.Unreadable, OSError, ValueError):
+                raise _GeoLine("places_unreadable", "unset") from None
+            if not found:
                 raise _GeoLine("place_missing", "no_place", "missing", name=ask.b)
             res.key = "place_forgot"
         elif kind == "geo_map":
