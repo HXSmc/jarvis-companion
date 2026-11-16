@@ -194,7 +194,9 @@ def test_create_gates(client, monkeypatch, tmp_path, mvault):
     assert steps("followup_dropped") and not says(events) and seen == []
     now = overlay.get_deps().clock()
     overlay._session_calls["job"] = [now] * 3  # e.g. two "watch it" + one 3D job this hour
-    assert says(turn(client, words, conv_id="g1")) == [acks.PHRASES["watch_limit"]] and seen == []
+    # round 1: a 3D ask over the shared bucket gets a true line (no "videos"); the bucket and row stay
+    assert says(turn(client, words, conv_id="g1")) == [acks.PHRASES["model_limit"]] and seen == []
+    assert "video" not in acks.PHRASES["model_limit"] and "reason=rate" in steps("model3d")[-1]["detail"]
     overlay._session_calls.clear()
     assert says(turn(client, "create a 3D object", conv_id="g1")) == [acks.PHRASES["model_what"]] and seen == []
     monkeypatch.delenv("OVERLAY_VAULT")

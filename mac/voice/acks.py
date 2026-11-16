@@ -136,6 +136,7 @@ PHRASES = {
     "model_failed": "I couldn't make your {name}.",
     "model_bad_file": "That 3D file looks broken, so I won't open it.",
     "model_shown": "Here's your {name}. Drag to turn it, scroll or pinch to zoom.",
+    "model_limit": "That's three background jobs this hour. Try again later.",
     "watch_ready": "The video summary is ready, sir.",
     "watch_failed": "I couldn't start that on the mini PC.",
     "watch_timeout": "The video summary took too long, so I gave up.",

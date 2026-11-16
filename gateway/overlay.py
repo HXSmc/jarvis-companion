@@ -5454,6 +5454,8 @@ async def _model_turn(body: TurnBody, intent: intents.Intent, deps: OverlayDeps,
             key = await minipc_job("blender", models3d.blender_job_prompt(slug, intent.arg), models3d.RESULT_NAME,
                                    body.conv_id, deps, slug=slug)
             reason = {"job_started": "ok", "watch_limit": "rate"}.get(key, "job_failed")
+            if key == "watch_limit":  # the bucket is shared with "watch it"; the line must not say videos
+                key = "model_limit"
     elif not vault:
         key, reason = "model_unset", "unset"
     elif intent.kind == "model_list":
