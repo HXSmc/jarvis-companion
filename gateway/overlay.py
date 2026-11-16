@@ -471,6 +471,17 @@ class OverlayDeps:
 
 _deps: OverlayDeps | None = None
 
+# Without an ask rule the CLI runs path-free read-only commands (echo, df -h, ls) by itself and never
+# sends can_use_tool, so the switch, the never-auto table and the cmd_run row could not see them.
+# One fixed rule makes every Bash call ask the host; agent_argv itself stays as it is.
+_AGENT_ASK_ARGS = ("--settings", json.dumps({"permissions": {"ask": ["Bash"]}}))
+assert not any(bad in arg for arg in _AGENT_ASK_ARGS for bad in agent.FORBIDDEN)
+
+
+def _agent_session(popen=subprocess.Popen) -> agent.AgentSession:
+    """An agent session whose CLI argv also carries the Bash ask rule (appended last)."""
+    return agent.AgentSession(popen=lambda argv, *a, **k: popen([*argv, *_AGENT_ASK_ARGS], *a, **k))
+
 
 def get_deps() -> OverlayDeps:
     """The process-wide deps, built once; the voice is optional (None synth = text acks)."""
@@ -498,7 +509,7 @@ def get_deps() -> OverlayDeps:
                 tools="",
             )),
             vlm_ask=_LazyVLM(),
-            agent_conversations=lean.Conversations(agent.AgentSession, 4),  # up to 4 warm agent sessions
+            agent_conversations=lean.Conversations(_agent_session, 4),  # up to 4 warm agent sessions
         )
     return _deps
 

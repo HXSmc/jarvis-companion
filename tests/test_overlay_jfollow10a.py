@@ -839,3 +839,34 @@ def test_data_volume_alias_of_home_asks(ctx, auto_on):
         for tainted in (False, True):
             assert auto_policy.verdict(command, ctx, tainted=tainted, barge=False, gate_ok=True) == (
                 "asked", code), (command, tainted)
+
+
+def test_agent_cli_asks_the_host_for_every_bash_command(monkeypatch):
+    """Mac live round 3: the CLI ran path-free read-only commands (echo, df -h, ls) itself, without a
+    can_use_tool request, so the switch, the cmd_run row and the Confirm never applied to them. The
+    overlay's agent sessions carry one fixed `ask` rule for Bash, so every Bash call reaches the host."""
+    seen = []
+
+    class Proc:
+        def __init__(self, argv, *a, **k):
+            seen.append(argv)
+            self.stdin, self.stdout = None, iter(())
+
+        def poll(self):
+            return 0
+
+    session = overlay._agent_session(popen=Proc)
+    try:
+        argv = seen[0]
+        assert argv[:2] == ["claude", "-p"] and argv[argv.index("--permission-mode") + 1] == "default"
+        rule = json.loads(argv[argv.index("--settings") + 1])
+        assert rule == {"permissions": {"ask": ["Bash"]}}
+        assert argv.count("--settings") == 1 and argv[-2] == "--settings"
+        assert not any(bad in arg for arg in argv[-2:] for bad in agent.FORBIDDEN)
+    finally:
+        os.rmdir(session.cwd)
+    # The live pool builds sessions through it.
+    monkeypatch.setattr(overlay, "_deps", None)
+    deps = overlay.get_deps()
+    assert deps.agent_conversations._factory is overlay._agent_session
+    overlay.set_deps(None)
