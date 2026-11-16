@@ -439,3 +439,14 @@ def test_keep_steps_jfollow9():
     steps = overlay_log.redact(snap)["turns"][0]["steps"]
     assert {s["step"]: s["detail"] for s in steps if "detail" in s} == rows
     assert steps[-1] == {"step": "screen", "at": 1.0}
+
+
+def test_keep_steps_jfollow10a():
+    """jfollow10a: the cmd_run row keeps its detail (program name + fixed words); any other string
+    field on it (a command, its output) is dropped."""
+    from gateway import overlay_log
+    detail = "cmd=echo decision=auto reason=ok"
+    snap = {"turns": [{"id": "t1", "steps": [{"step": "cmd_run", "at": 1.0, "detail": detail,
+                                              "command": "echo SECRET-ARG"}]}]}
+    (row,) = overlay_log.redact(snap)["turns"][0]["steps"]
+    assert row == {"step": "cmd_run", "at": 1.0, "detail": detail}

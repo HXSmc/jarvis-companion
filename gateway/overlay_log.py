@@ -32,6 +32,8 @@ KEEP_STEPS = frozenset({
     # jfollow9: the barge-in and voice-processing rows (numbers and fixed words only) and card_remove.
     "barge_gate", "barge_check", "barge_aec", "barge_turn", "mic_signal", "playback", "wake_ignored",
     "wake_capture", "card_remove",
+    # jfollow10a: one row per agent command / session start (sanitized program name + fixed words).
+    "cmd_run",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})
