@@ -1,0 +1,587 @@
+"""jfollow10a: full auto for the voice agent's shell commands and session starts (owner decision B).
+
+Guards that stay in every mode: the never-auto table (auto_policy.classify), untrusted text in the
+conversation (hub answer H1: only plain look-ups run auto after it), barge-in and quiet follow-ups,
+the owner's voice switch (one 0600 file), spoken-secret masking and one cmd_run debug row per command.
+The conftest fixture runs every other test file with the switch OFF; these tests turn it on.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+
+from gateway import overlay, overlay_log  # noqa: E402
+from mac.voice import acks, agent, agent_policy, auto_policy, intents  # noqa: E402
+from test_overlay_agent import (  # noqa: F401,E402
+    Clock, FakeAgent, can_use, client, reset, result, setup, tool_result)
+from test_overlay_jfollow4 import _cards, _deps, _session_env, _steps, fresh_session_state  # noqa: F401,E402
+from test_overlay_service import says, turn  # noqa: E402
+
+ROW_RE = re.compile(r"^cmd=[A-Za-z0-9._+-]{1,32} decision=(auto|asked|refused|on|off) reason=[a-z_]{2,12}$")
+QUIET = [0.002] * 30  # room talk: under every follow-up floor
+LOUD = [0.2] * 30
+RUN_LINE = acks.PHRASES["progress_run"]
+
+
+@pytest.fixture(autouse=True)
+def fresh_auto_state():
+    overlay._auto_tainted.clear()
+    overlay._owner_level.clear()
+    yield
+    overlay._auto_tainted.clear()
+    overlay._owner_level.clear()
+
+
+@pytest.fixture
+def auto_on():
+    """The owner's default: no settings file = full auto."""
+    auto_policy.SETTINGS_FILE.unlink()
+    assert auto_policy.auto_on() is True
+
+
+def _rows() -> list[str]:
+    """Every cmd_run detail, oldest first; each one checked against criterion 15's shape."""
+    out = [s["detail"] for s in _steps("cmd_run")]
+    for d in out:
+        assert ROW_RE.fullmatch(d) and len(d) <= 80, d
+    return out
+
+
+class SeqAgent(FakeAgent):
+    """Asks for each (tool, input) in turn; a result follows every allow or deny, then the reply."""
+
+    def __init__(self, clock, steps, final=({"say": "Done."},)):
+        super().__init__(clock, script=[can_use("r0", *steps[0])])
+        self.steps, self.final, self.i = list(steps), list(final), 0
+
+    def respond(self, request_id, allow, updated_input=None, message=""):
+        super().respond(request_id, allow, updated_input, message)
+        self.i += 1
+        evs = [tool_result("out")] if allow else []
+        if self.i < len(self.steps):
+            evs.append(can_use(f"r{self.i}", *self.steps[self.i]))
+        else:
+            evs.append(result(*self.final))
+        self.queue.extend(evs)
+
+    def send_user(self, text):  # a later turn on the same warm session starts the script again
+        self.prompts.append(text)
+        if len(self.prompts) > 1:
+            return
+        super().send_user(text)
+
+
+def bash(*commands, final=({"say": "Done."},)):
+    steps = [("Bash", {"command": c}) for c in commands]
+    return lambda clock: (lambda: SeqAgent(clock, steps, final))
+
+
+def run_agent(client, make, text="commit and push my changes", conv_id="a1", **extra):
+    clock = Clock()
+    pool, deps = setup(clock, make(clock))
+    events = turn(client, text, conv_id=conv_id, **extra)
+    return pool, events
+
+
+def _confirm_card(events):
+    return [c for c in _cards(events) if c["title"] == "Confirm"]
+
+
+# --- Outcome 1: auto ON runs at once ---------------------------------------------------------
+
+def test_auto_runs_bash_without_confirm(client, auto_on):
+    from test_overlay_agent import REPO  # a real repo in the fake home
+    for command, name in (("echo hi", "echo"), ("df -h", "df"), ("memory_pressure", "memory_pressure"),
+                          (f"git -C {REPO} commit -m 'x'", "git")):
+        overlay.debug_log.clear()
+        pool, events = run_agent(client, bash(command, final=({"say": "It printed hi."},)),
+                                 conv_id=f"a-{name}")
+        session = pool.made[0]
+        assert [r["behavior"] for r in session.responses] == ["allow"], command
+        spoken = says(events)
+        assert not any(t.endswith(". Shall I?") for t in spoken)
+        assert not _confirm_card(events)
+        assert not _steps("agent_confirm")
+        assert spoken.count(RUN_LINE) == 1 and "It printed hi." in spoken
+        assert _rows() == [f"cmd={name} decision=auto reason=ok"]
+
+
+def test_session_start_auto(client, monkeypatch, tmp_path, auto_on):
+    clock = Clock()
+    _deps(clock)
+
+    def post(request):
+        return httpx.Response(200, json={"session_id": "ns1", "title": "Tidy the logs"})
+
+    seen = _session_env(monkeypatch, tmp_path, post=post)
+    events = turn(client, "start a session on the mini PC to tidy the logs", conv_id="n1")
+    posts = [json.loads(b) for m, u, _a, b in seen if m == "POST" and u.endswith("/chat")]
+    assert len(posts) == 1 and posts[0]["new_session"] is True
+    assert not _confirm_card(events) and not any("Shall I?" in t for t in says(events))
+    assert "n1" not in overlay._host_ask
+    assert _rows() == ["cmd=session_start decision=auto reason=ok"]
+    assert _steps("session_start")[-1]["detail"].startswith("auto id=")
+
+    # a start that names a session (title text from the host) asks as before
+    overlay._session_ref["n2"] = ["s2"]
+    events = turn(client, "start a session to fix why that session went quiet", conv_id="n2")
+    assert _confirm_card(events) and "n2" in overlay._host_ask
+    assert _rows()[-1] == "cmd=session_start decision=asked reason=untrusted"
+
+    # untrusted text in the conversation (a card title) asks too
+    overlay._mark_untrusted("n3")
+    turn(client, "start a session on the mini PC to tidy the logs", conv_id="n3")
+    assert "n3" in overlay._host_ask
+    assert _rows()[-1] == "cmd=session_start decision=asked reason=untrusted"
+
+    # rate limit: refused before anything, as at base
+    overlay._host_ask.clear()
+    before = len(seen)
+    overlay._session_calls["start"] = [900.0, 950.0, 990.0]
+    events = turn(client, "start a session on the mini PC to tidy the logs", conv_id="n4")
+    assert says(events) == [acks.PHRASES["session_limit"]]
+    assert len(seen) == before
+
+
+# --- Outcome 2: the switch -------------------------------------------------------------------
+
+OFF_TEXTS = ("Jarvis, ask before commands", "ask me before running commands", "ask before you run anything",
+             "turn on confirmations")
+ON_TEXTS = ("Jarvis, stop asking before commands", "stop asking me before running commands",
+            "don't ask before commands", "run commands without asking", "go full auto")
+
+
+def test_auto_mode_intent_variants():
+    for texts, arg in ((OFF_TEXTS, "off"), (ON_TEXTS, "on")):
+        for t in texts:
+            assert intents.parse(t, apps={}) == intents.Intent("auto_mode", arg), t
+            assert not (intents.is_stop(t) or intents.is_no(t) or intents.is_cancel(t)
+                        or intents.is_confirm(t)), t
+    assert intents.parse("stop", apps={}).kind == "stop"
+    assert intents.parse("stop asking", apps={}).kind != "auto_mode"
+    assert intents.parse("don't", apps={}).kind != "auto_mode"
+
+
+def test_auto_switch_persists(client, tmp_path):
+    path = auto_policy.SETTINGS_FILE
+    assert auto_policy.set_auto(False) is True
+    assert oct(os.stat(path).st_mode & 0o777) == oct(0o600)
+    assert oct(os.stat(path.parent).st_mode & 0o777) == oct(0o700)
+    assert json.loads(path.read_text()) == {"agent_auto": False} and auto_policy.auto_on() is False
+    path.write_text('{"agent_auto": true, "other": 1}')  # from outside: read on every call, no cache
+    assert auto_policy.auto_on() is True
+    assert auto_policy.set_auto(False) and json.loads(path.read_text()) == {"agent_auto": False, "other": 1}
+    path.unlink()
+    assert auto_policy.auto_on() is True  # missing = the owner's default
+    for text, mode in (("{bad", 0o600), ('{"agent_auto": true}', 0o644), ('{"agent_auto": "yes"}', 0o600),
+                       ("[true]", 0o600)):
+        path.write_text(text)
+        path.chmod(mode)
+        assert auto_policy.auto_on() is False, (text, oct(mode))  # damaged = fail closed
+    path.write_text('{"agent_auto": true}')
+    path.chmod(0o600)
+
+    _deps(Clock())
+    events = turn(client, "Jarvis, ask before commands", conv_id="s1")
+    assert says(events) == [acks.PHRASES["auto_off"]]
+    assert json.loads(path.read_text()) == {"agent_auto": False}
+    assert _steps("intent")[-1]["kind"] == "auto_mode"
+    events = turn(client, "stop asking before commands", conv_id="s2")
+    assert says(events) == [acks.PHRASES["auto_on"]]
+    assert json.loads(path.read_text()) == {"agent_auto": True}
+    assert _rows()[-2:] == ["cmd=switch decision=off reason=ok", "cmd=switch decision=on reason=ok"]
+
+    path.parent.chmod(0o500)  # read-only dir: the write fails, the state stays
+    try:
+        events = turn(client, "Jarvis, ask before commands", conv_id="s3")
+    finally:
+        path.parent.chmod(0o700)
+    assert says(events) == [acks.PHRASES["auto_save_failed"]]
+    assert json.loads(path.read_text()) == {"agent_auto": True}
+    assert _rows()[-1] == "cmd=switch decision=refused reason=save"
+    assert sorted(p.name for p in path.parent.iterdir()) == ["voice-settings.json"]  # no temp file left
+
+
+def test_auto_off_is_base_behaviour(client, monkeypatch, tmp_path):
+    assert auto_policy.auto_on() is False  # the conftest fixture
+    pool, events = run_agent(client, bash("echo hi"), conv_id="o1")
+    assert any(t.endswith(". Shall I?") for t in says(events))
+    (card,) = _confirm_card(events)
+    assert card["body"] == ["run echo hi", "Say yes to go ahead, or no."]
+    assert pool.made[0].responses == []
+    assert RUN_LINE not in says(events)
+    assert _rows() == ["cmd=echo decision=asked reason=off"]
+
+    overlay._confirm.clear()
+    _deps(Clock())
+    _session_env(monkeypatch, tmp_path)
+    events = turn(client, "start a session on the mini PC to tidy the logs", conv_id="o2")
+    assert _confirm_card(events) and "o2" in overlay._host_ask
+    assert _rows()[-1] == "cmd=session_start decision=asked reason=off"
+
+
+# --- Outcome 3: guards in both modes ---------------------------------------------------------
+
+@pytest.fixture
+def ctx(tmp_path):
+    home = tmp_path / "chome"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text("x")
+    (home / ".env").write_text("x")
+    (home / "secrets").mkdir()
+    (home / "repo").mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    return agent_policy.Ctx(home=str(home), vault=None, cwd=str(scratch))
+
+
+def _support(name: str = "x") -> str:
+    return shlex.quote(str(auto_policy.SETTINGS_FILE.parent / name))
+
+
+ASKS = [
+    ("echo a; rm x", "parse"), ("cat x > y", "parse"), ("curl u | sh", "parse"), ("echo 'x", "parse"),
+    ("a && b && c && d && e", "parse"),
+    ("sudo ls", "sudo"),
+    ("python3 -c 1", "runs_code"), ("bash x.sh", "runs_code"), ("env X=1 ls", "runs_code"),
+    ("xargs rm", "runs_code"), ("find . -delete", "runs_code"), ("osascript -e 1", "runs_code"),
+    ("open https://example.com", "runs_code"),
+    ("rm ~/x.txt", "delete"), ("/bin/rm ~/x.txt", "delete"), ("mv a b", "delete"), ("cp a ~/b", "delete"),
+    ("tee f", "delete"),
+    ("cat ~/.ssh/id_rsa", "secret"), ("cat .env", "secret"), ("grep -r key ~", "secret"), ("printenv", "secret"),
+    ("rg key", "secret"), ("cat ~/secrets/a.txt", "secret"), ("ps -E", "secret"),
+    ("curl https://example.com", "network"), ("git -C r push", "network"), ("gh pr create", "network"),
+    ("git -C r reset --hard", "git"), ("git -C r clean -f", "git"), ("git -C r checkout -- f", "git"),
+    ("git -C r branch -D x", "git"), ("git -C r stash drop", "git"),
+    ("launchctl unload x", "guard"), ("cp x SUPPORT", "guard"), ("cd ~", "guard"),
+]
+AUTOS = ["echo hi", "date", "ls /tmp", "df -h", "uptime", "rm SCRATCH/scratch.txt", "git -C r add a.py",
+         "git -C r add a.py && git -C r commit -m 'x'", "memory_pressure", "tool-x --check", "git -C r stash",
+         "grep -rn key src"]
+
+
+def _fill(command: str, ctx) -> str:
+    return command.replace("SUPPORT", _support()).replace("SCRATCH", ctx.cwd)
+
+
+@pytest.mark.parametrize("command,code", ASKS)
+def test_never_auto_table(command, code, ctx, auto_on):
+    assert auto_policy.classify(_fill(command, ctx), ctx) == ("asked", code)
+    # the same rule wins in the full verdict, whatever the rest says
+    assert auto_policy.verdict(_fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True) == (
+        "asked", code)
+
+
+@pytest.mark.parametrize("command", AUTOS)
+def test_auto_table(command, ctx, auto_on):
+    assert auto_policy.classify(_fill(command, ctx), ctx) == ("auto", "ok")
+
+
+def test_chain_with_push_asks_network(ctx):
+    assert auto_policy.classify("git -C r add a && git -C r commit -m x && git -C r push", ctx) == (
+        "asked", "network")
+
+
+def test_classify_reads_the_raw_command_like_the_policy(ctx, monkeypatch):
+    """Spec flag (a): the raw command is classified; the policy's rebuilt one only adds git/gh prefixes
+    and re-quotes the same tokens, so a Confirm from decide() gets the same answer from either."""
+    monkeypatch.setattr(ctx, "toplevel", lambda d: d)
+    monkeypatch.setattr(ctx, "has_filters", lambda d: False)
+    repo = str(Path(ctx.home) / "repo")
+    for raw in ("echo hi", "df -h", "memory_pressure", "rm ~/x.txt", "mv a b", f"git -C {repo} commit -m 'x'",
+                f"git -C {repo} push", f"git -C {repo} reset --hard", "launchctl unload x"):
+        decision = agent_policy.decide("Bash", {"command": raw}, ctx)
+        assert isinstance(decision, agent_policy.Confirm), raw
+        assert auto_policy.classify(raw, ctx)[1] == auto_policy.classify(decision.updated_input["command"], ctx)[1]
+
+
+def test_secret_rules_use_the_policy_helpers(ctx, monkeypatch):
+    """Spec flag (b): the secret row calls agent_policy._secret_name/_path_problem, never a copy."""
+    calls = []
+    real = agent_policy._secret_name
+    monkeypatch.setattr(agent_policy, "_secret_name", lambda n: calls.append(n) or real(n))
+    assert auto_policy.classify("cat notes.md", ctx) == ("auto", "ok")
+    assert "notes.md" in calls
+    monkeypatch.setattr(agent_policy, "_path_problem", lambda *a, **k: "that file holds secrets and is off limits")
+    assert auto_policy.classify("cat ./plain.txt", ctx) == ("asked", "secret")
+
+
+def test_delete_exception_is_the_scratch_dir_only(ctx, tmp_path):
+    """Spec flag (c): never a shared dir like /tmp, never a relative path (a cd moves it)."""
+    assert auto_policy.classify(f"rm {ctx.cwd}/a.txt", ctx) == ("auto", "ok")
+    assert auto_policy.classify(f"rm {tmp_path}/a.txt", ctx) == ("asked", "delete")
+    assert auto_policy.classify("rm /tmp/a.txt", ctx) == ("asked", "delete")
+    assert auto_policy.classify("rm a.txt", ctx) == ("asked", "delete")
+    assert auto_policy.classify(f"rm {ctx.cwd}/../a.txt", ctx) == ("asked", "delete")
+    assert auto_policy.classify("rm x", agent_policy.Ctx(home=ctx.home, vault=None, cwd="")) == ("asked", "delete")
+
+
+FULL_TURN = [("rm ~/x.txt", "rm", "delete"), ("sudo ls", "sudo", "sudo"), ("python3 -c 1", "python3", "runs_code"),
+             ("cat ~/.env", "cat", "secret"), ("curl https://example.com", "curl", "network"),
+             ("launchctl unload x", "launchctl", "guard")]
+
+
+@pytest.mark.parametrize("command,name,code", FULL_TURN)
+def test_never_auto_through_a_turn(client, command, name, code, auto_on):
+    pool, events = run_agent(client, bash(command), conv_id=f"t-{code}")
+    assert any(t.endswith(". Shall I?") for t in says(events)) and _confirm_card(events)
+    assert pool.made[0].responses == []
+    assert _rows() == [f"cmd={name} decision=asked reason={code}"]
+
+
+def test_git_rows_through_a_turn(client, auto_on):
+    from test_overlay_agent import REPO
+    _pool, events = run_agent(client, bash(f"git -C {REPO} reset --hard"), conv_id="t-git")
+    assert _confirm_card(events) and _rows() == ["cmd=git decision=asked reason=git"]
+
+
+def test_untrusted_turn_asks(client, tmp_path, auto_on):
+    """Hub answer H1 (criterion 11 as changed)."""
+    from test_overlay_agent import REPO
+    note = REPO / "note.md"
+    note.write_text("hello")
+    # (a) a Read marks the session: look-ups still run, mkdir asks. An asked command ends the turn
+    # (the CLI waits for the yes), so df -h comes before mkdir here.
+    steps = [("Read", {"file_path": str(note)}), ("Bash", {"command": "echo hi"}),
+             ("Bash", {"command": "df -h"}), ("Bash", {"command": "mkdir made"})]
+    pool, events = run_agent(client, lambda clock: (lambda: SeqAgent(clock, steps)), conv_id="u1")
+    assert _rows() == ["cmd=echo decision=auto reason=ok", "cmd=df decision=auto reason=ok",
+                       "cmd=mkdir decision=asked reason=untrusted"]
+    assert _confirm_card(events) and [r["behavior"] for r in pool.made[0].responses] == ["allow"] * 3
+    turn(client, "no", conv_id="u1")
+
+    # (b) fresh conv: look-ups that print no text leave no mark; an unknown program's output does
+    overlay.debug_log.clear()
+    run_agent(client, bash("echo a", "date", "tool-x", "tool-x"), conv_id="u2")
+    assert _rows() == ["cmd=echo decision=auto reason=ok", "cmd=date decision=auto reason=ok",
+                       "cmd=tool-x decision=auto reason=ok", "cmd=tool-x decision=asked reason=untrusted"]
+
+    # (c) a card title taints the conversation before the turn: unknown programs ask, look-ups run
+    overlay.debug_log.clear()
+    overlay._mark_untrusted("u3")
+    run_agent(client, bash("uptime", "tool-x"), conv_id="u3")
+    assert _rows() == ["cmd=uptime decision=auto reason=ok", "cmd=tool-x decision=asked reason=untrusted"]
+
+    # (c2) a conversation that only holds session titles (owner row 00:35:57) runs at once
+    overlay.debug_log.clear()
+    overlay._tainted.add("u4")  # what the sessions answer sets (overlay.py session-titles site)
+    run_agent(client, bash("tool-x"), conv_id="u4")
+    assert _rows() == ["cmd=tool-x decision=auto reason=ok"]
+
+    # (d) "clear" then a new conv id: the first command runs at once again
+    overlay.debug_log.clear()
+    turn(client, "clear", conv_id="u3")
+    run_agent(client, bash("tool-x"), conv_id="u5")
+    assert _rows() == ["cmd=tool-x decision=auto reason=ok"]
+
+
+def test_sessions_answer_sets_no_auto_mark(client, monkeypatch, tmp_path, auto_on):
+    """(c2) end to end: the sessions answer taints the pool choice but not auto."""
+    _deps(Clock())
+    _session_env(monkeypatch, tmp_path)
+    turn(client, "list my mini PC sessions", conv_id="u6")
+    assert "u6" in overlay._tainted and "u6" not in overlay._auto_tainted
+
+
+def test_forget_clears_the_auto_mark():
+    overlay._mark_untrusted("f1")
+    assert "f1" in overlay._auto_tainted and "f1" in overlay._tainted
+    overlay._forget("f1")
+    assert "f1" not in overlay._auto_tainted and "f1" not in overlay._tainted
+
+
+@pytest.mark.parametrize("name", sorted(auto_policy.READ_ONLY))
+def test_read_only_names_run_after_the_mark(name, ctx, auto_on):
+    command = f"{name} notes.md" if name not in ("pwd", "whoami", "uptime", "date") else name
+    assert auto_policy.verdict(command, ctx, tainted=True, barge=False, gate_ok=True) == ("auto", "ok")
+    assert auto_policy.marks(command) is (name not in auto_policy.QUIET)
+
+
+def test_read_only_table_is_the_hub_list():
+    assert auto_policy.READ_ONLY == frozenset({
+        "date", "uptime", "df", "du", "memory_pressure", "vm_stat", "sw_vers", "uname", "whoami", "hostname",
+        "pwd", "echo", "ls", "cat", "head", "tail", "wc", "stat", "file", "which"})
+    assert auto_policy.QUIET == auto_policy.READ_ONLY - {"du", "ls", "cat", "head", "tail", "wc", "stat",
+                                                          "file", "which"}
+
+
+def test_marked_cat_env_still_asks_secret(ctx, auto_on):
+    assert auto_policy.verdict("cat .env", ctx, tainted=True, barge=False, gate_ok=True) == ("asked", "secret")
+
+
+def test_barge_and_quiet_followup_never_auto(client, monkeypatch, tmp_path, auto_on):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("OVERLAY_VAULT", str(vault))
+    text = "what is in my notes about the deadline"
+    assert intents.parse(text, apps={}).kind == "agent"  # spec flag (e)
+    # (a) a quiet follow-up still reaches the agent (base routing), but its command asks
+    pool, events = run_agent(client, bash("echo hi"), text=text, conv_id="b1", followup=True,
+                             levels=QUIET, conf=0.9)
+    assert pool.made and _rows() == ["cmd=echo decision=asked reason=followup"]
+    assert pool.made[0].responses == []
+    # (b) the same words as a barge-in turn ask too
+    overlay.debug_log.clear()
+    overlay._confirm.clear()
+    pool, events = run_agent(client, bash("echo hi"), text=text, conv_id="b2", followup=True, barge_in=True,
+                             levels=LOUD, conf=0.9)
+    assert _rows() == ["cmd=echo decision=asked reason=barge"]
+    # (c) a barge-in yes never settles that Confirm
+    turn(client, "yes", conv_id="b2", followup=True, barge_in=True)
+    assert _steps("agent_confirm")[-1]["state"] == "pending" and pool.made[0].responses == []
+    # (d) a barge-in can never turn auto ON; a quiet follow-up of it is dropped
+    auto_policy.set_auto(False)
+    events = turn(client, "stop asking before commands", conv_id="b3", followup=True, barge_in=True,
+                  levels=LOUD, conf=0.9)
+    assert says(events) == [acks.PHRASES["auto_barge"]] and auto_policy.auto_on() is False
+    assert _rows()[-1] == "cmd=switch decision=refused reason=barge"
+    events = turn(client, "stop asking before commands", conv_id="b4", followup=True, levels=QUIET, conf=0.9)
+    assert says(events) == [] and _steps("followup_dropped")[-1]["reason"] == "level"
+    assert auto_policy.auto_on() is False
+    # ... while a barge-in can still turn it OFF (always the safe side)
+    auto_policy.set_auto(True)
+    events = turn(client, "ask before commands", conv_id="b5", followup=True, barge_in=True, levels=LOUD)
+    assert says(events) == [acks.PHRASES["auto_off"]] and auto_policy.auto_on() is False
+    auto_policy.set_auto(True)
+    # (e) a quiet follow-up session start asks, no POST
+    _deps(Clock())
+    seen = _session_env(monkeypatch, tmp_path)
+    events = turn(client, "start a session on the mini PC to tidy the logs", conv_id="b6", followup=True,
+                  levels=QUIET, conf=0.9)
+    assert _rows()[-1] == "cmd=session_start decision=asked reason=followup"
+    assert "b6" in overlay._host_ask and not [s for s in seen if s[0] == "POST"]
+
+
+def test_dropped_followup_runs_nothing(client, auto_on):
+    """Framing 3d: room talk that the base gate drops never reaches a command."""
+    text = "can you run the date command"
+    assert intents.parse(text, apps={}).kind == "answer"
+    pool, events = run_agent(client, bash("date"), text=text, conv_id="d1", followup=True,
+                             levels=QUIET, conf=0.9)
+    assert len(_steps("followup_dropped")) == 1 and pool.made == []
+    assert not _steps("cmd_run") and says(events) == []
+    pool, events = run_agent(client, bash("date"), text="run it", conv_id="d2", followup=True,
+                             levels=LOUD, conf=0.95)
+    assert _steps("followup_dropped")[-1]["reason"] == "short" and pool.made == []
+
+
+# Base tests re-run with the switch ON: the host asks and the policy's Confirm rules are unchanged.
+_ON_PLUGIN = '''
+import pytest
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item):
+    from mac.voice import auto_policy
+    auto_policy.SETTINGS_FILE.unlink()
+    assert auto_policy.auto_on() is True
+'''
+_ON_TESTS = [
+    "tests/test_overlay_workspace.py::test_delete_needs_the_host_confirm",
+    "tests/test_overlay_workspace.py::test_save_asks_before_replacing",
+    "tests/test_overlay_memory.py::test_memory_forget_all_needs_the_host_confirm",
+    "tests/test_overlay_jfollow4.py::test_session_stop_and_answer_routes",
+    "tests/test_overlay_jfollow4.py::test_host_ask_never_confirmed_by",
+    "tests/test_overlay_jfollow9.py::test_short_delete_followup_never_reaches_a_saved_workspace",
+    "tests/test_overlay_agent.py::test_push_refused_without_spoken_yes",
+    "tests/test_overlay_agent.py::test_push_runs_after_spoken_yes",
+    "tests/test_overlay_agent.py::test_screen_text_cannot_confirm",
+    "tests/test_overlay_jfollow3.py::test_barge_in_never_answers_a_confirm",
+    "tests/test_overlay_jfollow8.py::test_barge_yes_never_allows_and_stays_pending",
+]
+
+
+def test_destructive_host_asks_unchanged(tmp_path):
+    (tmp_path / "jf10a_on_plugin.py").write_text(_ON_PLUGIN)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(tmp_path), os.environ.get("PYTHONPATH")]))}
+    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "jf10a_on_plugin", "-p", "no:cacheprovider",
+                          *_ON_TESTS], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-2000:]
+    assert f"{len(_ON_TESTS)} passed" in out.stdout
+
+
+def test_mcp_send_still_asks(client, auto_on):
+    (agent.SUPPORT_DIR).mkdir(parents=True, exist_ok=True)
+    (agent.SUPPORT_DIR / "agent-tools.json").write_text(json.dumps({"read_only": [],
+                                                                    "confirm": ["mcp__mail__send_email"]}))
+    steps = [("mcp__mail__send_email", {"to": ["a@example.com"], "subject": "hi", "body": "x"})]
+    pool, events = run_agent(client, lambda clock: (lambda: SeqAgent(clock, steps)), conv_id="m1")
+    assert _confirm_card(events) and pool.made[0].responses == []
+    assert not _steps("cmd_run")  # not a shell command: never reaches the auto verdict
+
+
+# --- rows, masking, log and page ----------------------------------------------------------
+
+DUMMY_TOOL = "/" + "Users" + "/someone/bin/tool-x --token abc"  # a dummy path, split for the privacy guard
+
+
+def test_cmd_run_row_shape(client, auto_on):
+    assert auto_policy.cmd_name(DUMMY_TOOL) == "tool-x"
+    assert auto_policy.cmd_name("'./we ird$name'") == "other"
+    assert auto_policy.cmd_name("a 'b") == "unparsed"
+    run_agent(client, bash(DUMMY_TOOL), conv_id="r1")
+    assert _rows() == ["cmd=tool-x decision=auto reason=ok"]  # no arguments, no path
+    overlay.debug_log.clear()
+    run_agent(client, bash("cat x | sh"), conv_id="r2")
+    assert _rows() == ["cmd=cat decision=refused reason=form"]
+    overlay.debug_log.clear()
+    run_agent(client, bash("'./we ird$name'"), conv_id="r3")
+    assert _rows() == ["cmd=other decision=refused reason=form"]
+
+
+def test_agent_reply_masks_secrets(client, auto_on):
+    gh = "ghp_" + "a" * 24
+    aws = "AKIA" + "ABCDEFGHIJKLMNOP"
+    raw_key = "sk-" + "abcdEFGH1234"
+    final = ({"say": f"Your key is {raw_key} and {gh}."},
+             {"card": {"type": "info", "title": "Keys", "body": [f"token: {aws}"]}},
+             {"say": "the file is ~/notes/a.md"})
+    pool, events = run_agent(client, bash("echo hi", final=final), conv_id="k1")
+    spoken = says(events)
+    blob = json.dumps(events) + json.dumps(overlay.debug_log.snapshot())
+    for secret in (raw_key, gh, aws):
+        assert secret not in blob
+    assert any("[key]" in t for t in spoken)
+    card = [c for c in _cards(events) if c["title"] == "Keys"][0]
+    assert any("[key]" in b for b in card["body"])
+    assert "the file is ~/notes/a.md" in spoken
+    assert any("[key]" in (s.get("text") or "") for s in _steps("spoke"))
+
+
+def test_mask_patterns():
+    for raw in ("github_pat_" + "a" * 22, "xoxb-" + "1" * 12, "-----BEGIN RSA PRIVATE " + "KEY-----",
+                "ghs_" + "b" * 20, "Bearer " + "c" * 12):
+        assert raw not in overlay._mask_secrets(f"x {raw} y")
+    assert overlay._mask_secrets("mail me at a@example.com about /tmp/x") == "mail me at a@example.com about /tmp/x"
+
+
+def test_debug_page_cmd_run():
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    page = (ROOT / "gateway" / "overlay_debug.html").read_text()
+    label = re.search(r"const LABEL = \{.*?\};", page, re.S).group(0)
+    describe = re.search(r"function describe\(s\) \{.*?\n\}\n", page, re.S).group(0)
+    detail = "cmd=echo decision=auto reason=ok"
+    rows = [{"step": "cmd_run", "detail": detail}]
+    script = (f"{label}\n{describe}\nconsole.log(JSON.stringify({json.dumps(rows)}"
+              ".map(r => [LABEL[r.step], describe(r)])));")
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                                    check=True, timeout=30).stdout)
+    assert out == [["command run", detail]]
+
+
+def test_cmd_run_is_kept_by_the_log():
+    assert "cmd_run" in overlay_log.KEEP_STEPS
