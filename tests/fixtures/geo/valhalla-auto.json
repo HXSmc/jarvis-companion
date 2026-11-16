@@ -1,0 +1,262 @@
+{
+ "trip": {
+  "summary": {
+   "time": 836.699,
+   "length": 4.957
+  },
+  "legs": [
+   {
+    "shape": "{swfaBl_yF[gJWuBSsBM_D@sCLuBXyA^}Ap@cBb@aAb@m@^]PG`@mFx@}FtBiLjB}FPeAr@sHjFcg@rC}WzAwNTsBTwBdAyJdLwfAi@gJ~A{Qh@kFVgCN}ARmBzB_Mx@gGReARgEpAeFcBcAs@e@eRoLqCmBuIsGkAeAkAeA{]sW{LuJsJsIgCkC{LeMcKkLeE{GmFaJ{NoUw@}AaAmBmQ{_@_F{LsAUu@kBy@gCgAcEk@wB[aEsAqEsCyMKa@oH}Z_Ig_@{Gs]wDaVqE_\\aCaRUgC}A_D_@_CWqC[aDc@eDJwDFmDaDs]yEmm@yAkSO}CMmCgAuTa@iIiAcWk@sOCiAUwHYkOEsKKsMK}d@Lo`@Fqu@TyfA?eE@cC?yE@uDFeL?aBP}UDoH@oNTkyBDsY@kQBmRJcRFmb@?kBy@kKS}D]iL]sHyCcm@yBmj@_@kOc@ccBz@g_CZu`@P}XBmFTkOLiJp@yOhBo\\~Bu]hEyo@T{C\\kEZaD^eEbBkN|Dw^rGym@fByMPyAJs@X}BVyBn@sFbAeAtDkb@Fq@LgARqBvAuM~AwJDeEb@kCtFs[pBmLfCuNpAyHBQ`@kCj@wE|AkB|@mJfBkS\\iEu@mG|@mLz@sLjAsO|@yIfAiNd@oGPgCxBy_@nMirBxBg_@J_CxBa^dBkZ\\{ID{MB}B_@}Lk@gImAcMgCqPgAmFiAwDkFuP}@eC_CwHDyEIc@cAsEiAyHk@yGSiHN_M\\uK^yMr@qPv@mK~@gI^cD`@eDf@cGFiD?_Fi@gZcAg]M}EGqAO_DiAqTeAgN_CgQeB_LUkA}C_P_AyE_B}AsBuAe@gCoBmOy@pAuC`DsB`BuCvAqD~@uGvBsEj@gCh@gEx@kCh@uOrB_@EWSc@k@a@i@g@oA_@wAKuBKcCEkEG{MAgICcFMua@Mu[t@uFPwCZ}Cp@cCVo@z@cCnDy@lFq@dFGfLHrAB~AB|CDtAj@z@z@^N~Av@rCvAbAf@hB`AvBlAlBtAfOrR`AdAxDpClDzCz@r@z@x@nA|@d@RpAl@nH|B~GxA`Cn@pBz@nFdDzBx@lChCTB|MhBtL`Bzq@vIvHv@xAcArCh@|DrAzAvCtEnB~JbGdf@tYbHnEjDpBtQrK",
+    "maneuvers": [
+     {
+      "street_names": [
+       "Trafalgar Square",
+       "A4"
+      ],
+      "length": 0.012
+     },
+     {
+      "street_names": [
+       "Charing Cross"
+      ],
+      "length": 0.043
+     },
+     {
+      "street_names": [
+       "Northumberland Avenue",
+       "A400"
+      ],
+      "length": 0.356
+     },
+     {
+      "street_names": [
+       "A3211"
+      ],
+      "length": 3.56
+     },
+     {
+      "street_names": [
+       "A1211"
+      ],
+      "length": 0.158
+     },
+     {
+      "street_names": [
+       "A1211"
+      ],
+      "length": 0.828
+     },
+     {
+      "street_names": [],
+      "length": 0.0
+     }
+    ]
+   }
+  ]
+ },
+ "alternates": [
+  {
+   "trip": {
+    "summary": {
+     "time": 941.287,
+     "length": 5.295
+    },
+    "legs": [
+     {
+      "shape": "{swfaBl_yF[gJWuBSsBM_D@sCLuBXyA^}Ap@cBb@aAb@m@^]PG`@mFx@}FtBiLjB}FPeAr@sHjFcg@rC}WzAwNTsBTwBdAyJdLwfAi@gJ~A{Qh@kFVgCN}ARmBzB_Mx@gGReARgEpAeFcBcAs@e@eRoLqCmBuIsGkAeAkAeA{]sW{LuJsJsIgCkC{LeMcKkLeE{GmFaJ{NoUw@}AaAmBmQ{_@_F{LsAUu@kBy@gCgAcEk@wB[aEsAqEsCyMKa@oH}Z_Ig_@{Gs]wDaVqE_\\aCaRUgC}A_D_@_CWqC[aDc@eDJwDFmDaDs]yEmm@yAkSO}CMmCgAuTa@iIiAcWk@sOCiAUwHYkOEsKKsMK}d@Lo`@Fqu@TyfA?eE@cC?yE@uDFeL?aBP}UDoH@oNTkyBDsY@kQBmRJcRFmb@?kBy@kKS}D]iLqAr@gBUoE}@kDq@qAUaCa@iBS}Ci@gH{@qIoAwA^e@Lo@XgAf@y@~@sBzENlHf@jOHhDv@`P\\nFJxBp@vLj@nGd@rB^pA~@xCb@~A~@xCh@`CXdCfC@hC@fAA~Bx@`AZbCd@dI|AjGx@xBHD?~BF|DHdAAzDDdJN|BBxkBnBdVPdB`BZEpEm@xDYfBGtAEhCG`CElBO`BeBjRV~O\\tA@lEVvA_Ht@iCbAaD~AgD~B_@p@qAdCkH`@oAt@_Cv@_ClC_KnAwEd@eBhBkHt@{C`Iu\\\\_BnAcG`BaI`@qBj@sCxDoRpKui@f@oCTqAjA}GtAgIRsAb@iChKut@NeA^eC\\eCfIwk@`@uDtDa^VeC~CwZXoCTeCrAoNrAaMtBiTn@_Hn@cHjBuYX{DJ{An@mM`@eJFuAPuDhA_XHaBZqHRcFl@}OPoEJ}BJ_DToFPgG~Bcr@@oAPwZB{HAs\\MaV[eVk@kOiAeBwAmQgAcNMoCQ_KeBwFI}BeC{D}BmDa@q@iBKMQi@w@eBiCsE{FaAoAC_EKOyD_FgEkAmDkDgDwEg@q@iCkDyC{CcFoEmAeA_A{@e@a@]}@Yo@Sc@_@o@[m@[m@K_@EYA_@JqCr@eEx@gGFi@R_BTwBPiB`Ead@Fu@zAoOr@mHfA}MXkDXqDTgDp@oI\\oDTaCNeAt@mEdA{EzAkG`DmMzDeMlGiR|DaMpAcEvAqE|AaFbEyLbD}J|AkEbCoH|@oC|@qCt@yB|AyEzBqGZgA`CwIh@oC^iBX{APw@dAcFvBgKd@{BrBuJx@cEv@qDf@cBv@aCjAsDVu@lCqIdAsCxAwDx@eCdDoJ~@oCx@cCxF}Q`AqEb@uB|@yFp@gE|@qFvAwIdAuGNeARqAv@}E`BwHdByGt@wCr@sCr@qCpAuE|@kDfEuOp@iCzEyQbCqFtIiOlKiPtBsDhAsBbCmEmBaBwBeBuKiGaAm@cDeBaG{DgAiAcBoCIEGCECCAsHiE_Q{JoHeEgCyAcB^cAm@aAk@k@iCkVqN_k@q\\qHmEyBqAmDqByQuK",
+      "maneuvers": [
+       {
+        "street_names": [
+         "Trafalgar Square",
+         "A4"
+        ],
+        "length": 0.012
+       },
+       {
+        "street_names": [
+         "Charing Cross"
+        ],
+        "length": 0.043
+       },
+       {
+        "street_names": [
+         "Northumberland Avenue",
+         "A400"
+        ],
+        "length": 0.356
+       },
+       {
+        "street_names": [
+         "A3211"
+        ],
+        "length": 1.607
+       },
+       {
+        "street_names": [
+         "Puddle Dock",
+         "A3211"
+        ],
+        "length": 0.095
+       },
+       {
+        "street_names": [
+         "Puddle Dock",
+         "A3211"
+        ],
+        "length": 0.028
+       },
+       {
+        "street_names": [
+         "Queen Victoria Street",
+         "A3211"
+        ],
+        "length": 0.127
+       },
+       {
+        "street_names": [
+         "A201"
+        ],
+        "length": 0.522
+       },
+       {
+        "street_names": [
+         "Southwark Street",
+         "A3200"
+        ],
+        "length": 1.053
+       },
+       {
+        "street_names": [
+         "Borough High Street",
+         "A3"
+        ],
+        "length": 0.081
+       },
+       {
+        "street_names": [
+         "A3"
+        ],
+        "length": 0.098
+       },
+       {
+        "street_names": [
+         "A200"
+        ],
+        "length": 0.889
+       },
+       {
+        "street_names": [
+         "A100"
+        ],
+        "length": 0.383
+       },
+       {
+        "street_names": [],
+        "length": 0.0
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "trip": {
+    "summary": {
+     "time": 950.212,
+     "length": 5.341
+    },
+    "legs": [
+     {
+      "shape": "{swfaBl_yF[gJWuBSsBM_D@sCLuBXyA^}Ap@cBb@aAb@m@^]PGb@CfANnA\\x@\\x@r@~AlCxAh@pAHfAArPsAvBs@`H}BbIwCfLsFnCmAxAsDn@[pAi@~C_BnH}CvM}ElFgBtEsBhHwCtHeCvAa@dBe@xGyBzFeB|@YdEmAdHaBrJaBbCa@`Hg@|AK|Ls@vUqAjBKpIs@vAKdFS~BKtFWpDKbE@|JNdCD`DHfA@hB@fGNvDb@b[hC`GVjCyBrIT|ADj@BtC@zABJ}GD_CFyELyNHoNDwEHa\\LyHFkCB}ADqBBuAFkCXuLDeBXyNHoD@[@k@l@m`@f@iY\\ca@B{DjB}zB?yJ@yQ?eBBqMDsM_AaLBuCDkEJmG^o^DkFDcF?GDaC@w@|AwDXaCb@_Cp@oBr@_BpCwFjDmGTqG^qBFuBE_Dk@wBYeAYcA_@kAaBoFsFgPwAw@}@_Bc@cAq@gAm@q@k@a@_A[eAEs@NkAZs@\\o@p@eAbBgArCcCbBgEfUo@nDiApGmBlIg@tAs@`AcBhAq@CmA~AgADkDcAyAu@w@g@y@_DsD_D}DuCcBp@gJ{Ga@}Cc@c@eH{FaA_AiAaA}@{@_HkGuEqAk@i@sJwIsCsC_JyIaL}KcEaEmQePoQsQuCuCoAwAgB{CaJ}PaB{BaAqAeAsA_BkAyAe@}BkB{AViE@wJeA_AeBo@cA{@iBc@iCQcBCgBFyBNqBX}BhBgNCcDOsC_@{C[oB]wAk@uBo@_Cm@uGcCeJkGsUm@wBqKg`@o@}B]sA{BwI_CqIa@yAm@wBoVe~@mJu]gBmH_Kg]yAgFiBsGcE_OkBgHcAyEs@iFsGkl@Gq@S}BaBkTIuBKuF?qHAsHIyN?q@D{O?aB?mBDwJ?W?w@D_JHgWcA{F@}E@iB@{BB_DBaD^cGvA_Ht@iCbAaD~AgD~B_@p@qAdCkH`@oAt@_Cv@_ClC_KnAwEd@eBhBkHt@{C`Iu\\\\_BnAcG`BaI`@qBj@sCxDoRpKui@f@oCTqAjA}GtAgIRsAb@iChKut@NeA^eC\\eCfIwk@`@uDtDa^VeC~CwZXoCTeCrAoNrAaMtBiTn@_Hn@cHjBuYX{DJ{An@mM`@eJFuAPuDhA_XHaBZqHRcFl@}OPoEJ}BJ_DToFPgG~Bcr@@oAPwZB{HAs\\MaV[eVk@kOiAeBwAmQgAcNMoCQ_KeBwFI}BeC{D}BmDa@q@iBKMQi@w@eBiCsE{FaAoAC_EKOyD_FgEkAmDkDgDwEg@q@iCkDyC{CcFoEmAeA_A{@e@a@]}@Yo@Sc@_@o@[m@[m@K_@EYA_@JqCr@eEx@gGFi@R_BTwBPiB`Ead@Fu@zAoOr@mHfA}MXkDXqDTgDp@oI\\oDTaCNeAt@mEdA{EzAkG`DmMzDeMlGiR|DaMpAcEvAqE|AaFbEyLbD}J|AkEbCoH|@oC|@qCt@yB|AyEzBqGZgA`CwIh@oC^iBX{APw@dAcFvBgKd@{BrBuJx@cEv@qDf@cBv@aCjAsDVu@lCqIdAsCxAwDx@eCdDoJ~@oCx@cCxF}Q`AqEb@uB|@yFp@gE|@qFvAwIdAuGNeARqAv@}E`BwHdByGt@wCr@sCr@qCpAuE|@kDfEuOp@iCzEyQbCqFtIiOlKiPtBsDhAsBbCmEmBaBwBeBuKiGaAm@cDeBaG{DgAiAcBoCIEGCECCAsHiE_Q{JoHeEgCyAcB^cAm@aAk@k@iCkVqN_k@q\\qHmEyBqAmDqByQuK",
+      "maneuvers": [
+       {
+        "street_names": [
+         "Trafalgar Square",
+         "A4"
+        ],
+        "length": 0.012
+       },
+       {
+        "street_names": [
+         "Charing Cross"
+        ],
+        "length": 0.068
+       },
+       {
+        "street_names": [
+         "A3212"
+        ],
+        "length": 0.666
+       },
+       {
+        "street_names": [
+         "Parliament Street",
+         "A3212"
+        ],
+        "length": 0.049
+       },
+       {
+        "street_names": [
+         "A302"
+        ],
+        "length": 0.635
+       },
+       {
+        "street_names": [
+         "Westminster Bridge Road",
+         "A302"
+        ],
+        "length": 0.07
+       },
+       {
+        "street_names": [
+         "A3200"
+        ],
+        "length": 0.557
+       },
+       {
+        "street_names": [],
+        "length": 0.093
+       },
+       {
+        "street_names": [
+         "A3200"
+        ],
+        "length": 1.739
+       },
+       {
+        "street_names": [
+         "Borough High Street",
+         "A3"
+        ],
+        "length": 0.081
+       },
+       {
+        "street_names": [
+         "A3"
+        ],
+        "length": 0.098
+       },
+       {
+        "street_names": [
+         "A200"
+        ],
+        "length": 0.889
+       },
+       {
+        "street_names": [
+         "A100"
+        ],
+        "length": 0.383
+       },
+       {
+        "street_names": [],
+        "length": 0.0
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

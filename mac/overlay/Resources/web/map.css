@@ -1,0 +1,143 @@
+/* Hallmark · route map card: dark glass key over a light street map */
+:root {
+  --ink: #eef0f3;
+  --page: #16181c;
+  --map-ground: #cfd3d8;
+  --line: rgba(255, 255, 255, 0.22);
+  --hover: rgba(255, 255, 255, 0.1);
+  --press: rgba(255, 255, 255, 0.18);
+  --credit-ground: rgba(255, 255, 255, 0.78);
+  --credit-ink: #222428;
+  --focus-on-map: #14171c;
+  --ink-soft: #a9b0bb;
+  --glass: rgba(18, 20, 24, 0.84);
+  --best: #3d8bfd;
+  --alt: #8b97a8;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: clip;
+  background: var(--page);
+  color: var(--ink);
+  font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  background: var(--map-ground);
+}
+
+#panel {
+  position: absolute;
+  left: 8px;
+  bottom: 22px;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: calc(100% - 16px);
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--glass);
+}
+
+#legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#legend li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+#legend .swatch {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--alt);
+}
+
+#legend .best .swatch {
+  height: 5px;
+  background: var(--best);
+}
+
+#legend .pin {
+  color: var(--ink-soft);
+}
+
+#reset {
+  flex: none;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+#reset:hover {
+  background: var(--hover);
+}
+
+#reset:active {
+  background: var(--press);
+}
+
+#reset:focus-visible {
+  outline: 2px solid var(--best);
+  outline-offset: 1px;
+}
+
+#status {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 1000;
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--glass);
+  transform: translateX(-50%);
+}
+
+#attribution {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  z-index: 1000;
+  margin: 0;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--credit-ground);
+  color: var(--credit-ink);
+  font-size: 11px;
+}
+
+/* The map and Leaflet's zoom buttons sit on the light map ground: a dark ring keeps focus visible there. */
+#map:focus-visible {
+  outline: 2px solid var(--focus-on-map);
+  outline-offset: -2px;
+}
+
+.leaflet-bar a:focus-visible {
+  outline: 2px solid var(--focus-on-map);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .leaflet-zoom-anim .leaflet-zoom-animated,
+  .leaflet-fade-anim .leaflet-tile,
+  .leaflet-fade-anim .leaflet-popup {
+    transition: none;
+  }
+}

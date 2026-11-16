@@ -1,0 +1,62 @@
+[
+ {
+  "lineId": "176",
+  "lineName": "176",
+  "platformName": "C",
+  "direction": "outbound",
+  "destinationName": "Tottenham Court Road",
+  "towards": "Tottenham Court Road",
+  "timeToStation": 1626,
+  "modeName": "bus"
+ },
+ {
+  "lineId": "176",
+  "lineName": "176",
+  "platformName": "C",
+  "direction": "outbound",
+  "destinationName": "Tottenham Court Road",
+  "towards": "Tottenham Court Road",
+  "timeToStation": 535,
+  "modeName": "bus"
+ },
+ {
+  "lineId": "176",
+  "lineName": "176",
+  "platformName": "C",
+  "direction": "outbound",
+  "destinationName": "Tottenham Court Road",
+  "towards": "Tottenham Court Road",
+  "timeToStation": 1097,
+  "modeName": "bus"
+ },
+ {
+  "lineId": "176",
+  "lineName": "176",
+  "platformName": "C",
+  "direction": "outbound",
+  "destinationName": "Tottenham Court Road",
+  "towards": "Tottenham Court Road",
+  "timeToStation": 447,
+  "modeName": "bus"
+ },
+ {
+  "lineId": "24",
+  "lineName": "24",
+  "platformName": "C",
+  "direction": "outbound",
+  "destinationName": "Hampstead Heath",
+  "towards": "Tottenham Court Road",
+  "timeToStation": 1715,
+  "modeName": "bus"
+ },
+ {
+  "lineId": "24",
+  "lineName": "24",
+  "platformName": "C",
+  "direction": "outbound",
+  "destinationName": "Hampstead Heath",
+  "towards": "Tottenham Court Road",
+  "timeToStation": 333,
+  "modeName": "bus"
+ }
+]

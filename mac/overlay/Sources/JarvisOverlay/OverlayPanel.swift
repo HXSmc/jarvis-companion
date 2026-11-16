@@ -202,12 +202,12 @@ final class HUDWindow: NSPanel {
         }
     }
 
-    /// True when the press lands inside a live player host, so its events go untouched.
+    /// True when the press lands inside a live player host or a web card's map, so its events go untouched.
     private func isOnPlayer(_ event: NSEvent) -> Bool {
         guard let contentView else { return false }
         var view = contentView.hitTest(event.locationInWindow)
         while let current = view {
-            if current is PlayerHostView { return true }
+            if current is PlayerHostView || current is WebCardHostView { return true }  // the map pans itself
             view = current.superview
         }
         return false

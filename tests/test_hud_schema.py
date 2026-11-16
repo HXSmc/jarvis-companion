@@ -51,7 +51,7 @@ CARDS = {
 }
 
 
-@pytest.mark.parametrize("ctype", hud.CARD_TYPES)
+@pytest.mark.parametrize("ctype", [t for t in hud.CARD_TYPES if t != "web"])  # web: service-only, test_web_card
 def test_every_card_type_accepted(ctype):
     raw = {"id": "c1", "type": ctype, "title": "T", **CARDS[ctype]}
     out = hud.validate_card(raw)
@@ -210,7 +210,7 @@ def test_validate_hud_drops_invalid_and_never_raises():
 def test_fixtures_are_already_valid(path):
     """Fixtures are shared with the Swift decoder: validating them must be a no-op."""
     msg = json.loads(path.read_text())
-    assert hud.validate_hud(msg) == msg  # 120 == 120.0, so int/float boxes compare equal
+    assert hud.validate_hud(msg, allow_web=True) == msg  # 120 == 120.0, so int/float boxes compare equal
 
 
 def test_fixtures_cover_every_kind_and_type():
@@ -224,3 +224,27 @@ def test_fixtures_cover_every_kind_and_type():
 
 def test_schema_file_matches_export():
     assert json.loads((FIXTURES / "schema.json").read_text()) == hud.schema_json()
+
+
+def test_web_card():
+    """jfollow10b: the service-only web card (page "map"); a model can never name one."""
+    web = json.loads((FIXTURES / "web.json").read_text())["cards"][0]
+    assert hud.validate_card(web, allow_web=True) == web
+    assert hud.validate_card(web) is None
+    assert hud.validate_card({**web, "page": "chart"}, allow_web=True) is None
+    assert hud.validate_card({**web, "page": "../map"}, allow_web=True) is None
+    data = web["data"]
+    bad = {**data, "routes": [{"points": [[91, 0], [51.5, 181], [51.5, -0.1], [51.6, -0.2]], "km": 1, "min": 2}]}
+    out = hud.validate_card({**web, "data": bad}, allow_web=True)
+    assert out["data"]["routes"][0]["points"] == [[51.5, -0.1], [51.6, -0.2]]
+    four = {**data, "routes": [data["routes"][0]] * 4}
+    assert len(hud.validate_card({**web, "data": four}, allow_web=True)["data"]["routes"]) == 3
+    long = {**data, "routes": [{"points": [[51.5, -0.1 + i / 10000] for i in range(301)], "km": 1, "min": 2}]}
+    assert len(hud.validate_card({**web, "data": long}, allow_web=True)["data"]["routes"][0]["points"]) == 300
+    pin = {**data, "pins": [{"lat": 51.5, "lon": -0.1, "label": "L" * 60}]}
+    assert len(hud.validate_card({**web, "data": pin}, allow_web=True)["data"]["pins"][0]["label"]) == 40
+    forged = {**data, "attribution": "<img src=x onerror=alert(1)>"}
+    assert hud.validate_card({**web, "data": forged}, allow_web=True)["data"]["attribution"] == hud.MAP_ATTRIBUTION
+    assert hud.validate_card({**web, "data": {"routes": [], "pins": []}}, allow_web=True) is None
+    assert hud.validate_hud({"shapes": [], "cards": [web]}) == {"shapes": [], "cards": []}
+    assert "web" in json.dumps(hud.schema_json()["$defs"]["card"])

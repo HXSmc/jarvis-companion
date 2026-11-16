@@ -410,6 +410,115 @@
               ]
             }
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "web"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 60,
+              "minLength": 1
+            },
+            "page": {
+              "enum": [
+                "map"
+              ]
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "routes": {
+                  "type": "array",
+                  "maxItems": 3,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "points": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 300,
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "number"
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        }
+                      },
+                      "km": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "min": {
+                        "type": "number",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "points",
+                      "km",
+                      "min"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "pins": {
+                  "type": "array",
+                  "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "lat": {
+                        "type": "number",
+                        "minimum": -90,
+                        "maximum": 90
+                      },
+                      "lon": {
+                        "type": "number",
+                        "minimum": -180,
+                        "maximum": 180
+                      },
+                      "label": {
+                        "type": "string",
+                        "maxLength": 40
+                      }
+                    },
+                    "required": [
+                      "lat",
+                      "lon",
+                      "label"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "attribution": {
+                  "const": "© OpenStreetMap contributors"
+                }
+              },
+              "required": [
+                "routes",
+                "pins",
+                "attribution"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "title",
+            "page",
+            "data"
+          ],
+          "additionalProperties": false
         }
       ]
     }

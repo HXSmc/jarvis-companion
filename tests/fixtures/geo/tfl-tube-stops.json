@@ -1,0 +1,20 @@
+{
+ "stopPoints": [
+  {
+   "id": "940GZZLUCHX",
+   "naptanId": "940GZZLUCHX",
+   "commonName": "Charing Cross Underground Station",
+   "stopLetter": null,
+   "distance": 82.58069632102448,
+   "stopType": "NaptanMetroStation"
+  },
+  {
+   "id": "940GZZLULSQ",
+   "naptanId": "940GZZLULSQ",
+   "commonName": "Leicester Square Underground Station",
+   "stopLetter": null,
+   "distance": 377.98453985521576,
+   "stopType": "NaptanMetroStation"
+  }
+ ]
+}

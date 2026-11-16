@@ -125,7 +125,7 @@ else
   fi
   run "$BASE_PY" -m venv "$REPO/.venv"
 fi
-run "$PY" -m pip install fastapi==0.143.2 uvicorn==0.54.0 httpx==0.28.1 numpy==2.5.4 openwakeword==0.6.0 kokoro-onnx==0.6.1
+run "$PY" -m pip install fastapi==0.143.2 uvicorn==0.54.0 httpx==0.28.1 numpy==2.5.4 openwakeword==0.6.0 kokoro-onnx==0.6.1 youtube-transcript-api==1.2.5
 
 # (d) Kokoro TTS model files (never redistributed by this repo; sha256-verified,
 # freshly downloaded ones and files already on disk alike).
@@ -168,6 +168,9 @@ run mkdir -p "$APP/Contents/MacOS"
 run cp "$REPO/mac/overlay/.build/release/JarvisOverlay" "$APP/Contents/MacOS/JarvisOverlay"
 run mkdir -p "$APP/Contents/Resources"
 run iconutil -c icns "$REPO/mac/overlay/Resources/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
+# the web card's bundled pages (map page + vendored Leaflet); copied before signing
+run mkdir -p "$APP/Contents/Resources/web"
+run cp -R "$REPO/mac/overlay/Resources/web/." "$APP/Contents/Resources/web/"
 if (( DRY_RUN )); then
   echo "would: write $APP/Contents/Info.plist (com.jarvis.overlay, AppIcon, LSUIElement, mic + speech usage strings)"
 else

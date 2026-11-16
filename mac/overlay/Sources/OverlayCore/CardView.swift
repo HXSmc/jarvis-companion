@@ -96,7 +96,7 @@ public struct CardView: View {
     /// Width the card kind is built at; the enlarged layer scales fonts from it.
     static func baseWidth(of card: HUDCard) -> CGFloat {
         switch card {
-        case .bar, .flow: return 360
+        case .bar, .flow, .web: return 360
         case .image, .video: return MediaPolicy.cardWidth
         default: return 300
         }
@@ -139,6 +139,30 @@ public struct CardView: View {
                           thumbnail: p.youtubeID != nil || p.thumbnailURL != nil ? .loading : nil,
                           phase: .idle,
                           onPlay: {})
+        case .web(let p):  // the static form; the live map is WebCardView inside WebCardChrome
+            CardChrome(meta: nil, title: p.title, width: width ?? 360, fontScale: enlargedFontScale) {
+                InfoBody(lines: [p.data.routes.isEmpty ? "Map" : "Route map"], scale: enlargedFontScale)
+            }
+        }
+    }
+}
+
+/// The web card's chrome around a live body (the app's WKWebView): the title row stays outside the
+/// web view, so a drag there still moves the card.
+public struct WebCardChrome<Content: View>: View {
+    let title: String
+    let content: () -> Content
+
+    public init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.content = content
+    }
+
+    public var body: some View {
+        CardChrome(meta: nil, title: title, width: 360) {
+            content()
+                .frame(width: 332, height: 260)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
         }
     }
 }

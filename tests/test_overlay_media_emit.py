@@ -129,7 +129,8 @@ def test_youtube_link_becomes_video_and_bad_id_does_not():
     assert card["type"] == "video" and card["youtube_id"] == YT
     deps = make_deps(chunks=lines({"card": {"type": "link", "title": "Jet",
                                             "url": "https://www.youtube.com/watch?v=short"}}))
-    assert [c["type"] for c in cards(run(deps, conv_id="c2"))] == ["link"]
+    # jfollow10b ruling 1: a model link card needs link words in the owner's own words
+    assert [c["type"] for c in cards(run(deps, text="give me the link to the jet video", conv_id="c2"))] == ["link"]
 
 
 @pytest.mark.parametrize("raw,want", [
@@ -141,7 +142,8 @@ def test_youtube_link_becomes_video_and_bad_id_does_not():
 def test_odd_video_hosts_never_play(raw, want):
     """Rule (hub answer 4): fast-tier video cards are YouTube only; a file URL is at most a link."""
     deps = make_deps(chunks=lines({"card": raw}))
-    got = [c for c in cards(run(deps)) if c["type"] != "info"]  # a dropped-only reply gets the failure card
+    # jfollow10b ruling 1: the owner asks for a link, so the link fallback still shows
+    got = [c for c in cards(run(deps, text="give me a link to a dog video")) if c["type"] != "info"]  # a dropped-only reply gets the failure card
     assert [c["type"] for c in got] == ([want] if want else [])
     assert all("youtube_id" not in c and c["type"] != "video" for c in got)
 

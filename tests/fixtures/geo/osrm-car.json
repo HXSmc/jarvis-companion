@@ -1,0 +1,207 @@
+{
+ "code": "Ok",
+ "routes": [
+  {
+   "distance": 4741.9,
+   "duration": 772.1,
+   "geometry": "yswfaBh`yF]cKWuBSsBM_D@sCLuBXyA^}Ap@cBb@aAb@m@^]NGb@mFx@}FtBiLjB_GPcAr@sHjFcg@rC}WzAwNTsBTwBdAyJdLwfAi@gJ~A{Qh@kFVgCN}ARmBzB_Mx@gGReARgEpAeFcBcAs@e@eRoLqCmBuIsGkAeAkAeA{]sW}LuJqJsIgCkC{LeMcKkLeE{GmFaJ{NoUw@}AaAmBoQ{_@}E{LuAUs@kBy@gCgAcEk@wB[aEsAqEsCyMKa@oH}Z_Ig_@{Gs]wDaVqE_\\aCaRUgC}A_D_@_CWqC[aDc@eDJwDFmDaDs]yEmm@yAkSO}CMmCgAuTa@iIiAcWk@sOCiAUwHYkOEsKKsMK}d@Lo`@Fqu@TyfA?eE@cC?yE@uDFeL?aBP}UDoH@oNTkyBDsY@kQBmRJcRFmb@?kBy@kKS}D]iL]sHyCcm@yBmj@_@kOc@ccBz@g_CZu`@N}XDmFTkOLiJp@yOfBo\\`Cu]hEyo@T{C\\kEZaD^eEbBkN|Dw^rGym@fByMPyAJs@X}BTyBp@sFbAeAtDkb@Fq@LgARqBvAuM~AwJDeEb@kCtFs[pBmLfCuNpAyHBQ`@kCj@wE|AkB|@mJfBkS\\iEu@mG|@mLz@sLjAsO|@yIfAiNd@oGPgCxBy_@nMirBxBg_@J_CxBa^dBkZ\\{ID{MB}B_@}Lk@gImAcMgCqPgAmFiAwDkFuP}@eC_CuHD{EIc@cAsEiAyHk@yGSiHN_M\\uK^yMr@qPv@mK~@gI^cD`@eDf@cGFiD?_Fi@gZcAg]O}EEqAO_DiAqTgAgN}BgQeB_LUkA}C_P_AyE_B}AWsDm@sCw@mFIuDNiGn@kIb@yCt@cCxAoCt@}AtAiB|F_Fn@k@hCcD|@cA`BkBwAcAkAs@eBuAiAcA}B}BqCqCmDmDgDgD}@kA]aAgAqBi@qAg@_Bm@iCu@kDvBlAjBtAhOrR`AdAxDpClDzCz@r@z@x@nA|@d@RpAl@lH|B`HxA`Cn@pBz@nFdDzBx@lChCTB|MhBtL`Bzq@vIvHv@xAcArCh@|DrAzAvCtEnB~JbGdf@tYbHnEjDpBtQrKj@\\",
+   "legs": [
+    {
+     "steps": [
+      {
+       "name": "Trafalgar Square",
+       "ref": "A4",
+       "distance": 13.6
+      },
+      {
+       "name": "Northumberland Avenue",
+       "ref": "A400",
+       "distance": 43.6
+      },
+      {
+       "name": "Northumberland Avenue",
+       "ref": "A400",
+       "distance": 358
+      },
+      {
+       "name": "Victoria Embankment",
+       "ref": "A3211",
+       "distance": 1217.5
+      },
+      {
+       "name": "Blackfriars Underpass",
+       "ref": "A3211",
+       "distance": 403.5
+      },
+      {
+       "name": "Upper Thames Street",
+       "ref": "A3211",
+       "distance": 1078.5
+      },
+      {
+       "name": "Lower Thames Street",
+       "ref": "A3211",
+       "distance": 371.2
+      },
+      {
+       "name": "Byward Street",
+       "ref": "A3211",
+       "distance": 253.1
+      },
+      {
+       "name": "Tower Hill",
+       "ref": "A100",
+       "distance": 244.3
+      },
+      {
+       "name": "",
+       "ref": "A100",
+       "distance": 116.7
+      },
+      {
+       "name": "Mansell Street",
+       "ref": "A1210",
+       "distance": 94
+      },
+      {
+       "name": "Mansell Street",
+       "ref": "A1210",
+       "distance": 96.9
+      },
+      {
+       "name": "",
+       "ref": "A100",
+       "distance": 450.9
+      },
+      {
+       "name": "Tower Bridge",
+       "ref": "A100",
+       "distance": 0
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "distance": 5087.3,
+   "duration": 840.6,
+   "geometry": "yswfaBh`yF]cKWuBSsB}CoMs@eDwBiHu@{A}@cA}@_@eAOkBD{AJqQfDqGvBiAXiAXoAJu@y@k@e@Y}@IgCF}HAgEe@cIEo[IuCUkIEaFCyTIaBMyBm@sA{@qB_A{BkE_Km@qA}KgYcPs`@q@eB_CoG}Pgc@qFePaByEkHcSuLy_@mDyLsBqGaDsK{@}CoFmRiAcEwJi^aJw\\mBnBsYtYc@n@_@j@i@wAGQyNge@{@yDUt@Ql@wL|`@e@vAmAqBiNo`@s@sAzNsh@Fc@b@iBTeAFa@n@gItDl@vCd@`M`@xAMlAQbDKtAH^Px@f@^Rt@t@d@p@|AfClCkCx@i@~AgADCdH}EpPoL`JcHnEiD~@i@zH{FnlA_cAlaCsqBfEmDzKsJ`I_IdYqVza@y]pAoAhDyCbEoEzBuCb@{@Ze@|@mBt@uCfBgNAcDOsC_@{C[oB]wAm@uBm@_Cm@uGcCeJkGsUm@wBqKg`@o@}B]sA}BwI}BqIa@yAm@wBoVe~@mJu]gBmH_Kg]yAgFiBsGcE_OkBgHcAyEs@iFsGkl@Gq@S}BaBkTIuBKuF?qHAsHIyNAq@F{OAaB@mBDwJ?U?y@D_JHgWcA{F@}E@iB@{BB_DBaD^cGvA_Ht@iCbAaD~AgD~B_@p@qAdCkH`@oAt@_Cv@_ClC_KnAwEd@eBhBkHt@{C`Iu\\\\_BnAcG`BaI`@qBj@sCxDoRpKui@f@oCTqAjA}GtAgIRsAb@iChKut@NeA\\eC^eCfIwk@`@uDtDa^VeC~CwZXoCTeCrAoNrAaMtBiTn@_Hn@cHjBuYX{DJ{An@mM`@eJFuAPuDhA_XHaBZqHRcFl@}OPoEJ}BJ_DToFPgG~Bcr@@oAPwZB{HAs\\MaV[eVk@kOiAeBwAmQiAcNKoCQ_KeBwFI}BeC{D_CmD_@q@iBKMQi@w@eBiCuE{F_AoAC_EKOyD_FgEkAmDkDgDwEg@q@iCkDyC{CcFoEmAeA_A{@e@a@]}@Yo@Sc@_@o@[m@[m@K_@EYA_@JqCr@eEx@gGFi@R_BTwBPiB`E_d@Fw@zAoOr@mHfA}MXkDXqDTgDp@oI\\oDTaCNeAt@mEdA{EzAkG`DmMzDeMlGiR|DaMpAcEvAqE|AaFbEyLbD}JzAkEdCoH|@oC|@qCt@yB|AyEzBqGZgA`CwIh@oC\\iBZ{APw@dAcFvBgKd@{BpBuJz@cEv@qDf@cBv@aCjAsDVu@jCqIfAsCxAwDv@eCfDoJ~@oCx@cCxF}Q`AqEb@uB|@yFp@gE|@qFvAwIdAuGNeARqAv@}E`BwHdByGt@wCr@sCr@qCpAuE|@kDfEuOp@iCzEyQgA}BQc@WoAWoBHwB|@wCpAsIT}AdAuH~BgPVeBRaBp@wHaG{DgAiAcBoCIEGCECCAsHiE_Q{JoHeEgCyAcB^cAm@aAk@k@iCkVqN_k@q\\qHmEyBqAmDqBmPwJ",
+   "legs": [
+    {
+     "steps": [
+      {
+       "name": "Trafalgar Square",
+       "ref": "A4",
+       "distance": 13.6
+      },
+      {
+       "name": "Trafalgar Square",
+       "ref": "A4",
+       "distance": 8.5
+      },
+      {
+       "name": "Trafalgar Square",
+       "ref": "A4",
+       "distance": 126.6
+      },
+      {
+       "name": "Duncannon Street",
+       "ref": "",
+       "distance": 131.5
+      },
+      {
+       "name": "Strand",
+       "ref": "A4",
+       "distance": 458.5
+      },
+      {
+       "name": "Burleigh Street",
+       "ref": "",
+       "distance": 68.1
+      },
+      {
+       "name": "Exeter Street",
+       "ref": "",
+       "distance": 62.8
+      },
+      {
+       "name": "Wellington Street",
+       "ref": "",
+       "distance": 52.8
+      },
+      {
+       "name": "Tavistock Street",
+       "ref": "",
+       "distance": 56.1
+      },
+      {
+       "name": "Catherine Street",
+       "ref": "",
+       "distance": 75.4
+      },
+      {
+       "name": "Aldwych",
+       "ref": "A4",
+       "distance": 87.8
+      },
+      {
+       "name": "Lancaster Place",
+       "ref": "A301",
+       "distance": 130.4
+      },
+      {
+       "name": "Waterloo Bridge",
+       "ref": "A301",
+       "distance": 660.5
+      },
+      {
+       "name": "Stamford Street",
+       "ref": "A3200",
+       "distance": 17.9
+      },
+      {
+       "name": "Stamford Street",
+       "ref": "A3200",
+       "distance": 678.1
+      },
+      {
+       "name": "Southwark Street",
+       "ref": "A3200",
+       "distance": 1062.7
+      },
+      {
+       "name": "Borough High Street",
+       "ref": "A3",
+       "distance": 177.2
+      },
+      {
+       "name": "Duke Street Hill",
+       "ref": "A200",
+       "distance": 162.2
+      },
+      {
+       "name": "Tooley Street",
+       "ref": "A200",
+       "distance": 636.6
+      },
+      {
+       "name": "Queen Elizabeth Street",
+       "ref": "A200",
+       "distance": 91.8
+      },
+      {
+       "name": "Tower Bridge Road",
+       "ref": "A100",
+       "distance": 328.3
+      },
+      {
+       "name": "Tower Bridge",
+       "ref": "A100",
+       "distance": 0
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

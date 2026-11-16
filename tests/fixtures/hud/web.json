@@ -1,0 +1,9 @@
+{"shapes": [], "cards": [
+  {"id": "c-web", "type": "web", "title": "Alpha Square to Beta Bridge", "page": "map", "data": {
+    "routes": [
+      {"points": [[51.508, -0.1281], [51.5071, -0.1203], [51.5062, -0.0951], [51.5055, -0.0754]], "km": 5.0, "min": 13.9},
+      {"points": [[51.508, -0.1281], [51.5102, -0.1002], [51.5055, -0.0754]], "km": 5.3, "min": 15.7}
+    ],
+    "pins": [{"lat": 51.508, "lon": -0.1281, "label": "Alpha Square"}, {"lat": 51.5055, "lon": -0.0754, "label": "Beta Bridge"}],
+    "attribution": "© OpenStreetMap contributors"}}
+]}

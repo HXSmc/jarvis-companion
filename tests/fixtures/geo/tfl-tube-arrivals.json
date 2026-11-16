@@ -1,0 +1,82 @@
+[
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 1457,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 617,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 1397,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 917,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 47,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 1097,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 1757,
+  "modeName": "tube"
+ },
+ {
+  "lineId": "bakerloo",
+  "lineName": "Bakerloo",
+  "platformName": "Southbound - Platform 2",
+  "direction": "inbound",
+  "destinationName": "Elephant & Castle Underground Station",
+  "towards": "Elephant and Castle",
+  "timeToStation": 257,
+  "modeName": "tube"
+ }
+]

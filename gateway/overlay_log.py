@@ -34,6 +34,8 @@ KEEP_STEPS = frozenset({
     "wake_capture", "card_remove",
     # jfollow10a: one row per agent command / session start (sanitized program name + fixed words).
     "cmd_run",
+    # jfollow10b: maps/TfL/places, video questions, the watch job, dropped link cards, the app's web card.
+    "geo", "video_ask", "watch_job", "link_dropped", "web_card",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})
