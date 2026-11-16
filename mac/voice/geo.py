@@ -59,7 +59,7 @@ _geocodes: dict[str, tuple[float, float]] = {}  # typed text -> lat/lon, process
 
 
 class GeoError(Exception):
-    """reason: api_error | timeout | too_big | rate_cap | bad_host | no_route | no_place"""
+    """reason: api_error | timeout | too_big | rate_cap | bad_host | no_route | no_place | no_stops | bad_tile | bad_png"""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -641,7 +641,7 @@ def tile(root: Path, z: int, x: int, y: int) -> bytes:
     data = _get(TILE_URL.format(z=z, x=x, y=y), "tile")
     if not _png_ok(data):
         TILE_STATS["refused"] += 1
-        raise GeoError("bad_tile")
+        raise GeoError("bad_png")  # upstream sent something else: 502, nothing cached
     TILE_STATS["fetched"] += 1
     for d in (tiles, tiles / str(z), tiles / str(z) / str(x)):
         d.mkdir(mode=0o700, exist_ok=True)

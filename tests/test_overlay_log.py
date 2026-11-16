@@ -450,3 +450,18 @@ def test_keep_steps_jfollow10a():
                                               "command": "echo SECRET-ARG"}]}]}
     (row,) = overlay_log.redact(snap)["turns"][0]["steps"]
     assert row == {"step": "cmd_run", "at": 1.0, "detail": detail}
+
+
+def test_keep_steps_jfollow10b():
+    """jfollow10b: the geo, video_ask, watch_job, link_dropped and web_card rows keep their detail."""
+    from gateway import overlay_log
+    rows = {"geo": "kind=map src=valhalla routes=3 stops=0 calls=3 ms=420 reason=ok",
+            "video_ask": "src=captions chars=1486 found=1 ms=900 reason=ok",
+            "watch_job": "state=started id=sess-1 reason=ok",
+            "link_dropped": "reason=no_link_words",
+            "web_card": "page=map rules=1 loaded=1 ms=9 blocked=0"}
+    snap = {"turns": [{"id": "t1", "steps": [{"step": k, "at": 1.0, "detail": v, "arg": "SECRET-PLACE"}
+                                             for k, v in rows.items()]}]}
+    out = overlay_log.redact(snap)
+    assert [(s["step"], s["detail"]) for s in out["turns"][0]["steps"]] == list(rows.items())
+    assert "SECRET-PLACE" not in repr(out)
