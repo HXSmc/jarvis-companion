@@ -117,6 +117,11 @@ body {
   background: var(--press);
 }
 
+#reset:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 #reset:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 1px;

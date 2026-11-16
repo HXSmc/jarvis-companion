@@ -42,12 +42,13 @@
     return [r.width / 2, r.height / 2];
   }
 
-  img.addEventListener("error", () => {
-    img.hidden = true;
+  function unavailable() {
+    img.remove();
     status.textContent = "Drawing unavailable";
     status.hidden = false;
-  });
-  img.src = "drawing.svg";
+  }
+  img.addEventListener("error", unavailable);
+  if (img.complete && img.naturalWidth === 0) unavailable();  // failed before this script ran
 
   // Trackpad pinch arrives as wheel with ctrlKey; a plain scroll zooms too, more gently.
   stage.addEventListener("wheel", (e) => {
