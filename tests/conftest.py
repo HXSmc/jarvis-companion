@@ -152,3 +152,15 @@ def isolate_central_state(monkeypatch, tmp_path):
     monkeypatch.setattr(central, "_inflight", set())
     monkeypatch.setattr(central, "_failed", {})
     monkeypatch.setattr(central, "_known_ids", set())
+
+
+@pytest.fixture(autouse=True)
+def voice_auto_off(monkeypatch, tmp_path):
+    """jfollow10a: every test runs with the voice switch OFF (commands ask, as at base) in its own
+    0600 settings file; a test that needs full auto turns it on explicitly."""
+    from mac.voice import auto_policy
+    path = tmp_path / "voice-settings" / "voice-settings.json"
+    path.parent.mkdir(mode=0o700)
+    path.write_text('{"agent_auto": false}')
+    path.chmod(0o600)
+    monkeypatch.setattr(auto_policy, "SETTINGS_FILE", path)

@@ -313,6 +313,15 @@ _SESSION_STOP_RE = re.compile(r"stop (?:the )?(?P<name>.+?) session"
 # Secrets folder gets the host line, before any app, model or tool (stricter, never looser).
 _VAULT_SECRETS_RE = re.compile(r".*\b(?:secrets? (?:folder|directory|notes?)"
                                r"|(?:in|from|inside|under) (?:my |the |your )?secrets)\b.*", re.I | re.S)
+# jfollow10a: the owner's voice switch for running agent commands without the spoken Confirm.
+# Whole utterance only; "stop" / "stop asking" alone never match ("commands" is required).
+_CMDS = r"(?:running |you run )?(?:any )?commands"
+_AUTO_OFF_RE = re.compile(_WRAP_LEAD + r"(?:ask (?:me )?before " + _CMDS + r"|ask (?:me )?before you run anything"
+                         r"|(?:turn|switch) on (?:command )?(?:confirmations|confirm)"
+                         r"|stop running commands without asking)" + _WRAP_TRAIL)
+_AUTO_ON_RE = re.compile(_WRAP_LEAD + r"(?:(?:stop|quit) asking (?:me )?before " + _CMDS
+                        + r"|(?:don't|do not) ask (?:me )?before " + _CMDS
+                        + r"|run commands without asking(?: me)?|(?:go|switch) to full auto|go full auto)" + _WRAP_TRAIL)
 _SESSION_ANSWER_RE = re.compile(
     r"(?:tell (?P<tname>the .+? session) (?P<tyn>yes|no|to go ahead)"
     r"|approve (?P<aname>the .+? session)"
@@ -397,6 +406,10 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     ask = memory_request(text)
     if ask:
         return Intent("memory", ask.action)
+    if _form_hit(_AUTO_OFF_RE, low.replace(",", "")):
+        return Intent("auto_mode", "off")
+    if _form_hit(_AUTO_ON_RE, low.replace(",", "")):
+        return Intent("auto_mode", "on")
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
     ask = workspace_request(text, ws_names)

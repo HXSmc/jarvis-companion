@@ -44,8 +44,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import hud
-from mac.voice import (acks, agent, agent_policy, gitdiff, ground, intents, lean, media_lookup,
-                       memory, workspaces)
+from mac.voice import (acks, agent, agent_policy, auto_policy, gitdiff, ground, intents, lean,
+                       media_lookup, memory, workspaces)
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,19 @@ _REDACT = (
     (re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+"), "[email]"),
     (re.compile(r"(?:~|/)[\w.\-]*(?:/[\w.\-@ ]+)+"), "[path]"),
 )
+
+
+# jfollow10a: keys and tokens are never spoken or shown (agent replies). Paths and emails stay:
+# answers name files.
+_SECRET_SAY = _REDACT[:2] + tuple((re.compile(p), "[key]") for p in (
+    r"gh[pousr]_[A-Za-z0-9]{20,}", r"github_pat_[A-Za-z0-9_]{20,}", r"AKIA[0-9A-Z]{16}",
+    r"xox[abprs]-[A-Za-z0-9-]{10,}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"))
+
+
+def _mask_secrets(text: str) -> str:
+    for pattern, repl in _SECRET_SAY:
+        text = pattern.sub(repl, text)
+    return text
 
 
 def _redact(text: str, limit: int = 300) -> str:
@@ -502,6 +515,16 @@ _notes: dict[str, deque] = {}  # conv_id -> context notes (e.g. the last diff te
 # conv_ids that ever saw screen/diff text: their later turns stay on the tool-less pool,
 # because history (the model's own replies) can carry that text to a web-tool session.
 _tainted: set[str] = set()
+# jfollow10a (hub answer H1): conv_ids that took in text not from the owner's words or his own mini PC
+# gateway (card titles, screen data, commit text, saved card text). Only the auto-run check reads it:
+# a command that is not a plain look-up asks first. The agent side of the mark lives on the session.
+_auto_tainted: set[str] = set()
+
+
+def _mark_untrusted(conv_id: str) -> None:
+    """The conv took in untrusted text: the tool-less pool (_tainted) and no auto-run beyond look-ups."""
+    _tainted.add(conv_id)
+    _auto_tainted.add(conv_id)
 # conv_id -> card ids already sent: a model-supplied id that repeats would silently replace
 # an earlier card in the app (and could overwrite a card the service itself sent).
 _card_ids: dict[str, set] = {}
@@ -656,6 +679,7 @@ def _forget(conv_id: str) -> None:
     _screen_at.pop(conv_id, None)
     _idle_gone.pop(conv_id, None)
     _tainted.discard(conv_id)
+    _auto_tainted.discard(conv_id)
 
 
 def _drop_cards(conv_id: str, group: str, keep: tuple[str, ...] = ()) -> dict | None:
@@ -1430,8 +1454,9 @@ async def _session_started(conv_id: str, sid: str, raw_title: object, deps: Over
 
 
 async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps,
-                                said: list[str], on_step) -> AsyncIterator[dict]:
-    """Yes said: POST /chat with the fixed start body; the prompt was built at ask time."""
+                                said: list[str], on_step, how: str = "confirmed") -> AsyncIterator[dict]:
+    """Yes said (or auto, jfollow10a): POST /chat with the fixed start body; the prompt was built at ask
+    time. `how` is only the session_start row's first word."""
     now = deps.clock()
     req = {"msg_id": uuid.uuid4().hex, "thread_id": "ov-" + uuid.uuid4().hex[:8],
            "text": session_prompt(str(payload.get("words") or ""), payload.get("ref_row")),
@@ -1447,9 +1472,9 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
         if _SESSION_ID_RE.fullmatch(new_id):
             _set_session_ref(body.conv_id, [new_id])
             if on_step:
-                on_step("session_start", detail=f"confirmed id={new_id}")
+                on_step("session_start", detail=f"{how} id={new_id}")
         elif on_step:
-            on_step("session_start", detail="confirmed")
+            on_step("session_start", detail=how)
         async for ev in _session_started(body.conv_id, new_id, out.get("title"), deps, said,
                                          str(payload.get("words") or ""), req["text"]):
             yield ev
@@ -1460,7 +1485,7 @@ async def _session_start_action(payload: dict, body: TurnBody, deps: OverlayDeps
             sid, title = found
             _set_session_ref(body.conv_id, [sid])
             if on_step:
-                on_step("session_start", detail=f"confirmed id={sid} via=lookup")
+                on_step("session_start", detail=f"{how} id={sid} via=lookup")
             async for ev in _session_started(body.conv_id, sid, title, deps, said,
                                              str(payload.get("words") or ""), req["text"]):
                 yield ev
@@ -1849,7 +1874,7 @@ async def _workspace_open_turn(body: TurnBody, ask: intents.WorkspaceAsk, deps: 
             yield ev
         said.append(acks.PHRASES["workspace_failed"])
         return
-    _tainted.add(body.conv_id)  # saved card text is model text: the conv stays on the quiet pool
+    _mark_untrusted(body.conv_id)  # saved card text is model text: the conv stays on the quiet pool
     mapping: dict[str, str] = {}
     for saved in doc.get("cards") or []:
         card = hud.validate_card(dict(saved))
@@ -2113,6 +2138,20 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
                    else f"Start a session on the mini PC: {_cut40(ask.words)}")
         question = f"{summary}?" if ref_row else _confirm_question(summary)
         payload = {"words": ask.words, "ref_row": ref_row}
+        # jfollow10a: the owner's own words start a session at once; a title from the host asks.
+        if ref_row is not None:
+            how, why = "asked", "untrusted"
+        elif not auto_policy.auto_on():
+            how, why = "asked", "off"
+        elif body.conv_id in _auto_tainted or _agent_session_marked(body.conv_id, deps):
+            how, why = "asked", "untrusted"
+        else:
+            how, why = auto_policy.gate(barge=body.barge_in, gate_ok=_auto_gate_ok(body))
+        _cmd_row(on_step, "session_start", how, why)
+        if how == "auto":
+            async for ev in _session_start_action(payload, body, deps, said, on_step, how="auto"):
+                yield ev
+            return
     elif action == "stop":
         summary = f"Stop the {title40} session"
         question = f"{summary}?"
@@ -2169,7 +2208,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         # pending head or reach a model. A known command ("next change", "stop") never is; "clear"
         # and a one-card remove are (jfollow9: they act on the screen, room talk must not).
         if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind
-                in ("answer", "clear", "card_remove")
+                in ("answer", "clear", "card_remove", "auto_mode")
                 and not (intents.is_cancel(body.text) or intents.is_confirm(body.text)
                          or intents.is_no(body.text) or intents.is_stop(body.text))):
             reason, level = _followup_gate(body)
@@ -2361,6 +2400,19 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 on_step("layout", mode=mode)
             yield {"type": "layout", "mode": mode}
 
+        elif intent.kind == "auto_mode":
+            # jfollow10a: the owner's switch. A barge-in can never turn auto ON; OFF is always safe.
+            if intent.arg == "on" and body.barge_in:
+                key, word, why = "auto_barge", "refused", "barge"
+            elif auto_policy.set_auto(intent.arg == "on"):
+                key, word, why = f"auto_{intent.arg}", intent.arg, "ok"
+            else:
+                key, word, why = "auto_save_failed", "refused", "save"
+            _cmd_row(on_step, "switch", word, why)
+            async for ev in _line(key, deps):
+                yield ev
+            said.append(acks.PHRASES[key])
+
         elif intent.kind == "vault_secrets":
             # D1: fixed code names the vault's Secrets folder; no model, tool or file read runs.
             async for ev in _line("vault_off_limits", deps):
@@ -2400,7 +2452,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append(acks.PHRASES["one_at_a_time"])
             elif refused:
                 line = _which_one(body.conv_id, "enlarge", tie[1][:3], cards, deps)
-                _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
+                _mark_untrusted(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
                 async for ev in _speak(line, deps):
                     yield ev
                 said.append(line)
@@ -2496,7 +2548,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         gone = next((c for c in cards if c[0] == drop_ids[0]), None)
                         line = acks.PHRASES["removed_named"].format(
                             name=_card_name(gone) if gone else "the card")
-                        _tainted.add(body.conv_id)
+                        _mark_untrusted(body.conv_id)
                         async for ev in _speak(line, deps):
                             yield ev
                         said.append(line)
@@ -2511,7 +2563,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         on_step("card_remove", cards=len(drop_ids), match=hit[0], detail=detail)
                 elif hit is not None:  # two or more names matched: name them, remove nothing
                     line = _which_one(body.conv_id, "remove", hit[1][:3], cards, deps)
-                    _tainted.add(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
+                    _mark_untrusted(body.conv_id)  # card titles (maybe untrusted) reach speech and _history
                     async for ev in _speak(line, deps):
                         yield ev
                     said.append(line)
@@ -2527,7 +2579,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     shown = [_card_name(c) for c in reversed(cards)][:3]
                     line = acks.PHRASES["no_card_named"].format(
                         names=", ".join(shown[:-1]) + " and " + shown[-1] if len(shown) > 1 else shown[0])
-                    _tainted.add(body.conv_id)
+                    _mark_untrusted(body.conv_id)
                     async for ev in _speak(line, deps):
                         yield ev
                     said.append(line)
@@ -2771,7 +2823,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                                                        nav.rel, a, head=nav.head)
                         # Commit text is untrusted: kept as a note for a later free question (so the
                         # conversation stays on the tool-less pool), spoken only through the template.
-                        _tainted.add(body.conv_id)
+                        _mark_untrusted(body.conv_id)
                         _notes.setdefault(body.conv_id, deque(maxlen=3)).append(
                             f"Change {k} of {n} in {nav.rel}, lines {a} to {b}.\n"
                             f"Commit subjects: {'; '.join(c['subject'] for c in commits) or 'none'}"
@@ -2919,7 +2971,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     metrics["total_s"] = round(deps.clock() - start, 3)
     logger.info("overlay turn %s", json.dumps({**metrics, "error": error}))
     if _resets.get(body.conv_id, 0) != resets:  # another turn started it afresh while this one ran:
-        _tainted.add(body.conv_id)  # what this turn stores may predate that, so it stays tool-less
+        _mark_untrusted(body.conv_id)  # what this turn stores may predate that, so it stays tool-less
     if body.conv_id not in _history:  # conv ids rotate: keep memory bounded
         # Oldest first, skipping a conversation with a turn running or agent state: dropping it would
         # drop its taint while that turn still writes history. All busy: the map grows by those only.
@@ -3203,6 +3255,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
             parts.append(POINT_RULE)
     elif look is not None and body.screen is not None:  # a capture with nothing readable in it
         parts.append(NO_TARGETS_NOTE)
+    screen_or_notes = untrusted  # jfollow10a H1: session rows (owner's own gateway) set no auto mark
     if extra_untrusted is not None:  # e.g. the companion sessions view: same wrapper, quiet pool
         untrusted = True
         parts.append(f'<context untrusted="true">\n{_scrub(extra_untrusted)}\n</context>')
@@ -3214,6 +3267,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
 
     if untrusted:
         _tainted.add(body.conv_id)
+    if screen_or_notes:
+        _mark_untrusted(body.conv_id)
     pool = deps.quiet_conversations if body.conv_id in _tainted else deps.conversations
     quiet = pool is deps.quiet_conversations  # screen text may be in play: no outside fetch, no media
     session = await asyncio.to_thread(pool.get, body.conv_id)
@@ -3636,6 +3691,9 @@ class AgentRun:
     document: str | None = None  # repo-relative document in front: the model's lines in it get scrolled to
     model_lines: dict | None = None  # the model's validated lines, held while the host's may replace them
     cards_sent: bool = False  # the previous agent turn's cards were dropped at this run's first card
+    barge: bool = False  # jfollow10a: a barge-in turn never runs a command without the spoken yes
+    gate_ok: bool = True  # jfollow10a: wake/typed turn, or a follow-up that passed the room-talk gate
+    run_said: bool = False  # "Running it, sir." already spoken this run
 
 
 # conv_id -> run waiting for the owner's spoken yes (one per conv); conv_id -> run streaming now.
@@ -3853,6 +3911,7 @@ async def _agent_preflight(body: TurnBody, deps: OverlayDeps, metrics: dict, sai
             if on_step:
                 on_step("agent_confirm", state="allowed")
             yield _settled_card(run.confirm_summary, "Going ahead")
+            _mark_session(run.session, (run.updated_input or {}).get("command"))
             await asyncio.to_thread(run.session.respond, run.request_id, True, run.updated_input)
             run.request_id = run.updated_input = None
             run.started = deps.clock()
@@ -4130,6 +4189,41 @@ def _last_change(run: AgentRun) -> tuple[dict | None, dict | None, HunkNav | Non
     return card, lines, nav
 
 
+def _auto_gate_ok(body: TurnBody) -> bool:
+    """A wake word or typed turn, or a follow-up loud and sure enough to count as the owner."""
+    return not body.followup or _followup_gate(body)[0] is None
+
+
+def _cmd_row(on_step, name: str, decision: str, reason: str) -> None:
+    """The one cmd_run debug row: a sanitized program name (auto_policy.cmd_name or a fixed word),
+    a fixed decision word and a fixed reason code. Never arguments, output, paths or text."""
+    if on_step:
+        on_step("cmd_run", detail=f"cmd={name} decision={decision} reason={reason}")
+
+
+def _session_marked(session) -> bool:
+    return bool(getattr(session, "auto_tainted", False))
+
+
+def _agent_session_marked(conv_id: str, deps: OverlayDeps) -> bool:
+    """The conv's warm agent session (if any) took in untrusted text. `in` peeks without starting one."""
+    pool = deps.agent_conversations
+    if pool is None:
+        return False
+    try:
+        if conv_id not in pool:
+            return False
+    except TypeError:
+        return True  # cannot tell: fail closed
+    return _session_marked(pool.get(conv_id))
+
+
+def _mark_session(session, command) -> None:
+    """A tool result reached the agent: unless it was a quiet look-up, later commands need look-ups only."""
+    if auto_policy.marks(command):
+        session.auto_tainted = True
+
+
 async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dict, said: list[str],
                       start: float, on_step, sub: str = "") -> AsyncIterator[dict]:
     pool = deps.agent_conversations
@@ -4185,7 +4279,8 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
                    opening_key=acks.progress_key({"code": "file"}.get(sub, sub)),
                    screen_file=await asyncio.to_thread(_screen_file, body, repo, sub),
                    document=await asyncio.to_thread(_screen_doc, body, repo),
-                   editor=_EDITOR_CLI.get(body.screen.app if body.screen is not None else ""))
+                   editor=_EDITOR_CLI.get(body.screen.app if body.screen is not None else ""),
+                   barge=body.barge_in, gate_ok=_auto_gate_ok(body))
     await asyncio.to_thread(session.send_user, "\n\n".join(parts))
     async for ev in _agent_stream(run, deps, metrics, said, start, on_step):
         yield ev
@@ -4265,6 +4360,22 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 except asyncio.TimeoutError:  # fail closed; the stuck thread is left to finish on its own
                     decision, family = agent_policy.Deny(POLICY_TIMEOUT_REASON), "file"
                 label = agent_policy.log_label(name, tool_input)
+                auto_run = False
+                if name == "Bash":
+                    command = tool_input.get("command")
+                    if isinstance(decision, agent_policy.Confirm):
+                        # jfollow10a: full auto unless the switch is off, a never-auto row, untrusted text
+                        # (beyond look-ups), a barge-in turn or a follow-up the room-talk gate refused.
+                        how, why = await asyncio.to_thread(
+                            auto_policy.verdict, command, run.ctx,
+                            tainted=_session_marked(run.session) or run.conv_id in _auto_tainted,
+                            barge=run.barge, gate_ok=run.gate_ok)
+                        _cmd_row(on_step, auto_policy.cmd_name(command), how, why)
+                        if how == "auto":
+                            decision, auto_run = agent_policy.Allow(decision.updated_input), True
+                    elif isinstance(decision, agent_policy.Deny):
+                        _cmd_row(on_step, auto_policy.cmd_name(command), "refused",
+                                 agent_policy.reason_code(decision.reason))
                 now = deps.clock()
                 run.opening_key = None  # a tool call came first: its own progress rules apply
                 if metrics.get("agent_first_tool_s") is None:
@@ -4272,7 +4383,16 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 if metrics.get("agent_first_progress_s") is None:
                     metrics["agent_first_progress_s"] = round(now - start, 3)
                 key = acks.progress_key(family)
-                if isinstance(decision, agent_policy.Allow) and key != run.opening_said and (
+                if auto_run:  # one fixed line per run, in place of the call's own progress line
+                    if not run.run_said:
+                        run.run_said = True
+                        run.last_progress = now
+                        if on_step:
+                            on_step("agent_progress", text=acks.PHRASES["progress_run"])
+                        async for out in _line("progress_run", deps):
+                            yield out
+                        last_sent = deps.clock()
+                elif isinstance(decision, agent_policy.Allow) and key != run.opening_said and (
                         run.last_progress is None or now - run.last_progress >= PROGRESS_GAP_S):
                     run.last_progress = now
                     if on_step:
@@ -4285,6 +4405,7 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         run.ctx.trusted_repos = run.ctx.trusted_repos | {repo}
                     # Any result (file, commit text, PR, mail) is text the agent did not write.
                     run.ctx.read_untrusted_remote = True
+                    _mark_session(run.session, tool_input.get("command") if name == "Bash" else None)
                     run.tool = (label, deps.clock(), family)
                     await asyncio.to_thread(run.session.respond, rid, True, decision.updated_input)
                 elif isinstance(decision, agent_policy.Deny):
@@ -4385,6 +4506,16 @@ async def _agent_flush(line: str, run: AgentRun, deps: OverlayDeps, metrics: dic
         obj = {"say": line}
     if not isinstance(obj, dict):
         obj = {"say": line}
+    if isinstance(obj.get("say"), str):
+        obj["say"] = _mask_secrets(obj["say"])
+    if isinstance(obj.get("card"), dict):  # title and body lines, before the card is validated
+        card_in = obj["card"] = dict(obj["card"])
+        if isinstance(card_in.get("title"), str):
+            card_in["title"] = _mask_secrets(card_in["title"])
+        if isinstance(card_in.get("body"), str):
+            card_in["body"] = _mask_secrets(card_in["body"])
+        elif isinstance(card_in.get("body"), list):
+            card_in["body"] = [_mask_secrets(b) if isinstance(b, str) else b for b in card_in["body"]]
     if isinstance(obj.get("say"), str) and obj["say"].strip():
         text, notes = intents.drop_injection_notes(obj["say"].strip(),
                                                    noted=bool(metrics.get("notes_dropped")))
