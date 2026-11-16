@@ -239,9 +239,12 @@ def _check_glb(fd: int, size: int) -> None:
         raise ModelError("too_big", 413)
     try:
         doc = json.loads(os.pread(fd, chunk_len, 20))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
         raise ModelError("bad_magic", 422) from None
     if not isinstance(doc, dict):
+        raise ModelError("bad_magic", 422)
+    # a dict here would be iterated as keys, so a non-list would skip the uri check below
+    if any(not isinstance(doc.get(k), (list, type(None))) for k in ("buffers", "images", "extensionsRequired")):
         raise ModelError("bad_magic", 422)
     for key in ("buffers", "images"):
         for item in doc.get(key) or []:

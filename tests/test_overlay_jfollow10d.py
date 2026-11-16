@@ -356,6 +356,11 @@ def test_model_route_checks(client, mvault, opens):
     case("ext", 422, "ext_uri", glb({"asset": {}, "buffers": [{"uri": "https://example.com/x.bin"}]}))
     case("img", 422, "ext_uri", glb({"asset": {}, "images": [{"uri": "../../x.png"}]}))
     case("draco", 422, "needs_decoder", glb({"asset": {}, "extensionsRequired": ["KHR_draco_mesh_compression"]}))
+    # round 1: wrong JSON types and deep nesting are a refused file, never an uncaught error
+    case("tbuf", 422, "bad_magic", glb({"asset": {}, "buffers": 1}))
+    case("treq", 422, "bad_magic", glb({"asset": {}, "extensionsRequired": 1}))
+    case("timg", 422, "bad_magic", glb({"asset": {}, "images": {"0": {"uri": "https://example.com/x.png"}}}))
+    case("deep", 422, "bad_magic", glb(json_bytes=b"[" * 100000 + b"]" * 100000))
 
     def fifo(d):
         (d / "fifo.glb").unlink()
