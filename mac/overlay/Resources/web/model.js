@@ -36,7 +36,7 @@ function showPreview(slug) {
   });
   preview.addEventListener("error", () => fail("fetch"));
   preview.hidden = false;
-  preview.src = "preview.png";
+  preview.src = preview.dataset.src;
   hint.textContent = `Say: pull up the ${slug.replace(/-/g, " ")}.`;
   hint.hidden = false;
 }

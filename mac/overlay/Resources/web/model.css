@@ -76,7 +76,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-top: 1px solid var(--line);
 }
 
@@ -104,6 +104,11 @@ body {
 
 #reset:active {
   background: var(--press);
+}
+
+#reset:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 #reset:focus-visible {
