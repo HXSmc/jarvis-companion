@@ -33,24 +33,37 @@ RUNS_CODE = frozenset(agent_policy._WRAPPERS) | frozenset({
     # builder additions: other runners that execute their arguments or a script
     "tclsh", "expect", "jshell", "irb", "julia", "R", "Rscript", "java", "dotnet", "powershell", "pwsh",
     "watch", "parallel", "script", "tmux", "screen", "automator", "git-shell", "sqlite3",
+    # round 1: stock macOS shells and exec wrappers (each runs another program), debuggers, dc (runs !cmd)
+    "csh", "tcsh", "arch", "xcrun", "lockf", "apply", "ssh-agent", "sandbox-exec", "lldb", "gdb", "dc",
 })
-RUNS_CODE_PREFIXES = ("python", "pip")  # python3, python3.12, pip3 ...
+# python3, python3.12, pip3, perl5.34, ruby3.2, ipython, pypy3 ...
+RUNS_CODE_PREFIXES = ("python", "pip", "perl", "ruby", "php", "tclsh", "ipython", "pypy", "jython")
 FIND_RUNS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
                        "-fls"})
 DELETE = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "trash", "truncate", "dd", "mv", "cp", "ln",
                     "install", "ditto", "tee", "tar", "unzip", "gunzip", "patch", "split", "mkfile",
                     # builder additions: other tools that overwrite or move files
-                    "zip", "gzip", "bzip2", "xz", "csplit", "sips", "textutil", "plutil"})
+                    "zip", "gzip", "bzip2", "xz", "csplit", "sips", "textutil", "plutil",
+                    # round 1: archivers that extract over any path
+                    "cpio", "pax"})
+# round 1: tools that write a file named by -o/--output (sort, base64, say, osacompile) or by their 2nd
+# operand (uniq, xxd); that file counts as a delete target, with the same scratch-dir exception.
+OUTPUT_OPT = frozenset({"sort", "base64", "say", "osacompile"})
+OUTPUT_OPERAND = frozenset({"uniq", "xxd"})
 SECRET = frozenset({"security", "printenv", "env", "set", "export", "pbpaste", "screencapture", "keychain",
                     # builder additions: other ways to dump the environment or the clipboard/screen
-                    "declare", "typeset"})
+                    "declare", "typeset",
+                    # round 1: password stores and decryption
+                    "op", "bw", "pass", "gpg"})
 RECURSIVE_READERS = frozenset({"grep", "rg", "ag", "ack", "cat", "head", "tail", "less", "strings", "du",
                                "egrep", "fgrep", "zgrep", "more"})
 RECURSE_BY_DEFAULT = frozenset({"rg", "ag", "ack"})
 NETWORK = frozenset({"curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp", "rsync", "ftp", "telnet",
                      "mail", "mailx", "sendmail", "msmtp", "shortcuts", "gh",
                      # builder additions: other senders
-                     "ping", "dig", "nslookup", "host", "socat"})
+                     "ping", "dig", "nslookup", "host", "socat",
+                     # round 1: Apple's HTTP client, TLS client, other HTTP / cloud / VPN senders
+                     "nscurl", "openssl", "http", "https", "xh", "aws", "gcloud", "rclone", "tailscale"})
 GIT_AUTO = frozenset({"add", "commit", "fetch", "stash"})
 STASH_AUTO = frozenset({"push", "list", "show"})
 GUARD = frozenset({"launchctl", "defaults", "kill", "killall", "pkill", "tccutil", "csrutil", "spctl",
@@ -107,14 +120,60 @@ def cmd_name(command) -> str:
     return name if _NAME_RE.fullmatch(name) else "other"
 
 
+def _attached(a: str) -> str | None:
+    """The path an option carries inside its own token: --opt=path, or -Xpath / -xf/path (from the first
+    / ~ or . on). None when there is none."""
+    if not a.startswith("-"):
+        return None
+    if "=" in a:
+        v = a.split("=", 1)[1]
+        return v if _is_path(v) else None
+    i = next((k for k, ch in enumerate(a) if k > 1 and ch in "/~."), None)
+    return a[i:] if i is not None and not a.startswith("--") else None
+
+
 def _values(argv: list[str]) -> list[str]:
-    """Every argument and every --opt=value value: the strings that may name a file."""
+    """Every argument and every option-attached value: the strings that may name a file."""
     out = []
     for a in argv[1:]:
         out.append(a)
         if a.startswith("-") and "=" in a:
             out.append(a.split("=", 1)[1])
+        elif (v := _attached(a)) is not None:
+            out.append(v)
     return out
+
+
+def _outputs(name: str, args: list[str]) -> list[str] | None:
+    """The files an OUTPUT_OPT / OUTPUT_OPERAND tool writes; None when an -o has no value (fail closed)."""
+    if name in OUTPUT_OPERAND:
+        return [a for a in args if not a.startswith("-")][1:]
+    out = []
+    for i, a in enumerate(args):
+        if a.startswith("--o"):  # --output, --output-file
+            if "=" in a:
+                out.append(a.split("=", 1)[1])
+            elif i + 1 < len(args):
+                out.append(args[i + 1])
+            else:
+                return None
+        elif a.startswith("-") and not a.startswith("--") and "o" in a[1:]:
+            tail = a[a.index("o", 1) + 1:]  # -o file, -ofile, -ro file
+            if tail:
+                out.append(tail)
+            elif i + 1 < len(args):
+                out.append(args[i + 1])
+            else:
+                return None
+    return out
+
+
+def _outside_scratch(targets: list[str], ctx: agent_policy.Ctx) -> bool:
+    """Absolute paths in the agent's own scratch dir only, never a shared one like /tmp (spec flag c),
+    and never a relative path: after a cd it lands elsewhere."""
+    scratch = os.path.realpath(ctx.cwd) if ctx.cwd else None
+    return scratch is None or not all(
+        os.path.isabs(os.path.expanduser(t)) and _under(_resolve(t, ctx), scratch) for t in targets)
 
 
 def _is_path(tok: str) -> bool:
@@ -180,14 +239,14 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
         if sub not in GIT_AUTO or (sub == "stash" and rest and rest[0] not in STASH_AUTO):
             return "git"
     if name in DELETE:
-        scratch = os.path.realpath(ctx.cwd) if ctx.cwd else None
-        # plain arguments plus path-like --opt=value values (tar --directory=/elsewhere)
+        # plain arguments plus option-attached paths (tar --directory=/elsewhere, tar -C/elsewhere)
         targets = [a for a in args if not a.startswith("-")] + [
-            v for a in args if a.startswith("-") and "=" in a for v in [a.split("=", 1)[1]] if _is_path(v)]
-        # Absolute paths in the agent's own scratch dir only, never a shared one like /tmp (spec flag
-        # c), and never a relative path: after a cd it lands elsewhere.
-        if scratch is None or not targets or not all(
-                os.path.isabs(os.path.expanduser(t)) and _under(_resolve(t, ctx), scratch) for t in targets):
+            v for a in args if (v := _attached(a)) is not None]
+        if not targets or _outside_scratch(targets, ctx):
+            return "delete"
+    if name in OUTPUT_OPT or name in OUTPUT_OPERAND:
+        outputs = _outputs(name, args)
+        if outputs is None or (outputs and _outside_scratch(outputs, ctx)):
             return "delete"
     if name in SECRET or (name == "ps" and any(_PS_ENV_RE.fullmatch(a) for a in args)):
         return "secret"

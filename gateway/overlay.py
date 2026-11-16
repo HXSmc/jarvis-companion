@@ -520,6 +520,10 @@ _tainted: set[str] = set()
 # a command that is not a plain look-up asks first. The agent side of the mark lives on the session.
 _auto_tainted: set[str] = set()
 _marked_sessions: dict[str, object] = {}  # conv_id -> its agent session that took in untrusted text
+# Round 1: convs whose running turn got a reply from the web-tool pool (a fetched page may echo in it).
+# The reply reaches a later agent prompt as history, so the conv is marked when that turn's history is
+# stored, not before: an agent the same turn hands over to never sees this reply.
+_web_replied: set[str] = set()
 
 
 def _mark_untrusted(conv_id: str) -> None:
@@ -682,6 +686,7 @@ def _forget(conv_id: str) -> None:
     _tainted.discard(conv_id)
     _auto_tainted.discard(conv_id)
     _marked_sessions.pop(conv_id, None)
+    _web_replied.discard(conv_id)
 
 
 def _drop_cards(conv_id: str, group: str, keep: tuple[str, ...] = ()) -> dict | None:
@@ -2991,6 +2996,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             _sessions_follow.pop(next(iter(_sessions_follow)))
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     history.append((body.text, " ".join(said)))
+    if body.conv_id in _web_replied:  # this history may echo a fetched page: later agent turns see it
+        _web_replied.discard(body.conv_id)
+        _auto_tainted.add(body.conv_id)
     yield {"type": "done", "metrics": metrics, "error": error}
 
 
@@ -3272,6 +3280,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
         _mark_untrusted(body.conv_id)
     pool = deps.quiet_conversations if body.conv_id in _tainted else deps.conversations
     quiet = pool is deps.quiet_conversations  # screen text may be in play: no outside fetch, no media
+    if not quiet:
+        _web_replied.add(body.conv_id)  # the web tools may run: its reply is not the owner's words
     session = await asyncio.to_thread(pool.get, body.conv_id)
 
     loop = asyncio.get_running_loop()
@@ -4151,6 +4161,14 @@ def _screen_file(body: TurnBody, repo: Path | None, sub: str) -> str | None:
     return _screen_doc(body, repo)
 
 
+def _own_doc(body: TurnBody, repo: Path | None) -> bool:
+    """The document in front is a file inside the picked repo (the owner's own file name)."""
+    try:
+        return _screen_doc(body, repo) is not None
+    except (OSError, RuntimeError, ValueError):
+        return False  # cannot tell: treat as untrusted
+
+
 def _screen_doc(body: TurnBody, repo: Path | None) -> str | None:
     """Repo-relative path of the document in front, when it is a file inside `repo`, else None."""
     doc = body.screen.document if body.screen is not None else None
@@ -4252,6 +4270,8 @@ async def _agent_turn(body: TurnBody, text: str, deps: OverlayDeps, metrics: dic
     where = [f"repository: {repo}" if repo else "no repository resolved; ask which one if the request needs one"]
     if body.screen is not None and body.screen.document:
         where.append(f"file on screen: {body.screen.document}")
+        if not await asyncio.to_thread(_own_doc, body, repo):
+            _auto_tainted.add(body.conv_id)  # e.g. a browser page's path: the page chose that text
     # The GitHub repo from the host, so the agent never needs remote URLs (they may hold tokens).
     where.append(f"origin: {origin or 'none'}")
     parts.append(f'<context untrusted="true">\n{_scrub(chr(10).join(where))}\n</context>')

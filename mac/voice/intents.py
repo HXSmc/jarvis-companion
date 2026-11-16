@@ -315,13 +315,17 @@ _VAULT_SECRETS_RE = re.compile(r".*\b(?:secrets? (?:folder|directory|notes?)"
                                r"|(?:in|from|inside|under) (?:my |the |your )?secrets)\b.*", re.I | re.S)
 # jfollow10a: the owner's voice switch for running agent commands without the spoken Confirm.
 # Whole utterance only; "stop" / "stop asking" alone never match ("commands" is required).
-_CMDS = r"(?:running |you run )?(?:any )?commands"
-_AUTO_OFF_RE = re.compile(_WRAP_LEAD + r"(?:ask (?:me )?before " + _CMDS + r"|ask (?:me )?before you run anything"
-                         r"|(?:turn|switch) on (?:command )?(?:confirmations|confirm)"
-                         r"|stop running commands without asking)" + _WRAP_TRAIL)
-_AUTO_ON_RE = re.compile(_WRAP_LEAD + r"(?:(?:stop|quit) asking (?:me )?before " + _CMDS
-                        + r"|(?:don't|do not) ask (?:me )?before " + _CMDS
-                        + r"|run commands without asking(?: me)?|(?:go|switch to) full auto)" + _WRAP_TRAIL)
+_CMDS = r"(?:running |you run )?(?:(?:a|any|every|each) )?commands?"
+_BEFORE = r"before (?:" + _CMDS + r"|(?:running |you run )?anything)"
+_CONFIRMS = r"(?:command )?(?:confirmations|confirm)"
+_AUTO_OFF_RE = re.compile(_WRAP_LEAD + r"(?:(?:always )?ask (?:me )?" + _BEFORE + r"|always ask (?:me )?first"
+                         r"|(?:turn|switch) on " + _CONFIRMS + r"|stop running commands without asking)"
+                         + _WRAP_TRAIL)
+_AUTO_ON_RE = re.compile(_WRAP_LEAD + r"(?:(?:stop|quit) asking (?:me )?(?:" + _BEFORE + r"|to confirm " + _CMDS + r")"
+                        + r"|(?:don't|do not) ask (?:me )?" + _BEFORE
+                        + r"|(?:turn|switch) off " + _CONFIRMS
+                        + r"|run commands without asking(?: me)?|(?:go|switch) (?:to )?full auto(?: mode)?)"
+                        + _WRAP_TRAIL)
 _SESSION_ANSWER_RE = re.compile(
     r"(?:tell (?P<tname>the .+? session) (?P<tyn>yes|no|to go ahead)"
     r"|approve (?P<aname>the .+? session)"
