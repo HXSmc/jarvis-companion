@@ -56,4 +56,13 @@ final class ChartModelTests: XCTestCase {
         XCTAssertNil(ChartModel(card: card("radar", series: spend)))
         XCTAssertNil(ChartModel(card: card("bar", series: Array(repeating: ChartSeries(name: "S", values: [1, 2, 3]), count: 5))))
     }
+
+    func testSeriesKeysAreUnique() throws {
+        let series = ["", "A", "A", "Series 4"].map { ChartSeries(name: $0, values: [1, 2, 3]) }
+        let m = try XCTUnwrap(ChartModel(card: card("line", series: series)))
+        XCTAssertEqual(m.seriesKeys, ["Series 1", "A", "Series 3", "Series 4"])
+        XCTAssertEqual(Set(m.rows.map(\.series)), Set(m.seriesKeys))
+        let clash = ["Series 2", ""].map { ChartSeries(name: $0, values: [1, 2, 3]) }
+        XCTAssertEqual(try XCTUnwrap(ChartModel(card: card("bar", series: clash))).seriesKeys, ["Series 2", "Series 2 (2)"])
+    }
 }

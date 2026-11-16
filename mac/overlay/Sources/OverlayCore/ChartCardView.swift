@@ -28,12 +28,14 @@ public struct ChartCardView: View {
         palette[i % palette.count].opacity(i < palette.count ? 1 : 0.55)
     }
 
-    private var seriesNames: [String] { card.series.map(\.name) }
+    private var seriesNames: [String] { model.seriesKeys }
+    /// Gauge half-ring parts: value, the rest of the track, and the hidden lower half.
+    static let gaugeColors: [Color] = [Theme.accent, Color.white.opacity(0.14), Color.clear]
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             chart
-                .frame(height: (model.kind == "gauge" ? 72 : 180) * scale)
+                .frame(height: (model.kind == "gauge" ? 130 : 180) * scale)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Text(verbatim: model.summary))
             legend
@@ -60,24 +62,40 @@ public struct ChartCardView: View {
                 PointMark(x: .value("X", item.element.x), y: .value("Y", item.element.y))
                     .foregroundStyle(Theme.accent)
             }
+            .chartXScale(domain: .automatic(includesZero: false))
             .chartYScale(domain: model.yDomain)
             .modifier(Axes(scale: scale))
         case "gauge":
-            Gauge(value: model.gaugeValue, in: model.gaugeRange) {
-                EmptyView()
-            } currentValueLabel: {
-                Text(verbatim: ChartModel.number(model.gaugeValue) + (card.unit.map { " " + $0 } ?? ""))
-                    .font(ScaledType.small(scale).monospacedDigit())
-                    .foregroundStyle(Color.white)
-            } minimumValueLabel: {
-                Text(verbatim: ChartModel.number(model.gaugeRange.lowerBound))
-                    .font(ScaledType.small(scale)).foregroundStyle(Color.white.opacity(0.72))
-            } maximumValueLabel: {
-                Text(verbatim: ChartModel.number(model.gaugeRange.upperBound))
-                    .font(ScaledType.small(scale)).foregroundStyle(Color.white.opacity(0.72))
+            // Half-ring (hub Q6 fallback): SwiftUI's accessory gauge styles render as a "not available"
+            // sign on macOS. Three sectors (value, rest, hidden lower half) turned so the ring opens
+            // at 9 o'clock, then cut to the top half.
+            let ring = 100 * scale
+            let f = model.gaugeFraction
+            VStack(spacing: 4) {
+                Chart(Array([f, 1 - f, 1].enumerated()), id: \.offset) { item in
+                    SectorMark(angle: .value("Part", item.element), innerRadius: .ratio(0.7))
+                        .foregroundStyle(Self.gaugeColors[item.offset])
+                }
+                .chartLegend(.hidden)
+                .rotationEffect(.degrees(-90))
+                .frame(width: 2 * ring, height: 2 * ring)
+                .frame(width: 2 * ring, height: ring, alignment: .top)
+                .clipped()
+                .overlay(alignment: .bottom) {
+                    Text(verbatim: ChartModel.number(model.gaugeValue) + (card.unit.map { " " + $0 } ?? ""))
+                        .font(ScaledType.title(scale).monospacedDigit())
+                        .foregroundStyle(Color.white)
+                }
+                HStack {
+                    Text(verbatim: ChartModel.number(model.gaugeRange.lowerBound))
+                    Spacer()
+                    Text(verbatim: ChartModel.number(model.gaugeRange.upperBound))
+                }
+                .font(ScaledType.small(scale))
+                .foregroundStyle(Color.white.opacity(0.72))
+                .frame(width: 2 * ring)
             }
-            .gaugeStyle(.accessoryLinearCapacity)
-            .tint(Theme.accent)
+            .frame(maxWidth: .infinity)
         default:
             Chart(Array(model.rows.enumerated()), id: \.offset) { item in
                 let r = item.element
@@ -110,7 +128,7 @@ public struct ChartCardView: View {
     /// Pie/donut: "Rent 69%" per slice; other kinds: one swatch per series when there are two or more.
     @ViewBuilder private var legend: some View {
         let items: [(String, Color)] = model.slices.isEmpty
-            ? (card.series.count > 1 ? card.series.enumerated().map { ($0.element.name, Self.color($0.offset)) } : [])
+            ? (card.series.count > 1 ? model.seriesKeys.enumerated().map { ($0.element, Self.color($0.offset)) } : [])
             : model.slices.enumerated().map { ("\($0.element.label) \($0.element.percent)%", Self.color($0.offset)) }
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 3) {

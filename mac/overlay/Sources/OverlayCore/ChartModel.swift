@@ -118,6 +118,9 @@ public struct ChartModel: Equatable {
     public let rows: [Row]
     public let slices: [Slice]
     public let points: [Point]
+    /// One unique key per series (marks and colours are keyed by it): an empty or repeated name
+    /// becomes "Series N".
+    public let seriesKeys: [String]
     public let yDomain: ClosedRange<Double>
     public let gaugeValue: Double
     public let gaugeRange: ClosedRange<Double>
@@ -130,6 +133,12 @@ public struct ChartModel: Equatable {
               card.series.allSatisfy({ $0.values.allSatisfy(\.isFinite) && $0.points.allSatisfy { $0.allSatisfy(\.isFinite) } })
         else { return nil }
         let labels = card.labels
+        var keys: [String] = []
+        for (i, s) in card.series.enumerated() {
+            var key = s.name.isEmpty || keys.contains(s.name) ? "Series \(i + 1)" : s.name
+            while keys.contains(key) { key += " (\(i + 1))" }
+            keys.append(key)
+        }
         var rows: [Row] = []
         var slices: [Slice] = []
         var points: [Point] = []
@@ -147,9 +156,9 @@ public struct ChartModel: Equatable {
             summary = "\(kind == "pie" ? "Pie" : "Donut") chart, \(slices.count) parts: \(parts)."
         case "line", "area", "bar", "stacked_bar":
             guard (2...12).contains(labels.count), card.series.allSatisfy({ $0.values.count == labels.count }) else { return nil }
-            for s in card.series {
+            for (s, key) in zip(card.series, keys) {
                 for (i, v) in s.values.enumerated() {
-                    rows.append(Row(index: i, label: labels[i], series: s.name, value: v))
+                    rows.append(Row(index: i, label: labels[i], series: key, value: v))
                 }
             }
             let name = ["line": "Line", "area": "Area", "bar": "Bar", "stacked_bar": "Stacked bar"][kind] ?? kind
@@ -171,6 +180,7 @@ public struct ChartModel: Equatable {
         self.rows = rows
         self.slices = slices
         self.points = points
+        self.seriesKeys = keys
         self.gaugeValue = gauge
         self.gaugeRange = range
         self.gaugeFraction = (gauge - range.lowerBound) / (range.upperBound - range.lowerBound)

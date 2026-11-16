@@ -48,7 +48,7 @@
     status.hidden = false;
   }
   img.addEventListener("error", unavailable);
-  if (img.complete && img.naturalWidth === 0) unavailable();  // failed before this script ran
+  img.src = img.dataset.src;  // set only after the error listener exists, so no failure is missed
 
   // Trackpad pinch arrives as wheel with ctrlKey; a plain scroll zooms too, more gently.
   stage.addEventListener("wheel", (e) => {
