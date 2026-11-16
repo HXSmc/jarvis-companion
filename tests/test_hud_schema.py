@@ -248,3 +248,53 @@ def test_web_card():
     assert hud.validate_card({**web, "data": {"routes": [], "pins": []}}, allow_web=True) is None
     assert hud.validate_hud({"shapes": [], "cards": [web]}) == {"shapes": [], "cards": []}
     assert "web" in json.dumps(hud.schema_json()["$defs"]["card"])
+
+
+# --- jfollow10c: chart cards and the drawing web page ------------------------------------------
+CARDS["chart"] = {"chart": "bar", "labels": ["A", "B"], "series": [{"name": "S", "values": [1.0, 2.0]}]}
+
+
+def test_web_drawing_card():
+    card = json.loads((FIXTURES / "web_drawing.json").read_text())["cards"][0]
+    assert hud.validate_card(card, allow_web=True) == card
+    assert hud.validate_card(card) is None
+    svg = card["data"]["svg"]
+    evil = svg.replace("</svg>", "<script>alert(1)</script></svg>")
+    out = hud.validate_card({**card, "data": {**card["data"], "svg": evil}}, allow_web=True)
+    assert out is None or "<script" not in out["data"]["svg"]
+    long = hud.validate_card({**card, "data": {"svg": svg, "legend": ["x" * 100] * 13}}, allow_web=True)
+    assert len(long["data"]["legend"]) == 12 and len(long["data"]["legend"][0]) == 80
+    assert hud.validate_card({**card, "data": {"svg": "<svg/>", "legend": []}}, allow_web=True) is None
+    made = hud.drawing_card("T", svg, ["1 a"])
+    assert made["type"] == "web" and made["page"] == "drawing" and made["id"].startswith("dr")
+
+
+def test_chart_card():
+    cards = json.loads((FIXTURES / "chart.json").read_text())["cards"]
+    assert sorted(c["chart"] for c in cards) == sorted(hud.CHART_KINDS)
+    for c in cards:
+        assert hud.validate_card(c) == c
+    pie = next(c for c in cards if c["chart"] == "pie")
+    one = {"name": "S", "values": [1, 2, 3]}
+    assert hud.validate_card({**pie, "series": [one, one]}) is None
+    assert hud.validate_card({**pie, "labels": ["A"], "series": [{"name": "S", "values": [1]}]}) is None
+    assert hud.validate_card({**pie, "labels": list("ABCDEFGHI"), "series": [{"name": "S", "values": [1] * 9}]}) is None
+    assert hud.validate_card({**pie, "series": [{"name": "S", "values": [1, -2, 3]}]}) is None
+    assert hud.validate_card({**pie, "series": [{"name": "S", "values": [0, 0, 0]}]}) is None
+    line = next(c for c in cards if c["chart"] == "line")
+    assert hud.validate_card({**line, "series": [{"name": "S", "values": [1, 2]}]}) is None
+    for bad in (float("nan"), float("inf"), True, "5"):
+        assert hud.validate_card({**line, "series": [{"name": "S", "values": [1, 2, 3, 4, bad]}]}) is None
+    assert hud.validate_card({**line, "labels": list("ABCDEFGHIJKLM"),
+                              "series": [{"name": "S", "values": [1] * 13}]}) is None
+    assert hud.validate_card({**line, "series": [line["series"][0]] * 5}) is None
+    scatter = next(c for c in cards if c["chart"] == "scatter")
+    assert hud.validate_card({**scatter, "series": [{"name": "P", "values": [[1, 2]] * 51}]}) is None
+    assert hud.validate_card({**scatter, "series": [{"name": "P", "values": [[1]]}]}) is None
+    assert "labels" not in hud.validate_card({**scatter, "labels": ["x"]})
+    gauge = next(c for c in cards if c["chart"] == "gauge")
+    assert hud.validate_card({**gauge, "min": 100, "max": 100}) is None
+    assert hud.validate_card({**gauge, "series": [{"name": "C", "values": [150]}]})["series"][0]["values"] == [100]
+    assert len(hud.validate_card({**line, "labels": ["x" * 40] + line["labels"][1:]})["labels"][0]) == 24
+    assert hud.validate_card({**line, "chart": "radar"}) is None
+    assert "chart" in json.dumps(hud.schema_json()["$defs"]["card"])

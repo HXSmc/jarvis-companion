@@ -19,8 +19,11 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
       video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
              .mp4/.mov/.m4v (no HLS), thumbnail_url? (file urls only), source_page?;
              no usable media -> link card on source_page/url, else dropped
-      web:   page: one of WEB_PAGES ("map"), data: that page's validated JSON. Service-only: dropped
-             unless the caller passes allow_web=True (model, agent, workspace and fast-tier cards never do)
+      web:   page: one of WEB_PAGES ("map", "drawing"), data: that page's validated JSON. Service-only:
+             dropped unless the caller passes allow_web=True (model, agent, workspace and fast-tier cards
+             never do); drawing data = {svg: svgsafe output, legend: [str<=80] <= 12}
+      chart: chart: one of CHART_KINDS, labels: [str<=24] <= 12, series: [{name, values}] 1-4,
+             unit?: str<=12, caption?: str<=120, min?/max?: gauge only (rules in _chart)
     hud   = {shapes: [shape], cards: [card]}
 """
 
@@ -31,8 +34,10 @@ import re
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
+from common import svgsafe
+
 SHAPE_KINDS = ("rect", "circle", "triangle")
-CARD_TYPES = ("info", "stat", "bar", "flow", "link", "image", "video", "web")
+CARD_TYPES = ("info", "stat", "bar", "flow", "link", "image", "video", "web", "chart")
 
 MAX_LABEL = 40
 MAX_TITLE = 60
@@ -359,7 +364,31 @@ def _map_data(raw) -> dict | None:
 
 # The bundled pages a web card may name -> their data validator. Adding a page: the files under
 # mac/overlay/Resources/web/, one entry in WebCardPolicy.resources (Swift), one validator here.
-WEB_PAGES = {"map": _map_data}
+MAX_LEGEND = 12
+MAX_LEGEND_ITEM = 80
+
+
+def _drawing_data(raw) -> dict | None:
+    """The drawing page's data: an SVG that svgsafe.sanitize returns unchanged (it re-runs here; any
+    difference drops the card) and a legend of <= 12 plain-text items of <= 80 chars."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("svg"), str):
+        return None
+    res = svgsafe.sanitize(raw["svg"])
+    if res.reason != "ok" or res.svg != raw["svg"]:
+        return None
+    legend = raw.get("legend") if isinstance(raw.get("legend"), list) else []
+    items = [t for t in (_text(x, MAX_LEGEND_ITEM) for x in legend) if t]
+    return {"svg": res.svg, "legend": items[:MAX_LEGEND]}
+
+
+WEB_PAGES = {"map": _map_data, "drawing": _drawing_data}
+
+
+def drawing_card(title: str, svg: str, legend: list) -> dict | None:
+    """The service's drawing card (jfollow10c): the one place a `drawing` web card is made. Callers
+    pass svgsafe output built from the owner's own words; the model never names a web card."""
+    return validate_card({"id": "dr" + uuid.uuid4().hex[:6], "type": "web", "title": title,
+                          "page": "drawing", "data": {"svg": svg, "legend": legend}}, allow_web=True)
 
 
 def _web(raw: dict, out: dict) -> dict | None:
@@ -373,8 +402,67 @@ def _web(raw: dict, out: dict) -> dict | None:
     return out
 
 
+CHART_KINDS = ("pie", "donut", "line", "area", "bar", "stacked_bar", "scatter", "gauge")
+MAX_CHART_LABELS = 12
+MAX_CHART_LABEL = 24
+MAX_SERIES = 4
+MAX_SCATTER = 50
+MAX_UNIT = 12
+
+
+def _chart(raw: dict, out: dict) -> dict | None:
+    """Labels + numeric series for a native chart; the model picks the kind and the numbers only.
+    Any non-finite or non-number value, or a count outside the kind's rules, drops the card."""
+    kind = raw.get("chart")
+    series = raw.get("series")
+    if kind not in CHART_KINDS or not isinstance(series, list) or not 1 <= len(series) <= MAX_SERIES:
+        return None
+    clean = []
+    for s in series:
+        if not isinstance(s, dict) or not isinstance(s.get("values"), list):
+            return None
+        if kind == "scatter":
+            pairs = s["values"]
+            if not all(isinstance(p, list) and len(p) == 2 for p in pairs):
+                return None
+            values = [[_number(p[0]), _number(p[1])] for p in pairs]
+            if not 1 <= len(values) <= MAX_SCATTER or any(v is None for p in values for v in p):
+                return None
+        else:
+            values = [_number(v) for v in s["values"]]
+            if any(v is None for v in values):
+                return None
+        clean.append({"name": _text(s.get("name"), MAX_CHART_LABEL), "values": values})
+    labels = raw.get("labels") if isinstance(raw.get("labels"), list) else []
+    labels = [_text(x, MAX_CHART_LABEL) for x in labels]
+    out["chart"] = kind
+    if kind in ("pie", "donut"):
+        vals = clean[0]["values"]
+        if (len(clean) != 1 or not 2 <= len(labels) <= 8 or len(vals) != len(labels)
+                or any(v < 0 for v in vals) or sum(vals) <= 0):
+            return None
+    elif kind in ("line", "area", "bar", "stacked_bar"):
+        if not 2 <= len(labels) <= MAX_CHART_LABELS or any(len(s["values"]) != len(labels) for s in clean):
+            return None
+    elif kind == "gauge":
+        lo, hi = _number(raw.get("min", 0)), _number(raw.get("max", 100))
+        if len(clean) != 1 or len(clean[0]["values"]) != 1 or lo is None or hi is None or lo >= hi:
+            return None
+        clean[0]["values"] = [min(max(clean[0]["values"][0], lo), hi)]
+        out["min"], out["max"] = lo, hi
+    if kind not in ("scatter", "gauge"):
+        out["labels"] = labels
+    out["series"] = clean
+    unit, caption = _text(raw.get("unit"), MAX_UNIT), _text(raw.get("caption"), MAX_CAPTION)
+    if unit:
+        out["unit"] = unit
+    if caption:
+        out["caption"] = caption
+    return out
+
+
 _CARD_BODY = {"info": _info, "stat": _stat, "bar": _bar, "flow": _flow, "link": _link,
-              "image": _image, "video": _video, "web": _web}
+              "image": _image, "video": _video, "web": _web, "chart": _chart}
 
 
 def validate_card(raw, allow_web: bool = False) -> dict | None:
@@ -481,7 +569,7 @@ def schema_json() -> dict:
                         "url": https, "thumbnail_url": https, "source_page": https,
                     }, []),
                      "anyOf": [{"required": ["youtube_id"]}, {"required": ["url"]}]},
-                    card("web", {"page": {"enum": list(WEB_PAGES)}, "data": {
+                    card("web", {"page": {"enum": list(WEB_PAGES)}, "data": {"oneOf": [{
                         "type": "object",
                         "properties": {
                             "routes": {"type": "array", "maxItems": MAX_ROUTES, "items": {
@@ -500,8 +588,26 @@ def schema_json() -> dict:
                                                "label": _str(MAX_LABEL)},
                                 "required": ["lat", "lon", "label"], "additionalProperties": False}},
                             "attribution": {"const": MAP_ATTRIBUTION}},
-                        "required": ["routes", "pins", "attribution"], "additionalProperties": False}},
+                        "required": ["routes", "pins", "attribution"], "additionalProperties": False},
+                        {"type": "object",
+                         "properties": {"svg": {"type": "string", "maxLength": svgsafe.MAX_BYTES},
+                                        "legend": {"type": "array", "maxItems": MAX_LEGEND,
+                                                   "items": _str(MAX_LEGEND_ITEM)}},
+                         "required": ["svg", "legend"], "additionalProperties": False}]}},
                         ["page", "data"]),
+                    card("chart", {
+                        "chart": {"enum": list(CHART_KINDS)},
+                        "labels": {"type": "array", "maxItems": MAX_CHART_LABELS, "items": _str(MAX_CHART_LABEL)},
+                        "series": {"type": "array", "minItems": 1, "maxItems": MAX_SERIES, "items": {
+                            "type": "object",
+                            "properties": {"name": _str(MAX_CHART_LABEL), "values": {
+                                "type": "array", "maxItems": MAX_SCATTER,
+                                "items": {"oneOf": [{"type": "number"}, {
+                                    "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}]}}},
+                            "required": ["name", "values"], "additionalProperties": False}},
+                        "unit": _str(MAX_UNIT), "caption": _str(MAX_CAPTION),
+                        "min": {"type": "number"}, "max": {"type": "number"},
+                    }, ["chart", "series"]),
                 ]
             },
         },

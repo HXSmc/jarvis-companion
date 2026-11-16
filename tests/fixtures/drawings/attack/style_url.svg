@@ -1,0 +1,1 @@
+<svg viewBox="0 0 100 100"><rect x="1" y="1" width="9" height="9" style="fill:url(https://attacker.example/x)" fill="url(https://attacker.example/y#z)"/></svg>

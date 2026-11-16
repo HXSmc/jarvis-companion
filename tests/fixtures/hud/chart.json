@@ -1,0 +1,10 @@
+{"shapes": [], "cards": [
+  {"id": "ch-pie", "type": "chart", "title": "Monthly spend", "chart": "pie", "labels": ["Rent", "Food", "Travel"], "series": [{"name": "Spend", "values": [1200, 400, 150]}], "unit": "GBP"},
+  {"id": "ch-donut", "type": "chart", "title": "Fruit in the bowl", "chart": "donut", "labels": ["Apples", "Pears", "Plums"], "series": [{"name": "Fruit", "values": [3, 5, 2]}]},
+  {"id": "ch-line", "type": "chart", "title": "Steps this week", "chart": "line", "labels": ["Mon", "Tue", "Wed", "Thu", "Fri"], "series": [{"name": "Steps", "values": [4200, 6100, 5300, 8000, 7200]}], "caption": "Invented numbers"},
+  {"id": "ch-area", "type": "chart", "title": "Rainfall", "chart": "area", "labels": ["Jan", "Feb", "Mar", "Apr"], "series": [{"name": "Rain", "values": [55, 41, 38, 44]}], "unit": "mm"},
+  {"id": "ch-bar", "type": "chart", "title": "Books read", "chart": "bar", "labels": ["Ann", "Ben", "Cal"], "series": [{"name": "2025", "values": [12, 7, 9]}, {"name": "2026", "values": [10, 11, 6]}]},
+  {"id": "ch-stack", "type": "chart", "title": "Sales by shop", "chart": "stacked_bar", "labels": ["Jan", "Feb", "Mar"], "series": [{"name": "North", "values": [20, 24, 30]}, {"name": "South", "values": [15, 18, 12]}]},
+  {"id": "ch-scatter", "type": "chart", "title": "Height and weight", "chart": "scatter", "series": [{"name": "People", "values": [[160, 55], [172, 70], [181, 82], [168, 64], [190, 90]]}], "unit": "cm/kg"},
+  {"id": "ch-gauge", "type": "chart", "title": "Battery", "chart": "gauge", "series": [{"name": "Charge", "values": [72]}], "min": 0, "max": 100, "unit": "%"}
+]}
