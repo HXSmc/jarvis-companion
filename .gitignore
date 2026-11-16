@@ -10,6 +10,7 @@ dist/
 shortcuts/build/
 *.md
 !/README.md
+!/skills/blender-object/SKILL.md
 !/skills/svg-drawing/SKILL.md
 .env
 .env.*
