@@ -5361,7 +5361,7 @@ async def _video_watch_turn(body: TurnBody, raw_text: str, deps: OverlayDeps, sa
 MODEL_KINDS = ("model_create", "model_list", "model_show")
 MODEL_SYNC_POLL_S = 5
 MODEL_SYNC_WAIT_S = 600
-MODEL_LIST_MAX = 8
+MODEL_LIST_MAX = 5  # hud info cards hold <= 6 body lines: 5 names + "and N more"
 _MODEL_SHOW_HINT = re.compile(r"\b(?:pull up|show me|bring up|open|display|load)\b", re.I)
 
 
