@@ -678,7 +678,7 @@ def test_model_page_shadow_visible(tmp_path):
     import subprocess
     import threading
     from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")  # the CI Python step has no pillow
     chrome = _chrome()
     if chrome is None:
         pytest.skip("no Chromium on PATH (set CHROME_PATH)")
