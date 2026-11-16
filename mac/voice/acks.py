@@ -189,7 +189,6 @@ ACK_POLICY: dict[str, str | None] = {
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
     "card_remove": None, "card_help": None,
     "answer": "answer",
-    "draw": None,  # jfollow10c: draw_started is the turn's own first line
 }
 
 

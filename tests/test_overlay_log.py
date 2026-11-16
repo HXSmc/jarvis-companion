@@ -465,3 +465,16 @@ def test_keep_steps_jfollow10b():
     out = overlay_log.redact(snap)
     assert [(s["step"], s["detail"]) for s in out["turns"][0]["steps"]] == list(rows.items())
     assert "SECRET-PLACE" not in repr(out)
+
+
+def test_keep_steps_jfollow10c():
+    """jfollow10c: the draw and chart rows keep their detail (fixed words and counts only)."""
+    from gateway import overlay_log
+    rows = {"draw": "reason=ok ms=900 bytes_in=5191 bytes_out=4242 kept=55 removed=0 attrs_removed=0 legend=12",
+            "chart": "type=pie labels=3 series=1 reason=ok"}
+    snap = {"turns": [{"id": "t1", "steps": [{"step": k, "at": 1.0, "detail": v, "title": "SECRET-TITLE",
+                                              "svg": "<svg viewBox='0 0 1 1'/>"}
+                                             for k, v in rows.items()]}]}
+    out = overlay_log.redact(snap)
+    assert [(s["step"], s["detail"]) for s in out["turns"][0]["steps"]] == list(rows.items())
+    assert "SECRET-TITLE" not in repr(out) and "<svg" not in repr(out)

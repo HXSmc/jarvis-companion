@@ -633,7 +633,7 @@ SPEC_LEAD_IN_ASKS = [  # criteria 9 and 10: lead-ins x nouns x "of <words>" (bui
     ("um, could you find me a photo of the eiffel tower", "eiffel tower"),
     ("alright, show me an image of a lighthouse", "lighthouse"),
     ("so can you show me a video of a cat", "cat"),
-    ("well, could you draw me a diagram of a bicycle", "bicycle diagram"),
+    ("well, could you show me a diagram of a bicycle", "bicycle diagram"),  # jfollow10c: "draw me" now draws
     ("right, i want you to show me a photo of a bridge", "bridge"),
     ("okay so just show me a picture of the moon", "moon"),
     ("hey, can we see a picture of a red fox", "red fox"),

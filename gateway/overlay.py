@@ -2382,7 +2382,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         # the switch's own line is the answer: no ack before it (acks.py gains phrase keys only)
-        ack_phrase_key = (None if intent.kind in ("auto_mode", *GEO_KINDS, "video_ask", "video_watch")
+        ack_phrase_key = (None if intent.kind in ("auto_mode", *GEO_KINDS, "video_ask", "video_watch", "draw")
                           else acks.ack_key(intent.kind, intent.sub))
         # A notes search with no vault set would start the file agent in some repo: say it is unset.
         notes_unset = intent.kind == "agent" and intent.sub == "notes" and not os.environ.get("OVERLAY_VAULT")

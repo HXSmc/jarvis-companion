@@ -36,6 +36,7 @@ _LOCAL_REF = re.compile(r"#" + _ID)
 _URL_REF = re.compile(r"url\(#" + _ID + r"\)")
 _BAD_VALUE = re.compile(r"javascript:|data:|expression\(|@import|\\", re.I)
 _DOCTYPE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)|<\?xml-stylesheet", re.I)
+_SVG_TAG = re.compile(r"<(?:[A-Za-z_][\w.-]*:)?svg[\s/>]")
 _FONT_SIZE = re.compile(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*")
 
 
@@ -205,6 +206,8 @@ def _sanitize(text) -> Result:
         return Result(None, "too_big")
     if _DOCTYPE.search(text.replace("\x00", "")):  # NULs: UTF-16 text read as single bytes
         return Result(None, "doctype")
+    if not _SVG_TAG.search(text):  # "<html>": no svg element at all, whatever else it is
+        return Result(None, "not_svg")
     root, _count = _parse(text)
     if root["tag"] != "svg" or root["ns"] not in ("", SVG_NS):
         return Result(None, "not_svg")

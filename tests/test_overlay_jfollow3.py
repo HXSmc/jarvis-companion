@@ -656,7 +656,7 @@ def test_card_index_outlives_a_fresh_conversation(client):
     clock = Clock()
     card = '{"card": {"type": "flow", "title": "Phone diagram", "nodes": [{"id": "b", "text": "Battery"}, {"id": "d", "text": "Display"}], "edges": [["b", "d"]]}}\n'
     overlay.set_deps(dataclasses.replace(make_deps(chunks=['{"say": "Here."}\n', card]), clock=clock))
-    first = turn(client, "draw me a diagram of a phone", conv_id="f1", audio_ms=900)
+    first = turn(client, "explain how a phone is built, as a diagram", conv_id="f1", audio_ms=900)  # jfollow10c: "draw me" now draws
     phone = [e["card"]["id"] for e in first if e["type"] == "card"][0]
     assert says(turn(client, "enlarge the phone diagram", conv_id="f1", audio_ms=900)) == ["Enlarged, sir."]
     clock.now += overlay.FRESH_AFTER_S + 10
