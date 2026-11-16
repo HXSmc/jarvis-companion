@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -386,6 +386,34 @@ def _form_hit(rx: re.Pattern, low: str) -> re.Match | None:
     return None
 
 
+# jfollow10c: "draw me X" / "sketch X" / "make me a labelled diagram of X" (whole utterance).
+_DRAW_NOUN = r"(?:picture|drawing|sketch|diagram|illustration)"
+_DRAW_ADJ = r"(?:(?:simple|quick|rough|clear|detailed|labell?ed|little|small|big|nice)\s+)*"
+_DRAW_RE = re.compile(
+    r"(?:(?:can|could|would|will) you\s+|please\s+)?(?:draw|sketch|illustrate|diagram)(?:\s+(?:me|us))?"
+    r"(?:\s+(?:a|an)\s+" + _DRAW_ADJ + _DRAW_NOUN + r"\s+of)?\s+(?P<subject>.+)"
+    r"|(?:make|create|give) me (?:a|an)\s+" + _DRAW_ADJ + _DRAW_NOUN + r"\s+of\s+(?P<made>.+)", re.I | re.S)
+_DRAW_CHART_RE = re.compile(r"\b(?:chart|charts|graph|graphs|plot|plots|pie|histogram)\b", re.I)
+
+
+def draw_request(text: str) -> str | None:
+    """The subject of a drawing ask ("" = it only points: "draw that"), or None. A chart or graph
+    is an answer-pool chart card, never a drawing; "show me a diagram of X" stays a picture search."""
+    t = destutter(_strip_tail(strip_lead(_clean(text)))).strip().rstrip(".?!,").strip()
+    if len(t) > 300:
+        return None
+    m = _DRAW_RE.fullmatch(t)
+    if not m:
+        return None
+    subject = (m["subject"] or m["made"] or "").strip()
+    if _DRAW_CHART_RE.search(subject):
+        return None
+    words = _tokens(subject.lower())
+    if all(w in _MEDIA_PRIVATE_WORDS or w in ("a", "an", "the", "one") for w in words):
+        return ""
+    return subject
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
                  place_names: tuple[str, ...] = ()) -> Intent | None:
@@ -402,6 +430,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         return Intent("card_size", ask.action, ask.target)
     t = _clean(text)
     low = t.lower()
+    subject = draw_request(text)
+    if subject is not None:
+        return Intent("draw", subject)
     m = _form_hit(_SESSIONS_RE, low.replace(",", ""))
     if m:
         return Intent("sessions", (m["name"] or "").strip(), "ref" if m.group("itref") else "")
@@ -854,9 +885,13 @@ def card_words(title: str) -> tuple[str, ...]:
 
 # Spoken kind word -> the card types it can mean ("the picture" -> any image card).
 _CARD_FLOW = frozenset({"flow", "bar"})
+_CARD_CHART = frozenset({"bar", "chart"})
+_CARD_DIAGRAM = frozenset({"flow", "bar", "web"})  # jfollow10c: a drawing is a web card
 KIND_WORDS: dict[str, frozenset[str]] = {
-    "diagram": _CARD_FLOW, "diagrams": _CARD_FLOW, "flow": _CARD_FLOW,
-    "chart": _CARD_FLOW, "charts": _CARD_FLOW,
+    "diagram": _CARD_DIAGRAM, "diagrams": _CARD_DIAGRAM, "flow": _CARD_FLOW,
+    "chart": frozenset({"flow", "bar", "chart"}), "charts": frozenset({"flow", "bar", "chart"}),
+    "graph": _CARD_CHART, "graphs": _CARD_CHART, "pie": _CARD_CHART,  # jfollow10c (soft)
+    "drawing": frozenset({"web"}), "drawings": frozenset({"web"}), "sketch": frozenset({"web"}),
     "picture": frozenset({"image"}), "pictures": frozenset({"image"}),
     "image": frozenset({"image"}), "images": frozenset({"image"}),
     "photo": frozenset({"image"}), "photos": frozenset({"image"}), "pic": frozenset({"image"}),
@@ -874,7 +909,8 @@ KIND_WORDS: dict[str, frozenset[str]] = {
 }
 # The jfollow9 additions: kind words too weak to make "close the notes" a card remove.
 _SOFT_KIND_WORDS = frozenset({"note", "notes", "text", "info", "summary", "stat", "stats",
-                              "number", "figure", "link", "links", "clip", "clips", "map", "maps"})
+                              "number", "figure", "link", "links", "clip", "clips", "map", "maps",
+                              "graph", "graphs", "pie", "drawing", "drawings", "sketch"})
 # Words that never name a card: pointers and politeness around the real words.
 _CARD_FILLERS = frozenset({"the", "a", "an", "that", "this", "these", "those", "my", "one",
                            "card", "please", "it"})

@@ -35,7 +35,7 @@ final class FixtureDecodeTests: XCTestCase {
             types.formUnion(msg.cards.map(\.typeName))
         }
         XCTAssertEqual(kinds, Set<HUDShape.Kind>([.rect, .circle, .triangle]))
-        XCTAssertEqual(types, Set(["info", "stat", "bar", "flow", "link", "image", "video", "web"]))
+        XCTAssertEqual(types, Set(["info", "stat", "bar", "flow", "link", "image", "video", "web", "chart"]))
     }
 
     /// jfollow10b: the web card (page "map") decodes; an unknown page is skipped like an unknown type.
@@ -51,6 +51,27 @@ final class FixtureDecodeTests: XCTestCase {
         let odd = #"{"shapes":[],"cards":[{"id":"w1","type":"web","title":"T","page":"evil","data":{"routes":[],"pins":[{"lat":1,"lon":2,"label":"x"}],"attribution":"x"}},{"id":"i1","type":"info","title":"Yes","body":["kept"]}]}"#
         let out = try JSONDecoder().decode(HUDMessage.self, from: Data(odd.utf8))
         XCTAssertEqual(out.cards.map(\.typeName), ["info"])
+    }
+
+    /// jfollow10c criterion 19: the drawing web card and the chart card decode; oversize/unknown are skipped.
+    func testDrawingAndChartCards() throws {
+        let file = Self.fixturesDir.appendingPathComponent("web_drawing.json")
+        let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(contentsOf: file))
+        guard case .web(let web) = msg.cards.first else { return XCTFail("expected a web card, got \(msg.cards)") }
+        XCTAssertEqual(web.page, "drawing")
+        XCTAssertEqual(msg.cards.first?.typeTag, "DRAWING")
+        XCTAssertTrue(try XCTUnwrap(web.drawing).svg.hasPrefix("<svg"))
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(web.drawing).legend.count, 3)
+        let back = try JSONDecoder().decode(HUDMessage.self, from: JSONEncoder().encode(msg))
+        XCTAssertEqual(back, msg)
+        let big = String(repeating: "a", count: 48_001 - 11)
+        let oversize = #"{"shapes":[],"cards":[{"id":"d1","type":"web","title":"T","page":"drawing","data":{"svg":"<svg>\#(big)</svg>","legend":[]}},{"id":"i1","type":"info","title":"Yes","body":["kept"]}]}"#
+        XCTAssertEqual(try JSONDecoder().decode(HUDMessage.self, from: Data(oversize.utf8)).cards.map(\.typeName), ["info"])
+        let charts = try JSONDecoder().decode(HUDMessage.self, from: Data(contentsOf: Self.fixturesDir.appendingPathComponent("chart.json")))
+        XCTAssertEqual(charts.cards.count, 8)
+        XCTAssertEqual(Set(charts.cards.map(\.typeTag)), ["GRAPH"])
+        let radar = #"{"shapes":[],"cards":[{"id":"c1","type":"chart","title":"T","chart":"radar","labels":["A","B"],"series":[{"name":"S","values":[1,2]}]},{"id":"i1","type":"info","title":"Yes","body":["kept"]}]}"#
+        XCTAssertEqual(try JSONDecoder().decode(HUDMessage.self, from: Data(radar.utf8)).cards.map(\.typeName), ["info"])
     }
 
     func testLossyArraysSkipUnknownKindAndType() throws {

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content ="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'">
+<meta name="viewport" content ="width=device-width, initial-scale=1">
+<title>Drawing</title>
+<link rel="stylesheet" href="drawing.css">
+</head>
+<body>
+<main id="stage" tabindex="0" aria-label="Drawing. Scroll or pinch to zoom, drag to move, double-click to reset.">
+  <img id="drawing" data-src="drawing.svg" alt="Labelled drawing" draggable="false">
+  <p id="status" role="status" hidden></p>
+</main>
+<section id="panel" aria-label="Parts">
+  <ol id="legend"></ol>
+  <button id="reset" type="button">Reset view</button>
+</section>
+<script src="drawing.js"></script>
+</body>
+</html>

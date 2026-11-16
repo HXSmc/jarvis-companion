@@ -367,13 +367,46 @@ public struct MapData: Codable, Equatable {
     }
 }
 
+extension MapData {
+    /// The map data of a page that is not the map (its own data is elsewhere on the WebCard).
+    static let none = MapData(noMap: ())
+
+    private init(noMap: Void) {
+        routes = []
+        pins = []
+        attribution = MapData.osmAttribution
+    }
+}
+
+/// The drawing page's data (jfollow10c): the gateway's sanitised SVG (served to the page only as
+/// the image `drawing.svg`) and its legend. Over 48,000 bytes of SVG throws: the card is skipped.
+public struct DrawingData: Codable, Equatable {
+    public var svg: String
+    public var legend: [String]
+
+    public static let maxSVGBytes = 48_000
+
+    private enum CodingKeys: String, CodingKey { case svg, legend }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        svg = try c.decode(String.self, forKey: .svg)
+        guard !svg.isEmpty, svg.utf8.count <= Self.maxSVGBytes else {
+            throw DecodingError.dataCorruptedError(forKey: .svg, in: c, debugDescription: "svg size")
+        }
+        legend = ((try? c.decode([String].self, forKey: .legend)) ?? []).prefix(12).map { String($0.prefix(80)) }
+    }
+}
+
 /// A sandboxed web card: one bundled page (WebCardPolicy.pages) and its data. An unknown page
-/// throws, so the card is skipped like an unknown type.
+/// throws, so the card is skipped like an unknown type. `data` is the map's; a drawing card
+/// carries `drawing` instead (and `data` is MapData.none).
 public struct WebCard: Codable, Equatable {
     public var id: String?
     public var title: String
     public var page: String
     public var data: MapData
+    public var drawing: DrawingData?
 
     private enum CodingKeys: String, CodingKey { case id, title, page, data }
 
@@ -385,7 +418,24 @@ public struct WebCard: Codable, Equatable {
         guard WebCardPolicy.pages[page] != nil else {
             throw DecodingError.dataCorruptedError(forKey: .page, in: c, debugDescription: "unknown page")
         }
-        data = try c.decode(MapData.self, forKey: .data)
+        if page == "drawing" {
+            drawing = try c.decode(DrawingData.self, forKey: .data)
+            data = .none
+        } else {
+            data = try c.decode(MapData.self, forKey: .data)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(page, forKey: .page)
+        if let drawing {
+            try c.encode(drawing, forKey: .data)
+        } else {
+            try c.encode(data, forKey: .data)
+        }
     }
 }
 
@@ -402,6 +452,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
     case image(ImageCard)
     case video(VideoCard)
     case web(WebCard)
+    case chart(ChartCard)
 
     /// Identifiable over the payload ids (nil when absent; ForEach by index instead).
     public var id: String? {
@@ -414,6 +465,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .image(let p): return p.id
         case .video(let p): return p.id
         case .web(let p): return p.id
+        case .chart(let p): return p.id
         }
     }
 
@@ -428,6 +480,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .image: return "image"
         case .video: return "video"
         case .web: return "web"
+        case .chart: return "chart"
         }
     }
 
@@ -441,7 +494,8 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .link: return "LINK"
         case .image: return "IMAGE"
         case .video: return "VIDEO"
-        case .web(let p): return p.page == "map" ? "MAP" : "WEB"
+        case .web(let p): return ["map": "MAP", "drawing": "DRAWING"][p.page] ?? "WEB"
+        case .chart: return "GRAPH"
         }
     }
 
@@ -458,6 +512,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case "image": self = .image(try ImageCard(from: decoder))
         case "video": self = .video(try VideoCard(from: decoder))
         case "web": self = .web(try WebCard(from: decoder))
+        case "chart": self = .chart(try ChartCard(from: decoder))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown card type \(other)")
         }
@@ -475,6 +530,7 @@ public enum HUDCard: Codable, Equatable, Identifiable {
         case .image(let p): try p.encode(to: encoder)
         case .video(let p): try p.encode(to: encoder)
         case .web(let p): try p.encode(to: encoder)
+        case .chart(let p): try p.encode(to: encoder)
         }
     }
 }

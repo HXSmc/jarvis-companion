@@ -1,0 +1,1 @@
+<svg viewBox="0 0 100 100" xmlns:xlink="http://www.w3.org/1999/xlink"><a xlink:href="#ok"><animate attributeName="href" to="javascript:alert(1)"/><set attributeName="xlink:href" to="https://attacker.example"/><text x="1" y="30">Go</text></a></svg>

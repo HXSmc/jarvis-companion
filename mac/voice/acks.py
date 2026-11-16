@@ -133,6 +133,13 @@ PHRASES = {
     "watch_limit": "That's three videos this hour. Try again later.",
     "web_no_enlarge": "The map stays this size. Zoom inside it instead.",
     "geo_barge": "Say that again once I've finished, sir.",
+    # jfollow10c: drawings
+    "draw_started": "Drawing it now, sir.",
+    "draw_failed": "I couldn't draw that cleanly, sir.",
+    "draw_busy": "I'm still on the last drawing, sir.",
+    "draw_which": "Tell me what to draw, sir.",
+    "draw_done": "Here's the drawing, sir.",
+    "draw_not_saved": "Drawings and maps aren't saved, sir.",
 }
 
 # Thinking lines said while the model works: (key, text, tag). "look" = an answer/lookup is

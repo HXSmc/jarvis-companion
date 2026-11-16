@@ -56,3 +56,33 @@ final class WebCardPolicyTests: XCTestCase {
         XCTAssertEqual(rules[1]["action"]?["type"], "ignore-previous-rules")
     }
 }
+
+/// jfollow10c criterion 16: the drawing page's files, the drawing.svg image, and the same CSP.
+final class WebCardDrawingPolicyTests: XCTestCase {
+    private func url(_ path: String) -> URL { URL(string: "jarvisweb://app/\(path)")! }
+
+    func testDrawingFilesResolve() {
+        for path in ["drawing.html", "drawing.js", "drawing.css", "drawing.svg"] {
+            XCTAssertEqual(WebCardPolicy.resourcePath(for: url(path)), path)
+        }
+        XCTAssertEqual(WebCardPolicy.resources["drawing.svg"]?.mime, "image/svg+xml")
+        XCTAssertEqual(WebCardPolicy.resources["drawing.html"]?.mime, "text/html")
+        XCTAssertEqual(WebCardPolicy.drawingImagePath, "drawing.svg")
+        XCTAssertEqual(WebCardPolicy.startURL(page: "drawing")?.absoluteString, "jarvisweb://app/drawing.html")
+        XCTAssertEqual(WebCardPolicy.startURL(page: "map")?.absoluteString, "jarvisweb://app/map.html")
+    }
+
+    func testDrawingEscapesRefused() {
+        for path in ["../drawing.svg", "%2e%2e/drawing.html", "DRAWING.HTML", "drawing.svg/../map.js",
+                     "./drawing.svg", "drawing.svg%00", "drawing.svg/"] {
+            XCTAssertNil(WebCardPolicy.resourcePath(for: url(path)), path)
+        }
+        XCTAssertNil(WebCardPolicy.resourcePath(for: URL(string: "https://app/drawing.svg")!))
+        XCTAssertNil(WebCardPolicy.resourcePath(for: URL(string: "jarvisweb://evil/drawing.svg")!))
+    }
+
+    func testCSPUnchanged() {
+        XCTAssertEqual(WebCardPolicy.csp,
+                       "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'")
+    }
+}

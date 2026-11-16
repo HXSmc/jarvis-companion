@@ -96,7 +96,7 @@ public struct CardView: View {
     /// Width the card kind is built at; the enlarged layer scales fonts from it.
     static func baseWidth(of card: HUDCard) -> CGFloat {
         switch card {
-        case .bar, .flow, .web: return 360
+        case .bar, .flow, .web, .chart: return 360
         case .image, .video: return MediaPolicy.cardWidth
         default: return 300
         }
@@ -141,7 +141,16 @@ public struct CardView: View {
                           onPlay: {})
         case .web(let p):  // the static form; the live map is WebCardView inside WebCardChrome
             CardChrome(meta: nil, title: p.title, width: width ?? 360, fontScale: enlargedFontScale) {
-                InfoBody(lines: [p.data.routes.isEmpty ? "Map" : "Route map"], scale: enlargedFontScale)
+                InfoBody(lines: [p.drawing != nil ? "Drawing" : p.data.routes.isEmpty ? "Map" : "Route map"],
+                         scale: enlargedFontScale)
+            }
+        case .chart(let p):
+            CardChrome(meta: nil, title: p.title, width: width ?? 360, fontScale: enlargedFontScale) {
+                if let chart = ChartCardView(card: p, scale: enlargedFontScale) {
+                    chart
+                } else {
+                    InfoBody(lines: ["Chart unavailable"], scale: enlargedFontScale)
+                }
             }
         }
     }

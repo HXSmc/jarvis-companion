@@ -79,8 +79,11 @@ extension WebCardView {
         private var reported = false
         private let opened = Date()
 
+        private let page: String
+
         init(card: WebCard) {
             handler = WebCardSchemeHandler(card: card)
+            page = card.page  // a WebCardPolicy.pages key (decoding refuses any other)
         }
 
         /// One `web_card` row per card: page, rules compiled, page loaded, ms, blocked navigations.
@@ -89,7 +92,7 @@ extension WebCardView {
             reported = true
             let ms = Int(Date().timeIntervalSince(opened) * 1000)
             ServiceClient().debugNote(step: "web_card",
-                                      detail: "page=map rules=\(rules ? 1 : 0) loaded=\(loaded ? 1 : 0) ms=\(ms) blocked=\(blocked)")
+                                      detail: "page=\(page) rules=\(rules ? 1 : 0) loaded=\(loaded ? 1 : 0) ms=\(ms) blocked=\(blocked)")
         }
 
         func tearDown() {
@@ -159,15 +162,25 @@ extension WebCardView {
 }
 
 /// Serves `jarvisweb://app/...`: the fixed resource table from Resources/web, `data.json` from the
-/// decoded card, and `tiles/z/x/y.png` through ServiceClient. Anything else fails unanswered.
+/// decoded card, `tiles/z/x/y.png` through ServiceClient (map page only) and `drawing.svg`, the
+/// drawing card's sanitised SVG as an image (drawing page only). Anything else fails unanswered.
 @MainActor
 final class WebCardSchemeHandler: NSObject, WKURLSchemeHandler {
     private let data: Data
+    private let svg: Data?  // drawing page only
+    private let isMap: Bool
     private let client = ServiceClient()
     private var live = Set<ObjectIdentifier>()
 
     init(card: WebCard) {
-        data = (try? JSONEncoder().encode(card.data)) ?? Data("{}".utf8)
+        isMap = card.page == "map"
+        if let drawing = card.drawing {  // the page reads only the legend; the SVG goes as an image
+            data = (try? JSONEncoder().encode(["legend": drawing.legend])) ?? Data("{}".utf8)
+            svg = Data(drawing.svg.utf8)
+        } else {
+            data = (try? JSONEncoder().encode(card.data)) ?? Data("{}".utf8)
+            svg = nil
+        }
     }
 
     func stopAll() {
@@ -181,7 +194,11 @@ final class WebCardSchemeHandler: NSObject, WKURLSchemeHandler {
         if WebCardPolicy.isData(url) {
             return respond(urlSchemeTask, url: url, body: data, mime: "application/json")
         }
-        if let tile = WebCardPolicy.tilePath(for: url) {
+        if WebCardPolicy.resourcePath(for: url) == WebCardPolicy.drawingImagePath {
+            guard let svg else { return fail(urlSchemeTask) }  // never a bundle read under this name
+            return respond(urlSchemeTask, url: url, body: svg, mime: "image/svg+xml")
+        }
+        if isMap, let tile = WebCardPolicy.tilePath(for: url) {
             Task { @MainActor in
                 let body = try? await client.tile(z: tile.z, x: tile.x, y: tile.y)
                 guard live.contains(key) else { return }  // stopped meanwhile: never touch the task
