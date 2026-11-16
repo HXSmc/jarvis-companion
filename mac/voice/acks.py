@@ -157,7 +157,7 @@ ACK_POLICY: dict[str, str | None] = {
     "agent": "agent",
     "sessions": "sessions",
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
-    "card_remove": None, "card_help": None, "auto_mode": None,
+    "card_remove": None, "card_help": None,
     "answer": "answer",
 }
 

@@ -39,11 +39,11 @@ RUN_LINE = acks.PHRASES["progress_run"]
 
 @pytest.fixture(autouse=True)
 def fresh_auto_state():
-    overlay._auto_tainted.clear()
-    overlay._owner_level.clear()
+    for store in (overlay._auto_tainted, overlay._owner_level, overlay._marked_sessions):
+        store.clear()
     yield
-    overlay._auto_tainted.clear()
-    overlay._owner_level.clear()
+    for store in (overlay._auto_tainted, overlay._owner_level, overlay._marked_sessions):
+        store.clear()
 
 
 @pytest.fixture
@@ -170,10 +170,14 @@ def test_auto_mode_intent_variants():
         for t in texts:
             assert intents.parse(t, apps={}) == intents.Intent("auto_mode", arg), t
             assert not (intents.is_stop(t) or intents.is_no(t) or intents.is_cancel(t)
-                        or intents.is_confirm(t)), t
+                        or intents.is_confirm(t) or intents.is_stop_family(t)), t
     assert intents.parse("stop", apps={}).kind == "stop"
     assert intents.parse("stop asking", apps={}).kind != "auto_mode"
     assert intents.parse("don't", apps={}).kind != "auto_mode"
+    # whole utterance only: a last sentence or a near phrase never flips the switch
+    for t in ("I told Bob about it. Go full auto.", "Thanks. Ask before commands.", "go to full auto",
+              "should I ask before commands", "stop asking me questions"):
+        assert intents.parse(t, apps={}).kind != "auto_mode", t
 
 
 def test_auto_switch_persists(client, tmp_path):
@@ -231,6 +235,9 @@ def test_auto_off_is_base_behaviour(client, monkeypatch, tmp_path):
     _session_env(monkeypatch, tmp_path)
     events = turn(client, "start a session on the mini PC to tidy the logs", conv_id="o2")
     assert _confirm_card(events) and "o2" in overlay._host_ask
+    assert _rows()[-1] == "cmd=session_start decision=asked reason=off"
+    overlay._session_ref["o3"] = ["s2"]  # OFF wins the order even when a title is named
+    turn(client, "start a session to fix why that session went quiet", conv_id="o3")
     assert _rows()[-1] == "cmd=session_start decision=asked reason=off"
 
 
@@ -302,11 +309,17 @@ def test_classify_reads_the_raw_command_like_the_policy(ctx, monkeypatch):
     monkeypatch.setattr(ctx, "toplevel", lambda d: d)
     monkeypatch.setattr(ctx, "has_filters", lambda d: False)
     repo = str(Path(ctx.home) / "repo")
-    for raw in ("echo hi", "df -h", "memory_pressure", "rm ~/x.txt", "mv a b", f"git -C {repo} commit -m 'x'",
-                f"git -C {repo} push", f"git -C {repo} reset --hard", "launchctl unload x"):
+    confirmed = 0
+    for case in [c for c, _code in ASKS] + AUTOS:
+        raw = _fill(case, ctx).replace("git -C r ", f"git -C {repo} ")
         decision = agent_policy.decide("Bash", {"command": raw}, ctx)
-        assert isinstance(decision, agent_policy.Confirm), raw
-        assert auto_policy.classify(raw, ctx)[1] == auto_policy.classify(decision.updated_input["command"], ctx)[1]
+        if isinstance(decision, agent_policy.Confirm):  # parse rows and git reads never reach a Confirm
+            confirmed += 1
+            mine, rebuilt = auto_policy.classify(raw, ctx), auto_policy.classify(decision.updated_input["command"], ctx)
+            assert mine[0] == rebuilt[0], raw  # both ask or both run
+            if not raw.startswith("gh "):  # gh gets an env prefix (_GH_ENV): reading it would say runs_code
+                assert mine == rebuilt, raw
+    assert confirmed >= 30
 
 
 def test_secret_rules_use_the_policy_helpers(ctx, monkeypatch):
@@ -354,15 +367,16 @@ def test_untrusted_turn_asks(client, tmp_path, auto_on):
     from test_overlay_agent import REPO
     note = REPO / "note.md"
     note.write_text("hello")
-    # (a) a Read marks the session: look-ups still run, mkdir asks. An asked command ends the turn
-    # (the CLI waits for the yes), so df -h comes before mkdir here.
+    # (a) a Read marks the session: look-ups still run, mkdir asks; after the owner's yes, df -h runs auto
     steps = [("Read", {"file_path": str(note)}), ("Bash", {"command": "echo hi"}),
-             ("Bash", {"command": "df -h"}), ("Bash", {"command": "mkdir made"})]
+             ("Bash", {"command": "mkdir made"}), ("Bash", {"command": "df -h"})]
     pool, events = run_agent(client, lambda clock: (lambda: SeqAgent(clock, steps)), conv_id="u1")
-    assert _rows() == ["cmd=echo decision=auto reason=ok", "cmd=df decision=auto reason=ok",
-                       "cmd=mkdir decision=asked reason=untrusted"]
-    assert _confirm_card(events) and [r["behavior"] for r in pool.made[0].responses] == ["allow"] * 3
-    turn(client, "no", conv_id="u1")
+    assert _rows() == ["cmd=echo decision=auto reason=ok", "cmd=mkdir decision=asked reason=untrusted"]
+    assert _confirm_card(events) and [r["behavior"] for r in pool.made[0].responses] == ["allow"] * 2
+    events = turn(client, "yes", conv_id="u1")
+    assert _rows()[-1] == "cmd=df decision=auto reason=ok"
+    assert [r["behavior"] for r in pool.made[0].responses] == ["allow"] * 4
+    assert RUN_LINE not in says(events)  # "Running it, sir." is once per run, and echo already said it
 
     # (b) fresh conv: look-ups that print no text leave no mark; an unknown program's output does
     overlay.debug_log.clear()
@@ -585,3 +599,25 @@ def test_debug_page_cmd_run():
 
 def test_cmd_run_is_kept_by_the_log():
     assert "cmd_run" in overlay_log.KEEP_STEPS
+
+
+def test_stuck_verdict_fails_closed(client, monkeypatch, auto_on):
+    """The verdict runs on the policy pool under the policy's time limit: stuck = ask."""
+    import time as _time
+    monkeypatch.setattr(overlay, "POLICY_CHECK_S", 0.05)
+    monkeypatch.setattr(auto_policy, "verdict", lambda *a, **k: _time.sleep(0.3) or ("auto", "ok"))
+    pool, events = run_agent(client, bash("echo hi"), conv_id="v1")
+    assert _rows() == ["cmd=echo decision=asked reason=timeout"]
+    assert _confirm_card(events) and pool.made[0].responses == []
+
+
+def test_marked_agent_session_makes_a_session_start_ask(client, monkeypatch, tmp_path, auto_on):
+    from types import SimpleNamespace
+    _deps(Clock())
+    _session_env(monkeypatch, tmp_path)
+    overlay._mark_session("n5", SimpleNamespace(closed=False), "cat notes.md")
+    turn(client, "start a session on the mini PC to tidy the logs", conv_id="n5")
+    assert _rows()[-1] == "cmd=session_start decision=asked reason=untrusted"
+    overlay._marked_sessions["n6"] = SimpleNamespace(closed=True)  # a closed session marks nothing
+    overlay._host_ask.clear()
+    assert overlay._agent_session_marked("n6", overlay.get_deps()) is False

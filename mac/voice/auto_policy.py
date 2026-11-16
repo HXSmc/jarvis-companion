@@ -168,7 +168,7 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
     guard_roots = [os.path.realpath(os.path.join(ctx.home, d)) for d in GUARD_HOME]
     guard_roots += [os.path.realpath(str(agent.SUPPORT_DIR)), os.path.realpath(str(SETTINGS_FILE.parent))]
     guard_roots += [os.path.realpath(d) for d in GUARD_ABS]
-    if name in GUARD or any(_is_path(v) and any(_under(_resolve(v, ctx), r) for r in guard_roots)
+    if name in GUARD or any(_is_path(v) and any(_under(p, r) for p in _places(v, ctx) for r in guard_roots)
                             for v in values):
         return "guard"
     if name in NETWORK:
@@ -181,7 +181,9 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
             return "git"
     if name in DELETE:
         scratch = os.path.realpath(ctx.cwd) if ctx.cwd else None
-        targets = [a for a in args if not a.startswith("-")]
+        # plain arguments plus path-like --opt=value values (tar --directory=/elsewhere)
+        targets = [a for a in args if not a.startswith("-")] + [
+            v for a in args if a.startswith("-") and "=" in a for v in [a.split("=", 1)[1]] if _is_path(v)]
         # Absolute paths in the agent's own scratch dir only, never a shared one like /tmp (spec flag
         # c), and never a relative path: after a cd it lands elsewhere.
         if scratch is None or not targets or not all(
