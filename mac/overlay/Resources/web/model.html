@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content ="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'">
+<meta name="viewport" content ="width=device-width, initial-scale=1">
+<title>3D object</title>
+<link rel="stylesheet" href="model.css">
+</head>
+<body>
+<main id="stage" tabindex="0" aria-label="3D object. Drag to turn, scroll or pinch to zoom, right-drag to move.">
+  <img id="preview" alt="" draggable="false" hidden>
+  <p id="status" role="status">Loading 3D object…</p>
+</main>
+<section id="panel">
+  <p id="hint" hidden></p>
+  <button id="reset" type="button" hidden>Reset view</button>
+</section>
+<script type="module" src="model.js"></script>
+</body>
+</html>

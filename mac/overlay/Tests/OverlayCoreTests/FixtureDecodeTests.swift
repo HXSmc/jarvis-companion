@@ -202,4 +202,18 @@ final class FixtureDecodeTests: XCTestCase {
             XCTAssertTrue(msg.cards.isEmpty, url)
         }
     }
+
+    /// jfollow10d criterion 23: the model web card decodes; a bad slug or view is skipped.
+    func testModelWebCard() throws {
+        let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(contentsOf: Self.fixturesDir.appendingPathComponent("web-model.json")))
+        guard case .web(let web) = msg.cards.first else { return XCTFail("expected a web card, got \(msg.cards)") }
+        XCTAssertEqual(web.page, "model")
+        XCTAssertEqual(web.model?.slug, "test-mug")
+        XCTAssertEqual(web.model?.view, "model")
+        XCTAssertEqual(try JSONDecoder().decode(HUDMessage.self, from: JSONEncoder().encode(msg)), msg)
+        for data in [#"{"slug":"../x","view":"model"}"#, #"{"slug":"Test","view":"model"}"#, #"{"slug":"a","view":"edit"}"#, #"{"routes":[]}"#] {
+            let json = #"{"shapes":[],"cards":[{"id":"m1","type":"web","title":"T","page":"model","data":\#(data)},{"id":"i1","type":"info","title":"Yes","body":["kept"]}]}"#
+            XCTAssertEqual(try JSONDecoder().decode(HUDMessage.self, from: Data(json.utf8)).cards.map(\.typeName), ["info"], data)
+        }
+    }
 }

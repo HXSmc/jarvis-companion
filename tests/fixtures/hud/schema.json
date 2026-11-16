@@ -429,7 +429,8 @@
             "page": {
               "enum": [
                 "map",
-                "drawing"
+                "drawing",
+                "model"
               ]
             },
             "data": {
@@ -532,6 +533,26 @@
                   "required": [
                     "svg",
                     "legend"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "slug": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"
+                    },
+                    "view": {
+                      "enum": [
+                        "model",
+                        "preview"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "slug",
+                    "view"
                   ],
                   "additionalProperties": false
                 }

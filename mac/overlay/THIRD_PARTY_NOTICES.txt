@@ -105,3 +105,52 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+three.js 0.187.0 (mrdoob/three.js) — MIT License
+Used in: the 3D object web card (Resources/web/model.*). Source: npm package three@0.187.0,
+fetched from cdn.jsdelivr.net/npm/three@0.187.0/ (2026-11-16). Six files under
+Resources/web/vendor/three/ with upstream relative paths.
+
+Upstream sha256 (as published):
+  49bfc58c4097915b4fcf08ed1ee245c0da687f02d35908f38266dbd3d5324ac2  vendor/three/build/three.module.min.js
+  60880f0fd017e6ad08a80c2f0f7015c336ba0a5b6dbdde733b9272ca89eb95e2  vendor/three/build/three.core.min.js
+  532ac726e120039acbcd6cf54328c57acbf7b438176afaa6951257126d11bff1  vendor/three/examples/jsm/loaders/GLTFLoader.js
+  vendor/three/e7fca2fe9e7670a828af9b28084669a5909445b7f36f1f26cee9bf8f2961c32c  examples/jsm/controls/OrbitControls.js
+  7bda2a8ba836b2bcf67cb938d4b9e1bb5d1b1bc616817103ed858c0b58296ce7  vendor/three/examples/jsm/utils/BufferGeometryUtils.js
+  vendor/three/b1632a703206c3d830de9fcbe515696770d04b71a15ee6b50afa6d2c3298c86f  examples/jsm/utils/SkeletonUtils.js
+
+Shipped sha256 (the 4 addons are patched: their one import line
+  } from 'three';
+becomes
+  } from '../../../build/three.module.min.js';
+so no import map or CSP change is needed; nothing else differs):
+  49bfc58c4097915b4fcf08ed1ee245c0da687f02d35908f38266dbd3d5324ac2  vendor/three/build/three.module.min.js
+  60880f0fd017e6ad08a80c2f0f7015c336ba0a5b6dbdde733b9272ca89eb95e2  vendor/three/build/three.core.min.js
+  65b20a4c7b57058bd3a1d019c777f3e33bfb5a05f6f7b48e24e51330168fc334  vendor/three/examples/jsm/loaders/GLTFLoader.js
+  4b4597c83c2a8e5a1ac12335b070e83c53d3cb358dcbefc2c612d9d34df5e0e2  vendor/three/examples/jsm/controls/OrbitControls.js
+  68db4a941ab4ca59b5c510bc1099a2a2be1df27dd17788d6ec64172a6f0419c0  vendor/three/examples/jsm/utils/BufferGeometryUtils.js
+  d098ca77e7e6e0f78f6c66aa24e4019260c71e50a8f2bd67df4ba4acbc7582c3  vendor/three/examples/jsm/utils/SkeletonUtils.js
+================================================================================
+
+The MIT License
+
+Copyright © 2010-2026 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
