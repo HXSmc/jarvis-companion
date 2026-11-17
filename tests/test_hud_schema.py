@@ -298,3 +298,28 @@ def test_chart_card():
     assert len(hud.validate_card({**line, "labels": ["x" * 40] + line["labels"][1:]})["labels"][0]) == 24
     assert hud.validate_card({**line, "chart": "radar"}) is None
     assert "chart" in json.dumps(hud.schema_json()["$defs"]["card"])
+
+
+def test_map_rows():
+    """jfollow10f: the map card's ranked rows, credit keys and as-of time; caps and drops, service-only."""
+    card = json.loads((FIXTURES / "web-places.json").read_text())["cards"][0]
+    assert hud.validate_card(card, allow_web=True) == card
+    assert hud.validate_card(card) is None
+    data = card["data"]
+    row = data["rows"][0]
+
+    def rows_of(**changes):
+        out = hud.validate_card({**card, "data": {**data, **changes}}, allow_web=True)
+        return out["data"]
+
+    assert len(rows_of(rows=data["rows"] + [row])["rows"]) == 5
+    assert rows_of(rows=[{**row, "name": "N" * 60}])["rows"][0]["name"] == "N" * 40
+    assert rows_of(rows=[{**row, "mode": "car"}, row])["rows"] == [row]
+    times = [{"at": "25:00", "film": "x"}] + [{"at": f"1{i}:00", "film": "x"} for i in range(4)]
+    assert [t["at"] for t in rows_of(rows=[{**row, "times": times}])["rows"][0]["times"]] == ["10:00", "11:00", "12:00"]
+    assert rows_of(credits=["osm", "evil"])["credits"] == ["osm"]
+    assert "asof" not in rows_of(asof="<b>")
+    assert rows_of(rows=[{**row, "name": "A\u202eB\u200bC"}])["rows"][0]["name"] == "ABC"
+    assert rows_of(rows=[{**row, "hours": "open now"}])["rows"][0].get("hours") is None
+    assert "rows" not in rows_of(rows=[{**row, "min": 601}])
+

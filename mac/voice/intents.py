@@ -18,7 +18,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | place
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -449,6 +449,11 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
     if not last:  # jfollow10b: whole-utterance kinds, before workspace and open
+        hit = _place_match(text, place_names)  # jfollow10f: before the map check
+        if hit and hit[0] == "place":
+            return Intent("place", hit[1]["mode"])
+        if hit:
+            return Intent("geo_map", hit[1])
         geo = geo_request(text, place_names)
         if geo:
             return Intent(geo.kind, geo.b or geo.a, geo.mode)
@@ -1587,6 +1592,114 @@ def geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
             g = m.groupdict()
             return GeoAsk("geo_map", (g.get("a") or "").strip(), (g.get("b") or "").strip())
     return None
+
+
+# --- jfollow10f: general places ("best way to the cinema", "nearest Dishoom", "is Ebenezer on near me") ---
+
+CATEGORY = {"pharmacy": "pharmacy", "chemist": "pharmacy", "supermarket": "supermarket", "cafe": "cafe",
+            "coffee shop": "cafe", "restaurant": "restaurant", "pub": "pub", "bank": "bank", "cash machine": "atm",
+            "atm": "atm", "post office": "post office", "hospital": "hospital", "petrol station": "petrol station",
+            "library": "library", "park": "park", "gym": "gym", "bakery": "bakery", "bookshop": "bookshop"}
+_CINEMA_WORDS = frozenset({"cinema", "cinemas", "pictures", "movies", "movie theatre", "movie theater"})
+_NOT_A_PLACE = r"(?!(?:grips|know|sleep|be|terms|the bottom|the point|work|school|it|that)\b)"
+_PLACE_BEST_RES = (
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?:go to|get to) " + _NOT_A_PLACE + r"(?P<x>.+)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?:go|get) (?P<x>home)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?P<x>(?:the|a|an) .+)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?P<bare>.+)"),
+    re.compile(r"how (?:do|can|should) i get to (?:the )?(?:nearest|closest) (?P<x>.+)"),
+    re.compile(r"(?:what'?s |what is |where'?s |where is |find(?: me)? )?(?:the |a )?(?:nearest|closest) (?P<x>.+)"),
+)
+_PLACE_FIND_RE = re.compile(r"find(?: me)? (?:a|an) (?P<x>.+)", re.I)  # case kept: a name is capitalised
+_FIND_MEDIA_RE = re.compile(r"\b(?:picture|photo|image|video|youtube|song|clip|gif|map|recipe|film|movie|book)s?\b", re.I)
+_FILM_RE = re.compile(r"is (?P<film>.+?) (?P<verb>on|showing|playing)"
+                      r"(?P<place> near me| nearby| at the cinema| in cinemas| at the pictures)?"
+                      r"(?P<when> tonight| today| tomorrow)?")
+_FILM_STOP = frozenset({"tv", "telly", "light", "lights", "heating", "oven", "wifi", "bluetooth", "camera", "mic",
+                        "screen", "overlay", "alarm", "music", "it", "that", "this", "they", "he", "she", "there"})
+_WHATS_ON_RES = (
+    re.compile(r"what'?s on at the (?:cinema|pictures|movies)(?P<when> tonight| today| tomorrow)?"),
+    re.compile(r"what is on at the (?:cinema|pictures|movies)(?P<when> tonight| today| tomorrow)?"),
+    re.compile(r"what films are on(?P<when> tonight| today)?(?: near me)?"),
+)
+_PLACE_WORDS_RE = re.compile(r"^[a-z0-9 '&-]{1,60}$")
+_PLACE_POSTCODE_RE = re.compile(r"^[a-z]{1,2}\d[a-z\d]? ?\d[a-z]{2}$")  # = geo.POSTCODE_RE (intents stays light)
+PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest)\b", re.I)  # the service loads saved names then
+
+
+def _place_target(x: str, place_names: tuple[str, ...]):
+    """Target words -> ("geo", words) for a saved name / home / postcode, ("place", mode, query), or None."""
+    x = " ".join(x.replace("’", "'").split()).strip(" .,?!")
+    if not x or "://" in x or "www." in x or len(x) > 60:
+        return None
+    if x.startswith("my ") or place_name(x) == "home" or place_name(x) in place_names or _PLACE_POSTCODE_RE.fullmatch(x):
+        return ("geo", x)
+    bare = re.sub(r"^(?:the|a|an) ", "", x)
+    if not _PLACE_WORDS_RE.fullmatch(bare):
+        return None
+    if bare in _CINEMA_WORDS:
+        return ("place", "cinema", "cinema")
+    if bare in CATEGORY:
+        return ("place", "category", CATEGORY[bare])
+    return ("place", "name", bare)
+
+
+def _place_match(text: str, place_names: tuple[str, ...]):
+    """The whole place form of one utterance: ("place", dict) | ("geo", target words) | None."""
+    if len(text) > 200:
+        return None
+    t = destutter(_strip_tail(strip_lead(_clean(text)))).strip().rstrip(".?!,").strip()
+    low = t.lower().replace("’", "'").replace(",", "")
+    for rx in _WHATS_ON_RES:
+        m = rx.fullmatch(low)
+        if m:
+            return ("place", {"mode": "whats_on", "query": "cinema", "film": "", "when": (m["when"] or " today")[1:]})
+    m = _FILM_RE.fullmatch(low)
+    if m and (m["place"] or m["when"] or m["verb"] != "on"):
+        film = " ".join(m["film"].split())
+        bare = re.sub(r"^(?:the|a|an) ", "", film)
+        if (film and len(film) <= 60 and _PLACE_WORDS_RE.fullmatch(film) and bare not in _FILM_STOP
+                and film not in _FILM_STOP and not re.search(r"\b(?:line|tube|bus|train)$", film)):
+            return ("place", {"mode": "film", "query": "cinema", "film": film, "when": (m["when"] or " today")[1:]})
+        return None
+    for rx in _PLACE_BEST_RES:
+        m = rx.fullmatch(low)
+        if not m:
+            continue
+        if "bare" in m.groupdict() and m["bare"] is not None:
+            word = m["bare"].strip()
+            if word not in _CINEMA_WORDS and word not in CATEGORY:
+                return None  # "best way to cook rice": not a place
+            x = word
+        else:
+            x = m["x"]
+        hit = _place_target(x, place_names)
+        if hit is None:
+            return None
+        return hit if hit[0] == "geo" else ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    m = _PLACE_FIND_RE.fullmatch(t)
+    if m and not _FIND_MEDIA_RE.search(m["x"]):
+        x = m["x"].strip()
+        # "find me a Pret" (a capitalised name, <= 3 words) or a category word; "find me a picture of a cat"
+        # and other lower-case asks stay with the media and answer kinds.
+        if x.lower() in CATEGORY or (x[:1].isupper() and len(x.split()) <= 3):
+            hit = _place_target(x.lower(), place_names)
+            if hit and hit[0] == "place":
+                return ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    return None
+
+
+def place_request(text: str, place_names: tuple[str, ...] = ()) -> dict | None:
+    """{"mode": name|category|cinema|film|whats_on, "query", "film", "when": today|tonight|tomorrow} or None.
+    Fixed code, owner words only; a saved name, home or a postcode is stage B's route (place_geo_request)."""
+    hit = _place_match(text, place_names)
+    return hit[1] if hit and hit[0] == "place" else None
+
+
+def place_geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
+    """"best way to go to the gym / home / SW1A 2AA" -> stage B's map route from home."""
+    hit = _place_match(text, place_names)
+    return GeoAsk("geo_map", "", hit[1]) if hit and hit[0] == "geo" else None
 
 
 @dataclass

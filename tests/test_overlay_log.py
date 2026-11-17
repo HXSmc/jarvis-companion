@@ -478,3 +478,13 @@ def test_keep_steps_jfollow10c():
     out = overlay_log.redact(snap)
     assert [(s["step"], s["detail"]) for s in out["turns"][0]["steps"]] == list(rows.items())
     assert "SECRET-TITLE" not in repr(out) and "<svg" not in repr(out)
+
+
+def test_keep_steps_jfollow10f():
+    """jfollow10f: the place row keeps its detail (fixed words and counts); any other string field is stripped."""
+    from gateway import overlay_log
+    detail = "kind=film src=clusterflick n=3 calls=9 ms=812 tfl=3 matrix=1 shows=1 reason=ok"
+    snap = {"turns": [{"id": "t1", "steps": [{"step": "place", "at": 1.0, "detail": detail, "query": "dishoom"}]}]}
+    [row] = overlay_log.redact(snap)["turns"][0]["steps"]
+    assert row == {"step": "place", "at": 1.0, "detail": detail}
+
