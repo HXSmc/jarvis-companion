@@ -227,7 +227,7 @@ final class FixtureDecodeTests: XCTestCase {
     }
 
     func testPlacesRowNoteTomorrow() throws {
-        let raw = #"{"shapes":[],"cards":[{"id":"w3","type":"web","title":"T","page":"map","data":{"routes":[],"pins":[],"attribution":"x","rows":[{"name":"A","km":1,"note":"none_tomorrow"},{"name":"B","km":2,"note":"<b>"}]}}]}"#
+        let raw = #"{"shapes":[],"cards":[{"id":"w3","type":"web","title":"T","page":"map","data":{"routes":[],"pins":[{"lat":51.5,"lon":-0.12,"label":"Home"}],"attribution":"x","rows":[{"name":"A","km":1,"note":"none_tomorrow"},{"name":"B","km":2,"note":"<b>"}]}}]}"#
         let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(raw.utf8))
         guard case .web(let web) = msg.cards.first else { return XCTFail("expected a web card") }
         XCTAssertEqual(web.data.rows?.map(\.note), ["none_tomorrow", nil])
