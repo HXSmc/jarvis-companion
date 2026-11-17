@@ -5279,9 +5279,9 @@ def _video_id_for(raw_text: str, conv_id: str) -> str:
     return _last_video.get(conv_id, "")
 
 
-def _text_lines(text: str, cap: int = 6) -> list[str]:
+def _text_lines(text: str) -> list[str]:
     pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", text) if p.strip()]
-    return [p[:hud.MAX_LINE] for p in pieces][:cap]
+    return [p[:hud.MAX_LINE] for p in pieces][:6]
 
 
 async def _video_answer(body: TurnBody, raw_text: str, deps: OverlayDeps) -> tuple[str | None, str, dict]:
@@ -5519,8 +5519,8 @@ def _job_row(sid: str) -> dict | None:
     return None
 
 
-def _companion_text(path: str, cap: int = JOB_FILE_MAX) -> str | None:
-    """One allow-listed GET of a small text file: the first `cap` bytes (a longer file is cut)."""
+def _companion_text(path: str) -> str | None:
+    """One allow-listed GET of a small text file: the first JOB_FILE_MAX bytes (a longer file is cut)."""
     if not _companion_allowed("GET", path):
         raise ValueError("call not allowed")
     access = _sessions_access()
@@ -5535,11 +5535,11 @@ def _companion_text(path: str, cap: int = JOB_FILE_MAX) -> str | None:
                 data = bytearray()
                 for chunk in resp.iter_bytes():
                     data += chunk
-                    if len(data) >= cap:
+                    if len(data) >= JOB_FILE_MAX:
                         break
     except Exception:
         return None
-    return bytes(data[:cap]).decode("utf-8", "replace")
+    return bytes(data[:JOB_FILE_MAX]).decode("utf-8", "replace")
 
 
 def _summary_lines(text: str) -> list[str]:

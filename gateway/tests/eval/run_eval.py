@@ -43,10 +43,10 @@ class _NoAgent:  # the tool-using agent tier never runs in the eval
         pass
 
 
-def _wait_warm(deps, limit_s: float = 10.0) -> None:
+def _wait_warm(deps) -> None:
     """Before a turn, give a rebuilding picker the seconds a spoken pause gives it on a running gateway."""
     picker = getattr(getattr(deps, "intent_pick", None), "__self__", None)
-    end = time.monotonic() + limit_s
+    end = time.monotonic() + 10.0
     while picker is not None and picker._session is None and time.monotonic() < end:
         time.sleep(0.1)
 
