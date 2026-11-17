@@ -143,8 +143,6 @@ QUIET_PROMPT = re.sub(
 
 def _live_prompt(prompt: str) -> str:
     """The prompt with the live fact sheet (vault note when it passes facts' checks) in the fixture's place."""
-    if _FIXTURE_BLOCK not in prompt:  # never expected; the constant stays a working prompt
-        return prompt
     return prompt.replace(_FIXTURE_BLOCK, facts.block(facts.load(os.environ.get("OVERLAY_VAULT"))), 1)
 
 
@@ -3181,7 +3179,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 yield ev
 
         elif intent.kind == "video_watch":
-            async for ev in _video_watch_turn(body, raw_text, deps, said, on_step):
+            async for ev in _video_watch_turn(body, raw_text, deps, said):
                 yield ev
 
         elif intent.kind == "draw":
@@ -5629,8 +5627,8 @@ async def minipc_job(kind: str, prompt: str, result_name: str, conv_id: str, dep
     return "job_started"
 
 
-async def _video_watch_turn(body: TurnBody, raw_text: str, deps: OverlayDeps, said: list[str],
-                            on_step) -> AsyncIterator[dict]:
+async def _video_watch_turn(body: TurnBody, raw_text: str, deps: OverlayDeps,
+                            said: list[str]) -> AsyncIterator[dict]:
     if body.barge_in:  # a barge-in never starts a job
         _job_note("refused", "", "barge")
         key = "geo_barge"
