@@ -136,6 +136,8 @@ PHRASES = {
     # jfollow10f: general places near home (nearest Dishoom, the best way to the cinema, is a film on).
     "place_best": "{name} is closest, {mins} {how}. It's on the card.",
     "place_best_km": "{name} is closest, {km} kilometres away. It's on the card.",
+    "place_best_closed": "{name} is closest, {mins} {how}, but closed now. It's on the card.",
+    "place_best_km_closed": "{name} is closest, {km} kilometres, but closed now. It's on the card.",
     "cinema_best": "{name} is your best bet, {mins} {how}, next showing {time}.",
     "cinema_none_left": "Nothing left to catch {when}. {name} is closest, {mins} {how}.",
     "film_best": "{film} is on at {name} at {time}, {mins} {how}.",

@@ -18,6 +18,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from string import capwords
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
@@ -37,6 +38,7 @@ STALE_S = 36 * 3600
 TURN_S = 15.0  # the whole place turn gives up here with what it has
 BYTES_PER_QUESTION = 1536 * 1024
 REACH_PAD_MIN = 10
+NEAR_RATIO, NEAR_MIN_CHARS = 0.75, 4  # misheard-name retry: how alike a nearby name must be ("disham" ~ "dishoom" 0.77)
 SHOWS_DOWN_LEAD = "I can't see showtimes right now."
 NOT_LISTED = "hours not listed"
 MODES = ("name", "category", "cinema", "film", "whats_on")
@@ -65,6 +67,7 @@ class Budget(geo.Budget):
     def __init__(self) -> None:
         super().__init__()
         self.bytes = self.matrix = self.shows = 0
+        self.near = "no"  # misheard-name retry: no (not run) | hit | miss
         self.deadline = geo.clock() + TURN_S
         self.timed_out = False
 
@@ -112,9 +115,12 @@ def search_point(home: tuple) -> tuple[float, float]:
     return round(home[0], 2), round(home[1], 2)
 
 
-def search_box(point: tuple, wide: bool = False) -> tuple[float, float, float, float]:
-    """(west, north, east, south) around the rounded point: ~11 km square, or ~33 km when widened."""
-    dlat, dlon = (0.15, 0.24) if wide else (0.05, 0.08)
+BOXES = {"tight": (0.01, 0.02), "small": (0.05, 0.08)}  # half-sizes (lat, lon) in degrees
+
+
+def search_box(point: tuple, size: str = "small") -> tuple[float, float, float, float]:
+    """(west, north, east, south) around the rounded point: tight ~2 x 3 km, small ~11 km square."""
+    dlat, dlon = BOXES[size]
     return (round(point[1] - dlon, 2), round(point[0] + dlat, 2), round(point[1] + dlon, 2), round(point[0] - dlat, 2))
 
 
@@ -192,6 +198,33 @@ def candidates(hits: list[dict], home: tuple, fallback_name: str = "") -> list[d
     return kept[:MAX_ROWS]
 
 
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def near_score(query: str, name: str) -> float:
+    """How alike the owner's (maybe misheard) words are to a place name: the best difflib ratio of the words,
+    spaces dropped, against any run of words in the name ("dish um" vs "Dishoom Covent Garden" -> 0.77)."""
+    q, words = _compact(query), name.split()[:8]
+    runs = [_compact(" ".join(words[i:j])) for i in range(len(words)) for j in range(i + 1, len(words) + 1)]
+    return max((SequenceMatcher(None, q, r).ratio() for r in runs if r), default=0.0) if q else 0.0
+
+
+def near_miss(hits: list[dict], query: str, home: tuple) -> list[dict]:
+    """The hits (<= 25 km) that carry the ONE name most like the query, when it is alike enough; else []."""
+    if len(_compact(query)) < NEAR_MIN_CHARS:
+        return []
+    best, best_name = NEAR_RATIO, ""
+    for h in hits:
+        p, name = _point(h.get("lat"), h.get("lon")), hud.place_text(h.get("name"), hud.MAX_LABEL)
+        if p is None or not name or km_between(home, p) > MAX_KM:
+            continue
+        score = near_score(query, name)
+        if score >= best and (score > best or not best_name):
+            best, best_name = score, _compact(name)
+    return [h for h in hits if best_name and _compact(hud.place_text(h.get("name"), hud.MAX_LABEL)) == best_name]
+
+
 class SearchFailed(Exception):
     def __init__(self, key: str, reason: str):
         super().__init__(key)
@@ -203,16 +236,20 @@ def _search_reason(e: geo.GeoError) -> str:
 
 
 def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = True) -> tuple[str, list[dict]]:
-    """(src, <= 5 candidates) for a name or category: Nominatim on the small box, then once more on the
-    wide box when that had 0 usable hits; Photon (names only) when the first Nominatim call fails.
-    At most 2 search calls. Raises SearchFailed(place_down | place_none, reason)."""
+    """(src, <= 5 candidates) for a name or category. Categories: Nominatim on the tight box (its 20 hits
+    in a bigger box come by importance, not distance), then the small box when that had 0 usable hits.
+    Names: Nominatim on the small box; 0 usable hits -> ONE misheard-name retry on Photon (fuzzy, near the
+    rounded point) kept only when a nearby name is alike enough (near_miss). Photon also stands in when the
+    first Nominatim call fails for a name. widen=False: one small-box call only. At most 2 search calls.
+    Raises SearchFailed(place_down | place_none, reason)."""
     point = search_point(home)
-    box = search_box(point)
+    box = search_box(point, "tight" if mode == "category" and widen else "small")
     key = (query, box)
     fallback = query if mode == "category" else ""
     with _lock:
         hit = _searches.get(key)
     if hit and geo.clock() - hit[0] < SEARCH_TTL_S:
+        budget.near = hit[3]
         return hit[1], candidates(hit[2], home, fallback)
     src = "nominatim"
     try:
@@ -225,16 +262,25 @@ def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = Tru
         except geo.GeoError as e2:
             raise SearchFailed("place_down", _search_reason(e2)) from None
     found = candidates(hits, home, fallback)
-    if not found and src == "nominatim" and widen:
+    if not found and src == "nominatim" and widen and mode == "name":
+        budget.near = "miss"
         try:
-            hits = _nominatim_hits(_nominatim(nominatim_search_url(query, search_box(point, wide=True)), budget))
+            hits = near_miss(_photon_hits(geo._json(_fetch(photon_url(query, point), "photon", budget))), query, home)
+        except geo.GeoError as e:
+            raise SearchFailed("place_down", _search_reason(e)) from None
+        found = candidates(hits, home)
+        if found:
+            src, budget.near = "photon", "hit"
+    elif not found and src == "nominatim" and widen:
+        try:
+            hits = _nominatim_hits(_nominatim(nominatim_search_url(query, search_box(point, "small")), budget))
         except geo.GeoError as e:
             raise SearchFailed("place_down", _search_reason(e)) from None
         found = candidates(hits, home, fallback)
     if not found:
         raise SearchFailed("place_none", "none_near")
     with _lock:
-        _searches[key] = (geo.clock(), src, hits[:40])
+        _searches[key] = (geo.clock(), src, hits[:40], budget.near)
         while len(_searches) > 32:
             _searches.pop(next(iter(_searches)))
     return src, found
@@ -545,10 +591,12 @@ def _minutes_text(n: int) -> str:
     return f"{n} minute{'s' if n != 1 else ''}"
 
 
-def _spoken_name(rows: list[dict]) -> str:
+def _spoken_name(rows: list[dict], road: bool = False) -> str:
+    """The top row's name (<= 6 words), "on <road>" when two rows share it or road=True (a category pick:
+    a brand name alone, "Life", says little)."""
     top = rows[0]
     name = " ".join(top["name"].split()[:6])
-    if top["road"] and sum(r["name"].lower() == top["name"].lower() for r in rows) > 1:
+    if top["road"] and (road or sum(r["name"].lower() == top["name"].lower() for r in rows) > 1):
         name += " on " + " ".join(top["road"].split()[:6])
     return name
 
@@ -585,14 +633,15 @@ def _route(top: dict) -> dict | None:
 
 def _line(ans: Answer, rows: list[dict], cinema: bool, shows_ok: bool, ask: dict) -> None:
     top = rows[0]
-    name = _spoken_name(rows)
+    name = _spoken_name(rows, road=ask.get("mode") == "category")
+    closed = "_closed" if not cinema and ans.rows and ans.rows[0].get("hours") == "closed now" else ""
     if top["min"] is None:  # neither the matrix nor TfL answered: straight km
-        ans.key = "shows_down_km" if cinema and not shows_ok else "place_best_km"
+        ans.key = "shows_down_km" if cinema and not shows_ok else "place_best_km" + closed
         ans.fmt = {"name": name, "km": f"{top['km']:.1f}"}
         return
     base = {"name": name, "mins": _minutes_text(top["min"]), "how": HOW[top["mode"]]}
     if not cinema:
-        ans.key, ans.fmt = "place_best", base
+        ans.key, ans.fmt = "place_best" + closed, base
     elif not shows_ok:
         ans.key, ans.fmt = "shows_down", base
     elif ask["mode"] == "film":
@@ -612,7 +661,8 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
     try:
         if not cinema:
             ans.src, found = search(ask["mode"], ask["query"], home, budget)
-            ans.title = f"Nearest {capwords(ask['query'])}"[:hud.MAX_TITLE]
+            # a misheard name answers with the name it matched ("Dishoom", not "Disham")
+            ans.title = f"Nearest {found[0]['name'] if budget.near == 'hit' else capwords(ask['query'])}"[:hud.MAX_TITLE]
         else:
             idx, fresh = clusterflick_index(budget)
             if idx is None:  # cold cache and Clusterflick down: one bounded Nominatim "cinema" search
@@ -662,6 +712,8 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
                 ans.key, ans.reason, ans.fmt = "film_none", "film_no_match", {"film": capwords(ask["film"]), "when": ask["when"]}
                 return ans
         rows = sorted(rows, key=lambda r: (r["group"], r["min"] is None, r["min"] or 0, r["km"]))
+    if ask["mode"] == "category":  # "closest <category>": nearest first (km as shown on the card), then minutes
+        rows = sorted(rows, key=lambda r: (round(r["km"], 1), r["min"] is None, r["min"] or 0))
     ans.rows = _card_rows(rows, t, cinema, shows_ok, ask)
     ans.top = {"lat": rows[0]["lat"], "lon": rows[0]["lon"], "name": rows[0]["name"]}
     ans.route = _route(rows[0])

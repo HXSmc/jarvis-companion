@@ -5013,7 +5013,7 @@ async def _place_turn(body: TurnBody, ask: dict, deps: OverlayDeps, said: list[s
             kind = ask.get("mode") if ask.get("mode") in nearby.MODES else "none"
             on_step("place", detail=f"kind={kind} src={ans.src} n={len(ans.rows)}"
                                     f" calls={budget.calls} ms={ms} tfl={budget.tfl} matrix={budget.matrix}"
-                                    f" shows={budget.shows} reason={ans.reason}")
+                                    f" shows={budget.shows} near={budget.near} reason={ans.reason}")
 
 
 # --- jfollow10b: questions about a YouTube video (captions, one tool-less model call) ------------

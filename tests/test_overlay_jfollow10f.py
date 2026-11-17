@@ -354,15 +354,16 @@ def test_search_point_and_calls(net, clock):
     assert not {f"{HOME[0]:.4f}", f"{HOME[1]:.4f}"} & set(box)
     assert req.url.params["bounded"] == "1" and req.url.params["countrycodes"] == "gb"
     assert req.url.params["limit"] == "20"
-    # 0 hits -> one wider call, then place_none
+    # 0 hits -> one wider call, then place_none (a category; a name gets the misheard-name retry instead)
     nearby.reset()
     net.requests.clear()
     net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=[])
     with pytest.raises(nearby.SearchFailed) as e:
-        nearby.search("name", "dishoom", HOME, nearby.Budget())
+        nearby.search("category", "pharmacy", HOME, nearby.Budget())
     assert e.value.key == "place_none" and net.count("nominatim.openstreetmap.org") == 2
     w1, w2 = (r.url.params["viewbox"].split(",") for r in net.requests)
     assert float(w2[0]) < float(w1[0]) and float(w2[1]) > float(w1[1])
+    assert all(len(v.split(".")[1]) <= 2 for v in w1 + w2)
     # Nominatim 503 -> one Photon call for a name (lat/lon at 2 decimals), none for a category
     nearby.reset()
     net.requests.clear()
@@ -867,3 +868,100 @@ def test_odd_shapes_do_not_crash(net):
     assert nearby.venue_showings("ica.art", nearby.Budget()) == []
     with pytest.raises(geo.GeoError):
         nearby._parse_index({"venues": []})
+
+
+# --- live fix round (hub ruling LIVE-1) -----------------------------------------------------------
+
+def _pharmacy(name, lat, lon, road="Strand", hours=""):
+    return {"lat": str(lat), "lon": str(lon), "name": name, "address": {"road": road},
+            "extratags": {"opening_hours": hours} if hours else {}}
+
+
+def test_category_nearest_first(vault, client, net):
+    """LIVE-1 #1: "closest pharmacy" searched a ~11 km box whose 20 hits come by importance, not distance
+    (live: 1.9 km pick from Trafalgar Square). Now the first call is a tight box around the rounded point,
+    and the rows are numbered nearest first even when a farther one is quicker by bus."""
+    hits = [_pharmacy("Far Chemist", 51.5130, -0.1397, "Oxford Street"),  # ~0.9 km, listed first
+            _pharmacy("Near Chemist", 51.5085, -0.1270, "Strand"),  # ~0.1 km
+            _pharmacy("Mid Chemist", 51.5110, -0.1240, "Bedford Street")]  # ~0.4 km
+    net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=hits)
+    net.walk = [20, 9, 14]  # matrix targets come nearest first: Near 20 (a long way round), Mid 9, Far 14
+    net.tfl = [3, 30, 30]  # TfL prices Mid (9 walk) first at 3 min: quickest, but not the closest
+    d = deps_with()
+    events = turn(client, "where's the closest pharmacy", conv_id="c1")
+    [req] = [r for r in net.requests if r.url.host == "nominatim.openstreetmap.org"]
+    w, n, e, s_ = map(float, req.url.params["viewbox"].split(","))
+    assert e - w <= 0.041 and n - s_ <= 0.021  # the tight box (~2 x 3 km), still 2 decimals
+    assert not {f"{HOME[0]:.4f}", f"{HOME[1]:.4f}"} & set(req.url.params["viewbox"].split(","))
+    [card] = cards(events)
+    rows = card["data"]["rows"]
+    assert [r["name"] for r in rows] == ["Near Chemist", "Mid Chemist", "Far Chemist"]
+    assert [r["km"] for r in rows] == sorted(r["km"] for r in rows)
+    top = rows[0]
+    assert last_line(events) == phrase("place_best", name="Near Chemist on Strand",
+                                       mins=f"{top['min']} minutes", how=nearby.HOW[top["mode"]])
+    assert card["data"]["pins"][1]["label"] == "Near Chemist" and model_asks(d) == 0
+
+
+def test_misheard_name_near_miss(vault, client, net):
+    """LIVE-1 #2: "Dishoom" heard as "Disham" found nothing (reason=none_near). A name with 0 hits near home
+    gets ONE retry on Photon (fuzzy, near the rounded point), kept only for a nearby name alike enough."""
+    net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=[])
+    deps_with()
+    events = turn(client, "what's the best way to go to Disham", conv_id="m1")
+    assert net.count("nominatim.openstreetmap.org") == 1 and net.count("photon.komoot.io") == 1  # 2 search calls
+    ph = [r for r in net.requests if r.url.host == "photon.komoot.io"][0]
+    assert ph.url.params["q"] == "disham" and ph.url.params["lat"] == "51.51" and ph.url.params["lon"] == "-0.13"
+    [card] = cards(events)
+    assert card["title"] == "Nearest Dishoom" and all(r["name"] == "Dishoom" for r in card["data"]["rows"])
+    assert last_line(events).startswith("Dishoom on ") and "Disham" not in last_line(events)
+    detail = steps("place")[-1]["detail"]
+    assert "src=photon" in detail and " near=hit " in detail and detail.endswith("reason=ok") and ROW_RE.match(detail)
+    # a nearby name that is not alike ("this hun") or too far off ("Denham" for "disham") -> the honest line
+    for words, said in (("this hun", "This Hun"), ("dishamxyz", "Dishamxyz")):
+        nearby.reset()
+        geo.reset()
+        events = turn(client, f"what's the best way to go to {words}", conv_id="m2")
+        assert not cards(events) and last_line(events) == phrase("place_none", query=said)
+        detail = steps("place")[-1]["detail"]
+        assert " near=miss " in detail and detail.endswith("reason=none_near")
+    assert nearby.near_score("disham", "Denham") < nearby.NEAR_RATIO <= nearby.near_score("disham", "Dishoom")
+    assert nearby.near_score("dish um", "Dishoom Covent Garden") >= nearby.NEAR_RATIO
+    assert nearby.near_miss([{"lat": 51.51, "lon": -0.13, "name": "Denham"}], "disham", HOME) == []
+    assert nearby.near_miss([{"lat": 51.51, "lon": -0.13, "name": "Dsh"}], "dsh", HOME) == []  # too short to judge
+    # found at once -> no retry; the field says so
+    nearby.reset()
+    geo.reset()
+    net.override.clear()
+    turn(client, "what's the best way to go to Dishoom", conv_id="m3")
+    assert " near=no " in steps("place")[-1]["detail"]
+
+
+def test_closed_top_pick_says_so(vault, client, net, monkeypatch):
+    """LIVE-1 #3: row 1 said "closed now" at 01:37 but the line sent him there without a word."""
+    monkeypatch.setattr(nearby, "now", lambda: datetime(2026, 11, 17, 1, 37, tzinfo=LON))
+    deps_with()
+    events = turn(client, "what's the best way to go to Dishoom", conv_id="x1")
+    [card] = cards(events)
+    top = card["data"]["rows"][0]
+    assert top["hours"] == "closed now"
+    name = top["name"] + f" on {top['road']}"
+    assert last_line(events) == phrase("place_best_closed", name=name, mins=f"{top['min']} minutes",
+                                       how=nearby.HOW[top["mode"]])
+    assert "closed now" in last_line(events)
+    # no minutes known (matrix and TfL down) -> the km form says it too
+    nearby.reset()
+    geo.reset()
+    net.override["valhalla1.openstreetmap.de"] = lambda r: httpx.Response(503)
+    net.override["api.tfl.gov.uk"] = lambda r: httpx.Response(503)
+    events = turn(client, "what's the best way to go to Dishoom", conv_id="x2")
+    top = cards(events)[0]["data"]["rows"][0]
+    assert last_line(events) == phrase("place_best_km_closed", name=f"{top['name']} on {top['road']}",
+                                       km=f"{top['km']:.1f}")
+    # open at 19:30 (the usual clock) -> the plain line
+    monkeypatch.setattr(nearby, "now", lambda: MONDAY_1930)
+    nearby.reset()
+    geo.reset()
+    net.override.clear()
+    events = turn(client, "what's the best way to go to Dishoom", conv_id="x3")
+    assert "closed" not in last_line(events) and cards(events)[0]["data"]["rows"][0]["hours"] != "closed now"
