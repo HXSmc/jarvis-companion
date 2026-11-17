@@ -28,7 +28,6 @@ public struct ChartCardView: View {
         palette[i % palette.count].opacity(i < palette.count ? 1 : 0.55)
     }
 
-    private var seriesNames: [String] { model.seriesKeys }
     /// Gauge half-ring parts: value, the rest of the track, and the hidden lower half.
     static let gaugeColors: [Color] = [Theme.accent, Color.white.opacity(0.14), Color.clear]
 
@@ -118,7 +117,7 @@ public struct ChartCardView: View {
                         .position(by: .value("Series", r.series))
                 }
             }
-            .chartForegroundStyleScale(domain: seriesNames, range: Array(Self.palette.prefix(seriesNames.count)))
+            .chartForegroundStyleScale(domain: model.seriesKeys, range: Array(Self.palette.prefix(model.seriesKeys.count)))
             .chartLegend(.hidden)
             .chartYScale(domain: model.yDomain)
             .modifier(Axes(scale: scale))

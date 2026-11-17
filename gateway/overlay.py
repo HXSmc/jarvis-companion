@@ -143,8 +143,6 @@ QUIET_PROMPT = re.sub(
 
 def _live_prompt(prompt: str) -> str:
     """The prompt with the live fact sheet (vault note when it passes facts' checks) in the fixture's place."""
-    if _FIXTURE_BLOCK not in prompt:  # never expected; the constant stays a working prompt
-        return prompt
     return prompt.replace(_FIXTURE_BLOCK, facts.block(facts.load(os.environ.get("OVERLAY_VAULT"))), 1)
 
 
@@ -3181,7 +3179,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 yield ev
 
         elif intent.kind == "video_watch":
-            async for ev in _video_watch_turn(body, raw_text, deps, said, on_step):
+            async for ev in _video_watch_turn(body, raw_text, deps, said):
                 yield ev
 
         elif intent.kind == "draw":
@@ -5281,9 +5279,9 @@ def _video_id_for(raw_text: str, conv_id: str) -> str:
     return _last_video.get(conv_id, "")
 
 
-def _text_lines(text: str, cap: int = 6) -> list[str]:
+def _text_lines(text: str) -> list[str]:
     pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", text) if p.strip()]
-    return [p[:hud.MAX_LINE] for p in pieces][:cap]
+    return [p[:hud.MAX_LINE] for p in pieces][:6]
 
 
 async def _video_answer(body: TurnBody, raw_text: str, deps: OverlayDeps) -> tuple[str | None, str, dict]:
@@ -5521,8 +5519,8 @@ def _job_row(sid: str) -> dict | None:
     return None
 
 
-def _companion_text(path: str, cap: int = JOB_FILE_MAX) -> str | None:
-    """One allow-listed GET of a small text file: the first `cap` bytes (a longer file is cut)."""
+def _companion_text(path: str) -> str | None:
+    """One allow-listed GET of a small text file: the first JOB_FILE_MAX bytes (a longer file is cut)."""
     if not _companion_allowed("GET", path):
         raise ValueError("call not allowed")
     access = _sessions_access()
@@ -5537,11 +5535,11 @@ def _companion_text(path: str, cap: int = JOB_FILE_MAX) -> str | None:
                 data = bytearray()
                 for chunk in resp.iter_bytes():
                     data += chunk
-                    if len(data) >= cap:
+                    if len(data) >= JOB_FILE_MAX:
                         break
     except Exception:
         return None
-    return bytes(data[:cap]).decode("utf-8", "replace")
+    return bytes(data[:JOB_FILE_MAX]).decode("utf-8", "replace")
 
 
 def _summary_lines(text: str) -> list[str]:
@@ -5629,8 +5627,8 @@ async def minipc_job(kind: str, prompt: str, result_name: str, conv_id: str, dep
     return "job_started"
 
 
-async def _video_watch_turn(body: TurnBody, raw_text: str, deps: OverlayDeps, said: list[str],
-                            on_step) -> AsyncIterator[dict]:
+async def _video_watch_turn(body: TurnBody, raw_text: str, deps: OverlayDeps,
+                            said: list[str]) -> AsyncIterator[dict]:
     if body.barge_in:  # a barge-in never starts a job
         _job_note("refused", "", "barge")
         key = "geo_barge"
