@@ -76,7 +76,7 @@ Types:
 - 3d: make, list or show a 3D model (sub create, list or show). Slots desc, name.
 - youtube: find a YouTube video, or a question about a video. Slot query.
 - watch: watch a video and sum it up.
-- sessions: what the owner's Claude Code sessions are doing, how many run, which failed.
+- sessions: what the owner's Claude Code sessions are doing, how many run, which failed; done or finished sessions; sessions by device or date; "router sessions" and "sessions on the Companion app" (router sessions means every session on the app).
 - agent: a task on the owner's files, code, repository, GitHub, mail, calendar or notes.
 - answer: anything else: a question, a fact, small talk, or a question about Jarvis Companion itself.
 

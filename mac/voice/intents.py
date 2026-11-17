@@ -267,25 +267,33 @@ _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anythi
 # companion"); matched after session/memory/workspace, before the hide/clear verbs, so
 # their phrases keep their kinds. Whole utterance, commas off.
 # jfollow7 S: an adjective before "sessions", the article before the device optional, more devices (mac, router, STT forms of mini PC).
-_COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion|(?:mini|many) ?(?:p ?c|b ?c|piece)"
-              r"|minipc|mac|router)")
+_COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion(?: app)?|(?:mini|many) ?(?:p ?c|b ?c|piece)"
+              r"|minipc|mac|windows(?: pc)?|router)")
+# jfollow10g: one word naming where or which sessions ("router sessions", "done sessions"); router,
+# companion and app mean every session on the app.
+_SESSIONS_NOUN = (r"(?:active|running|open|live|current|done|finished|completed|ended|router|app|mac|windows"
+                  r"|(?:\w+(?:'s|s')? )?companion|(?:mini|many) ?(?:p ?c|b ?c|piece)|minipc)")
 _SESSIONS_PREP = r"(?:on|in|through|via)"
 # R1: "how" questions keep base's article rule ("how are the sessions"), so "how do I check
 # sessions" / "how long are sessions" stay answers.
 _SESSIONS_LEAD = (r"(?:check|show|list|see|tell me|give me|what's|whats|what|which|how many|any"
                   r"|are there|are|is|do i have|can you tell me|can you show me|i want to see"
                   r"|i'd like to see|i would like to see)")
-_SESSIONS_TAIL = (r"(?: (?:are |is )?(?:doing|going|running|open|active)| today| right now| now| ok| okay"
-                  r"| do i have)?"
+_SESSIONS_TAIL = (r"(?: (?:that |which )?(?:are |is |were )?(?:doing|going|running|open|active"
+                  r"|done|finished|completed|ended|ran))?"
+                  r"(?: (?:from )?(?:today|yesterday|this week|(?:this )?past week)"
+                  r"| (?:in |from )?the (?:last|past) (?:7|seven) days| right now| now| ok| okay| do i have)?"
                   r"(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?")
 _SESSIONS_TOPIC_RE = re.compile(
     # R1: never with a start/stop verb anywhere ("check and stop all sessions" is no listing).
     r"(?!.*\b(?:start|stop|end|kill|close|cancel|spin up)\b)(?:"
-    + _SESSIONS_LEAD + r"[\w' ]{0,16}?(?:(?:my|the|our) )?(?:(?:active|running|open|live|current) )?sessions"
+    + _SESSIONS_LEAD + r"[\w' ]{0,16}?(?:(?:my|the|our) )?(?:" + _SESSIONS_NOUN + r" )?sessions"
+    + _SESSIONS_TAIL +
+    r"|what (?:did|have) (?:my|the|our) (?:" + _SESSIONS_NOUN + r" )?sessions (?:do|done|been doing)"
     + _SESSIONS_TAIL +
     r"|(?:how's|hows|how)[\w' ]{0,16}?(?:my|the|our) (?:(?:active|running|open|live|current) )?sessions"
     + _SESSIONS_TAIL +
-    r"|(?:(?:" + _SESSIONS_LEAD + r"|how's|hows|how) )?(?:any )?sessions? (?:are |is )?"
+    r"|(?:(?:" + _SESSIONS_LEAD + r"|how's|hows|how) )?(?:any )?(?:(?!open )" + _SESSIONS_NOUN + r" )?sessions? (?:are |is )?"
     r"(?:(?:running|active|open|going)(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
     r"|" + _SESSIONS_PREP + r" " + _COMPANION + r")"
     r"|what(?:'s| is| are)? (?:running|active) " + _SESSIONS_PREP + r" " + _COMPANION +
@@ -1477,7 +1485,48 @@ _FOLLOW_VERB_RE = re.compile(r"\b(?:start|stop|end|kill|close|cancel|spin up|ope
 def sessions_followup(text: str) -> bool:
     """True when a reply right after a sessions answer is still about sessions (pure, no state)."""
     low = _clean(text).lower().replace(",", "")
-    return bool(_FOLLOW_SESSIONS_RE.search(low)) and not _FOLLOW_VERB_RE.search(low)
+    return ((bool(_FOLLOW_SESSIONS_RE.search(low)) or sessions_anaphor(text))
+            and not _FOLLOW_VERB_RE.search(low))
+
+
+# jfollow10g: the owner's filter for a sessions list, from his own words only (never a model slot,
+# row or screen text). "router", "companion" and "app" never filter: router sessions = every
+# session on the Jarvis Companion app.
+@dataclass(frozen=True)
+class SessionsFilter:
+    done: bool = False  # the app's DONE column (phase == "done")
+    device: str = ""  # "" | "mac" | "minipc" | "windows"
+    when: str = ""  # "" | "today" | "yesterday" | "week" (rolling 7 days by last activity)
+
+
+_FILTER_DONE_RE = re.compile(r"\b(?:done|finished|completed|complete|ended)\b")
+_FILTER_DEVICES = (
+    ("minipc", re.compile(r"\b(?:mini|many) ?(?:p ?c|b ?c|piece)\b|\bminipc\b")),
+    ("windows", re.compile(r"\bwindows\b")),
+    ("mac", re.compile(r"\b(?:on|in|from) (?:(?:my|the) )?mac\b|\bmac sessions?\b")),
+)
+_FILTER_WHEN = (
+    ("today", re.compile(r"\btoday\b")),
+    ("yesterday", re.compile(r"\byesterday\b")),
+    ("week", re.compile(r"\b(?:this|past) week\b|\b(?:last|past) (?:7|seven) days\b")),
+)
+# A follow-up pointing back at the list just given; it counts only with a filter word beside it.
+_FOLLOW_ANAPHOR_RE = re.compile(r"\b(?:the ones|those ones|which ones|which of them|those)\b")
+
+
+def sessions_filter(text: str) -> SessionsFilter:
+    """The owner's words -> the list filter (pure). Only the first device and time word count."""
+    low = _clean(text).lower().replace(",", "")
+    device = next((name for name, rx in _FILTER_DEVICES if rx.search(low)), "")
+    when = next((name for name, rx in _FILTER_WHEN if rx.search(low)), "")
+    return SessionsFilter(bool(_FILTER_DONE_RE.search(low)), device, when)
+
+
+def sessions_anaphor(text: str) -> bool:
+    """ "the ones that ran this week", "which ones were on the Mac": a pointer back plus a filter word.
+    A filter word alone ("what's the weather today") never makes a sessions follow-up."""
+    low = _clean(text).lower().replace(",", "")
+    return bool(_FOLLOW_ANAPHOR_RE.search(low)) and sessions_filter(text) != SessionsFilter()
 
 
 
