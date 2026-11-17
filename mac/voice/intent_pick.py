@@ -19,6 +19,7 @@ PICK_TIMEOUT_S = 1.5
 PICK_CONF = 0.6
 JOB_CONF = 0.85
 REBUILD_AFTER = 25
+ABANDON_GRACE_S = 3.0  # a timed-out ask still running after this is treated as hung
 WARM_ASKS = 2  # measured: cold CLI ~3.5 s, 2nd ask ~1.9 s, then ~1.1 s
 
 # pick -> (allowed sub words, allowed slot names)
@@ -206,10 +207,17 @@ class Picker:
             return raw
 
     def abandon(self) -> None:
-        """After a timeout: close the stuck session so its ask fails and frees the lock (no thread piles up)."""
+        """After a turn's timeout: a slow reply keeps its warm session; an ask still stuck after
+        ABANDON_GRACE_S gets its session closed, so the ask fails, frees the lock and a rebuild starts."""
         stuck = self._session
         if stuck is not None:
-            threading.Thread(target=_close, args=(stuck,), daemon=True).start()
+            threading.Thread(target=self._close_if_stuck, args=(stuck,), daemon=True).start()
+
+    def _close_if_stuck(self, stuck) -> None:
+        if self._lock.acquire(timeout=ABANDON_GRACE_S):
+            self._lock.release()  # the slow ask finished: keep the warm session
+            return
+        _close(stuck)
 
 def _close(session) -> None:
     try:

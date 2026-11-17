@@ -405,9 +405,49 @@ def test_picker_rebuilds_and_abandons():
         picker.ask("boom")
     assert wait_until(lambda: picker._session is not None) and S.made == 3  # rebuilt in the background
     assert picker.ask("hi") == "{}"
-    stuck = picker._session
+    kept = picker._session
+    picker.abandon()  # no ask in flight: the slow reply already came back, the warm session stays
+    time.sleep(0.1)
+    assert not kept.closed and picker._session is kept
+
+
+def test_picker_abandon_closes_only_a_hung_ask(monkeypatch):
+    monkeypatch.setattr(intent_pick, "ABANDON_GRACE_S", 0.2)
+    release = threading.Event()
+
+    class Hung:
+        def __init__(self):
+            self.closed = False
+
+        def ask(self, msg):
+            if msg == "hang":
+                while not self.closed and not release.is_set():
+                    time.sleep(0.01)
+                if self.closed:
+                    raise RuntimeError("closed")
+            return lean.Reply(raw="{}", ttft_s=None, total_s=0.0)
+
+        def close(self):
+            self.closed = True
+
+    picker = intent_pick.Picker(factory=Hung)
+    for _ in range(200):
+        if picker._session is not None:
+            break
+        time.sleep(0.01)
+    hung = picker._session
+    t = threading.Thread(target=lambda: pytest.raises(RuntimeError, picker.ask, "hang"))
+    t.start()
+    time.sleep(0.05)
     picker.abandon()
-    assert wait_until(lambda: stuck.closed)
+    t.join(2)
+    assert hung.closed and not t.is_alive()  # the hung ask failed and freed the lock
+    for _ in range(200):
+        if picker._session is not None and picker._session is not hung:
+            break
+        time.sleep(0.01)
+    assert picker._session is not hung and picker.ask("hi") == "{}"  # rebuilt off the turn's path
+    release.set()
 
 
 def test_picker_never_asks_cold():

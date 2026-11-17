@@ -125,7 +125,7 @@ async def _once(q: dict, n: int, deps, model: bool) -> dict:
         why.append("answer part errored: " + answer[-140:])
     pk = picks[-1] if picks else {}
     return {"id": q["id"], "pass": not why, "intent_got": kinds,
-            "pick": pk.get("pick"), "pick_path": pk.get("path"),
+            "pick": pk.get("pick"), "pick_path": pk.get("path"), "pick_reason": pk.get("reason"),
             "pick_ms": int(pk["ms"]) if "ms" in pk else None,
             "ack_ms": metrics.get("ack_ms"), "total_s": metrics.get("total_s"),
             "answer_got": answer[:300], "answer_run": ran if need else None,
