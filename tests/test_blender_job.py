@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -183,8 +184,19 @@ def _fake_bpy():
     return bpy
 
 
+class _Translate:
+    """matrix_world stand-in: a pure translation (enough for `matrix_world @ Vector(corner)`)."""
+
+    def __init__(self, t):
+        self.t = t
+
+    def __matmul__(self, v):
+        return tuple(a + b for a, b in zip(v, self.t))
+
+
 def _run_runner(job_dir, bpy):
-    with mock.patch.dict(sys.modules, {"bpy": bpy}), mock.patch.object(sys, "argv", ["blender", "--", str(job_dir)]):
+    fake_mathutils = SimpleNamespace(Vector=tuple)
+    with mock.patch.dict(sys.modules, {"bpy": bpy, "mathutils": fake_mathutils}), mock.patch.object(sys, "argv", ["blender", "--", str(job_dir)]):
         try:
             runpy.run_path(str(RUNNER), run_name="__main__")
         except SystemExit as e:
@@ -209,6 +221,41 @@ def test_runner_with_fake_bpy(tmp_path):
     assert _run_runner(d, bpy) not in (0, None)
     assert (d / "error.txt").stat().st_size <= 8 * 1024
     assert not bpy.ops.export_scene.gltf.called
+
+
+def test_preview_frames_a_small_object(tmp_path):
+    """Hub ruling R3-CAM: a 5 cm object with its origin at its base fills the preview from the top third to
+    the bottom third. No real Blender here: the test projects the bounding box through the runner's camera
+    (Blender's default 50 mm lens on a 36 mm sensor, square frame, view along local -Z, XYZ Euler)."""
+    import math
+    d = tmp_path / "job"
+    d.mkdir()
+    (d / "object.py").write_text("")
+    bpy = _fake_bpy()
+    box = [(x, y, z) for x in (-0.01, 0.01) for y in (-0.01, 0.01) for z in (0.0, 0.05)]
+    bpy.context.scene.objects = [SimpleNamespace(type="MESH", bound_box=box, matrix_world=_Translate((0, 0, 0)),
+                                                 location=(0.0, 0.0, 0.0), dimensions=(0.02, 0.02, 0.05))]
+    made = []
+    bpy.data.cameras.new = lambda name: SimpleNamespace(clip_start=0.1, clip_end=100.0)  # Blender defaults
+    bpy.data.objects.new = lambda name, data: made.append(SimpleNamespace(name=name, data=data)) or made[-1]
+    assert _run_runner(d, bpy) == 0
+    cam = next(o for o in made if o.name == "jarvis_preview_camera")
+    a, b, c = cam.rotation_euler
+    rx = ((1, 0, 0), (0, math.cos(a), -math.sin(a)), (0, math.sin(a), math.cos(a)))
+    ry = ((math.cos(b), 0, math.sin(b)), (0, 1, 0), (-math.sin(b), 0, math.cos(b)))
+    rz = ((math.cos(c), -math.sin(c), 0), (math.sin(c), math.cos(c), 0), (0, 0, 1))
+    mul = lambda m, n: tuple(tuple(sum(m[i][k] * n[k][j] for k in range(3)) for j in range(3)) for i in range(3))  # noqa: E731
+    rot = mul(rz, mul(ry, rx))
+    tan_half = 18 / 50
+    ys = []
+    for p in box:
+        rel = [p[i] - cam.location[i] for i in range(3)]
+        x, y, z = (sum(rot[k][i] * rel[k] for k in range(3)) for i in range(3))  # camera space = R^T (p - loc)
+        assert cam.data.clip_start < -z < cam.data.clip_end, "a corner falls outside the clip range"
+        assert abs(x / (-z * tan_half)) <= 1
+        ys.append(y / (-z * tan_half))
+    assert max(ys) <= 1 and min(ys) >= -1  # the whole object is in frame
+    assert max(ys) > 1 / 3 and min(ys) < -1 / 3  # it reaches the top third and the bottom third
 
 
 def _install(tmp_path, *args):

@@ -400,6 +400,23 @@ def test_3d_pick_slots_are_owner_words(client, monkeypatch, tmp_path, mvault):
 
 # --- criterion 11: the row ---------------------------------------------------------------------------
 
+def test_picture_words_never_draw():
+    """jfollow11d R3-CAT: a picture ask with no draw verb keeps its word kind (the media path), even when
+    the model picks draw; a draw verb still draws."""
+    for text in ("show me a picture of a cat", "can you find me a photo of a cat", "get me an image of a cat"):
+        word = intents.parse(text, apps=APPS)
+        got, _, rows = _pick(text, _deps_with(FakePick(reply("draw", 0.85, subject="a cat"))), word=word)
+        assert got == word and got.kind != "draw", text
+        assert rows[-1].endswith("reason=picture_words") and "pick=draw" not in rows[-1], rows
+        assert "cat" not in rows[-1]  # no heard words on the row
+    text = "draw me a picture of an iPhone"
+    got, _, rows = _pick(text, _deps_with(FakePick(reply("draw", 0.85, subject="an iPhone"))))
+    assert got == intents.Intent("draw", "an iPhone") and rows[-1].endswith("reason=ok")
+    text = "I'd love a quick doodle of a cat"  # no picture words: the model's draw pick stands
+    got, _, rows = _pick(text, _deps_with(FakePick(reply("draw", 0.85, subject="a cat"))))
+    assert got.kind == "draw" and rows[-1].endswith("reason=ok")
+
+
 def test_pick_row_shape(client):
     texts = ["so me a map from King's Cross to Tower Bridge", "sketch out Tower Bridge for me", "stop",
              "tell me a joke about cats"]

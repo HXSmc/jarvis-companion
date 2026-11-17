@@ -2466,6 +2466,9 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
             conf = min(100, round(p.conf * 100))
             if p.conf < intent_pick.PICK_CONF or (p.pick in ("watch", "3d") and p.conf < intent_pick.JOB_CONF):
                 reason = "low_conf"
+            elif (p.pick == "draw" and intents.media_request(raw_text) is not None
+                    and intents.draw_request(raw_text) is None):
+                reason = "picture_words"  # jfollow11d R3-CAT: "show me a picture of X" wants a real picture
             else:
                 built, extra, used = _intent_from_pick(p, word, raw_text, body.conv_id, deps)
                 if built is None:

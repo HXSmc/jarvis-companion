@@ -21,19 +21,22 @@ def job_dir() -> str:
     return args[0]
 
 
-def preview(bpy, job: str) -> None:
+def preview(bpy, mathutils, job: str) -> None:
     """Frame a camera on every mesh, add a sun, render Workbench 512x512 to <job>/preview.png."""
     scene = bpy.context.scene
     meshes = [o for o in scene.objects if getattr(o, "type", "") == "MESH"]
-    locs = [tuple(o.location) for o in meshes] or [(0.0, 0.0, 0.0)]
-    center = tuple(sum(p[i] for p in locs) / len(locs) for i in range(3))
-    radius = max([math.dist(tuple(o.location), center) + max(tuple(o.dimensions)) / 2 for o in meshes] or [1.0])
-    radius = radius if radius > 0 else 1.0
+    # The world-space bounding box, not the origins: an origin at the base or a tiny object still frames whole.
+    corners = [tuple(o.matrix_world @ mathutils.Vector(c)) for o in meshes for c in o.bound_box]
+    center, radius = (0.0, 0.0, 0.0), 1.0
+    if corners:
+        center = tuple((min(v[i] for v in corners) + max(v[i] for v in corners)) / 2 for i in range(3))
+        radius = max(math.dist(v, center) for v in corners) or 1.0
     dx, dy, dz = 1.0 * radius * 2.4, -1.0 * radius * 2.4, 0.8 * radius * 2.4
     cam = bpy.data.objects.new("jarvis_preview_camera", bpy.data.cameras.new("jarvis_preview_camera"))
     scene.collection.objects.link(cam)
     cam.location = (center[0] + dx, center[1] + dy, center[2] + dz)
     cam.rotation_euler = (math.atan2(math.hypot(dx, dy), dz), 0.0, math.atan2(dx, -dy))
+    cam.data.clip_start, cam.data.clip_end = radius * 0.01, radius * 100  # the 0.1 m default clips small objects
     scene.camera = cam
     sun = bpy.data.objects.new("jarvis_preview_sun", bpy.data.lights.new("jarvis_preview_sun", "SUN"))
     scene.collection.objects.link(sun)
@@ -49,6 +52,7 @@ def preview(bpy, job: str) -> None:
 def main() -> None:
     job = job_dir()
     import bpy  # Blender's own module: only here, inside Blender
+    import mathutils  # ships inside Blender, like bpy
 
     try:
         runpy.run_path(os.path.join(job, "object.py"), run_name="__main__")
@@ -57,7 +61,7 @@ def main() -> None:
             f.write(traceback.format_exc()[-ERROR_MAX:])
         sys.exit(1)
     try:
-        preview(bpy, job)
+        preview(bpy, mathutils, job)
     except Exception:  # noqa: BLE001 - no preview: the GLB still exports, the wrapper says no_png
         traceback.print_exc()
     bpy.ops.export_scene.gltf(filepath=os.path.join(job, "object.glb"), export_format="GLB",

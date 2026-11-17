@@ -299,6 +299,18 @@
   "note": "NOT BUILT YET: drawings"
  },
  {
+  "id": "draw-2",
+  "text": "show me a picture of a cat",
+  "expect_intent": [
+   "answer",
+   "media"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "a picture ask with no draw verb is a real picture, never a drawing",
+  "model_only": false
+ },
+ {
   "id": "3d-1",
   "text": "show me a 3D model of a cube I can rotate",
   "expect_intent": "3d",
