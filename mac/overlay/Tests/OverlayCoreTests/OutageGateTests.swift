@@ -76,4 +76,22 @@ final class OutageGateTests: XCTestCase {
         XCTAssertTrue(OutageGate.announcement(timedOut: true).banner.hasPrefix("Jarvis service is not answering."))
         XCTAssertTrue(OutageGate.announcement(timedOut: true).spoken.contains("not answering"))
     }
+
+    // Regression (cause b, proven live in jfollow10i round 3): a service restart refuses
+    // connections for ~37-45 s while the voice model loads. Replays the measured windows on
+    // the gate the app uses. Before: grace 30 announced a false outage on every restart.
+    func testServiceRestartWindowIsNotAnOutage() {
+        let t0 = Date()
+        var restart = OutageGate.service                                // kickstart: refused 45 s
+        for s in stride(from: 0.0, through: 45.0, by: 3.0) {
+            XCTAssertFalse(restart.failed(at: t0.addingTimeInterval(s)), "announced at \(s) s")
+        }
+        XCTAssertFalse(restart.reached())                               // back: nothing was said
+        var stopped = OutageGate.service                                // 45 s stop + ~37 s start
+        var said = 0
+        for s in stride(from: 0.0, through: 82.0, by: 3.0) where stopped.failed(at: t0.addingTimeInterval(s)) {
+            said += 1
+        }
+        XCTAssertEqual(said, 1)                                         // a real stop is still said once
+    }
 }

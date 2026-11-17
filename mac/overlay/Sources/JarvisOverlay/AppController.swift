@@ -89,8 +89,7 @@ final class AppController {
 
     // Outage state.
     private var serviceVoice: String?
-    // maxGap: retries are ~1-3 s apart; a bigger gap is a Mac sleep, not 30 s of retrying.
-    private var outage = OutageGate(grace: 30, maxGap: 10)
+    private var outage = OutageGate.service  // grace outlasts a service restart (see OutageGate)
     /// Bad-reply words already noted in this streak (health and events each once, not every retry).
     private var badReplies: Set<String> = []
     private var bannerTask: Task<Void, Never>?
@@ -516,7 +515,7 @@ final class AppController {
         }
     }
 
-    /// Says the outage only after 30 s of failed retries (see OutageGate), and says what to do.
+    /// Says the outage only after the grace of failed retries (see OutageGate), and says what to do.
     private func serviceUnreachable(_ why: String, timedOut: Bool = false) {
         if outage.since == nil { log("service unreachable (\(why)), retrying") }
         guard outage.failed(at: Date()) else { return }

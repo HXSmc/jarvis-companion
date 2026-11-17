@@ -12,6 +12,12 @@ public struct OutageGate {
     public private(set) var last: Date?
     public private(set) var announced = false
 
+    /// The gate the app uses. A service restart refuses connections for ~37-45 s (the voice
+    /// model loads before the port opens; measured on the Mac), so the grace must outlast it.
+    /// A stop of 45 s plus that start-up is ~80 s and is still said. maxGap: retries are
+    /// ~1-3 s apart; a bigger gap is a Mac sleep, not retrying.
+    public static var service: OutageGate { OutageGate(grace: 60, maxGap: 10) }
+
     public init(grace: TimeInterval = 30, maxGap: TimeInterval? = nil) {
         self.grace = grace
         self.maxGap = maxGap
