@@ -279,8 +279,8 @@ def test_slots_from_owner_words():
     assert "pick=map" in rows[-1] and "path=model" in rows[-1] and "slots=2 reason=ok" in rows[-1]
     got, geo_ask, rows = _pick(text, _deps_with(FakePick(reply("map", sub="map", **{"from": "King's Cross",
                                                                                      "to": "10 Downing Street"}))))
-    # the made-up place is dropped; stage B's own rule for a map with no "to" (one pin) takes it from there
-    assert got.kind == "geo_map" and (geo_ask.a, geo_ask.b) == ("king's cross", "") and "slots=1" in rows[-1]
+    # the made-up place is dropped; with no "to" left the pick falls back to the word parse (no guessed pin)
+    assert got.kind == "answer" and geo_ask is None and rows[-1].endswith("slots=0 reason=args")
     p = intent_pick.parse_pick(reply("place", query="dishoom<script>"), "what's the best way to go to Dishoom")
     assert p.slots == {} and p.dropped == 1
     text = "draw an iPhone"
@@ -289,6 +289,24 @@ def test_slots_from_owner_words():
     assert got == intents.Intent("draw", intents.draw_request(text))  # draw_request's subject wins
     got, _, rows = _pick("tell me about Tower Bridge", _deps_with(FakePick(reply("tfl", sub="journey", stop="Tower"))))
     assert got.kind == "answer" and rows[-1].endswith("reason=args")  # a journey with no "to": word parse
+    text = "when is the next Northern line train at King's Cross"
+    got, geo_ask, _ = _pick(text, _deps_with(FakePick(reply("tfl", stop="King's Cross"))))
+    assert got.kind == "transit_next" and geo_ask.a == "king's cross"  # no sub: inferred from the slots
+
+
+def test_model_slots_reach_the_geo_handler(client, monkeypatch):
+    seen = []
+
+    async def spy(body, ask, deps, said, on_step):
+        seen.append(ask)
+        yield {"type": "say", "text": "Here."}
+
+    monkeypatch.setattr(overlay, "_geo_turn", spy)
+    _deps_with(FakePick(reply("map", sub="map", **{"from": "King's Cross", "to": "Tower Bridge"})),
+               chunks=['{"say": "Here."}\n'])
+    turn(client, "so me a map from King's Cross to Tower Bridge", conv_id="gm1")
+    assert _kind() == "geo_map" and "path=model" in _row()
+    assert [(a.kind, a.a, a.b) for a in seen] == [("geo_map", "king's cross", "tower bridge")]
 
 
 def test_place_and_3d_take_the_answer_path():

@@ -2216,9 +2216,6 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
     said.append(question)
 
 
-_NO_GEO = frozenset({"place_save", "place_forget"})  # saved places are word-only (Secrets-side data)
-
-
 def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, conv_id: str,
                       deps: OverlayDeps) -> tuple[intents.Intent | None, object, int]:
     """(handler intent, the owner-words ask it carries, model slots used); None intent = slots fail the caps.
@@ -2251,14 +2248,17 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
             a, b, line = (slots.get(k, "").lower() for k in (
                 ("from", "to", "line") if p.pick == "map" else ("stop", "to", "line")))
             used = sum(1 for k in ("from", "to", "line", "stop") if slots.get(k))
+            sub = p.sub or ("journey" if b else "status" if line and not a else "next")
             if p.pick == "map":
+                if not b:  # no destination in the owner's words: never a guessed pin or a map of home
+                    return None, None, 0
                 geo_ask = intents.GeoAsk("geo_roads", "", b) if p.sub == "roads" else intents.GeoAsk("geo_map", a, b)
-            elif p.sub == "next":
+            elif sub == "next":
                 mode = "bus" if line == "bus" or line[:1].isdigit() or line[:1] == "n" and line[1:2].isdigit() else "tube"
                 geo_ask = intents.GeoAsk("transit_next", a, "", mode)
-            elif p.sub == "status":
+            elif sub == "status":
                 geo_ask = intents.GeoAsk("transit_status", "", "", intents.TUBE_LINES.get(line, "?") if line else "tube")
-            elif p.sub == "journey" and b:
+            elif sub == "journey" and b:
                 geo_ask = intents.GeoAsk("transit_journey", a, b)
             else:
                 return None, None, 0

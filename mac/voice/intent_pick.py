@@ -168,21 +168,25 @@ class Picker:
                     self._session = None
 
     def _drop(self) -> None:
+        """Close the old session and build the next one in the background (never on a turn's path)."""
         old, self._session, self._asks = self._session, None, 0
         if old is not None:
             threading.Thread(target=_close, args=(old,), daemon=True).start()
+        threading.Thread(target=self._warm, daemon=True).start()  # waits for the lock the caller holds
 
     def ask(self, msg: str) -> str:
         with self._lock:
-            if self._session is None or self._asks >= REBUILD_AFTER:
-                self._drop()
+            if self._session is None:  # the background build failed or has not run: build now
                 self._session = self._factory()
             self._asks += 1
             try:
-                return self._session.ask(msg).raw
+                raw = self._session.ask(msg).raw
             except BaseException:
                 self._drop()
                 raise
+            if self._asks >= REBUILD_AFTER:
+                self._drop()
+            return raw
 
     def abandon(self) -> None:
         """After a timeout: close the stuck session so its ask fails and frees the lock (no thread piles up)."""
