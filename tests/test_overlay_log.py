@@ -490,3 +490,14 @@ def test_keep_steps_jfollow10e():
                                               "words": "so me a map"}]}]}
     steps = overlay_log.redact(snap)["turns"][0]["steps"]
     assert steps == [{"step": "intent_pick", "at": 1.0, "detail": detail}]
+
+
+def test_keep_steps_jfollow10d():
+    """jfollow10d: the model3d row keeps its detail (fixed words and numbers); a name, slug or path
+    in any other field is dropped."""
+    from gateway import overlay_log
+    detail = "kind=ready slug_len=8 bytes=1024 ms=5000 reason=ok"
+    snap = {"turns": [{"id": "t1", "steps": [{"step": "model3d", "at": 1.0, "detail": detail,
+                                              "slug": "SECRET-SLUG", "path": "/vault/3D/x"}]}]}
+    (row,) = overlay_log.redact(snap)["turns"][0]["steps"]
+    assert row == {"step": "model3d", "at": 1.0, "detail": detail}

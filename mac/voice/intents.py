@@ -10,6 +10,7 @@ work, plain questions) comes back as an Intent for the turn pipeline.
 
 from __future__ import annotations
 
+import difflib
 import re
 import subprocess
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -422,6 +423,62 @@ def draw_request(text: str) -> str | None:
     return subject
 
 
+# jfollow10d: 3D objects. Whole utterance only; "show me the cards" / "open notes" keep their kinds.
+_3D = r"(?:3d|3-d|3 d|three d|three-d)"
+_MODEL_CREATE_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
+                              r"(?:create|make|model|build|design|generate|render) (?:me )?(?:a |an )?" + _3D
+                              + r"(?: (?:object|model|thing))?(?P<rest>(?:[:, ].*)?)")
+_MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?:(?:^| ?,? )(?:and )?(?:call(?:ed)? it|called|named) (?P<name>.+))?")
+_MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
+                            r"|(?:list|show)(?: me)? (?:my |the )?" + _3D + r" (?:objects|models))")
+_MODEL_SHOW_RE = re.compile(r"(?:pull up|show me|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
+                            r"(?P<three> " + _3D + r" (?:object|model))?")
+
+
+def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None:
+    """A 3D object ask: model_create (arg = description, sub = name, or sub "ask" when no
+    description), model_list, or model_show (arg = the name words) when the name is a known object
+    (slug or alias) or the words say "3D". None = not a 3D ask."""
+    low = re.sub(r",? please$", "", _clean(text).lower())  # "... a mug please" never names a "mug please"
+    m = _MODEL_CREATE_RE.fullmatch(low)
+    if m:
+        rest = re.sub(r"^[\s:,]+(?:of )?", "", m["rest"]).strip()
+        parts = _MODEL_NAME_RE.fullmatch(rest)
+        desc = (parts["desc"] if parts else rest).strip(" ,:")
+        name = ((parts["name"] or "") if parts else "").strip(" ,:")
+        desc = desc or name  # "create a 3D object called test mug": the name is all we have
+        return Intent("model_create", desc, name) if desc else Intent("model_create", "", "ask")
+    if _MODEL_LIST_RE.fullmatch(low.replace(",", "")):
+        return Intent("model_list")
+    m = _MODEL_SHOW_RE.fullmatch(low)
+    if m and (m["three"] or re.search(_3D, m["name"]) is None and _model_key(m["name"]) in model_names):
+        return Intent("model_show", m["name"].strip())
+    return None
+
+
+def model_near(text: str, model_names: tuple[str, ...]) -> Intent | None:
+    """A show ask whose name is a speech-to-text near miss of a known object ("bring up the test
+    cue" for test-cube; Mac live run). Only for an utterance that would otherwise be a free answer,
+    a name of two or more words where exactly one word was misheard (one-word asks like "pull up the
+    weather" stay answers whatever the vault holds), at the service's close-match cutoff (0.8)."""
+    m = _MODEL_SHOW_RE.fullmatch(re.sub(r",? please$", "", _clean(text).lower()))
+    if not m or m["three"] or re.search(_3D, m["name"]):
+        return None
+    key = _model_key(m["name"])
+    words = key.split("-")
+    near = [n for n in model_names if len(n.split("-")) == len(words) > 1
+            and sum(a != b for a, b in zip(n.split("-"), words)) == 1]
+    if not difflib.get_close_matches(key, near, n=1, cutoff=0.8):
+        return None
+    return Intent("model_show", m["name"].strip())
+
+
+def _model_key(words: str) -> str:
+    """models3d.slugify without the import (same rule): the key model_names holds."""
+    out = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w and w not in ("a", "an", "the", "my")]
+    return "-".join(out)[:40].strip("-") or "object"
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
                  place_names: tuple[str, ...] = ()) -> Intent | None:
@@ -436,6 +493,10 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)
+    if not last:
+        model = model_request(text)  # no names here: a bare vault name is tried in parse, after fixed kinds
+        if model is not None:
+            return model
     t = _clean(text)
     low = t.lower()
     subject = draw_request(text)
@@ -505,14 +566,16 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
 
 def parse(text: str, apps: dict[str, str] | None = None,
           workspace_names: tuple[str, ...] | None = None,
-          place_names: tuple[str, ...] | None = None) -> Intent:
+          place_names: tuple[str, ...] | None = None,
+          model_names: tuple[str, ...] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
     Fast-path kinds run on the whole text, then once more on its last sentence
     (fast_forms); the model kinds always see the whole cleaned transcript.
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
     to a real installed app before the domain check. `workspace_names` (saved
-    workspace names) lets "open <name>" resolve to a workspace ask.
+    workspace names) lets "open <name>" resolve to a workspace ask; `model_names` (3D
+    object slugs + aliases) lets "pull up <name>" resolve to a 3D object.
     """
     forms = fast_forms(text)
     for i, form in enumerate(forms):
@@ -547,11 +610,21 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if look and _LOOK_REF_RE.search(low, look.end()):
         return Intent("look", t)
     if low.startswith("open "):
-        arg = t[5:].strip()
-        return _open_intent(t, apps) or Intent("open_app", arg)
+        hit = _open_intent(t, apps)
+        if hit:
+            return hit
+    # A bare 3D name ("pull up the test mug") comes from the vault (folders, mini PC-written
+    # aliases), so it is tried only after every fixed kind and a real app or site, and never
+    # for a stop phrase: a name like "stop" must not swallow a spoken stop ("load stop").
+    model = model_request(text, model_names) if model_names and not is_stop_family(text) else None
+    if model is not None:
+        return model
+    if low.startswith("open "):
+        return Intent("open_app", t[5:].strip())
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
-    return Intent("answer", t)
+    near = model_near(text, model_names) if model_names else None  # a misheard name, before a free answer
+    return near or Intent("answer", t)
 
 
 def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:

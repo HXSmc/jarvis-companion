@@ -40,6 +40,8 @@ KEEP_STEPS = frozenset({
     "draw", "chart",
     # jfollow10e: one row per routed turn: the picked command type (enum word, numbers, fixed words).
     "intent_pick",
+    # jfollow10d: one row per 3D object step (fixed words and numbers; never a name, slug or path).
+    "model3d",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})

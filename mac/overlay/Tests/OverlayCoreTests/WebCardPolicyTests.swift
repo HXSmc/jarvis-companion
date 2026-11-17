@@ -86,3 +86,78 @@ final class WebCardDrawingPolicyTests: XCTestCase {
                        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'")
     }
 }
+
+/// jfollow10d criterion 22: the model page's files, three.js, the card's own model path, the GLB/PNG
+/// re-checks and the status ping; the CSP stays stage B's.
+final class WebCardModelPolicyTests: XCTestCase {
+    private func url(_ path: String) -> URL { URL(string: "jarvisweb://app/\(path)")! }
+
+    static func glb(version: UInt32 = 2, length: UInt32? = nil, magic: String = "glTF", count: Int = 20) -> Data {
+        var d = Data(magic.utf8)
+        for v in [version, length ?? UInt32(count)] { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        d.append(Data(repeating: 0, count: count - 12))
+        return d
+    }
+
+    func testModelFilesResolve() {
+        for path in ["model.html", "model.js", "model.css", "vendor/three/build/three.module.min.js",
+                     "vendor/three/examples/jsm/loaders/GLTFLoader.js", "vendor/three/examples/jsm/controls/OrbitControls.js",
+                     "vendor/three/examples/jsm/utils/BufferGeometryUtils.js", "vendor/three/examples/jsm/utils/SkeletonUtils.js"] {
+            XCTAssertEqual(WebCardPolicy.resourcePath(for: url(path)), path)
+            XCTAssertEqual(WebCardPolicy.resources[path]?.file, path)
+        }
+        XCTAssertEqual(WebCardPolicy.resourcePath(for: url("vendor/three/build/three.core.js")), "vendor/three/build/three.core.js")
+        XCTAssertEqual(WebCardPolicy.resources["vendor/three/build/three.core.js"]?.file, "vendor/three/build/three.core.min.js")
+        XCTAssertEqual(WebCardPolicy.resources["vendor/three/build/three.core.js"]?.mime, "text/javascript")
+        XCTAssertEqual(WebCardPolicy.startURL(page: "model")?.absoluteString, "jarvisweb://app/model.html")
+    }
+
+    func testModelEscapesRefused() {
+        for path in ["../model.html", "%2e%2e/model.js", "vendor/three/../../model.js", "object.glb", "preview.png",
+                     "vendor/three/build/three.core.min.js", "MODEL.HTML", "model.js/"] {
+            XCTAssertNil(WebCardPolicy.resourcePath(for: url(path)), path)
+        }
+        XCTAssertEqual(WebCardPolicy.modelFileKind(for: url("object.glb?x=1")), "glb")
+        XCTAssertEqual(WebCardPolicy.modelFileKind(for: url("preview.png")), "png")
+        XCTAssertNil(WebCardPolicy.modelFileKind(for: url("../object.glb")))
+        XCTAssertNil(WebCardPolicy.modelFileKind(for: url("x/object.glb")))
+    }
+
+    func testModelFilePath() {
+        XCTAssertEqual(WebCardPolicy.modelFilePath(slug: "test-mug", kind: "glb"), "/overlay/model3d/test-mug/glb")
+        XCTAssertEqual(WebCardPolicy.modelFilePath(slug: "test-mug", kind: "png"), "/overlay/model3d/test-mug/png")
+        for slug in ["..", "a/b", "A", "a:b", String(repeating: "a", count: 49), "", "-a", "a b", "é"] {
+            XCTAssertNil(WebCardPolicy.modelFilePath(slug: slug, kind: "glb"), slug)
+        }
+        XCTAssertNotNil(WebCardPolicy.modelFilePath(slug: String(repeating: "a", count: 48), kind: "glb"))
+        XCTAssertNil(WebCardPolicy.modelFilePath(slug: "test-mug", kind: "py"))
+    }
+
+    func testAcceptGLBAndPNG() {
+        XCTAssertTrue(WebCardPolicy.acceptGLB(Self.glb()))
+        XCTAssertFalse(WebCardPolicy.acceptGLB(Self.glb(magic: "glTX")))
+        XCTAssertFalse(WebCardPolicy.acceptGLB(Self.glb(version: 1)))
+        XCTAssertFalse(WebCardPolicy.acceptGLB(Self.glb(length: 21)))
+        XCTAssertFalse(WebCardPolicy.acceptGLB(Data("glTF".utf8)))
+        let big = WebCardPolicy.maxGLBBytes + 1
+        XCTAssertFalse(WebCardPolicy.acceptGLB(Self.glb(length: UInt32(big), count: big)))
+        let sig = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        XCTAssertTrue(WebCardPolicy.acceptPNG(sig + Data(repeating: 1, count: 20)))
+        XCTAssertFalse(WebCardPolicy.acceptPNG(Data("GIF89a-not-a-png".utf8)))
+        XCTAssertFalse(WebCardPolicy.acceptPNG(sig + Data(repeating: 1, count: WebCardPolicy.maxPNGBytes)))
+    }
+
+    func testModelStatusPing() {
+        XCTAssertEqual(WebCardPolicy.modelStatus(for: url("model-status/none/0"))?.error, "none")
+        XCTAssertEqual(WebCardPolicy.modelStatus(for: url("model-status/parse/12"))?.refused, 12)
+        for path in ["model-status/evil/0", "model-status/none/12345", "model-status/none/x", "model-status/none",
+                     "model-status/none/0/x", "model-status/../0"] {
+            XCTAssertNil(WebCardPolicy.modelStatus(for: url(path)), path)
+        }
+    }
+
+    func testCSPByteEqualToStageB() {
+        XCTAssertEqual(WebCardPolicy.csp,
+                       "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'")
+    }
+}

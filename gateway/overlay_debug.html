@@ -68,7 +68,8 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 cmd_run: "command run",
                 geo: "map / transit", video_ask: "video question", watch_job: "watch job",
                 link_dropped: "link card dropped", web_card: "web card",
-                draw: "drawing", chart: "chart card", intent_pick: "intent pick" };
+                draw: "drawing", chart: "chart card", intent_pick: "intent pick",
+                model3d: "3D object" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -106,7 +107,7 @@ function describe(s) {
     case "barge_turn": case "mic_signal": case "barge_check": return s.detail || "";
     case "cmd_run": return s.detail || "";
     case "geo": case "video_ask": case "watch_job": case "link_dropped": case "web_card":
-    case "draw": case "chart": case "intent_pick": return s.detail || "";
+    case "draw": case "chart": case "intent_pick": case "model3d": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return s.detail || (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
