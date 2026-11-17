@@ -246,7 +246,8 @@ def test_place_collisions(vault, client, net):
                  "find me a picture of a cat", "find me a YouTube video about the Tower Bridge lift"):
         assert intents.parse(text, apps={}, place_names=pn).kind != "place", text
     for text in ("is the northern line on", "is it on tonight", "is the TV on tonight", "is Ebenezer on",
-                 "best way to get to " + "x" * 70, "best way to get to https://evil.example/x"):
+                 "best way to get to " + "x" * 70, "best way to get to https://evil.example/x",
+                 "what is the closest planet to the sun", "what's the nearest star to earth"):
         assert intents.place_request(text, place_names=pn) is None, text
     assert intents.parse("is Ebenezer on", apps={}).kind == "answer"
     assert intents.parse("stop", apps={}).kind == "stop"

@@ -1673,6 +1673,8 @@ def _place_match(text: str, place_names: tuple[str, ...]):
             x = word
         else:
             x = m["x"]
+            if re.search(r"\b(?:to|from|than)\b", x):  # "the closest planet to the sun": a question, not a place
+                return None
         hit = _place_target(x, place_names)
         if hit is None:
             return None
