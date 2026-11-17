@@ -91,8 +91,8 @@ final class AppController {
     private var serviceVoice: String?
     // maxGap: retries are ~1-3 s apart; a bigger gap is a Mac sleep, not 30 s of retrying.
     private var outage = OutageGate(grace: 30, maxGap: 10)
-    /// The fixed word of the current bad-reply streak (noted once per streak, not every retry).
-    private var badReplyNote: String?
+    /// Bad-reply words already noted in this streak (health and events each once, not every retry).
+    private var badReplies: Set<String> = []
     private var bannerTask: Task<Void, Never>?
     private var permissionTimer: Task<Void, Never>?
 
@@ -461,7 +461,7 @@ final class AppController {
                 endOutage()
                 for try await event in client.events() {
                     endOutage()
-                    badReplyNote = nil  // the stream opened: a later bad reply is a new streak
+                    badReplies = []  // the stream opened: a later bad reply is a new streak
                     if event.name == "wake" {
                         await handleWake()
                     } else if event.name == "hud" {
@@ -538,8 +538,7 @@ final class AppController {
 
     private func serviceAnsweredBadly(_ note: String, _ path: String) {
         let word = "\(path) \(note)"
-        guard badReplyNote != word else { return }
-        badReplyNote = word
+        guard badReplies.insert(word).inserted else { return }
         log("service answered but the \(path) reply did not fit (\(note))")
         client.debugNote(step: "service_reply", detail: word)
     }
