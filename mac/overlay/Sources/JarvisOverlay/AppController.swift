@@ -89,7 +89,10 @@ final class AppController {
 
     // Outage state.
     private var serviceVoice: String?
-    private var outage = OutageGate(grace: 30)
+    // maxGap: retries are ~1-3 s apart; a bigger gap is a Mac sleep, not 30 s of retrying.
+    private var outage = OutageGate(grace: 30, maxGap: 10)
+    /// The fixed word of the current bad-reply streak (noted once per streak, not every retry).
+    private var badReplyNote: String?
     private var bannerTask: Task<Void, Never>?
     private var permissionTimer: Task<Void, Never>?
 
@@ -445,14 +448,20 @@ final class AppController {
     private func runEventsLoop() async {
         while true {
             do {
-                let health = try await client.health()
-                serviceVoice = health.voice
-                speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
-                applyBargeMode(BargeMode.from(health: health.bargeMode, bargeIn: health.bargeIn,
-                                               bargeAec: health.bargeAec))
+                do {
+                    let health = try await client.health()
+                    serviceVoice = health.voice
+                    speech.tailRatio = health.tailLevelRatio ?? TailGate.defaultRatio
+                    applyBargeMode(BargeMode.from(health: health.bargeMode, bargeIn: health.bargeIn,
+                                                   bargeAec: health.bargeAec))
+                } catch let error where answeredNote(error) != nil {
+                    // The service answered: keep the last settings and still open the event stream.
+                    serviceAnsweredBadly(answeredNote(error) ?? "", "health")
+                }
                 endOutage()
                 for try await event in client.events() {
                     endOutage()
+                    badReplyNote = nil  // the stream opened: a later bad reply is a new streak
                     if event.name == "wake" {
                         await handleWake()
                     } else if event.name == "hud" {
@@ -460,8 +469,11 @@ final class AppController {
                     }
                 }
                 serviceUnreachable("event stream ended")
+            } catch let error where answeredNote(error) != nil {
+                serviceAnsweredBadly(answeredNote(error) ?? "", "events")
+                endOutage()
             } catch {
-                serviceUnreachable("\(error)")
+                serviceUnreachable("\(error)", timedOut: (error as? URLError)?.code == .timedOut)
             }
             // Retry fast: a reinstall or a Mac wake drops the service for only a few seconds.
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -505,16 +517,31 @@ final class AppController {
     }
 
     /// Says the outage only after 30 s of failed retries (see OutageGate), and says what to do.
-    private func serviceUnreachable(_ why: String) {
+    private func serviceUnreachable(_ why: String, timedOut: Bool = false) {
         if outage.since == nil { log("service unreachable (\(why)), retrying") }
         guard outage.failed(at: Date()) else { return }
         log("service still unreachable after \(Int(outage.grace)) s: \(why)")
         bannerTask?.cancel()
         bannerTask = nil
-        audio.speakLocally("My service is not running. I've put the fix on screen.")
+        let say = OutageGate.announcement(timedOut: timedOut)
+        audio.speakLocally(say.spoken)
         model.orb = .error
-        model.banner = "Jarvis service is not running. Fix: run scripts/install-mac-overlay.sh again. "
-            + "Details: ~/Library/Logs/JarvisOverlay/service.log"
+        model.banner = say.banner
+    }
+
+    /// A reply that did not fit (decode error, HTTP error status) is not an outage: log it and
+    /// note a debug row once per streak (fixed words only), never say "not running".
+    private func answeredNote(_ error: Error) -> String? {
+        if case ServiceError.badStatus(let code) = error { return "status \(code)" }
+        return OutageGate.answeredNote(error)
+    }
+
+    private func serviceAnsweredBadly(_ note: String, _ path: String) {
+        let word = "\(path) \(note)"
+        guard badReplyNote != word else { return }
+        badReplyNote = word
+        log("service answered but the \(path) reply did not fit (\(note))")
+        client.debugNote(step: "service_reply", detail: word)
     }
 
     private func log(_ line: String) {
@@ -528,7 +555,7 @@ final class AppController {
         bannerTask?.cancel()
         bannerTask = nil
         model.banner = nil
-        model.orb = .idle
+        if model.orb == .error { model.orb = .idle }  // a running turn keeps its own orb
     }
 
     /// Wake chime, resolved once on the first wake; nil = off or unknown name (no retry).
@@ -743,6 +770,7 @@ final class AppController {
                     // A barge-in or a stop cut this turn: nothing more of it is drawn or heard.
                     guard !Task.isCancelled, token == turnToken else { return }
                     gotEvent = true
+                    endOutage()  // the service just answered: whatever the events loop saw, it is up
                     switch event {
                     case .overlay(let e): handle(e, captured: captured, token: token)
                     case .control(let c): handleControl(c)
