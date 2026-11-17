@@ -21,7 +21,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from gateway import overlay  # noqa: E402
-from mac.voice import acks, intent_pick, lean  # noqa: E402
+from mac.voice import acks, lean  # noqa: E402
+
+try:  # absent at commits before jfollow10e: the runner is copied there for the latency baseline (criterion 13)
+    from mac.voice import intent_pick  # noqa: E402
+except ImportError:
+    intent_pick = None
 
 SAFE = {"answer", "about_companion", "stop", "clear", "card_remove", "clock", "card_help"}
 
@@ -44,20 +49,22 @@ def _deps(model: bool) -> overlay.OverlayDeps:
     if model:
         mk = lambda prompt, tools: lean.Conversations(lambda: lean.LeanSession(  # noqa: E731
             model="sonnet", system_prompt=prompt, tools=tools))
-        conv, quiet = mk(overlay.answer_prompt(), "WebSearch,WebFetch"), mk(overlay.quiet_prompt(), "")
+        answer = overlay.answer_prompt() if hasattr(overlay, "answer_prompt") else overlay.ANSWER_PROMPT
+        quiet_p = overlay.quiet_prompt() if hasattr(overlay, "quiet_prompt") else overlay.QUIET_PROMPT
+        conv, quiet = mk(answer, "WebSearch,WebFetch"), mk(quiet_p, "")
     else:
         conv = quiet = _NoAgent()
     picker = None
-    if model:
+    if model and intent_pick is not None:
         picker = intent_pick.Picker()
         for _ in range(600):  # wait up to 60 s for the prewarm, as a running gateway has long before the first turn
             if picker._session is not None:
                 break
             time.sleep(0.1)
+    extra = {"intent_pick": picker.ask if picker else None} if intent_pick is not None else {}
     return overlay.OverlayDeps(acks=cache, synth=None, conversations=conv, quiet_conversations=quiet,
                                vlm_ask=lambda p, j: '{"id": null}', run=lambda *a, **k: None,
-                               apps={}, agent_conversations=_NoAgent(),
-                               intent_pick=picker.ask if picker else None)
+                               apps={}, agent_conversations=_NoAgent(), **extra)
 
 
 async def _once(q: dict, n: int, deps, model: bool) -> dict:
