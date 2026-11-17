@@ -2600,7 +2600,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                               else intents.Intent("card_size", "max", ""))
         # S2: right after a sessions answer, a reply about sessions/the device stays on sessions.
         follow_at = _sessions_follow.pop(body.conv_id, None)  # one turn only, live or not
-        follow_live = follow_at is not None and deps.clock() < follow_at and pick_ids is None
+        follow_live = (follow_at is not None and deps.clock() < follow_at and pick_ids is None
+                       and not body.barge_in)  # jfollow10g: a barge-in never stays on sessions
         # jfollow10g: a model `agent` pick switches too (a sessions read reaches strictly less);
         # a word-rule agent hit keeps its kind.
         if (follow_live and intents.sessions_followup(raw_text)

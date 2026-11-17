@@ -268,7 +268,7 @@ _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anythi
 # their phrases keep their kinds. Whole utterance, commas off.
 # jfollow7 S: an adjective before "sessions", the article before the device optional, more devices (mac, router, STT forms of mini PC).
 _COMPANION = (r"(?:(?:my|the|our) )?(?:(?:\w+(?:'s|s')? )?companion(?: app)?|(?:mini|many) ?(?:p ?c|b ?c|piece)"
-              r"|minipc|mac|router)")
+              r"|minipc|mac|windows(?: pc)?|router)")
 # jfollow10g: one word naming where or which sessions ("router sessions", "done sessions"); router,
 # companion and app mean every session on the app.
 _SESSIONS_NOUN = (r"(?:active|running|open|live|current|done|finished|completed|ended|router|app|mac|windows"
@@ -293,7 +293,7 @@ _SESSIONS_TOPIC_RE = re.compile(
     + _SESSIONS_TAIL +
     r"|(?:how's|hows|how)[\w' ]{0,16}?(?:my|the|our) (?:(?:active|running|open|live|current) )?sessions"
     + _SESSIONS_TAIL +
-    r"|(?:(?:" + _SESSIONS_LEAD + r"|how's|hows|how) )?(?:any )?(?:" + _SESSIONS_NOUN + r" )?sessions? (?:are |is )?"
+    r"|(?:(?:" + _SESSIONS_LEAD + r"|how's|hows|how) )?(?:any )?(?:(?!open )" + _SESSIONS_NOUN + r" )?sessions? (?:are |is )?"
     r"(?:(?:running|active|open|going)(?: " + _SESSIONS_PREP + r" " + _COMPANION + r")?"
     r"|" + _SESSIONS_PREP + r" " + _COMPANION + r")"
     r"|what(?:'s| is| are)? (?:running|active) " + _SESSIONS_PREP + r" " + _COMPANION +

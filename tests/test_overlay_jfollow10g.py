@@ -434,9 +434,11 @@ def test_stop_by_name_still_confirms(client, monkeypatch, tmp_path):
 ROUTES = ["what are my companion sessions doing right now", "which router sessions are done",
           "what did my sessions do today", "list my done sessions on the Mac",
           "show me the sessions on the Jarvis Companion app", "list my sessions that ended yesterday",
-          "finished sessions on the mini PC"]
+          "finished sessions on the mini PC", "show me my done sessions on the Windows PC",
+          "which sessions are done on the Windows PC"]
 # Generated on BASE (e7aad9a) with intents.parse; these keep their kinds.
 KEEP = {"start a session to tidy the logs": "session", "stop the session on the Mac": "session",
+        "open sessions on the Mac": "open_app", "open session on the mini PC": "session", "open sessions": "open_app",
         "end all sessions": "answer", "how do I check sessions": "answer", "how long are sessions": "answer"}
 
 
@@ -459,14 +461,15 @@ def test_word_routes_keep(text, kind):
 def _owner_conv(client, monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, BOARD)
     clock = Clock()
-    deps, made = deps_for(clock, pick=picker(lambda msg: "sessions" if "are running" in msg else "agent"))
+    deps, made = deps_for(clock, pick=picker("agent"))  # the model answers agent on every turn
     return deps, made, clock
 
 
 def test_owner_rows_replay(client, monkeypatch, tmp_path):
     deps, made, clock = _owner_conv(client, monkeypatch, tmp_path)
     turn(client, "how many sessions are running", conv_id="o")
-    assert _steps("intent")[-1]["kind"] == "sessions"
+    assert _steps("intent")[-1]["kind"] == "sessions"  # a word sessions hit beats the model's agent
+    assert re.match(r"pick=agent conf=\d+ path=model ", _steps("intent_pick")[-1]["detail"])
     clock.now += 10
     overlay.debug_log.clear()
     turn(client, "How many sessions did you say", conv_id="o")
@@ -547,3 +550,21 @@ def test_pick_prompt_sessions_line():
         assert word in line
     assert intent_pick.KIND_TO_PICK["sessions"] == "sessions"
     assert intent_pick.PICKS["sessions"] == (frozenset(), frozenset())
+
+
+def test_s2_gated_and_barge_never_switch(client, monkeypatch, tmp_path):
+    """Room talk failing the follow-up gate, and a barge-in, are dropped/kept as before: no list."""
+    env(monkeypatch, tmp_path, BOARD)
+    clock = Clock()
+    deps_for(clock, pick=picker("agent"))
+    turn(client, "how many sessions are running", conv_id="g")
+    clock.now += 3
+    overlay.debug_log.clear()
+    turn(client, "which ones were on the Mac", conv_id="g", followup=True, audio_ms=3000, levels=[0.002] * 12)
+    assert not [s for s in _steps("intent") if s.get("kind") == "sessions"] and not _steps("sessions")
+    turn(client, "how many sessions are running", conv_id="b")
+    clock.now += 3
+    overlay.debug_log.clear()
+    turn(client, "which ones were on the Mac", conv_id="b", barge_in=True)
+    assert _steps("intent_pick")[-1]["detail"].endswith("reason=barge")
+    assert not [s for s in _steps("sessions") if "match=" in s["detail"]]
