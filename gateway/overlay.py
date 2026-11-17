@@ -5258,6 +5258,12 @@ async def _draw_turn(body: TurnBody, subject: str, deps: OverlayDeps, said: list
                                              ("bytes_in", "bytes_out", "kept", "removed", "attrs_removed",
                                               "legend")))
 
+    if body.barge_in:  # jfollow10e criterion 15: speech over Jarvis never starts a drawing (as geo, watch)
+        async for ev in _line("geo_barge", deps):
+            yield ev
+        said.append(acks.PHRASES["geo_barge"])
+        note({**row, "reason": "barge"})
+        return
     if not subject or not _draw_lock.acquire(blocking=False):
         key = "draw_which" if not subject else "draw_busy"
         async for ev in _line(key, deps):

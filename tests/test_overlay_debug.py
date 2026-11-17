@@ -191,3 +191,16 @@ def test_debug_page_reads_the_service_when_shown_again(client):
     page = client.get("/overlay/debug").text
     assert 'document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });' in page
     assert 'window.addEventListener("pageshow", tick);' in page
+
+
+def test_debug_page_intent_pick_row():
+    """jfollow10e criterion 11: the page labels an intent_pick row "intent pick" and shows its detail."""
+    import shutil
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    from test_overlay_jfollow8 import _page_rows_with_node
+    detail = "pick=map conf=92 path=model ms=640 slots=2 reason=ok"
+    got = _page_rows_with_node([{"step": "intent_pick", "detail": detail}], ["intent_pick"])
+    assert got == {"d": [detail], "l": ["intent pick"]}
+    page = (Path(__file__).resolve().parent.parent / "gateway" / "overlay_debug.html").read_text()
+    assert "Command pick: word rules only" in page and "Fact sheet: ${ok.facts}" in page

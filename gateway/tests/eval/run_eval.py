@@ -1,11 +1,13 @@
 """Answer-quality eval for the overlay: runs each question through overlay.run_turn (the typed-turn path).
 
-  python gateway/tests/eval/run_eval.py [--out result.json] [--compare baseline.json] [--no-model]
+  python gateway/tests/eval/run_eval.py [--out result.json] [--compare baseline.json] [--no-model] [--strict]
 
 Intent picks are graded for every question. The model answer is run only when the turn lands on a
 safe intent (answer/stop/clear/card_remove/clock); any other intent is cut right after the pick so
 nothing opens, starts or searches. The model part needs the `claude` CLI logged in (opt-in, not for CI).
-Exit 0 always, except --compare: 1 if a question that passed in the baseline now fails.
+An intent passes when the `intent` row's kind OR the `intent_pick` row's pick is expected (jfollow10e).
+Exit 0 always, except --compare: 1 if a question that passed in the baseline now fails; --strict: 1 on
+any miss of a row without "model_only": true.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from gateway import overlay  # noqa: E402
-from mac.voice import acks, lean  # noqa: E402
+from mac.voice import acks, intent_pick, lean  # noqa: E402
 
 SAFE = {"answer", "about_companion", "stop", "clear", "card_remove", "clock", "card_help"}
 
@@ -41,21 +43,26 @@ def _deps(model: bool) -> overlay.OverlayDeps:
     if model:
         mk = lambda prompt, tools: lean.Conversations(lambda: lean.LeanSession(  # noqa: E731
             model="sonnet", system_prompt=prompt, tools=tools))
-        conv, quiet = mk(overlay.ANSWER_PROMPT, "WebSearch,WebFetch"), mk(overlay.QUIET_PROMPT, "")
+        conv, quiet = mk(overlay.answer_prompt(), "WebSearch,WebFetch"), mk(overlay.quiet_prompt(), "")
     else:
         conv = quiet = _NoAgent()
     return overlay.OverlayDeps(acks=cache, synth=None, conversations=conv, quiet_conversations=quiet,
                                vlm_ask=lambda p, j: '{"id": null}', run=lambda *a, **k: None,
-                               apps={}, agent_conversations=_NoAgent())
+                               apps={}, agent_conversations=_NoAgent(),
+                               intent_pick=intent_pick.Picker().ask if model else None)
 
 
 async def _once(q: dict, n: int, deps, model: bool) -> dict:
     kinds: list[str] = []
+    picks: list[dict] = []
     said: list[str] = []
+    metrics: dict = {}
     cut = False
 
     def on_step(step, **f):
         nonlocal cut
+        if step == "intent_pick":
+            picks.append(dict(kv.split("=", 1) for kv in f.get("detail", "").split()))
         if step == "intent":
             kinds.append(f.get("kind", ""))
             if f.get("kind") not in SAFE:
@@ -68,6 +75,8 @@ async def _once(q: dict, n: int, deps, model: bool) -> dict:
             async for ev in overlay.run_turn(body, deps, on_step=on_step):
                 if ev.get("type") == "say":
                     said.append(ev["text"])
+                elif ev.get("type") == "done":
+                    metrics = ev.get("metrics") or {}
     except _Cut:
         pass
     except Exception as e:  # noqa: BLE001 - a failed turn is a result, not a crash
@@ -75,8 +84,9 @@ async def _once(q: dict, n: int, deps, model: bool) -> dict:
     answer = " ".join(said)
     want = q["expect_intent"] if isinstance(q["expect_intent"], list) else [q["expect_intent"]]
     why = []
-    if not any(k in want for k in kinds):
-        why.append(f"intent {kinds or 'none'} not in {want}")
+    got = kinds + [p.get("pick", "") for p in picks]
+    if not any(k in want for k in got):
+        why.append(f"intent {got or 'none'} not in {want}")
     # Answer checks need an answer: intents cut after the pick, or a no-model run, are NOT RUN.
     ran = model and not cut and bool(answer) and "[error" not in answer
     need = bool(q["expect_answer_contains"] or q["expect_answer_not_contains"])
@@ -90,7 +100,11 @@ async def _once(q: dict, n: int, deps, model: bool) -> dict:
                 why.append(f"answer has '{bad}'")
     elif need and not cut and "[error" in answer:
         why.append("answer part errored: " + answer[-140:])
+    pk = picks[-1] if picks else {}
     return {"id": q["id"], "pass": not why, "intent_got": kinds,
+            "pick": pk.get("pick"), "pick_path": pk.get("path"),
+            "pick_ms": int(pk["ms"]) if "ms" in pk else None,
+            "ack_ms": metrics.get("ack_ms"), "total_s": metrics.get("total_s"),
             "answer_got": answer[:300], "answer_run": ran if need else None,
             "why": "; ".join(why) or ("ok" if (ran or not need) else "ok (answer NOT RUN)")}
 
@@ -117,6 +131,7 @@ def main() -> int:
     ap.add_argument("--out")
     ap.add_argument("--compare")
     ap.add_argument("--no-model", action="store_true", help="intent picks only; answers NOT RUN")
+    ap.add_argument("--strict", action="store_true", help="exit 1 on a miss of a row without model_only")
     args = ap.parse_args()
     res = asyncio.run(main_async(args))
     print(f"SCORE {sum(r['pass'] for r in res)} of {len(res)}", file=sys.stderr)
@@ -125,6 +140,13 @@ def main() -> int:
         Path(args.out).write_text(text)
     else:
         print(text)
+    if args.strict:
+        flags = {q["id"]: q.get("model_only", False)
+                 for q in json.loads((Path(__file__).parent / "jarvis_eval.json").read_text())}
+        missed = [r["id"] for r in res if not r["pass"] and not flags.get(r["id"])]
+        if missed:
+            print("STRICT MISS:", ", ".join(missed), file=sys.stderr)
+            return 1
     if args.compare:
         base = {r["id"]: r["pass"] for r in json.loads(Path(args.compare).read_text())}
         broke = [r["id"] for r in res if base.get(r["id"]) and not r["pass"]]

@@ -75,7 +75,8 @@
   "expect_intent": "sessions",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "sessions board read"
+  "note": "sessions board read",
+  "model_only": true
  },
  {
   "id": "sess-2",
@@ -192,7 +193,8 @@
   "expect_answer_not_contains": [
    "The Companion is your phone app"
   ],
-  "note": "real row: Companion as TASK, must not be answered as a question"
+  "note": "real row: Companion as TASK, must not be answered as a question",
+  "model_only": true
  },
  {
   "id": "comp-task-2",
@@ -202,7 +204,8 @@
   "expect_answer_not_contains": [
    "The Companion is your phone app"
   ],
-  "note": "Companion as a task"
+  "note": "Companion as a task",
+  "model_only": true
  },
  {
   "id": "comp-q-1",
@@ -266,7 +269,8 @@
   "expect_intent": "tfl",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: TfL tube"
+  "note": "NOT BUILT YET: TfL tube",
+  "model_only": true
  },
  {
   "id": "tfl-2",
@@ -274,7 +278,8 @@
   "expect_intent": "tfl",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: TfL bus"
+  "note": "NOT BUILT YET: TfL bus",
+  "model_only": true
  },
  {
   "id": "chart-1",
@@ -282,7 +287,8 @@
   "expect_intent": "chart",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: charts"
+  "note": "NOT BUILT YET: charts",
+  "model_only": true
  },
  {
   "id": "draw-1",
@@ -298,7 +304,8 @@
   "expect_intent": "3d",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: 3D"
+  "note": "NOT BUILT YET: 3D",
+  "model_only": true
  },
  {
   "id": "yt-1",
@@ -306,7 +313,8 @@
   "expect_intent": "youtube",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: YouTube ask (today: media)"
+  "note": "NOT BUILT YET: YouTube ask (today: media)",
+  "model_only": true
  },
  {
   "id": "yt-2",
@@ -314,6 +322,115 @@
   "expect_intent": "watch",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: YouTube watch"
+  "note": "NOT BUILT YET: YouTube watch",
+  "model_only": true
+ },
+ {
+  "id": "place-1",
+  "text": "what's the best way to go to Dishoom",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "place pick (place search not on this build: honest answer)",
+  "model_only": true
+ },
+ {
+  "id": "place-2",
+  "text": "what's the best way to go to the cinema",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "place pick",
+  "model_only": true
+ },
+ {
+  "id": "place-3",
+  "text": "is Ebenezer on near me tonight",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "place pick: a film near me tonight",
+  "model_only": true
+ },
+ {
+  "id": "scr-5",
+  "text": "can other agents click my Mac screen",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "403|refus|only"
+  ],
+  "expect_answer_not_contains": [
+   "yes, any"
+  ],
+  "note": "fact sheet: other agents get 403"
+ },
+ {
+  "id": "mis-1",
+  "text": "so me a map from King's Cross to Tower Bridge",
+  "expect_intent": [
+   "map"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "mis-heard 'show me'",
+  "model_only": true
+ },
+ {
+  "id": "mis-2",
+  "text": "sketch out Tower Bridge for me",
+  "expect_intent": [
+   "draw"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "drawing in other words"
+ },
+ {
+  "id": "mis-3",
+  "text": "make me a three D model of a cube",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "mis-heard '3D'",
+  "model_only": true
+ },
+ {
+  "id": "mis-4",
+  "text": "what are my sessions up to on the mini PC",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "sessions in other words",
+  "model_only": true
+ },
+ {
+  "id": "mis-5",
+  "text": "Jarvis, clear the over, overlay",
+  "expect_intent": [
+   "clear"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "owner transcript: stutter"
+ },
+ {
+  "id": "mis-6",
+  "text": "Okay, okay, stop and clear everything",
+  "expect_intent": [
+   "clear"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "owner transcript"
  }
 ]
