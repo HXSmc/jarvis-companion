@@ -2407,8 +2407,20 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
         return intents.Intent("sessions", "", ""), None, 0
     if p.pick == "agent":
         return intents.Intent("agent", clean, intents._agent_sub(clean.lower())), None, 0
-    # answer, chart (the answer model draws the chart card), place and 3d (not on this build: the
-    # answer says so from the fact sheet)
+    if p.pick == "3d":  # jfollow11d: a 3d pick always yields a 3D kind (the model-path gates run in _model_turn)
+        if p.sub == "create":
+            ask = intents.model_request(raw_text)
+            if ask is not None and ask.kind == "model_create":
+                return ask, None, 0
+            desc, name = slots.get("desc", ""), slots.get("name", "")
+            if not desc:
+                return intents.Intent("model_create", "", "ask"), None, 0
+            return intents.Intent("model_create", desc, name), None, 1 + bool(name)
+        if p.sub == "show" and slots.get("name"):
+            return intents.Intent("model_show", slots["name"]), None, 1
+        return intents.Intent("model_list"), None, 0
+    # answer, chart (the answer model draws the chart card) and place (not on this build: the answer
+    # says so from the fact sheet)
     return intents.Intent("answer", clean), None, 0
 
 
@@ -5678,7 +5690,7 @@ MODEL_KINDS = ("model_create", "model_list", "model_show")
 MODEL_SYNC_POLL_S = 5
 MODEL_SYNC_WAIT_S = 600
 MODEL_LIST_MAX = 5  # hud info cards hold <= 6 body lines: 5 names + "and N more"
-_MODEL_SHOW_HINT = re.compile(r"\b(?:pull up|show me|bring up|open|display|load)\b", re.I)
+_MODEL_SHOW_HINT = re.compile(r"\b(?:pull up|show|bring up|open|display|load)\b", re.I)
 
 
 def _vault() -> str | None:

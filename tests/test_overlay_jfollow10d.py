@@ -719,3 +719,18 @@ def test_model_page_shadow_visible(tmp_path):
     floor = sum(n for lum, n in greys.items() if lum >= page_lum + 30)
     shadow = sum(n for lum, n in greys.items() if page_lum + 10 <= lum <= page_lum + 30)
     assert floor > 3000 and shadow > 1000, (page_lum, floor, shadow)
+
+
+# --- jfollow11d criterion 8: polite show forms reach the 3D kind -----------------------------------
+
+def test_polite_show_forms():
+    names = ("test-mug",)
+    for text in ("can you pull up the test mug", "could you show me the test mug",
+                 "would you please bring up the test mug", "please pull up the test mug",
+                 "pull up the test mug please", "show the test mug"):
+        assert intents.parse(text, apps={}, model_names=names) == intents.Intent("model_show", "test mug"), text
+    for text, kind in {"show the cards": "show", "show me the cards": "look", "open notes": "open_app",
+                       "show me a picture of a cat": "answer", "can you pull up the weather": "answer"}.items():
+        assert intents.parse(text, apps={}, model_names=names).kind == kind, text
+    assert intents.parse("stop", apps={}, model_names=("stop",)).kind == "stop"  # round-2 guard
+    assert overlay._MODEL_SHOW_HINT.search("show the test mug")

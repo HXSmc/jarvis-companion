@@ -431,7 +431,8 @@ _MODEL_CREATE_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
 _MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?:(?:^| ?,? )(?:and )?(?:call(?:ed)? it|called|named) (?P<name>.+))?")
 _MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
                             r"|(?:list|show)(?: me)? (?:my |the )?" + _3D + r" (?:objects|models))")
-_MODEL_SHOW_RE = re.compile(r"(?:pull up|show me|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
+_MODEL_SHOW_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
+                            r"(?:pull up|show(?: me)?|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
                             r"(?P<three> " + _3D + r" (?:object|model))?")
 
 
