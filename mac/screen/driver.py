@@ -133,6 +133,8 @@ AX.AXUIElementCreateApplication.argtypes = [ctypes.c_int]
 
 # mirroring/driver.py declares only the left-button constants
 kCGEventRightMouseDown, kCGEventRightMouseUp = 3, 4
+# AppKit/WebKit only see a drag as LeftMouseDragged while the left button is down.
+kCGEventLeftMouseDragged = 6
 kCGMouseEventClickState = 1  # dblclick sets this field to 2
 kCGScrollEventUnitLine = 1
 kCGImageAlphaPremultipliedLast = 1
@@ -620,7 +622,8 @@ def _click(p: CGPoint, ev: dict | None = None, double: bool = False,
 def _drag(p1: CGPoint, p2: CGPoint, ev: dict | None = None) -> None:
     """Both the start and the end point are guarded before the mouse-down, so
     a bad end point refuses with nothing pressed; the end point is checked
-    again before the up. The held-button moves only check halt. Any refusal
+    again immediately before the last held-button dragged event, which lands
+    exactly on p2. The other held-button dragged events only check halt. Any refusal
     after the down releases at the START point p1 (a drop back on the
     checked source = cancel), never at an unchecked point."""
     _move(p1, ev)
@@ -630,12 +633,12 @@ def _drag(p1: CGPoint, p2: CGPoint, ev: dict | None = None) -> None:
     _guarded_post(ev, down, p1)
     at = p1
     try:
-        for i in range(1, 11):  # <= 10 intermediate moves, 0.03s apart
+        for i in range(1, 11):  # <= 10 intermediate drags, 0.03s apart
             f = i / 11
             q = CGPoint(p1.x + (p2.x - p1.x) * f, p1.y + (p2.y - p1.y) * f)
-            _guarded_post(None, AX.CGEventCreateMouseEvent(None, kCGEventMouseMoved, q, 0))
+            _guarded_post(None, AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDragged, q, 0))
             time.sleep(0.03)
-        _guard(ev, p2)
+        _guarded_post(ev, AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDragged, p2, 0), p2)
         at = p2
     finally:
         _post_release(AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, at, 0))

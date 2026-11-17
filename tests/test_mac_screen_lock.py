@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 DRIVER_PATH = Path(__file__).resolve().parent.parent / "mac" / "screen" / "driver.py"
 
-MOVED, LDOWN, LUP, RDOWN, RUP = 5, 1, 2, 3, 4
+MOVED, LDOWN, LUP, RDOWN, RUP, DRAGGED = 5, 1, 2, 3, 4, 6
 SAFARI, TERMINAL = ("Safari", 100), ("Terminal", 300)
 WARM = (0.0, 0.0)  # the driver's once-per-process AX warm-up hit-test
 
@@ -405,7 +405,7 @@ def test_halt_mid_drag_releases_the_button(load):
     moves = []
 
     def halt_on_third_held_move(desc):
-        if desc[:2] == ("mouse", MOVED) and any(d[:2] == ("mouse", LDOWN) for d in mac.posted):
+        if desc[:2] == ("mouse", DRAGGED) and any(d[:2] == ("mouse", LDOWN) for d in mac.posted):
             moves.append(desc)
             if len(moves) == 3:
                 mod.halt()
@@ -435,7 +435,7 @@ def test_drag_focus_change_mid_drag_releases_at_start_point(load):
     held = []
 
     def flip_on_fifth_held_move(desc):
-        if desc[:2] == ("mouse", MOVED) and any(d[:2] == ("mouse", LDOWN) for d in mac.posted):
+        if desc[:2] == ("mouse", DRAGGED) and any(d[:2] == ("mouse", LDOWN) for d in mac.posted):
             held.append(desc)
             if len(held) == 5:
                 mac.front = TERMINAL
@@ -454,7 +454,7 @@ def test_locked_drag_match_releases_at_end_point(load):
     mod, mac = load()
     mod.send_events([{"type": "drag", "x": 0.2, "y": 0.2, "dx": 0.6, "dy": 0.0, **LOCK}])
     assert mac.posted[-1] == ("mouse", LUP, 80.0, 20.0, 0)
-    assert len(mac.posted) == 13
+    assert len(mac.posted) == 14
     # start (move), end (before the down), start (down), end (before the up)
     assert mac.points == [WARM, (20.0, 20.0), (80.0, 20.0), (20.0, 20.0), (80.0, 20.0)]
 
@@ -503,8 +503,8 @@ def _golden() -> list:
     out += mouse(MOVED, a, a) + [("sleep", 0.1)] + mouse(LDOWN, a, a)
     for i in range(1, 11):
         f = i / 11
-        out += mouse(MOVED, a + (b - a) * f, a + (b - a) * f) + [("sleep", 0.03)]
-    out += mouse(LUP, b, b)
+        out += mouse(DRAGGED, a + (b - a) * f, a + (b - a) * f) + [("sleep", 0.03)]
+    out += mouse(DRAGGED, b, b) + mouse(LUP, b, b)
     s = ("scroll", 1, 2, 5, -3, 0)
     out += [("new",) + s, ("post",) + s, ("release",) + s]
     hi = "hi".encode("utf-16-le")
@@ -1004,3 +1004,35 @@ def test_key_refuses_before_building_any_event():
     hits = [i for i, stmt in enumerate(key_fn.body)
             if any(is_build(n) for is_build in builds for n in ast.walk(stmt))]
     assert hits and hits[0] > 0, hits
+
+
+# jfollow10i: held moves are real LeftMouseDragged events (AppKit/WebKit drag)
+def test_drag_posts_dragged_not_moved(load):
+    mod, mac = load()
+    mod.send_events([{"type": "drag", "x": 0.2, "y": 0.2, "dx": 0.6, "dy": 0.0}])
+    assert mac.posted == (
+        [("mouse", MOVED, 20.0, 20.0, 0), ("mouse", LDOWN, 20.0, 20.0, 0)]
+        + [("mouse", DRAGGED, pytest.approx(20 + 60 * i / 11), 20.0, 0) for i in range(1, 11)]
+        + [("mouse", DRAGGED, 80.0, 20.0, 0), ("mouse", LUP, 80.0, 20.0, 0)])
+    down = mac.posted.index(("mouse", LDOWN, 20.0, 20.0, 0))
+    assert all(d[:2] != ("mouse", MOVED) for d in mac.posted[down:])
+    assert_pairs(mac.posted)
+
+
+def test_drag_end_refused_at_last_check_releases_at_start(load):
+    mod, mac = load()
+    held = []
+
+    def flip_end_owner_on_tenth_drag(desc):
+        if desc[:2] == ("mouse", DRAGGED):
+            held.append(desc)
+            if len(held) == 10:
+                mac.element_at = lambda x, y: (SAFARI[1] if x < 79 else TERMINAL[1], None)
+    mac.on_post = flip_end_owner_on_tenth_drag
+    with pytest.raises(mod.FocusMismatch) as exc:
+        mod.send_events([{"type": "drag", "x": 0.2, "y": 0.2, "dx": 0.6, "dy": 0.0, **LOCK}])
+    assert (exc.value.reason, exc.value.partial, exc.value.index) == ("point", True, 0)
+    assert ("mouse", DRAGGED, 80.0, 20.0, 0) not in mac.posted  # nothing posted at the refused end
+    assert mac.posted[-1] == ("mouse", LUP, 20.0, 20.0, 0)  # released at the checked start point
+    assert sum(d[:2] == ("mouse", LUP) for d in mac.posted) == 1
+    assert_pairs(mac.posted)
