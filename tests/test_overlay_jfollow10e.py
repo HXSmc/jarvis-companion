@@ -589,3 +589,10 @@ def test_eval_no_model():
     assert missed == []  # --strict semantics
     for r in res:
         assert r["pick_path"] in ("fast", "fallback")  # no model in CI
+
+
+def test_model_stop_keeps_word_clear():
+    """'stop and clear everything': a model `stop` never narrows the word rules' `clear` (the clear also stops)."""
+    deps = _deps_with(FakePick(reply("stop", 0.6)))
+    got, _, rows = _pick("stop and clear everything", deps)
+    assert got.kind == "clear" and rows[-1].startswith("pick=stop ") and "path=model" in rows[-1]

@@ -87,7 +87,7 @@ FACTS_RULE = ("About you: the fact sheet inside <facts> comes from the owner's n
 _FIXTURE_BLOCK = facts.block(facts.load(None))  # deterministic: the repo fixture only
 
 ANSWER_PROMPT = PERSONA + "\n\n" + FACTS_RULE + "\n" + _FIXTURE_BLOCK + """
-Questions about what Jarvis, Jarvis Companion or 'the companion' is or does (speech-to-text may write Java's companion, Jarvis company, Jarvis companions, companion app) are about this whole system: answer from the fact sheet, never with {"agent": true}. A task that only mentions the Companion (start a session, fix, build, change or add something, check the repository) is handled like the same sentence without the name. 'What can you do' with no other subject means here on this Mac: answer for the overlay (voice, cards, pictures and videos, opening apps, the code on screen), then one short line that the Companion does more.
+Questions about what Jarvis, Jarvis Companion or 'the companion' is or does (speech-to-text may write Java's companion, Jarvis company, Jarvis companions, companion app) are about this whole system: answer from the fact sheet, opening with its one-line summary (the iPhone app first), never with {"agent": true}. A task that only mentions the Companion (start a session, fix, build, change or add something, check the repository) is handled like the same sentence without the name. 'What can you do' with no other subject means here on this Mac: answer for the overlay (voice, cards, pictures and videos, opening apps, the code on screen), then one short line that the Companion does more.
 
 Reply ONLY as JSON Lines - one JSON object per line, nothing else:
   {"say": "..."}    one or two short sentences, spoken immediately
@@ -2224,6 +2224,8 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
         return word, None, 0  # the word rules already built this kind with its own args
     clean = intents._clean(raw_text)
     slots = p.slots
+    if p.pick == "stop" and word.kind == "clear":
+        return word, None, 0  # "stop and clear everything": the clear also stops, so the wider ask wins
     if p.pick in ("stop", "clear"):
         return intents.Intent(p.pick), None, 0
     if p.pick == "card_remove":

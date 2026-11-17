@@ -43,6 +43,14 @@ class _NoAgent:  # the tool-using agent tier never runs in the eval
         pass
 
 
+def _wait_warm(deps, limit_s: float = 10.0) -> None:
+    """Before a turn, give a rebuilding picker the seconds a spoken pause gives it on a running gateway."""
+    picker = getattr(getattr(deps, "intent_pick", None), "__self__", None)
+    end = time.monotonic() + limit_s
+    while picker is not None and picker._session is None and time.monotonic() < end:
+        time.sleep(0.1)
+
+
 def _deps(model: bool) -> overlay.OverlayDeps:
     cache = acks.AckCache(None)
     cache.prerender()
@@ -130,8 +138,10 @@ async def main_async(args) -> list[dict]:
     overlay.set_deps(deps)
     out = []
     for q in qs:
+        _wait_warm(deps)
         r = await _once(q, 1, deps, not args.no_model)
         if not r["pass"]:  # one rerun before a miss counts
+            _wait_warm(deps)
             r2 = await _once(q, 2, deps, not args.no_model)
             if r2["pass"]:
                 r2["why"] = "passed on rerun"

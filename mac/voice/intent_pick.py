@@ -64,7 +64,7 @@ PICK_PROMPT = """You sort one spoken request for a voice assistant into exactly 
 
 Types:
 - stop: stop talking or stop what you are doing.
-- clear: clear the screen, the overlay or all cards.
+- clear: clear the screen, the overlay or all cards (also "stop and clear everything").
 - card_remove: remove, close or take off one card. Slot target: the card's words.
 - move: move the cards somewhere. Slot where: left, right, up, down, top left, top right, top, bottom left, bottom right, bottom or other side.
 - map: a map, route or directions between places (sub map), or which roads to take (sub roads). Slots from, to.
