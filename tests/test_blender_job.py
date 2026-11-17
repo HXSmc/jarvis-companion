@@ -244,7 +244,9 @@ def test_preview_frames_a_small_object(tmp_path):
     rx = ((1, 0, 0), (0, math.cos(a), -math.sin(a)), (0, math.sin(a), math.cos(a)))
     ry = ((math.cos(b), 0, math.sin(b)), (0, 1, 0), (-math.sin(b), 0, math.cos(b)))
     rz = ((math.cos(c), -math.sin(c), 0), (math.sin(c), math.cos(c), 0), (0, 0, 1))
-    mul = lambda m, n: tuple(tuple(sum(m[i][k] * n[k][j] for k in range(3)) for j in range(3)) for i in range(3))  # noqa: E731
+    def mul(m, n):
+        return tuple(tuple(sum(m[i][k] * n[k][j] for k in range(3)) for j in range(3)) for i in range(3))
+
     rot = mul(rz, mul(ry, rx))
     tan_half = 18 / 50
     ys = []
