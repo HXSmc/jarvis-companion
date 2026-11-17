@@ -110,6 +110,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pytest  # noqa: E402
 
+from common import facts  # noqa: E402
 from gateway import overlay  # noqa: E402
 from mac.voice import intents  # noqa: E402
 from test_overlay_agent import Clock, client, reset  # noqa: F401,E402
@@ -323,7 +324,9 @@ def test_companion_question_never_goes_to_agent(client, text):
     cards = [e["card"] for e in events if e["type"] == "card"]
     assert [c["title"] for c in cards] == ["Jarvis Companion"]
     body = " ".join(cards[0]["body"])
-    for fact in ("iPhone app", "Gateway", "Mac overlay", "Claude Code sessions", "Windows", "Remote screen"):
+    # jfollow10e: the card lines come from the fact sheet (the repo fixture here: OVERLAY_VAULT unset).
+    assert cards[0]["body"] == facts.card_lines(facts.load(None))
+    for fact in ("iPhone app", "Gateway", "Mac overlay", "Claude Code sessions", "Windows", "view-only"):
         assert fact in body
     assert says(events) == [acks.PHRASES["companion_about"]]  # no thinking ack before it
     assert [s for s in _steps("intent") if s.get("kind") == "about_companion"]
@@ -337,14 +340,16 @@ def test_companion_notes_question_still_goes_to_agent(client):
 
 
 def test_prompt_holds_companion_paragraph():
-    assert overlay.COMPANION_ABOUT in overlay.ANSWER_PROMPT
-    assert overlay.COMPANION_ABOUT in overlay.QUIET_PROMPT
+    # jfollow10e: the fixture fact sheet replaced the hard-coded paragraph.
+    fixture = facts.load(None)
+    assert facts.block(fixture) in overlay.ANSWER_PROMPT
+    assert facts.block(fixture) in overlay.QUIET_PROMPT
     assert 'never with {"agent": true}' in overlay.ANSWER_PROMPT
-    assert len(overlay.COMPANION_ABOUT) <= 700
+    assert len(facts.FIXTURE.read_bytes()) <= 6000
     # The criterion-22 pattern, built in parts so the repo's own privacy grep does not match it.
     private = "|".join([r"ts\.net", r"192\.168\.", r"100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.",
                         "/" + "Users/", "/" + "home/", "@", "token"])
-    assert re.search(private, overlay.COMPANION_ABOUT) is None
+    assert re.search(private, fixture.text) is None
 
 
 def test_debug_page_rows_jfollow9():

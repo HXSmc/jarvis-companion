@@ -38,6 +38,8 @@ KEEP_STEPS = frozenset({
     "geo", "video_ask", "watch_job", "link_dropped", "web_card",
     # jfollow10c: one row per drawing and per model chart card (fixed words and counts only).
     "draw", "chart",
+    # jfollow10e: one row per routed turn: the picked command type (enum word, numbers, fixed words).
+    "intent_pick",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})

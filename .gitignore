@@ -10,6 +10,7 @@ dist/
 shortcuts/build/
 *.md
 !/README.md
+!/docs/jarvis-facts.md
 !/skills/svg-drawing/SKILL.md
 .env
 .env.*

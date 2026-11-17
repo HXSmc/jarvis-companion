@@ -380,7 +380,7 @@ class _SlowCloseSession:
     """Stands in for LeanSession: close() blocks the calling thread for 0.5 s."""
     instances: list = []
 
-    def __init__(self, model, claude_bin=None):
+    def __init__(self, model, claude_bin=None, system_prompt=None):
         self.turns = 0
         self.closed = 0
         _SlowCloseSession.instances.append(self)

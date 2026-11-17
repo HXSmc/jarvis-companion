@@ -68,7 +68,7 @@ const LABEL = { wake: "wake heard", voice: "voice received", transcribed: "trans
                 cmd_run: "command run",
                 geo: "map / transit", video_ask: "video question", watch_job: "watch job",
                 link_dropped: "link card dropped", web_card: "web card",
-                draw: "drawing", chart: "chart card" };
+                draw: "drawing", chart: "chart card", intent_pick: "intent pick" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -106,7 +106,7 @@ function describe(s) {
     case "barge_turn": case "mic_signal": case "barge_check": return s.detail || "";
     case "cmd_run": return s.detail || "";
     case "geo": case "video_ask": case "watch_job": case "link_dropped": case "web_card":
-    case "draw": case "chart": return s.detail || "";
+    case "draw": case "chart": case "intent_pick": return s.detail || "";
     case "spoke": return null;
     case "agent_progress": return null;  // rendered as a quote
     case "agent": return s.detail || (s.cold ? "cold start" : "warm") + (s.repo ? ` · repo ${s.repo}` : "");
@@ -144,6 +144,9 @@ function render(data) {
   else if (ok.barge_mode === "aec") rows.push(["barge-in: on (echo canceller on speakers; headphones as before)", true]);
   else if (ok.barge_in) rows.push(["barge-in: on with headphones, off on speakers", true]);
   if (ok.sessions_access === false) rows.push(["Sessions access: not set (run the installer)", false]);
+  if (ok.intent_pick === false) rows.push(["Command pick: word rules only (intent_pick off in voice settings)", false]);
+  else if (ok.intent_pick) rows.push(["Command pick: the model picks, word rules as fallback", true]);
+  if (typeof ok.facts === "string") rows.push([`Fact sheet: ${ok.facts}`, ok.facts === "vault ok"]);
   setup.hidden = rows.length === 0;
   setup.replaceChildren(...rows.map(([text, healthy]) => {
     const line = document.createElement("span");
