@@ -432,5 +432,45 @@
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
   "note": "owner transcript"
+ },
+ {
+  "id": "sess-4",
+  "text": "which router sessions are done",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "done sessions on the app"
+ },
+ {
+  "id": "sess-5",
+  "text": "what did my sessions do today",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "sessions by date"
+ },
+ {
+  "id": "sess-6",
+  "text": "list my done sessions on the Mac",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "done sessions by device"
+ },
+ {
+  "id": "sess-7",
+  "text": "show me the sessions on the Jarvis Companion app",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "router sessions = the app's sessions"
  }
 ]

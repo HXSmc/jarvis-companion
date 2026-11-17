@@ -14,6 +14,7 @@ In one line: Jarvis Companion is the whole open-source system around this voice:
 
 ## iPhone app
 - Sessions board: every Claude Code session across the Mac, the Windows PC and the mini PC, with sub-sessions.
+- Router sessions means every session on the Jarvis Companion app, on every device.
 - Cards from sessions, a focused inbox that keeps only mail that needs the owner, and the central chat.
 - Remote screen for the Mac and the Windows PC. The mini PC screen is view-only in the app.
 
