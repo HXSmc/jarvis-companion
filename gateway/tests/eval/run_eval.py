@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -46,10 +47,17 @@ def _deps(model: bool) -> overlay.OverlayDeps:
         conv, quiet = mk(overlay.answer_prompt(), "WebSearch,WebFetch"), mk(overlay.quiet_prompt(), "")
     else:
         conv = quiet = _NoAgent()
+    picker = None
+    if model:
+        picker = intent_pick.Picker()
+        for _ in range(600):  # wait up to 60 s for the prewarm, as a running gateway has long before the first turn
+            if picker._session is not None:
+                break
+            time.sleep(0.1)
     return overlay.OverlayDeps(acks=cache, synth=None, conversations=conv, quiet_conversations=quiet,
                                vlm_ask=lambda p, j: '{"id": null}', run=lambda *a, **k: None,
                                apps={}, agent_conversations=_NoAgent(),
-                               intent_pick=intent_pick.Picker().ask if model else None)
+                               intent_pick=picker.ask if picker else None)
 
 
 async def _once(q: dict, n: int, deps, model: bool) -> dict:

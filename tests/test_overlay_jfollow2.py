@@ -231,7 +231,7 @@ def test_quiet_prompt_gives_the_reason():
         assert bad not in overlay.QUIET_PROMPT
     # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3 (persona "sir" line), jfollow9 D2 (About you), jfollow9 R5 F1 (questions only), jfollow10b A3 (show, don't link), jfollow10b hub ruling 2 (spoken answer stays whole), jfollow10c D (chart cards), jfollow10e B3 (fact sheet block)
     assert hashlib.sha256(overlay.ANSWER_PROMPT.encode()).hexdigest() == \
-        "02ecfc209167680f43149c52bf5b7a9da499722aa79b7f6f5dec677844f3e72d"
+        "2650456b7cacd44b00ff6f576c45f0563edebbe01bb2ff5767bb4d3454ed14c8"
 
 
 def test_media_turn_joined_continuation_falls_back(client, monkeypatch):

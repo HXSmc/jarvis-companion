@@ -2,6 +2,8 @@
 
 This sheet is the source for questions about Jarvis, Jarvis Companion and its parts. Answer from it. When an answer about what a part can do rests only on reading code, not on a line here or a live check, start it with "from the code, " instead of a flat yes or no.
 
+In one line: Jarvis Companion is the whole open-source system around this voice: the iPhone app, a gateway on the owner's own machines, this Mac overlay, a session router on the mini PC and a Windows PC agent.
+
 ## Card
 - iPhone app: sessions board, cards, Hardware Mode, focused inbox
 - Gateway on your own machines, reached over Tailscale

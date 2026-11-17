@@ -19,6 +19,7 @@ PICK_TIMEOUT_S = 1.5
 PICK_CONF = 0.6
 JOB_CONF = 0.85
 REBUILD_AFTER = 25
+WARM_ASKS = 2  # measured: cold CLI ~3.5 s, 2nd ask ~1.9 s, then ~1.1 s
 
 # pick -> (allowed sub words, allowed slot names)
 PICKS: dict[str, tuple[frozenset, frozenset]] = {
@@ -157,35 +158,51 @@ class Picker:
         self._lock = threading.Lock()
         self._session = None
         self._asks = 0
-        threading.Thread(target=self._warm, daemon=True).start()  # prewarm off the turn's path
+        self._warming = False
+        self._rewarm()  # prewarm off the turn's path
+
+    def _rewarm(self) -> None:
+        """Start one background build; callers hold the lock (or are __init__), so two never run at once."""
+        if not self._warming:
+            self._warming = True
+            threading.Thread(target=self._warm, daemon=True).start()
 
     def _warm(self) -> None:
+        """Build a session and pay the CLI's cold start (the first asks take 2-4 s) before any turn uses it."""
+        fresh = None
+        try:
+            fresh = self._factory()
+            for _ in range(WARM_ASKS):
+                fresh.ask(message("hello", 0, False, False))
+        except Exception:
+            if fresh is not None:
+                _close(fresh)
+            fresh = None
         with self._lock:
-            if self._session is None:
-                try:
-                    self._session = self._factory()
-                except Exception:
-                    self._session = None
-
-    def _drop(self) -> None:
-        """Close the old session and build the next one in the background (never on a turn's path)."""
-        old, self._session, self._asks = self._session, None, 0
+            self._warming = False
+            old = None
+            if fresh is not None:
+                old, self._session, self._asks = self._session, fresh, 0
         if old is not None:
-            threading.Thread(target=_close, args=(old,), daemon=True).start()
-        threading.Thread(target=self._warm, daemon=True).start()  # waits for the lock the caller holds
+            _close(old)
 
     def ask(self, msg: str) -> str:
         with self._lock:
-            if self._session is None:  # the background build failed or has not run: build now
-                self._session = self._factory()
+            session = self._session
+            if session is None:  # still warming (or the build failed): word rules this turn, never a cold ask
+                self._rewarm()
+                raise RuntimeError("picker not warm")
             self._asks += 1
             try:
-                raw = self._session.ask(msg).raw
+                raw = session.ask(msg).raw
             except BaseException:
-                self._drop()
+                if self._session is session:
+                    self._session = None
+                threading.Thread(target=_close, args=(session,), daemon=True).start()
+                self._rewarm()
                 raise
             if self._asks >= REBUILD_AFTER:
-                self._drop()
+                self._rewarm()  # the old session keeps serving until the new one is warm
             return raw
 
     def abandon(self) -> None:

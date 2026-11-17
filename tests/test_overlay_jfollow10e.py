@@ -8,6 +8,7 @@ import importlib.util
 import json
 import re
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -370,12 +371,14 @@ def test_classifier_input(client, monkeypatch, tmp_path):
 def test_picker_rebuilds_and_abandons():
     class S:
         made = 0
+        asked = []
 
         def __init__(self):
             S.made += 1
             self.closed = False
 
         def ask(self, msg):
+            S.asked.append(msg)
             if msg == "boom":
                 raise RuntimeError
             return lean.Reply(raw="{}", ttft_s=None, total_s=0.0)
@@ -383,21 +386,50 @@ def test_picker_rebuilds_and_abandons():
         def close(self):
             self.closed = True
 
+    def wait_until(cond):
+        for _ in range(200):
+            if cond():
+                return True
+            time.sleep(0.01)
+        return False
+
     picker = intent_pick.Picker(factory=S)
+    assert wait_until(lambda: picker._session is not None)  # prewarmed off the turn's path
+    assert len(S.asked) == intent_pick.WARM_ASKS  # cold start paid before any turn
+    first = picker._session
     for _ in range(intent_pick.REBUILD_AFTER + 1):
-        assert picker.ask("hi") == "{}"
-    assert S.made >= 2  # rebuilt after REBUILD_AFTER asks
+        assert picker.ask("hi") == "{}"  # the old session serves while the new one warms
+    assert wait_until(lambda: picker._session is not first) and S.made == 2  # rebuilt after REBUILD_AFTER asks
+    assert wait_until(lambda: first.closed)
     with pytest.raises(RuntimeError):
         picker.ask("boom")
-    assert picker._session is None  # dropped after an error; the next ask builds a new one
+    assert wait_until(lambda: picker._session is not None) and S.made == 3  # rebuilt in the background
     assert picker.ask("hi") == "{}"
     stuck = picker._session
     picker.abandon()
-    for _ in range(50):
-        if stuck.closed:
-            break
-        time.sleep(0.01)
-    assert stuck.closed
+    assert wait_until(lambda: stuck.closed)
+
+
+def test_picker_never_asks_cold():
+    """No warm session -> the ask fails at once (word rules this turn) and never builds a CLI on the turn's path."""
+    gate = threading.Event()
+
+    class Slow:
+        def __init__(self):
+            gate.wait(2)
+
+        def ask(self, msg):
+            return lean.Reply(raw="{}", ttft_s=None, total_s=0.0)
+
+        def close(self):
+            pass
+
+    picker = intent_pick.Picker(factory=Slow)
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError):
+        picker.ask("hi")
+    assert time.monotonic() - t0 < 0.2
+    gate.set()
 
 
 # --- criterion 14: the follow-up gate runs before the model -----------------------------------------
