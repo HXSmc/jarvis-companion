@@ -124,9 +124,9 @@ def search_box(point: tuple, size: str = "small") -> tuple[float, float, float, 
     return (round(point[1] - dlon, 2), round(point[0] + dlat, 2), round(point[1] + dlon, 2), round(point[0] - dlat, 2))
 
 
-def nominatim_search_url(query: str, box: tuple) -> str:
+def nominatim_search_url(query: str, box: tuple, limit: int = 20) -> str:
     params = {"q": query, "format": "jsonv2", "viewbox": ",".join(f"{v:.2f}" for v in box), "bounded": "1",
-              "extratags": "1", "addressdetails": "1", "countrycodes": "gb", "limit": "20"}
+              "extratags": "1", "addressdetails": "1", "countrycodes": "gb", "limit": str(limit)}
     return geo.NOMINATIM + "?" + urlencode(params, quote_via=quote)
 
 
@@ -244,6 +244,10 @@ def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = Tru
     Raises SearchFailed(place_down | place_none, reason)."""
     point = search_point(home)
     box = search_box(point, "tight" if mode == "category" and widen else "small")
+    # categories ask for Nominatim's max of 40: the tight box near Trafalgar Square holds 27 pharmacies and
+    # 20 of them skipped the 3 nearest. shortcut: a box with > 40 (cafes) still returns 40 by importance,
+    # most of them close; upgrade to a distance-sorted source if a live miss shows up.
+    limit = 40 if mode == "category" else 20
     key = (query, box)
     fallback = query if mode == "category" else ""
     with _lock:
@@ -253,7 +257,7 @@ def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = Tru
         return hit[1], candidates(hit[2], home, fallback)
     src = "nominatim"
     try:
-        hits = _nominatim_hits(_nominatim(nominatim_search_url(query, box), budget))
+        hits = _nominatim_hits(_nominatim(nominatim_search_url(query, box, limit), budget))
     except geo.GeoError as e:
         if mode != "name":  # Photon drifts off London for categories: say so instead
             raise SearchFailed("place_down", _search_reason(e)) from None
@@ -273,7 +277,7 @@ def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = Tru
             src, budget.near = "photon", "hit"
     elif not found and src == "nominatim" and widen:
         try:
-            hits = _nominatim_hits(_nominatim(nominatim_search_url(query, search_box(point, "small")), budget))
+            hits = _nominatim_hits(_nominatim(nominatim_search_url(query, search_box(point, "small"), limit), budget))
         except geo.GeoError as e:
             raise SearchFailed("place_down", _search_reason(e)) from None
         found = candidates(hits, home, fallback)

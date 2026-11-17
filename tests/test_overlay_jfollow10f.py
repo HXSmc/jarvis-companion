@@ -364,6 +364,12 @@ def test_search_point_and_calls(net, clock):
     w1, w2 = (r.url.params["viewbox"].split(",") for r in net.requests)
     assert float(w2[0]) < float(w1[0]) and float(w2[1]) > float(w1[1])
     assert all(len(v.split(".")[1]) <= 2 for v in w1 + w2)
+    # a name spelled right but with 0 Nominatim hits on the small box: the one Photon retry still finds it
+    nearby.reset()
+    net.requests.clear()
+    b = nearby.Budget()
+    src, found = nearby.search("name", "dishoom", HOME, b)
+    assert src == "photon" and found and b.near == "hit" and len(net.requests) == 2
     # Nominatim 503 -> one Photon call for a name (lat/lon at 2 decimals), none for a category
     nearby.reset()
     net.requests.clear()
@@ -893,6 +899,7 @@ def test_category_nearest_first(vault, client, net):
     w, n, e, s_ = map(float, req.url.params["viewbox"].split(","))
     assert e - w <= 0.041 and n - s_ <= 0.021  # the tight box (~2 x 3 km), still 2 decimals
     assert not {f"{HOME[0]:.4f}", f"{HOME[1]:.4f}"} & set(req.url.params["viewbox"].split(","))
+    assert req.url.params["limit"] == "40"  # Nominatim's max: the tight box held 27 pharmacies live
     [card] = cards(events)
     rows = card["data"]["rows"]
     assert [r["name"] for r in rows] == ["Near Chemist", "Mid Chemist", "Far Chemist"]
@@ -965,3 +972,16 @@ def test_closed_top_pick_says_so(vault, client, net, monkeypatch):
     net.override.clear()
     events = turn(client, "what's the best way to go to Dishoom", conv_id="x3")
     assert "closed" not in last_line(events) and cards(events)[0]["data"]["rows"][0]["hours"] != "closed now"
+
+
+def test_category_full_answer_keeps_the_nearest(net):
+    """LIVE-1 #1, saturated answer: 40 hits in Nominatim's own order (importance), the 3 nearest last."""
+    far = [_pharmacy(f"Chemist {i}", 51.5080 + 0.006 + i * 0.0001, -0.1281 + 0.01, "Far Road") for i in range(37)]
+    near = [_pharmacy(f"Close {i}", 51.5080 + i * 0.0005, -0.1281, "Strand") for i in (3, 1, 2)]
+    # like the server: it cuts its own ordering at `limit`
+    net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=(far + near)[:int(r.url.params["limit"])])
+    src, found = nearby.search("category", "pharmacy", HOME, nearby.Budget())
+    assert [c["name"] for c in found[:3]] == ["Close 1", "Close 2", "Close 3"] and len(found) == 5
+    assert [c["km"] for c in found] == sorted(c["km"] for c in found)
+    [req] = net.requests
+    assert req.url.params["limit"] == "40"
