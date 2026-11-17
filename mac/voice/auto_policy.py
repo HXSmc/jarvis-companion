@@ -439,6 +439,16 @@ def auto_on() -> bool:
     return value
 
 
+def pick_on() -> bool:
+    """jfollow10e: the model picks the command type. Missing file or key = ON; damaged = OFF (word rules)."""
+    data = _read()
+    value = None if data is None else data.get("intent_pick", True)
+    if not isinstance(value, bool):
+        logger.warning("voice settings intent_pick unreadable or not true/false: word rules only")
+        return False
+    return value
+
+
 def set_auto(on: bool) -> bool:
     """Write {"agent_auto": on} atomically (dir 0700, file 0600), keeping other keys. False on failure."""
     path = SETTINGS_FILE

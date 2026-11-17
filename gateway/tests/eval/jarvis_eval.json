@@ -1,0 +1,436 @@
+[
+ {
+  "id": "cap-1",
+  "text": "what can you do",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "Companion"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "capabilities: overlay plus one line that the Companion does more"
+ },
+ {
+  "id": "cap-2",
+  "text": "what can Jarvis do for me",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "Companion"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "capabilities"
+ },
+ {
+  "id": "scr-1",
+  "text": "can AI agents click on my Mac screen",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "jarvis-screen|click"
+  ],
+  "expect_answer_not_contains": [
+   "cannot click",
+   "can't click",
+   "cannot control",
+   "can't control",
+   "unable to click",
+   "not able to click"
+  ],
+  "note": "truth: mini PC sessions see AND click via jarvis-screen"
+ },
+ {
+  "id": "scr-2",
+  "text": "can the mini PC sessions see my Windows screen",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "jarvis-screen|see"
+  ],
+  "expect_answer_not_contains": [
+   "cannot see",
+   "can't see"
+  ],
+  "note": "truth: via jarvis-screen"
+ },
+ {
+  "id": "scr-3",
+  "text": "can I control the mini PC screen from the app",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "view-only|view only|only view|just view|watch only"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "truth: mini PC screen is view-only"
+ },
+ {
+  "id": "scr-4",
+  "text": "can any other agent control my Mac screen",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "403|refus|denied|only"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "truth: other agents get 403"
+ },
+ {
+  "id": "sess-1",
+  "text": "what are my companion sessions doing right now",
+  "expect_intent": "sessions",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "sessions board read",
+  "model_only": true
+ },
+ {
+  "id": "sess-2",
+  "text": "how many sessions are running",
+  "expect_intent": "sessions",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "sessions count"
+ },
+ {
+  "id": "sess-3",
+  "text": "start a new session on the mini PC to check the build logs",
+  "expect_intent": [
+   "session_start",
+   "session"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "explicit session start"
+ },
+ {
+  "id": "stop-1",
+  "text": "stop",
+  "expect_intent": "stop",
+  "expect_answer_contains": [
+   "OK"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "bare stop"
+ },
+ {
+  "id": "stop-2",
+  "text": "Hey Jarvis, stop",
+  "expect_intent": "stop",
+  "expect_answer_contains": [
+   "OK"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "stop with wake word"
+ },
+ {
+  "id": "stop-3",
+  "text": "Stop. Driver stop",
+  "expect_intent": "stop",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "real row, stop plus garbage"
+ },
+ {
+  "id": "clear-1",
+  "text": "clear everything",
+  "expect_intent": "clear",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "clear all"
+ },
+ {
+  "id": "clear-2",
+  "text": "stop and clear everything",
+  "expect_intent": "clear",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "stop plus clear rides into clear"
+ },
+ {
+  "id": "clear-3",
+  "text": "close all the cards",
+  "expect_intent": "clear",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "clear phrasing"
+ },
+ {
+  "id": "clear-4",
+  "text": "remove everything",
+  "expect_intent": "clear",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "clear phrasing"
+ },
+ {
+  "id": "card-1",
+  "text": "remove the first card",
+  "expect_intent": "card_remove",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "one card by position"
+ },
+ {
+  "id": "card-2",
+  "text": "remove the cat card",
+  "expect_intent": "card_remove",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "one card by title"
+ },
+ {
+  "id": "card-3",
+  "text": "get rid of the cat picture",
+  "expect_intent": "card_remove",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "one card by kind"
+ },
+ {
+  "id": "comp-task-1",
+  "text": "start a session, uh, to help the Jarvis companion app allow AI agents to use remote control for clicks on all of my devices",
+  "expect_intent": [
+   "session_start",
+   "session",
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [
+   "The Companion is your phone app"
+  ],
+  "note": "real row: Companion as TASK, must not be answered as a question",
+  "model_only": true
+ },
+ {
+  "id": "comp-task-2",
+  "text": "fix the sessions list in the Jarvis companion",
+  "expect_intent": "agent",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [
+   "The Companion is your phone app"
+  ],
+  "note": "Companion as a task",
+  "model_only": true
+ },
+ {
+  "id": "comp-q-1",
+  "text": "what is the Jarvis companion",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "phone app"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "question about the Companion: whole system"
+ },
+ {
+  "id": "comp-q-2",
+  "text": "what is Java's companion",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "phone app"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "mis-heard variant of the above"
+ },
+ {
+  "id": "comp-q-3",
+  "text": "what does the Jarvis company do",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "phone app"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "mis-heard variant"
+ },
+ {
+  "id": "comp-q-4",
+  "text": "tell me about the companion app",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "phone app"
+  ],
+  "expect_answer_not_contains": [],
+  "note": "question about the Companion"
+ },
+ {
+  "id": "clock-1",
+  "text": "what time is it",
+  "expect_intent": "clock",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "local clock"
+ },
+ {
+  "id": "map-1",
+  "text": "show me a map of the walking route from King's Cross to Tower Bridge",
+  "expect_intent": "map",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: maps"
+ },
+ {
+  "id": "tfl-1",
+  "text": "when is the next Northern line train at King's Cross",
+  "expect_intent": "tfl",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: TfL tube",
+  "model_only": true
+ },
+ {
+  "id": "tfl-2",
+  "text": "when is the next 73 bus from King's Cross",
+  "expect_intent": "tfl",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: TfL bus",
+  "model_only": true
+ },
+ {
+  "id": "chart-1",
+  "text": "draw a bar chart of 3, 5 and 8",
+  "expect_intent": "chart",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: charts",
+  "model_only": true
+ },
+ {
+  "id": "draw-1",
+  "text": "draw a simple sketch of Tower Bridge",
+  "expect_intent": "draw",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: drawings"
+ },
+ {
+  "id": "3d-1",
+  "text": "show me a 3D model of a cube I can rotate",
+  "expect_intent": "3d",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: 3D",
+  "model_only": true
+ },
+ {
+  "id": "yt-1",
+  "text": "find me a YouTube video about the Tower Bridge lift",
+  "expect_intent": "youtube",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: YouTube ask (today: media)",
+  "model_only": true
+ },
+ {
+  "id": "yt-2",
+  "text": "watch this YouTube video and tell me what it says",
+  "expect_intent": "watch",
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "NOT BUILT YET: YouTube watch",
+  "model_only": true
+ },
+ {
+  "id": "place-1",
+  "text": "what's the best way to go to Dishoom",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "place pick (place search not on this build: honest answer)",
+  "model_only": true
+ },
+ {
+  "id": "place-2",
+  "text": "what's the best way to go to the cinema",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "place pick",
+  "model_only": true
+ },
+ {
+  "id": "place-3",
+  "text": "is Ebenezer on near me tonight",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "place pick: a film near me tonight",
+  "model_only": true
+ },
+ {
+  "id": "scr-5",
+  "text": "can other agents click my Mac screen",
+  "expect_intent": "answer",
+  "expect_answer_contains": [
+   "403|refus|only"
+  ],
+  "expect_answer_not_contains": [
+   "yes, any"
+  ],
+  "note": "fact sheet: other agents get 403"
+ },
+ {
+  "id": "mis-1",
+  "text": "so me a map from King's Cross to Tower Bridge",
+  "expect_intent": [
+   "map"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "mis-heard 'show me'",
+  "model_only": true
+ },
+ {
+  "id": "mis-2",
+  "text": "sketch out Tower Bridge for me",
+  "expect_intent": [
+   "draw"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "drawing in other words"
+ },
+ {
+  "id": "mis-3",
+  "text": "make me a three D model of a cube",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "mis-heard '3D'",
+  "model_only": true
+ },
+ {
+  "id": "mis-4",
+  "text": "what are my sessions up to on the mini PC",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "sessions in other words",
+  "model_only": true
+ },
+ {
+  "id": "mis-5",
+  "text": "Jarvis, clear the over, overlay",
+  "expect_intent": [
+   "clear"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "owner transcript: stutter"
+ },
+ {
+  "id": "mis-6",
+  "text": "Okay, okay, stop and clear everything",
+  "expect_intent": [
+   "clear"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "owner transcript"
+ }
+]

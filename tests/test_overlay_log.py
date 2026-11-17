@@ -478,3 +478,15 @@ def test_keep_steps_jfollow10c():
     out = overlay_log.redact(snap)
     assert [(s["step"], s["detail"]) for s in out["turns"][0]["steps"]] == list(rows.items())
     assert "SECRET-TITLE" not in repr(out) and "<svg" not in repr(out)
+
+
+def test_keep_steps_jfollow10e():
+    """jfollow10e: the intent_pick row keeps its detail (enum word, numbers, fixed words); an added
+    string field holding the owner's words is dropped. (`text` is a kept field for every row, the
+    transcribed row's own; the intent_pick emitter never passes it: test_overlay_jfollow10e checks.)"""
+    from gateway import overlay_log
+    detail = "pick=map conf=92 path=model ms=640 slots=2 reason=ok"
+    snap = {"turns": [{"id": "t1", "steps": [{"step": "intent_pick", "at": 1.0, "detail": detail,
+                                              "words": "so me a map"}]}]}
+    steps = overlay_log.redact(snap)["turns"][0]["steps"]
+    assert steps == [{"step": "intent_pick", "at": 1.0, "detail": detail}]

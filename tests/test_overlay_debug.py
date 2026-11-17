@@ -63,7 +63,8 @@ def test_debug_turn_steps_newest_first(client):
     newest, first = data["turns"]
     assert newest["steps"][0]["step"] == "voice"
     steps = {s["step"]: s for s in first["steps"]}
-    assert [s["step"] for s in first["steps"]][:4] == ["wake", "voice", "transcribed", "intent"]
+    # jfollow10e: the intent_pick row comes just before the intent row
+    assert [s["step"] for s in first["steps"]][:5] == ["wake", "voice", "transcribed", "intent_pick", "intent"]
     assert steps["wake"]["score"] == 0.91
     assert steps["voice"]["audio_ms"] == 1800
     assert steps["transcribed"]["text"] == "what is the capital of France"
@@ -128,7 +129,8 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
     monkeypatch.setenv("OVERLAY_BARGE_IN", "0")
     data = client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()
     assert data["setup"] == {"code_cli": False, "vault": False, "barge_in": False,
-                             "barge_mode": "off", "sessions_access": False}
+                             "barge_mode": "off", "sessions_access": False,
+                             "intent_pick": True, "facts": "fixture unset"}  # jfollow10e keys
     monkeypatch.setattr(overlay.shutil, "which", lambda name: str(tmp_path / name))
     monkeypatch.setenv("OVERLAY_VAULT", str(tmp_path))
     assert client.get("/overlay/debug/turns", headers=AUTH_HEADER).json()["setup"] == {"code_cli": True,
@@ -136,7 +138,9 @@ def test_debug_turns_report_setup_booleans_only(client, monkeypatch, tmp_path):
                                                                                         "vault_excluded": ["Secrets"],
                                                                                         "barge_in": False,
                                                                                         "barge_mode": "off",
-                                                                                        "sessions_access": False}
+                                                                                        "sessions_access": False,
+                                                                                        "intent_pick": True,
+                                                                                        "facts": "fixture missing"}
     page = client.get("/overlay/debug").text
     assert "VS Code command line tool (code) missing: the editor will not scroll" in page and "code_cli === false" in page
     assert "`code`" not in page  # R1 design 6: textContent would show literal backticks
@@ -187,3 +191,16 @@ def test_debug_page_reads_the_service_when_shown_again(client):
     page = client.get("/overlay/debug").text
     assert 'document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });' in page
     assert 'window.addEventListener("pageshow", tick);' in page
+
+
+def test_debug_page_intent_pick_row():
+    """jfollow10e criterion 11: the page labels an intent_pick row "intent pick" and shows its detail."""
+    import shutil
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    from test_overlay_jfollow8 import _page_rows_with_node
+    detail = "pick=map conf=92 path=model ms=640 slots=2 reason=ok"
+    got = _page_rows_with_node([{"step": "intent_pick", "detail": detail}], ["intent_pick"])
+    assert got == {"d": [detail], "l": ["intent pick"]}
+    page = (Path(__file__).resolve().parent.parent / "gateway" / "overlay_debug.html").read_text()
+    assert "Command pick: word rules only" in page and "Fact sheet: ${ok.facts}" in page
