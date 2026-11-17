@@ -239,6 +239,7 @@ def test_preview_frames_a_small_object(tmp_path):
     bpy.data.cameras.new = lambda name: SimpleNamespace(clip_start=0.1, clip_end=100.0)  # Blender defaults
     bpy.data.objects.new = lambda name, data: made.append(SimpleNamespace(name=name, data=data)) or made[-1]
     assert _run_runner(d, bpy) == 0
+    bpy.context.view_layer.update.assert_called_once_with()  # fresh matrix_world before the bounding box
     cam = next(o for o in made if o.name == "jarvis_preview_camera")
     a, b, c = cam.rotation_euler
     rx = ((1, 0, 0), (0, math.cos(a), -math.sin(a)), (0, math.sin(a), math.cos(a)))

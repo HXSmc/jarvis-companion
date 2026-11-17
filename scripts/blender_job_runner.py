@@ -23,6 +23,7 @@ def job_dir() -> str:
 
 def preview(bpy, mathutils, job: str) -> None:
     """Frame a camera on every mesh, add a sun, render Workbench 512x512 to <job>/preview.png."""
+    bpy.context.view_layer.update()  # matrix_world is stale after a script that only set location/scale/parent
     scene = bpy.context.scene
     meshes = [o for o in scene.objects if getattr(o, "type", "") == "MESH"]
     # The world-space bounding box, not the origins: an origin at the base or a tiny object still frames whole.

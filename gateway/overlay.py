@@ -2424,6 +2424,9 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
     return intents.Intent("answer", clean), None, 0
 
 
+_DRAW_WORDS = re.compile(r"\b(?:draw|drawing|sketch|diagram|illustrat\w*)\b", re.IGNORECASE)  # R3-CAT: these keep a draw pick
+
+
 async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, joined: bool, pick_open: bool,
                        deps: OverlayDeps, on_step: Callable[..., None] | None
                        ) -> tuple[intents.Intent, object]:
@@ -2466,8 +2469,7 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
             conf = min(100, round(p.conf * 100))
             if p.conf < intent_pick.PICK_CONF or (p.pick in ("watch", "3d") and p.conf < intent_pick.JOB_CONF):
                 reason = "low_conf"
-            elif (p.pick == "draw" and intents.media_request(raw_text) is not None
-                    and intents.draw_request(raw_text) is None):
+            elif p.pick == "draw" and intents.media_request(raw_text) is not None and not _DRAW_WORDS.search(raw_text):
                 reason = "picture_words"  # jfollow11d R3-CAT: "show me a picture of X" wants a real picture
             else:
                 built, extra, used = _intent_from_pick(p, word, raw_text, body.conv_id, deps)

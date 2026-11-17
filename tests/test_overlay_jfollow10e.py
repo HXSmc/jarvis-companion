@@ -412,6 +412,9 @@ def test_picture_words_never_draw():
     text = "draw me a picture of an iPhone"
     got, _, rows = _pick(text, _deps_with(FakePick(reply("draw", 0.85, subject="an iPhone"))))
     assert got == intents.Intent("draw", "an iPhone") and rows[-1].endswith("reason=ok")
+    text = "show me a diagram of a cat"  # a draw word (hub ruling list): the model's draw pick stands
+    got, _, rows = _pick(text, _deps_with(FakePick(reply("draw", 0.85, subject="a cat"))))
+    assert got == intents.Intent("draw", "a cat") and rows[-1].endswith("reason=ok")
     text = "I'd love a quick doodle of a cat"  # no picture words: the model's draw pick stands
     got, _, rows = _pick(text, _deps_with(FakePick(reply("draw", 0.85, subject="a cat"))))
     assert got.kind == "draw" and rows[-1].endswith("reason=ok")
