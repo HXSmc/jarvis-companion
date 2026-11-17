@@ -1598,6 +1598,7 @@ def geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
 
 CATEGORY = {"pharmacy": "pharmacy", "chemist": "pharmacy", "supermarket": "supermarket", "cafe": "cafe",
             "coffee shop": "cafe", "restaurant": "restaurant", "pub": "pub", "bank": "bank", "cash machine": "atm",
+            "cash point": "atm", "cashpoint": "atm",
             "atm": "atm", "post office": "post office", "hospital": "hospital", "petrol station": "petrol station",
             "library": "library", "park": "park", "gym": "gym", "bakery": "bakery", "bookshop": "bookshop"}
 _CINEMA_WORDS = frozenset({"cinema", "cinemas", "pictures", "movies", "movie theatre", "movie theater"})
@@ -1634,8 +1635,9 @@ def _place_target(x: str, place_names: tuple[str, ...]):
         return None
     if x.startswith("my ") or place_name(x) == "home" or place_name(x) in place_names or _PLACE_POSTCODE_RE.fullmatch(x):
         return ("geo", x)
-    bare = re.sub(r"^(?:the|a|an) ", "", x)
-    if not _PLACE_WORDS_RE.fullmatch(bare):
+    # "best way to get to the nearest Dishoom": the target is "dishoom", not "nearest dishoom"
+    bare = re.sub(r"^(?:(?:the|a|an) )?(?:(?:nearest|closest) )?", "", x)
+    if not _PLACE_WORDS_RE.fullmatch(bare) or bare in ("nearest", "closest"):
         return None
     if bare in _CINEMA_WORDS:
         return ("place", "cinema", "cinema")

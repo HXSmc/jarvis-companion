@@ -236,6 +236,22 @@ def test_place_request_forms():
         assert intents.parse(text, apps={}, place_names=pn).kind == "place", text
 
 
+def test_place_nearest_inside_best_way():
+    """Round 1 (ux 1, 3): "best way to get to the nearest Dishoom" searches "dishoom", not "nearest dishoom"."""
+    pn = ("home", "gym")
+    want = {
+        "best way to get to the nearest Dishoom": ("name", "dishoom"),
+        "what's the best way to go to the closest pharmacy": ("category", "pharmacy"),
+        "what's the best way to the nearest cinema": ("cinema", "cinema"),
+        "nearest cash point": ("category", "atm"),
+        "where's the closest cashpoint": ("category", "atm"),
+    }
+    for text, (mode, query) in want.items():
+        assert intents.place_request(text, place_names=pn) == {"mode": mode, "query": query, "film": "",
+                                                               "when": "today"}, text
+    assert intents.place_request("best way to get to the nearest", place_names=pn) is None
+
+
 def test_place_collisions(vault, client, net):
     pn = ("home", "gym")
     for text in ("what's the best way to go to the gym", "best way to go home", "best way to get to SW1A 2AA",
@@ -614,6 +630,39 @@ def test_film_filter_and_windows(vault, client, net, monkeypatch):
     soon = {"km": 0.3, "walk": 4, "min": 4, "shows": [(start + timedelta(minutes=1), "Ebenezer")]}
     assert len(nearby._showings(soon, {**ask, "when": "tomorrow"}, day)) == 1  # no reach rule tomorrow
     assert nearby.film_matches("ebenezer", "Ebenezer: Unlimited") and not nearby.film_matches("eben", "Ebenezer")
+
+
+def test_tomorrow_lines_name_the_day(vault, client, net, monkeypatch):
+    """Round 1 (ux 2): a tomorrow ask never hears a bare time or "today", and the card never says "left"."""
+    t = MONDAY_1930
+    tue6 = (t + timedelta(days=1)).replace(hour=18, minute=0)
+    set_now(monkeypatch, net, t)
+    net.walk = [4, 5, 6, 7, 8]
+    net.tfl = [60, 60, 60]
+    cinemas_with(net, {"odeon.co.uk-west-end": [film("Ebenezer", tue6)]})
+    deps_with()
+    events = turn(client, "what's on at the cinema tomorrow", conv_id="w1")
+    assert last_line(events) == phrase("cinema_best", name="ODEON Luxe West End", mins="4 minutes",
+                                       how="on foot", time="6pm tomorrow")
+    nearby.reset()
+    events = turn(client, "is Ebenezer on near me tomorrow", conv_id="w2")
+    assert last_line(events) == phrase("film_best", film="Ebenezer", name="ODEON Luxe West End",
+                                       time="6pm tomorrow", mins="4 minutes", how="on foot")
+    # nothing tomorrow: the line names tomorrow, never today; rows say "none_tomorrow"
+    nearby.reset()
+    cinemas_with(net, {"odeon.co.uk-west-end": [film("Ebenezer", t + timedelta(minutes=60))]})
+    events = turn(client, "what's on at the cinema tomorrow", conv_id="w3")
+    line = last_line(events)
+    assert line == phrase("cinema_none_left", when="tomorrow", name="ODEON Luxe West End", mins="4 minutes",
+                          how="on foot")
+    assert "today" not in line
+    assert {r.get("note") for r in cards(events)[0]["data"]["rows"]} == {"none_tomorrow"}
+    # today keeps its words
+    nearby.reset()
+    cinemas_with(net, {})
+    events = turn(client, "what's the best way to go to the cinema", conv_id="w4")
+    assert last_line(events).startswith("Nothing left to catch today.")
+    assert {r.get("note") for r in cards(events)[0]["data"]["rows"]} == {"none"}
 
 
 def test_film_not_found(vault, client, net, monkeypatch):

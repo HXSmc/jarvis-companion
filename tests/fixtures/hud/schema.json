@@ -569,7 +569,8 @@
                           "note": {
                             "enum": [
                               "times_not_listed",
-                              "none"
+                              "none",
+                              "none_tomorrow"
                             ]
                           }
                         },

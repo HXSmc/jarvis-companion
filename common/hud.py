@@ -374,7 +374,7 @@ def _map_data(raw) -> dict | None:
 
 MAX_ROWS = 5
 PLACE_MODES = ("walk", "bus", "tube", "train")
-PLACE_NOTES = ("times_not_listed", "none")
+PLACE_NOTES = ("times_not_listed", "none", "none_tomorrow")
 PLACE_CREDITS = ("osm", "tfl", "clusterflick")  # the page maps each key to its fixed credit line
 _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 _HOURS = re.compile(r"open 24 hours|closed now|hours not listed|open until (?:midnight|(?:[01]\d|2[0-3]):[0-5]\d)")

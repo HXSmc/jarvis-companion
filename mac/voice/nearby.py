@@ -526,9 +526,11 @@ class Answer:
     home: tuple | None = None
 
 
-def spoken_time(t: datetime) -> str:
+def spoken_time(t: datetime, when: str = "today") -> str:
+    """"6pm", or "6pm tomorrow" for a tomorrow ask (the owner must hear the day)."""
     h = t.hour % 12 or 12
-    return f"{h}{'' if t.minute == 0 else f':{t.minute:02d}'}{'am' if t.hour < 12 else 'pm'}"
+    text = f"{h}{'' if t.minute == 0 else f':{t.minute:02d}'}{'am' if t.hour < 12 else 'pm'}"
+    return text + " tomorrow" if when == "tomorrow" else text
 
 
 def _query_words(ask: dict) -> str:
@@ -566,7 +568,7 @@ def _card_rows(rows: list[dict], t: datetime, cinema: bool, shows_ok: bool, ask:
             if picked:
                 row["times"] = [{"at": s.strftime("%H:%M"), "film": title} for s, title in picked]
             else:
-                row["note"] = "none"
+                row["note"] = "none_tomorrow" if ask.get("when") == "tomorrow" else "none"
         else:
             row["note"] = "times_not_listed"
         out.append(row)
@@ -594,11 +596,11 @@ def _line(ans: Answer, rows: list[dict], cinema: bool, shows_ok: bool, ask: dict
     elif not shows_ok:
         ans.key, ans.fmt = "shows_down", base
     elif ask["mode"] == "film":
-        ans.key, ans.fmt = "film_best", {**base, "film": capwords(ask["film"]), "time": spoken_time(top["picked"][0][0])}
+        ans.key, ans.fmt = "film_best", {**base, "film": capwords(ask["film"]), "time": spoken_time(top["picked"][0][0], ask["when"])}
     elif top["picked"]:
-        ans.key, ans.fmt = "cinema_best", {**base, "time": spoken_time(top["picked"][0][0])}
+        ans.key, ans.fmt = "cinema_best", {**base, "time": spoken_time(top["picked"][0][0], ask["when"])}
     else:
-        ans.key, ans.fmt = "cinema_none_left", base
+        ans.key, ans.fmt = "cinema_none_left", {**base, "when": ask["when"]}
 
 
 def answer(ask: dict, home: tuple, budget: Budget) -> Answer:

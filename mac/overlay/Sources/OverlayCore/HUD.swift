@@ -409,7 +409,7 @@ public struct PlaceRow: Codable, Equatable {
     public var note: String?
 
     public static let modes: Set<String> = ["walk", "bus", "tube", "train"]
-    public static let notes: Set<String> = ["times_not_listed", "none"]
+    public static let notes: Set<String> = ["times_not_listed", "none", "none_tomorrow"]
     public static let creditKeys: Set<String> = ["osm", "tfl", "clusterflick"]
     static let hoursForms = ["open 24 hours", "closed now", "hours not listed", "open until midnight"]
 

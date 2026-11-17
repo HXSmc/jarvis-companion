@@ -137,7 +137,7 @@ PHRASES = {
     "place_best": "{name} is closest, {mins} {how}. It's on the card.",
     "place_best_km": "{name} is closest, {km} kilometres away. It's on the card.",
     "cinema_best": "{name} is your best bet, {mins} {how}, next showing {time}.",
-    "cinema_none_left": "Nothing left to catch today. {name} is closest, {mins} {how}.",
+    "cinema_none_left": "Nothing left to catch {when}. {name} is closest, {mins} {how}.",
     "film_best": "{film} is on at {name} at {time}, {mins} {how}.",
     "film_none": "I can't see {film} at any cinema near you {when}.",
     "shows_down": "I can't see showtimes right now. {name} is closest, {mins} {how}.",

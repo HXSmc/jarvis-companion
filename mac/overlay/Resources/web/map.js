@@ -55,7 +55,7 @@
     tfl: "Powered by TfL Open Data",
     clusterflick: "Screening data from Clusterflick (CC BY 4.0)"
   };
-  var NOTES = {times_not_listed: "times not listed", none: "no showings left"};
+  var NOTES = {times_not_listed: "times not listed", none: "no showings left", none_tomorrow: "no showings tomorrow"};
 
   function addLine(parent, cls, text) {
     var p = document.createElement("p");
