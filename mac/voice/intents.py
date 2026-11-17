@@ -1631,12 +1631,13 @@ PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest)\b", re.I)  # the s
 def _place_target(x: str, place_names: tuple[str, ...]):
     """Target words -> ("geo", words) for a saved name / home / postcode, ("place", mode, query), or None."""
     x = " ".join(x.replace("’", "'").split()).strip(" .,?!")
+    # "best way to get to the nearest Dishoom": the target is "dishoom" (a saved name then still wins)
+    x = re.sub(r"^(?:(?:the|a|an) )?(?:nearest|closest) ", "", x)
     if not x or "://" in x or "www." in x or len(x) > 60:
         return None
     if x.startswith("my ") or place_name(x) == "home" or place_name(x) in place_names or _PLACE_POSTCODE_RE.fullmatch(x):
         return ("geo", x)
-    # "best way to get to the nearest Dishoom": the target is "dishoom", not "nearest dishoom"
-    bare = re.sub(r"^(?:(?:the|a|an) )?(?:(?:nearest|closest) )?", "", x)
+    bare = re.sub(r"^(?:the|a|an) ", "", x)
     if not _PLACE_WORDS_RE.fullmatch(bare) or bare in ("nearest", "closest"):
         return None
     if bare in _CINEMA_WORDS:

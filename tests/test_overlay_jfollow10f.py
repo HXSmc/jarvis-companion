@@ -250,6 +250,10 @@ def test_place_nearest_inside_best_way():
         assert intents.place_request(text, place_names=pn) == {"mode": mode, "query": query, "film": "",
                                                                "when": "today"}, text
     assert intents.place_request("best way to get to the nearest", place_names=pn) is None
+    # a saved name stays stage B's route in every "nearest" form, like "how do I get to the nearest gym"
+    for text in ("best way to get to the nearest gym", "how do I get to the nearest gym"):
+        assert intents.place_request(text, place_names=pn) is None, text
+        assert intents.parse(text, apps={}, place_names=pn).kind == "geo_map", text
 
 
 def test_place_collisions(vault, client, net):
