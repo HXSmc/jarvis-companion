@@ -597,7 +597,7 @@ def test_film_filter_and_windows(vault, client, net, monkeypatch):
     [card] = cards(events)
     assert [r["name"] for r in card["data"]["rows"]] == ["ODEON Luxe West End"]
     assert card["data"]["rows"][0]["times"] == [{"at": "18:00", "film": "Ebenezer Unlimited Screening"}]
-    assert last_line(events) == phrase("film_best", film="ebenezer", name="ODEON Luxe West End", time="6pm",
+    assert last_line(events) == phrase("film_best", film="Ebenezer", name="ODEON Luxe West End", time="6pm",
                                        mins="4 minutes", how="on foot")
     # windows (pure): 23:30 drops a 23:35 start, keeps 00:20; 02:00 "today" ends 04:00 the same day
     late = datetime(2026, 11, 16, 23, 30, tzinfo=LON)
@@ -796,3 +796,20 @@ def test_place_turn_say_has_no_url(vault, client, net, monkeypatch):
         assert not [c for c in cards(events) if c["type"] == "link"]
         assert not any(re.search(r"https?://|www\.", s) for s in says(events))
         assert "example.com" not in json.dumps(cards(events))
+
+
+def test_odd_shapes_do_not_crash(net):
+    """Web JSON in an unexpected shape is no answer, never an exception."""
+    assert nearby._photon_hits({"features": 5}) == [] and nearby._nominatim_hits({"x": 1}) == []
+    net.override[("valhalla1.openstreetmap.de", "/sources_to_targets")] = lambda r: httpx.Response(
+        200, json={"sources_to_targets": 7})
+    assert nearby.walk_minutes(HOME, [{"lat": 51.51, "lon": -0.13}], nearby.Budget()) == [None]
+    net.override[("api.tfl.gov.uk", "/Journey/")] = lambda r: httpx.Response(
+        200, json={"journeys": [{"duration": 12, "legs": 5}]})
+    assert nearby.journey(HOME, {"lat": 51.51, "lon": -0.13}, nearby.Budget()) == {"min": 12, "mode": "walk",
+                                                                                   "points": []}
+    net.override[("clusterflick.com", "/datasets/venues/")] = lambda r: httpx.Response(
+        200, json=[{"title": "X", "performances": 5}, 3, {"title": "Y", "performances": [{"time": 1e30}]}])
+    assert nearby.venue_showings("ica.art", nearby.Budget()) == []
+    with pytest.raises(geo.GeoError):
+        nearby._parse_index({"venues": []})

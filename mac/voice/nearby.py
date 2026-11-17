@@ -4,7 +4,7 @@ Fixed code only, no model. Every request goes through geo._get / geo._post (http
 geo.HOSTS, no redirects, a byte cap per kind). What each host sees:
 - Nominatim / Photon: the owner's place words and a box (or point) from home rounded to 2 decimals (~1 km);
   never the exact home. Cinemas skip place search: the Clusterflick index is ranked here, locally.
-- clusterflick.com: two fixed static paths (the index, a venue file built from a checked venue id); no query.
+- Clusterflick: two fixed static paths (the index, a venue file built from a checked venue id); no query.
 - Valhalla matrix and TfL Journey: numbers only (home and the picked places), as stage B already sends.
 Untrusted web text (names, roads, hours, film titles) is cleaned with hud.place_text and capped; it is shown
 and spoken only, never put in a URL, a prompt or a row. Nothing here logs a name, query, film or coordinate.
@@ -18,6 +18,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from string import capwords
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
@@ -155,7 +156,8 @@ def _nominatim_hits(doc) -> list[dict]:
 
 def _photon_hits(doc) -> list[dict]:
     out = []
-    for f in (doc.get("features") if isinstance(doc, dict) else None) or []:
+    feats = doc.get("features") if isinstance(doc, dict) else None
+    for f in feats if isinstance(feats, list) else []:
         if not isinstance(f, dict):
             continue
         coords = (f.get("geometry") or {}).get("coordinates") if isinstance(f.get("geometry"), dict) else None
@@ -251,7 +253,7 @@ def walk_minutes(home: tuple, places: list[dict], budget: Budget) -> list[int | 
     except geo.GeoError:
         return out
     cells = doc.get("sources_to_targets") if isinstance(doc, dict) else None
-    flat = [c for row in cells or [] for c in (row if isinstance(row, list) else [row])]
+    flat = [c for row in (cells if isinstance(cells, list) else []) for c in (row if isinstance(row, list) else [row])]
     for c in flat:
         t, i = (c.get("time"), c.get("to_index")) if isinstance(c, dict) else (None, None)
         if (type(i) is int and 0 <= i < len(out) and isinstance(t, (int, float)) and not isinstance(t, bool)
@@ -296,7 +298,7 @@ def journey(home: tuple, place: dict, budget: Budget) -> dict | None:
     if type(mins) is not int or not 0 <= mins <= 600:
         return None
     mode, points = "walk", []
-    for leg in j.get("legs") or []:
+    for leg in j.get("legs") if isinstance(j.get("legs"), list) else []:
         if not isinstance(leg, dict):
             continue
         lid = str((leg.get("mode") or {}).get("id") or "") if isinstance(leg.get("mode"), dict) else ""
@@ -450,7 +452,8 @@ def venue_showings(vid: str, budget: Budget) -> list[tuple[datetime, str]] | Non
         if not isinstance(film, dict):
             continue
         title = hud.place_text(film.get("title"), hud.MAX_LABEL)  # bookingUrl and themoviedb are dropped here
-        for p in film.get("performances") or []:
+        perfs = film.get("performances")
+        for p in perfs if isinstance(perfs, list) else []:
             if not isinstance(p, dict) or (isinstance(p.get("status"), dict) and p["status"].get("soldOut") is True):
                 continue
             ms = p.get("time")
@@ -528,6 +531,14 @@ def spoken_time(t: datetime) -> str:
     return f"{h}{'' if t.minute == 0 else f':{t.minute:02d}'}{'am' if t.hour < 12 else 'pm'}"
 
 
+def _query_words(ask: dict) -> str:
+    """"Dishoom" for a name; "a pharmacy" / "an atm" for a category."""
+    q = ask["query"]
+    if ask["mode"] != "category":
+        return capwords(q)
+    return ("an " if q[:1] in "aeiou" else "a ") + q
+
+
 def _minutes_text(n: int) -> str:
     return f"{n} minute{'s' if n != 1 else ''}"
 
@@ -583,7 +594,7 @@ def _line(ans: Answer, rows: list[dict], cinema: bool, shows_ok: bool, ask: dict
     elif not shows_ok:
         ans.key, ans.fmt = "shows_down", base
     elif ask["mode"] == "film":
-        ans.key, ans.fmt = "film_best", {**base, "film": ask["film"], "time": spoken_time(top["picked"][0][0])}
+        ans.key, ans.fmt = "film_best", {**base, "film": capwords(ask["film"]), "time": spoken_time(top["picked"][0][0])}
     elif top["picked"]:
         ans.key, ans.fmt = "cinema_best", {**base, "time": spoken_time(top["picked"][0][0])}
     else:
@@ -599,7 +610,7 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
     try:
         if not cinema:
             ans.src, found = search(ask["mode"], ask["query"], home, budget)
-            ans.title = f"Nearest {ask['query']}"[:hud.MAX_TITLE]
+            ans.title = f"Nearest {capwords(ask['query'])}"[:hud.MAX_TITLE]
         else:
             idx, fresh = clusterflick_index(budget)
             if idx is None:  # cold cache and Clusterflick down: one bounded Nominatim "cinema" search
@@ -614,10 +625,10 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
                 if not found:
                     raise SearchFailed("place_none", "none_near")
                 ans.asof = gen.astimezone(LONDON).strftime("%H:%M") if gen else ""
-            ans.title = (f"{ask['film'].title()} near you" if ask["mode"] == "film" else "Cinemas near you")[:hud.MAX_TITLE]
+            ans.title = (f"{capwords(ask['film'])} near you" if ask["mode"] == "film" else "Cinemas near you")[:hud.MAX_TITLE]
     except SearchFailed as e:
         ans.key, ans.reason = e.key, e.reason
-        ans.fmt = {"query": ask["query"] if not cinema else "a cinema"} if e.key == "place_none" else {}
+        ans.fmt = {"query": _query_words(ask) if not cinema else "a cinema"} if e.key == "place_none" else {}
         return ans
     rows = [{**c, "walk": None, "tfl": None, "min": None, "mode": None, "shows": None, "picked": []} for c in found]
     if cinema and shows_ok:
@@ -636,7 +647,7 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
         if ask["mode"] == "film":
             rows = [r for r in rows if r["picked"]]
             if not rows:
-                ans.key, ans.reason, ans.fmt = "film_none", "film_no_match", {"film": ask["film"], "when": ask["when"]}
+                ans.key, ans.reason, ans.fmt = "film_none", "film_no_match", {"film": capwords(ask["film"]), "when": ask["when"]}
                 return ans
     rows = price(home, rows, budget)
     if cinema and shows_ok:  # re-checked with the final minutes
@@ -646,7 +657,7 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
         if ask["mode"] == "film":
             rows = [r for r in rows if r["picked"]]
             if not rows:
-                ans.key, ans.reason, ans.fmt = "film_none", "film_no_match", {"film": ask["film"], "when": ask["when"]}
+                ans.key, ans.reason, ans.fmt = "film_none", "film_no_match", {"film": capwords(ask["film"]), "when": ask["when"]}
                 return ans
         rows = sorted(rows, key=lambda r: (r["group"], r["min"] is None, r["min"] or 0, r["km"]))
     ans.rows = _card_rows(rows, t, cinema, shows_ok, ask)
