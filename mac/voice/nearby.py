@@ -51,7 +51,9 @@ OVERPASS_QUERY = ('[out:csv(name;false)][timeout:8];nwr["amenity"~"^(restaurant|
                   '["name"](around:{radius},{lat:.2f},{lon:.2f});out {cap};')
 OVERPASS_RADIUS_M, OVERPASS_CAP = 1000, 1000
 NAMES_TTL_S, NAMES_KEEP = 6 * 3600, 4  # R6: the Overpass names per rounded point, memory only
-BG_TRY_S, BG_TRIES, BG_PER_HOUR = 40.0, 2, 4  # R6 background names fetch: 2 x (40 s + 5 s connect) <= 90 s
+# R6 background names fetch: <= 2 tries sharing one 80 s deadline (+ 5 s connect) so the whole fetch stays
+# <= 90 s; try 1 may wait out Overpass's 40-46 s queue, try 2 gets what is left (after a quick 502)
+BG_TOTAL_S, BG_TRIES, BG_PER_HOUR = 80.0, 2, 4
 NEAR_RATIO, NEAR_MIN_CHARS = 0.75, 4  # misheard-name retry: how alike a nearby name must be ("disham" ~ "dishoom" 0.77)
 SHOWS_DOWN_LEAD = "I can't see showtimes right now."
 NOT_LISTED = "hours not listed"
@@ -69,6 +71,7 @@ _overpass: dict[tuple, tuple[float, list[str]]] = {}  # rounded point -> (stored
 _bg_alive: list[bool] = [False]  # R6: one background names fetch at a time
 _bg_starts: deque = deque()  # R6: when each background fetch started (geo.clock), for the hourly cap
 _spawn = lambda fn: threading.Thread(target=fn, daemon=True).start()  # noqa: E731 (tests run or drop it)
+on_names = lambda detail: None  # noqa: E731 (the gateway sets its debug row writer; fixed words + counts only)
 
 
 def reset() -> None:
@@ -272,17 +275,21 @@ def _keep_names(point: tuple, text: str) -> list[str]:
 
 
 def _names_fetch(point: tuple) -> None:
-    """R6 background thread: the same names GET, longer limit, <= BG_TRIES tries (a 502 is a try). A failure
-    leaves no entry and one fixed log line; nothing it does can reach a turn but the cache."""
+    """R6 background thread: the same names GET, <= BG_TRIES tries (a 502 is a try) inside one BG_TOTAL_S
+    deadline. One row when it ends (names=filled n= tries= | names=failed tries=); a failure leaves no entry.
+    shortcut: httpx's limit is per read, so a server trickling the body could pass the deadline by one read;
+    the names body is ~13 KB, upgrade only if a live row shows it."""
+    end, tries = geo.clock() + BG_TOTAL_S, 0
     try:
-        for _ in range(BG_TRIES):
+        while tries < BG_TRIES and end - geo.clock() >= 1:
+            tries += 1
             try:
-                text = geo._get(overpass_url(point), "overpass", total_s=BG_TRY_S).decode("utf-8", "replace")
+                text = geo._get(overpass_url(point), "overpass", total_s=end - geo.clock()).decode("utf-8", "replace")
             except geo.GeoError:
                 continue
-            _keep_names(point, text)
+            on_names(f"names=filled n={len(_keep_names(point, text))} tries={tries}")
             return
-        geo.logger.info("overpass names: background fetch failed")
+        on_names(f"names=failed tries={tries}")
     except Exception:  # never let the daemon thread die loudly; the next failed turn may try again
         geo.logger.info("overpass names: background fetch error")
     finally:

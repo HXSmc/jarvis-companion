@@ -422,6 +422,16 @@ class DebugLog:
         self.add(turn, step, detail=detail)
         return turn
 
+    def alone(self, step: str, detail: str) -> dict:
+        """A row from outside any turn (jfollow11f R6: the background names fetch ending): its own turn.
+        shortcut: landing during a wake that waits for its words splits that wake from its turn in this
+        log only; upgrade if live rows show it."""
+        turn = {"id": uuid.uuid4().hex[:8], "steps": []}
+        with self._lock:
+            self._turns.append(turn)
+        self.add(turn, step, detail=detail)
+        return turn
+
     def snapshot(self) -> dict:
         with self._lock:
             turns = [{"id": t["id"], "steps": [dict(s) for s in t["steps"]]}
@@ -434,6 +444,7 @@ class DebugLog:
 
 
 debug_log = DebugLog()
+nearby.on_names = lambda detail: debug_log.alone("place", detail)  # R6: the background names fetch row
 
 
 # --- Dependencies (tests replace the whole bundle via set_deps) ---

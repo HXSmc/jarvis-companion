@@ -466,6 +466,9 @@ def test_names_cache_after_slow_overpass(vault, client, world, monkeypatch):
     world.requests.clear()
     jobs[0]()  # the background fetch finishes
     assert world.count(OVERPASS_HOST) == 1 and len(nearby._overpass) == 1 and not nearby._bg_alive[0]
+    filled = steps("place")[-1]["detail"]  # the newest row, the one the live tester waits for: counts only
+    n = len(next(iter(nearby._overpass.values()))[1])
+    assert filled == f"names=filled n={n} tries=1" and n > 100 and ROW_RE.fullmatch(filled)
     assert world.requests[0].url == nearby.overpass_url(nearby.search_point(HOME))  # the same GET, nothing new
     world.requests.clear()
     events = turn(client, "take me to Decim", conv_id="r3")
@@ -512,6 +515,7 @@ def test_names_background_failure_and_caps(world, clock, monkeypatch):
     world.requests.clear()
     jobs[0]()
     assert world.count(OVERPASS_HOST) == 2 and not nearby._overpass and not nearby._bg_alive[0]
+    assert steps("place")[-1]["detail"] == "names=failed tries=2"
     b, _ = _search("decim")
     assert b.op == "down" and len(jobs) == 2  # a new fetch: the last one ended
     _search("decim")
@@ -529,6 +533,50 @@ def test_names_background_failure_and_caps(world, clock, monkeypatch):
     monkeypatch.setattr(nearby, "_spawn", lambda fn: (_ for _ in ()).throw(RuntimeError("no thread")))
     b, _ = _search("decim")
     assert b.op == "down" and not nearby._bg_alive[0]
+
+
+def test_names_background_deadline(world, clock, monkeypatch):
+    """The 40-46 s Overpass queue of the live runs fits try 1; a 502 then a 200 fills on try 2; the tries
+    share one BG_TOTAL_S deadline (<= 90 s with connect), each try gets only what is left, never a third."""
+    good = world.override[OVERPASS_HOST]
+    jobs = []
+    monkeypatch.setattr(nearby, "_spawn", jobs.append)
+
+    def queued(r):  # live run 2: 45.8 s
+        clock.t += 46
+        return good(r)
+
+    nearby.reset()
+    world.override[OVERPASS_HOST] = queued
+    b, _ = _search("decim")
+    assert b.op == "down" and len(jobs) == 1  # 46 s is past the turn's 8 s limit
+    jobs[-1]()
+    assert re.fullmatch(r"names=filled n=\d+ tries=1", steps("place")[-1]["detail"]) and nearby._overpass
+    nearby.reset()
+    answers = iter([httpx.Response(502), httpx.Response(502)])  # the turn's call, then background try 1
+    world.override[OVERPASS_HOST] = lambda r: next(answers, None) or good(r)
+    b, _ = _search("decim")
+    jobs[-1]()
+    assert b.op == "down" and steps("place")[-1]["detail"].endswith(" tries=2") and nearby._overpass
+    limits = []
+
+    def failing(spent):
+        def get(url, kind="route", params=None, total_s=geo.TOTAL_S):
+            assert kind == "overpass" and url == nearby.overpass_url(POINT)
+            limits.append(total_s)
+            clock.t += spent
+            raise geo.GeoError("api_error")
+        return get
+
+    assert nearby.BG_TOTAL_S + geo.CONNECT_S <= 90 and nearby.BG_TRIES == 2
+    for spent, want in ((30, [80.0, 50.0]), (79.5, [80.0])):
+        nearby.reset()
+        limits.clear()
+        monkeypatch.setattr(geo, "_get", failing(spent))
+        nearby._names_fetch(POINT)
+        assert limits == want and not nearby._overpass
+        assert all(lim + spent * i == nearby.BG_TOTAL_S for i, lim in enumerate(limits))  # what is left
+        assert steps("place")[-1]["detail"] == f"names=failed tries={len(want)}" and not nearby._bg_alive[0]
 
 
 def test_names_background_real_thread(world, monkeypatch):
