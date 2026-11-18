@@ -514,7 +514,7 @@ def test_untrusted_turn_asks(client, tmp_path, auto_on):
     note.write_text("hello")
     # (a) a Read marks the session: look-ups still run, mkdir asks; after the owner's yes, df -h runs auto
     steps = [("Read", {"file_path": str(note)}), ("Bash", {"command": "echo hi"}),
-             ("Bash", {"command": f"mkdir {Path.home()}/made"}), ("Bash", {"command": "df -h"})]
+             ("Bash", {"command": f"mkdir {_short_home()}/made"}), ("Bash", {"command": "df -h"})]
     pool, events = run_agent(client, lambda clock: (lambda: SeqAgent(clock, steps)), conv_id="u1")
     assert _rows() == ["cmd=echo decision=auto reason=ok", "cmd=mkdir decision=asked reason=untrusted"]
     assert _confirm_card(events) and [r["behavior"] for r in pool.made[0].responses] == ["allow"] * 2
