@@ -37,7 +37,8 @@ def test_off(monkeypatch):
     resp = _get("/central/repos")
     assert resp.status_code == 200 and resp.json() == {"state": "off", "repos": []}
     for path, params in (("/central/repos/alpha/file", {"path": "README"}),
-                         ("/central/repos/alpha/search", {"q": "wake"})):
+                         ("/central/repos/alpha/search", {"q": "wake"}),
+                         ("/central/repos/alpha/search", {"q": ""}), ("/central/repos/alpha/search", {"q": "a;b"})):
         r = _get(path, **params)
         assert 400 <= r.status_code < 500 and r.json() == {"error": "off"}
 

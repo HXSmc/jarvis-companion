@@ -202,8 +202,8 @@ def query_words(q: str) -> list[str]:
 
 
 def search(name: str, q: str) -> dict:
+    repo = _repo(name)  # first: with no roots set the answer is `off`, whatever q holds
     words = query_words(q)
-    repo = _repo(name)
     if not _search_lock.acquire(timeout=SEARCH_MAX_S):
         raise Refused("busy")
     try:

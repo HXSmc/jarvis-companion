@@ -2662,6 +2662,13 @@ def _repo_close(words: str, names: list[str]) -> list[str]:
     return [lower[h] for h in hits] or sorted(names)[:6]
 
 
+def _repo_secret_named(raw_text: str) -> bool:
+    """A private-looking file named in the owner's own words: refused before any call (M4)."""
+    low = intents._clean(raw_text).lower()
+    return any(repo_rules._denied(w) for w in re.findall(r"[a-z0-9_.-]+", low)
+               if "." in w.strip(".") or w.startswith((".", "id_")))
+
+
 def _repo_card(name: str, what: str, body: list[str]) -> dict | None:
     return hud.validate_card({"id": "rp-" + hashlib.sha256(f"{name}/{what}".encode()).hexdigest()[:8],
                               "type": "info", "title": f"{name} · {what}"[:60], "body": body[:6]})
@@ -2692,9 +2699,7 @@ async def _repo_turn(body: TurnBody, intent: intents.Intent, picked: object, raw
         said.append(line)
 
     low = intents._clean(raw_text).lower()
-    # A private-looking file named in the owner's own words is refused before any call (M4).
-    if any(repo_rules._denied(w) for w in re.findall(r"[a-z0-9_.-]+", low)
-           if "." in w.strip(".") or w.startswith((".", "id_"))):
+    if _repo_secret_named(raw_text):  # before any call (M4)
         log("secret_name")
         async for ev in say("repo_refused"):
             yield ev
@@ -2711,6 +2716,11 @@ async def _repo_turn(body: TurnBody, intent: intents.Intent, picked: object, raw
             yield ev
         return
     name = _repo_match(intent.arg, names)
+    if not names:  # roots set but no repo under them: "closest ones on the card" would be untrue
+        log("no_repo")
+        async for ev in say("repo_off"):
+            yield ev
+        return
     if name is None:
         log("no_repo")
         card = hud.validate_card({"id": "rp-repos", "type": "info", "title": "Repos",
@@ -2739,7 +2749,8 @@ async def _repo_turn(body: TurnBody, intent: intents.Intent, picked: object, raw
         reason = got.get("error") if got.get("error") in _REPO_REASONS else "error"
         log(reason)
         key = ("repo_off" if reason == "off" else "repo_refused" if reason in _REPO_REFUSED
-               else "repo_unknown" if reason == "no_repo" else "repo_no_hits")
+               else "repo_unknown" if reason == "no_repo" else "repo_busy" if reason == "busy"
+               else "repo_unreadable" if reason in ("too_big", "binary", "bad_utf8") else "repo_no_hits")
         async for ev in say(key, **({"repo": name} if key == "repo_no_hits" else {})):
             yield ev
         return
@@ -3064,6 +3075,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             ack_phrase_key = None  # no gateway access: the no_sessions_access line is the whole speech
         elif notes_unset:
             ack_phrase_key = None  # the vault_unset line is the whole speech
+        elif intent.kind == "repo" and _repo_secret_named(raw_text):
+            ack_phrase_key = None  # the refusal line is the whole speech, said before any call
         elif (intent.kind == "answer"
               and (body.conv_id in _tainted or _holds_agent_state(body.conv_id, deps, cursor=False))
               and _MEDIA_NOUN_RE.search(body.text)):
@@ -3105,7 +3118,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         detail="stop (barge-in, silent)" if body.barge_in else "stop")
 
         elif intent.kind == "new_topic":  # jfollow11c D4: the D3 steps now, or due at the next turn start
-            if fresh is None:
+            # still due here = the turn start already tried it and deferred (one row per decision)
+            if fresh is None and body.conv_id not in _fresh_due:
                 _due_fresh(body.conv_id, "new_topic")
                 got = await _start_due_fresh(body.conv_id, deps, owner_answer_due, step)
                 if got is not None:
@@ -5110,6 +5124,9 @@ def _mark_session(conv_id: str, session, command) -> None:
     """A tool result reached the agent: unless it was a quiet look-up, later commands need look-ups only."""
     if auto_policy.marks(command):
         session.auto_tainted = True
+        # The agent's echo of that text sits in the conv's history, which outlives the session (stop,
+        # deny, timeout drop it): the conv keeps the mark until _fresh_conversation drops both.
+        _auto_tainted.add(conv_id)
         _marked_sessions.pop(conv_id, None)
         _marked_sessions[conv_id] = session
         while len(_marked_sessions) > 64:

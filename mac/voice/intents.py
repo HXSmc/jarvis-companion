@@ -398,8 +398,7 @@ _README = r"\b(?:readme(?:\.md)?|read me)\b"
 _REPO_README_RE = re.compile(_README + r"(?: file)? (?:of|for|in|from) (?:the |my )?"
                              r"(?P<name>[a-z0-9][\w.-]*(?: [\w.-]+){0,4}?)"
                              r"(?: (?:repo|repository))?(?: (?:say|says|said|file|contain|contains))?$")
-_REPO_LEAD = re.compile(r"\b(?:where|which file|what file|find|search|look|grep|read|in which"
-                        r"|how (?:does|do|is))\b")
+_REPO_LEAD = re.compile(r"\b(?:where|which file|what file|find|search|look|grep|read|in which)\b")
 # A change, a run or a session ask is never a read-only repo question.
 _REPO_CHANGE = re.compile(r"\b(?:fix|edit|update|change|changed|write|rewrite|add|remove|delete|create|commit"
                           r"|push|pull|merge|refactor|rename|move|start|stop|run|install|deploy|open|diff"
@@ -431,7 +430,8 @@ def repo_request(text: str) -> RepoAsk | None:
         return None
     m = _REPO_README_RE.search(low)
     if m:
-        return RepoAsk("read", m["name"].strip(), "")
+        name = m["name"].strip()
+        return None if name in ("repo", "repository") else RepoAsk("read", name, "")
     words = low.split()
     for i in range(len(words) - 1, -1, -1):
         if words[i] in ("repo", "repository", "repo's"):
@@ -443,7 +443,11 @@ def repo_request(text: str) -> RepoAsk | None:
             if not _REPO_LEAD.search(low):
                 return None
             rest = " ".join(words[:j] + words[i + 1:])
-            return RepoAsk("read" if re.search(_README, rest) else "search", " ".join(words[j:i]), repo_query(rest))
+            if re.search(_README, rest):
+                return RepoAsk("read", " ".join(words[j:i]), "")
+            query = repo_query(rest)
+            # "where is the X repo": nothing to search for, so not a repo search (BASE kinds keep it)
+            return RepoAsk("search", " ".join(words[j:i]), query) if query else None
     return None
 
 

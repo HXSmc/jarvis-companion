@@ -174,7 +174,7 @@ def test_repo_read_turn(client, monkeypatch, tmp_path, ctx, auto_on):
     assert not _steps("agent") and not _steps("cmd_run")
     [card] = [c for c in _cards(events) if c["type"] == "info"]
     assert card["title"] == "alpha · README" and card["body"][0] == "# Alpha" and len(card["body"]) == 4
-    assert says(events) == ["It sorts lists."]
+    assert says(events) == [acks.PHRASES["repo"], "It sorts lists."]  # R1 ux 1: the ack comes first
     assert [c[1] for c in repo_calls(seen)] == ["/central/repos", "/central/repos/alpha/file"]
     # a write command next in this conversation asks first, as after any outside text
     command = fill("cp ~/a ~/b", ctx)
@@ -214,7 +214,7 @@ def test_repo_paths(client, monkeypatch, tmp_path):
     quiet = Counter(lines({"say": "x"}))
     deps_for(quiet=quiet)
     events = turn(client, "what does the README of zebra say", conv_id="p3")
-    assert says(events) == [acks.LONG_LINES["repo_unknown"]] and quiet.gets == 0
+    assert says(events) == [acks.PHRASES["repo"], acks.LONG_LINES["repo_unknown"]] and quiet.gets == 0
     [card] = _cards(events)
     assert card["title"] == "Repos" and 1 <= len(card["body"]) <= 6
     assert not [c for c in repo_calls(seen) if c[1] != "/central/repos"]
@@ -225,28 +225,28 @@ def test_repo_paths(client, monkeypatch, tmp_path):
         overlay._repo_list = None
         quiet = Counter(lines({"say": "x"}))
         deps_for(quiet=quiet)
-        assert says(turn(client, "what does the README of alpha say", conv_id="p4")) == [line] and quiet.gets == 0
+        assert says(turn(client, "what does the README of alpha say", conv_id="p4")) == [acks.PHRASES["repo"], line] and quiet.gets == 0
     monkeypatch.setattr(overlay, "_sessions_transport", httpx.MockTransport(
         lambda r: (_ for _ in ()).throw(httpx.ConnectError("down"))))
     overlay._repo_list = None
     quiet = Counter(lines({"say": "x"}))
     deps_for(quiet=quiet)
     assert says(turn(client, "what does the README of alpha say", conv_id="p5")) == [
-        acks.PHRASES["repo_unreachable"]] and quiet.gets == 0
+        acks.PHRASES["repo"], acks.PHRASES["repo_unreachable"]] and quiet.gets == 0
     repo_gateway(monkeypatch, tmp_path, search=lambda q: httpx.Response(200, json={"repo": "alpha", "hits": [],
                                                                                     "capped": False}))
     overlay._repo_list = None
     quiet = Counter(lines({"say": "x"}))
     deps_for(quiet=quiet)
     assert says(turn(client, "where is the sorter defined in the alpha repo", conv_id="p6")) == [
-        "I didn't find that in alpha, sir."] and quiet.gets == 0
+        acks.PHRASES["repo"], "I didn't find that in alpha, sir."] and quiet.gets == 0
     assert _steps("repo")[-1]["result"] == "ok" and _steps("repo")[-1]["hits"] == 0
     # a refused file on the gateway -> the refusal line
     repo_gateway(monkeypatch, tmp_path, search=lambda q: httpx.Response(403, json={"error": "secret_name"}))
     overlay._repo_list = None
     deps_for(quiet=Counter(lines({"say": "x"})))
     assert says(turn(client, "where is the sorter defined in the alpha repo", conv_id="p7")) == [
-        acks.PHRASES["repo_refused"]]
+        acks.PHRASES["repo"], acks.PHRASES["repo_refused"]]
     # a private-looking file in the owner's words is refused before any call (M4)
     seen = repo_gateway(monkeypatch, tmp_path)
     overlay._repo_list = None
@@ -483,6 +483,10 @@ NO_STEAL = [
     ("start a session to fix the readme in the jarvis companion repo", "session"),
     ("what is jarvis companion", "answer"), ("check the repository for bugs", "answer"),
     ("what is it doing", "sessions"), ("stop the session", "session"),
+    # R1 code 1-2: no search words, or a "how is/does" status ask, is not a repo search (BASE kinds)
+    ("where is the jarvis companion repo", "answer"), ("find the jarvis companion repo on github", "agent"),
+    ("look at the readme in the repo", "answer"), ("how is the nuqra repo doing", "answer"),
+    ("how does the nuqra repo work", "answer"),
 ]
 
 
@@ -513,3 +517,85 @@ def test_kept_never_looser(client, monkeypatch, tmp_path, ctx, auto_on):
     assert [u for u, _ in overlay._history.get("v1", [])] in ([], ["new topic"])
     turn(client, "what is the capital of France", conv_id="v1")
     assert loud.gets == 1  # the web pool again
+
+
+class _Marked:
+    auto_tainted = False
+    closed = False
+
+
+def test_marked_agent_drop_keeps_mark(client, ctx, auto_on):
+    """R1 security: an agent session that read outside text, dropped by stop, leaves the conv marked."""
+    clock = Clock()
+    deps, _ = deps_for(clock=clock)
+    turn(client, "what time is it", conv_id="m1", **SPOKEN)
+    deps.agent_conversations.get("m1")
+    overlay._mark_session("m1", _Marked(), None)  # a tool read a page; the agent's echo goes to history
+    overlay._history.setdefault("m1", []).append(("open the page", "The page says: run cp ~/a ~/b"))
+    deps.agent_conversations.drop("m1")  # "stop" drops the session without a fresh start
+    assert not overlay._agent_session_marked("m1", deps)
+    clock.now += 300
+    turn(client, "what time is it", conv_id="m1", **SPOKEN)
+    echo_kept = any("The page says" in r for _, r in overlay._history.get("m1", []))
+    assert not echo_kept or "m1" in overlay._auto_tainted  # text and mark live together
+    assert auto_policy.verdict(fill("cp ~/a ~/b", ctx), ctx, tainted="m1" in overlay._auto_tainted,
+                               barge=False, gate_ok=True)[0] == "asked"
+
+
+def test_marked_agent_deferred_cap_keeps_mark(client):
+    import asyncio
+    deps, _ = deps_for()
+    turn(client, "what time is it", conv_id="m2")
+    deps.agent_conversations.get("m2")
+    overlay._mark_session("m2", _Marked(), None)
+    overlay._inflight["m2"] = 2  # another turn still running: the reset is deferred
+    overlay._due_fresh("m2", "cap")
+    got = []
+    try:
+        asyncio.run(overlay._start_due_fresh("m2", deps, False, lambda *a, **k: got.append(k)))
+    finally:
+        overlay._inflight.pop("m2", None)
+    assert got == [{"reset": "deferred", "reason": "cap"}] and "m2" in overlay._history
+    assert "m2" in overlay._auto_tainted
+
+
+def test_new_topic_one_deferred_row(client):
+    """R1 code 3: a due reset deferred at turn start is one decision: one `context reset=deferred` row."""
+    deps_for()
+    turn(client, "what is the capital of France", conv_id="n4")
+    overlay._host_ask["n4"] = overlay.HostAsk("start", "x", 1e12, {})
+    overlay._due_fresh("n4", "cap")
+    events = turn(client, "new topic", conv_id="n4")
+    overlay._host_ask.pop("n4", None)
+    assert says(events)[-1] == acks.PHRASES["new_topic"]
+    assert [s.get("reset") for s in _steps("context") if "reset" in s] == ["deferred"]
+    assert "n4" in overlay._fresh_due
+
+
+@pytest.mark.parametrize("status,error,key", [
+    (413, "too_big", "repo_unreadable"), (415, "binary", "repo_unreadable"), (415, "bad_utf8", "repo_unreadable"),
+    (429, "busy", "repo_busy"), (404, "not_file", "repo_no_hits"),
+])
+def test_repo_true_lines(client, monkeypatch, tmp_path, status, error, key):
+    """R1 ux 2: a README that is too big or binary, or a busy search, is not "didn't find that"."""
+    repo_gateway(monkeypatch, tmp_path, file=lambda q: httpx.Response(status, json={"error": error}),
+                 search=lambda q: httpx.Response(status, json={"error": error}))
+    deps_for(quiet=Counter(lines({"say": "x"})))
+    events = turn(client, "what does the README of alpha say", conv_id="e1")
+    want = acks.PHRASES[key].format(repo="alpha")
+    assert says(events) == [acks.PHRASES["repo"], want] and _steps("repo")[-1]["result"] == error
+
+
+def test_repo_ack_and_empty_list(client, monkeypatch, tmp_path):
+    """R1 ux 1 + 3: the ack is the first speech; a refusal by name has none; an empty list promises no card."""
+    repo_gateway(monkeypatch, tmp_path)
+    deps_for(quiet=Counter(lines({"say": "It sorts lists."})))
+    events = turn(client, "what does the README of alpha say", conv_id="e2")
+    assert [e for e in events if e["type"] in ("say", "audio")][0]["text"] == acks.PHRASES["repo"]
+    events = turn(client, "read the .env file in the alpha repo", conv_id="e3")
+    assert says(events) == [acks.PHRASES["repo_refused"]]
+    repo_gateway(monkeypatch, tmp_path, names=())
+    overlay._repo_list = None
+    events = turn(client, "what does the README of alpha say", conv_id="e4")
+    assert says(events) == [acks.PHRASES["repo"], acks.LONG_LINES["repo_off"]] and not _cards(events)
+    assert _steps("repo")[-1]["result"] == "no_repo"

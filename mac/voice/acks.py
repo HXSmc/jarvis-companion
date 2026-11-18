@@ -72,7 +72,10 @@ PHRASES = {
     "no_sessions": "No sessions to report.",
     "no_session_named": "I don't see a session called that.",
     # jfollow11c: read-only repo answers, sessions that say what they did, and a fresh start.
+    "repo": "Checking the repo.",
     "repo_refused": "I won't read that file, sir. It looks private.",
+    "repo_unreadable": "I can't read that one, sir.",
+    "repo_busy": "I'm busy with another search, sir. Ask again in a moment.",
     "repo_unreachable": "I can't reach the mini PC right now, sir.",
     # A template ({repo} = a listed repo name only): spoken through the synth, never prerendered.
     "repo_no_hits": "I didn't find that in {repo}, sir.",
@@ -229,7 +232,8 @@ ACK_POLICY: dict[str, str | None] = {
     "sessions": "sessions",
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
     "card_remove": None, "card_help": None,
-    "repo": None, "new_topic": None,  # jfollow11c: their own fixed line (or the answer) is the speech
+    "repo": "repo",  # jfollow11c R1: the slow mini PC path; a refusal by name skips it (overlay)
+    "new_topic": None,  # jfollow11c: its own fixed line is the speech
     "answer": "answer",
 }
 
