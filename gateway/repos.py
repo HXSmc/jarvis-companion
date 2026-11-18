@@ -146,6 +146,7 @@ def _open_inside(repo: str, rel: str) -> int:
     real = os.path.realpath(full)
     if not real.startswith(repo + os.sep):
         raise Refused("outside")
+    check_path(real[len(repo) + 1:].replace(os.sep, "/"))  # an in-repo link to .git or a secret file
     try:
         fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     except OSError:

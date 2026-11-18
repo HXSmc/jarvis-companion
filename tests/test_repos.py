@@ -113,6 +113,17 @@ def test_read_refusals(root, tmp_path):
     assert _get("/central/repos/nope/file", path="README").json() == {"error": "no_repo"}
 
 
+def test_read_refusals_inner_links(root):
+    repo = _repo(root, "alpha", {".env": "inner words"})
+    os.symlink(repo / ".git", repo / "gitlink")
+    os.symlink(repo / ".env", repo / "notes.txt")
+    for path, reason in {"gitlink/config": "git", "notes.txt": "secret_name"}.items():
+        r = _get("/central/repos/alpha/file", path=path)
+        assert r.json() == {"error": reason}, path
+    hits = _get("/central/repos/alpha/search", q="inner").json()["hits"]
+    assert hits == []
+
+
 def test_read_ok(root):
     key = "sk-" + "test" + "x" * 20
     _repo(root, "alpha", {"Readme.MD": f"# Alpha\nan invented tool\nkey {key}\n", "src/long.txt": "b" * 20_000})
