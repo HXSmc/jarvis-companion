@@ -405,6 +405,7 @@ _REPO_CHANGE = re.compile(r"\b(?:fix|edit|update|change|changed|write|rewrite|ad
                           r"|session|sessions|clone|build|test)\b")
 _REPO_STOP = frozenset("the a an this that my our your in of for from on at to is it its which what where and or "
                        "with whole same current local code git github".split())
+_REPO_NOT_NAME = _REPO_STOP | frozenset("repo repository repos project projects codebase app here these those".split())
 _QUERY_STOP = _REPO_STOP | frozenset(
     "is are was be handled handle handles defined define implemented implement done located lives live kept set up "
     "used use found does do did how show me find search look grep read please jarvis hey can you could would tell "
@@ -432,7 +433,8 @@ def repo_request(text: str) -> RepoAsk | None:
     m = _REPO_README_RE.search(low)
     if m:
         name = m["name"].strip()
-        return None if name in ("repo", "repository") else RepoAsk("read", name, "")
+        # R3: "the readme of this repo / it / my project" names no listed repo (README reads skip the pick)
+        return None if set(name.split()) <= _REPO_NOT_NAME else RepoAsk("read", name, "")
     words = low.split()
     for i in range(len(words) - 1, -1, -1):
         if words[i] in ("repo", "repository", "repo's"):

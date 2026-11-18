@@ -487,6 +487,11 @@ NO_STEAL = [
     ("where is the jarvis companion repo", "answer"), ("find the jarvis companion repo on github", "agent"),
     ("look at the readme in the repo", "answer"), ("how is the nuqra repo doing", "answer"),
     ("how does the nuqra repo work", "answer"),
+    # R3: "this/that/it/current/my project" is no repo name (README reads now skip the pick); BASE kinds
+    ("what does the readme of this repo say", "answer"), ("read the readme in this project", "answer"),
+    ("what does the readme of it say", "answer"), ("what does the readme of that say", "answer"),
+    ("what does the readme in the current repo say", "answer"), ("what does the readme of my project say", "answer"),
+    ("where is the wake word handled in the current repo", "answer"),
 ]
 
 
