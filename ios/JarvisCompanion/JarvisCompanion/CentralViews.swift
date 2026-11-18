@@ -306,10 +306,12 @@ final class SessionsModel: ObservableObject {
 
     /// A card button: the gateway sends the session one plain message, then the card refreshes.
     /// Returns an error line for the card, or nil when it went through.
-    func answer(sessionID: String, needID: String, answer: String, checked: [Bool] = []) async -> String? {
+    /// `note` is only sent by the Message field of a `mac` ask (stored, not sent to a session).
+    func answer(sessionID: String, needID: String, answer: String, checked: [Bool] = [],
+                note: String = "") async -> String? {
         do {
             let body: [String: Any] = ["msg_id": UUID().uuidString, "need_id": needID,
-                                       "answer": answer, "checked": checked]
+                                       "answer": answer, "checked": checked, "note": note]
             _ = try await Central.data(Central.request("/central/cards/\(sessionID)/answer", method: "POST", json: body))
             await refresh()
             return nil
@@ -1812,6 +1814,7 @@ struct CardInfo: Decodable, Equatable {
         case "choice": return (need.options ?? []).map { (label: $0, sends: true) } + [(label: "Something else", sends: false)]
         case "checklist": return [("Send results", true), ("Add a note", false)]
         case "hardware": return [("Open in Hardware Mode", false), ("Reply", false)]
+        case "mac": return [("Free", true), ("Message", false)]  // Message opens a field on the card
         default: return [("OK", true), ("Reply", false)]
         }
     }
@@ -1973,11 +1976,16 @@ struct CardExtras: View {
     @State private var sending: String?
     @State private var error: String?
     @State private var checked: [Bool] = []
+    /// The Message field of a `mac` ask: open state and its text.
+    @State private var messageOpen: Bool
+    @State private var message = ""
 
+    /// `messageOpen` is for the snapshot test only; the app always starts closed.
     init(session: CentralSession, card: CardInfo, model: SessionsModel, compact: Bool,
          openChat: @escaping (ChatTarget) -> Void, openFile: @escaping (CardFileTarget) -> Void,
          openSession: @escaping (String) -> Void,
-         openHardware: @escaping (HWTarget) -> Void = { _ in }) {
+         openHardware: @escaping (HWTarget) -> Void = { _ in }, messageOpen: Bool = false) {
+        _messageOpen = State(initialValue: messageOpen)
         self.session = session
         self.card = card
         self.model = model
@@ -2069,7 +2077,9 @@ struct CardExtras: View {
         if let answered = need.answered {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill").foregroundColor(.centralGreen)
-                Text(answered.answer == "reply" ? "You replied in the chat" : "You answered: \(answered.answer ?? "")")
+                Text(answered.answer == "reply" ? "You replied in the chat"
+                     : need.kind == "mac" && answered.answer == "Message" ? "You sent a message"
+                     : "You answered: \(answered.answer ?? "")")
                     .font(.footnote.weight(.semibold))
                     .foregroundColor(.jarvisText)
                     .lineLimit(1)
@@ -2100,6 +2110,9 @@ struct CardExtras: View {
                     }
                 }
                 buttonRows(need)
+                if need.kind == "mac" && messageOpen {
+                    messageField(need)
+                }
             }
             .onAppear {
                 if checked.count != (need.items ?? []).count { checked = Array(repeating: false, count: (need.items ?? []).count) }
@@ -2136,10 +2149,69 @@ struct CardExtras: View {
         }
     }
 
+    /// Inline field under the `mac` ask's buttons: the text is stored on the card
+    /// for the waiting tester to read, so it never opens the chat.
+    private func messageField(_ need: CardInfo.Need) -> some View {
+        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Message for the tester")
+                .font(.footnote.weight(.semibold))
+                .foregroundColor(.jarvisText)
+            TextField("Message for the tester", text: $message,
+                      prompt: Text("For example: give me 10 minutes").foregroundColor(.jarvisMuted), axis: .vertical)
+                .lineLimit(2...5)
+                .font(.subheadline)
+                .foregroundColor(.jarvisText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(minHeight: 44)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                .disabled(sending != nil)
+                .accessibilityLabel("Message for the tester")
+                .accessibilityHint("The waiting test reads it. Up to 300 characters.")
+            HStack(spacing: 8) {
+                Button {
+                    messageOpen = false
+                } label: {
+                    Text("Cancel")
+                        .font(.subheadline.weight(.bold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                        .foregroundColor(.jarvisText)
+                }
+                .disabled(sending != nil)
+                Button {
+                    Task {
+                        sending = "Send"
+                        error = await model.answer(sessionID: session.sessionId, needID: need.id,
+                                                   answer: "Message", note: text)
+                        sending = nil
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if sending == "Send" { ProgressView().tint(Color.black) }
+                        Text("Send")
+                    }
+                    .font(.subheadline.weight(.bold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(RoundedRectangle(cornerRadius: 10)
+                        .fill(text.isEmpty ? Color.jarvisAccent.opacity(0.4) : Color.jarvisAccent))
+                    .foregroundColor(Color.black)
+                }
+                .disabled(text.isEmpty || sending != nil)
+                .accessibilityHint(text.isEmpty ? "Write a message first" : "Sends the message to the waiting test")
+            }
+            .padding(.top, 4)
+        }
+    }
+
     private func actionButton(_ need: CardInfo.Need, _ label: String, sends: Bool, primary: Bool) -> some View {
         let opensHardware = need.kind == "hardware" && label == "Open in Hardware Mode"
+        let opensMessage = need.kind == "mac" && label == "Message"
         return Button {
-            if opensHardware {
+            if opensMessage {
+                messageOpen = true
+            } else if opensHardware {
                 // No answer is posted here; the gateway's Hardware Mode report-back marks it done.
                 openHardware(HWTarget(id: session.sessionId, task: need.question))
             } else if sends {
@@ -2167,6 +2239,8 @@ struct CardExtras: View {
         }
         .disabled(sending != nil)
         .accessibilityHint(opensHardware ? need.question
+                           : opensMessage ? "Opens a field to write to the waiting test"
+                           : need.kind == "mac" ? "Tells the waiting test the Mac is free"
                            : sends ? "Sends \(label) to the session"
                            : "Opens the chat to write what to change")
     }
