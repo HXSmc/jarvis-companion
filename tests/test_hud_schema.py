@@ -298,3 +298,17 @@ def test_chart_card():
     assert len(hud.validate_card({**line, "labels": ["x" * 40] + line["labels"][1:]})["labels"][0]) == 24
     assert hud.validate_card({**line, "chart": "radar"}) is None
     assert "chart" in json.dumps(hud.schema_json()["$defs"]["card"])
+
+
+def test_web_model_page():
+    """jfollow10d criterion 21: the model page's data is {slug, view} only; service-only like every web card."""
+    msg = json.loads((FIXTURES / "web-model.json").read_text())
+    (card,) = msg["cards"]
+    assert hud.validate_card(card, allow_web=True) == card
+    assert hud.validate_card(card) is None
+    extra = {**card, "data": {**card["data"], "path": "../../x", "html": "<b>"}}
+    assert hud.validate_card(extra, allow_web=True)["data"] == {"slug": "test-mug", "view": "model"}
+    for bad in ({"slug": "../x", "view": "model"}, {"slug": "Test", "view": "model"}, {"slug": "a" * 49, "view": "model"},
+                {"slug": "test-mug", "view": "edit"}, {"slug": "test-mug"}, "test-mug"):
+        assert hud.validate_card({**card, "data": bad}, allow_web=True) is None, bad
+    assert '"model"' in json.dumps(hud.schema_json()["$defs"]["card"])

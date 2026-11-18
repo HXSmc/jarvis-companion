@@ -51,7 +51,7 @@ ENUM_SLOTS = {
 WORD_ONLY = frozenset({
     "auto_mode", "session", "memory", "workspace", "vault_secrets", "open_app", "open_site", "card_size",
     "card_help", "hide", "show", "aside", "restore", "clock", "hunk", "git_diff", "ground", "look",
-    "place_save", "place_forget", "media",
+    "place_save", "place_forget", "media", "model_show", "model_list",
 })
 KIND_TO_PICK = {
     "stop": "stop", "clear": "clear", "card_remove": "card_remove", "move": "move",
@@ -59,6 +59,7 @@ KIND_TO_PICK = {
     "transit_next": "tfl", "transit_status": "tfl", "transit_journey": "tfl",
     "draw": "draw", "video_ask": "youtube", "video_watch": "watch",
     "sessions": "sessions", "agent": "agent", "answer": "answer",
+    "model_create": "3d", "model_list": "3d", "model_show": "3d",
 }
 
 PICK_PROMPT = """You sort one spoken request for a voice assistant into exactly one command type. Speech-to-text often mishears: "so me" is "show me", "Java's companion" is "Jarvis Companion", "three D" is "3D", "over, overlay" is "overlay".

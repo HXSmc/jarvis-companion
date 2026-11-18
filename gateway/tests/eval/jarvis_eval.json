@@ -299,12 +299,24 @@
   "note": "NOT BUILT YET: drawings"
  },
  {
+  "id": "draw-2",
+  "text": "show me a picture of a cat",
+  "expect_intent": [
+   "answer",
+   "media"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "a picture ask with no draw verb is a real picture, never a drawing",
+  "model_only": false
+ },
+ {
   "id": "3d-1",
   "text": "show me a 3D model of a cube I can rotate",
   "expect_intent": "3d",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: 3D",
+  "note": "3D show or make",
   "model_only": true
  },
  {
@@ -472,5 +484,60 @@
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
   "note": "router sessions = the app's sessions"
+ },
+ {
+  "id": "3d-2",
+  "text": "can you pull up my test mug 3D model",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite show, says 3D",
+  "model_only": false
+ },
+ {
+  "id": "3d-3",
+  "text": "please pull up the chess pawn 3D object",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite show, says 3D",
+  "model_only": false
+ },
+ {
+  "id": "3d-4",
+  "text": "could you make me a 3D model of a coffee mug",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite create",
+  "model_only": false
+ },
+ {
+  "id": "3d-5",
+  "text": "show my 3D models please",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "list",
+  "model_only": false
+ },
+ {
+  "id": "3d-6",
+  "text": "can you pull up the weather",
+  "expect_intent": [
+   "answer"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite pull-up that is not a 3D object",
+  "model_only": false
  }
 ]

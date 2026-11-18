@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field
 
 from common import facts, hud, svgsafe
 from mac.voice import (acks, agent, agent_policy, auto_policy, geo, gitdiff, ground, intents, lean,
-                       intent_pick, media_lookup, memory, places, workspaces, youtube)
+                       intent_pick, media_lookup, memory, models3d, places, workspaces, youtube)
 
 logger = logging.getLogger(__name__)
 
@@ -2407,9 +2407,24 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
         return intents.Intent("sessions", "", ""), None, 0
     if p.pick == "agent":
         return intents.Intent("agent", clean, intents._agent_sub(clean.lower())), None, 0
-    # answer, chart (the answer model draws the chart card), place and 3d (not on this build: the
-    # answer says so from the fact sheet)
+    if p.pick == "3d":  # jfollow11d: a 3d pick always yields a 3D kind (the model-path gates run in _model_turn)
+        if p.sub == "create":
+            ask = intents.model_request(raw_text)
+            if ask is not None and ask.kind == "model_create":
+                return ask, None, 0
+            desc, name = slots.get("desc", ""), slots.get("name", "")
+            if not desc:
+                return intents.Intent("model_create", "", "ask"), None, 0
+            return intents.Intent("model_create", desc, name), None, 1 + bool(name)
+        if p.sub == "show" and slots.get("name"):
+            return intents.Intent("model_show", slots["name"]), None, 1
+        return intents.Intent("model_list"), None, 0
+    # answer, chart (the answer model draws the chart card) and place (not on this build: the answer
+    # says so from the fact sheet)
     return intents.Intent("answer", clean), None, 0
+
+
+_DRAW_WORDS = re.compile(r"\b(?:draw|drawing|sketch|diagram|illustrat\w*)\b", re.IGNORECASE)  # R3-CAT: these keep a draw pick
 
 
 async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, joined: bool, pick_open: bool,
@@ -2454,6 +2469,8 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
             conf = min(100, round(p.conf * 100))
             if p.conf < intent_pick.PICK_CONF or (p.pick in ("watch", "3d") and p.conf < intent_pick.JOB_CONF):
                 reason = "low_conf"
+            elif p.pick == "draw" and intents.media_request(raw_text) is not None and not _DRAW_WORDS.search(raw_text):
+                reason = "picture_words"  # jfollow11d R3-CAT: "show me a picture of X" wants a real picture
             else:
                 built, extra, used = _intent_from_pick(p, word, raw_text, body.conv_id, deps)
                 if built is None:
@@ -2510,7 +2527,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         # and a one-card remove are (jfollow9: they act on the screen, room talk must not).
         if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind
                 in ("answer", "clear", "card_remove", "auto_mode", *GEO_KINDS, "video_ask", "video_watch",
-                    "draw")
+                    "draw", "model_create")
                 and not (intents.is_cancel(body.text) or intents.is_confirm(body.text)
                          or intents.is_no(body.text) or intents.is_stop(body.text))):
             reason, level = _followup_gate(body)
@@ -2577,7 +2594,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         ws_names = await asyncio.to_thread(_ws_names)
         place_names = await asyncio.to_thread(places.names) if "forget" in body.text.lower() else ()
-        word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names)
+        model_names = await asyncio.to_thread(_model_names, body.text)
+        word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names,
+                             model_names=model_names)
         intent, picked = await _pick_intent(body, raw_text, word, joined=joined,
                                             pick_open=pick is not None or owner_answer_due, deps=deps,
                                             on_step=on_step)
@@ -2660,7 +2679,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         # the switch's own line is the answer: no ack before it (acks.py gains phrase keys only)
-        ack_phrase_key = (None if intent.kind in ("auto_mode", *GEO_KINDS, "video_ask", "video_watch", "draw")
+        ack_phrase_key = (None if intent.kind in ("auto_mode", *GEO_KINDS, "video_ask", "video_watch", "draw",
+                                                  *MODEL_KINDS)
                           else acks.ack_key(intent.kind, intent.sub))
         # A notes search with no vault set would start the file agent in some repo: say it is unset.
         notes_unset = intent.kind == "agent" and intent.sub == "notes" and not os.environ.get("OVERLAY_VAULT")
@@ -3184,6 +3204,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
 
         elif intent.kind == "draw":
             async for ev in _draw_turn(body, intent.arg, deps, said, on_step):
+                yield ev
+
+        elif intent.kind in MODEL_KINDS:
+            async for ev in _model_turn(body, intent, deps, said, on_step):
                 yield ev
 
         elif intent.kind == "media" and media_ask is not None:
@@ -5554,8 +5578,10 @@ def _summary_lines(text: str) -> list[str]:
     return out
 
 
-def _job_note(state: str, sid: str, reason: str) -> None:
-    debug_log.note("watch_job", f"state={state} id={sid if _SESSION_ID_RE.fullmatch(sid) else 'none'} reason={reason}")
+def _job_note(state: str, sid: str, reason: str, job: str = "watch") -> None:
+    # a "watch it" row stays stage B's exact text; other jobs add job=<kind> at the end
+    debug_log.note("watch_job", f"state={state} id={sid if _SESSION_ID_RE.fullmatch(sid) else 'none'} reason={reason}"
+                                + ("" if job == "watch" else f" job={job}"))
 
 
 def _push_line(key: str, deps: OverlayDeps) -> None:
@@ -5563,7 +5589,36 @@ def _push_line(key: str, deps: OverlayDeps) -> None:
         bus.publish("hud", ev)
 
 
-async def _job_runner(kind: str, prompt: str, result_name: str, conv_id: str, deps: OverlayDeps) -> None:
+async def _watch_done(outcome: str, text: str | None, sid: str, conv_id: str, deps: OverlayDeps,
+                      slug: str) -> None:
+    """"watch it": the summary file -> an info card + watch_ready; else the no-summary / timeout line."""
+    if outcome == "file":
+        lines = _summary_lines(text or "")
+        if lines:
+            _mark_untrusted(conv_id)  # the summary is untrusted text in the conv it was asked in
+            card_ev = hud.validate_card({"id": "job-" + uuid.uuid4().hex[:8], "type": "info",
+                                         "title": "Video summary", "body": lines})
+            if card_ev:
+                bus.publish("hud", {"type": "card", "card": card_ev})
+            _push_line("watch_ready", deps)
+            _job_note("done", sid, "ok")
+            return
+        outcome = "no_file"
+    if outcome == "timeout":
+        _job_note("timeout", sid, "ok")
+        _push_line("watch_timeout", deps)
+    elif outcome == "no_file":
+        _job_note("no_summary", sid, "ok")
+        _push_line("watch_no_summary", deps)
+    else:
+        _push_line("watch_failed", deps)
+
+
+async def _job_runner(kind: str, prompt: str, result_name: str, conv_id: str, deps: OverlayDeps,
+                      slug: str = "") -> None:
+    """One background job: POST the fixed prompt, poll the session until its result file shows up (or
+    it ends, or 60 min pass), then hand the outcome to the kind's done-handler (_JOB_DONE)."""
+    done = _JOB_DONE[kind]
     req = {"msg_id": uuid.uuid4().hex, "thread_id": "ov-" + uuid.uuid4().hex[:8], "text": prompt,
            "new_session": True}
     status, out = await asyncio.to_thread(_companion_call, "POST", "/chat", req, SESSION_START_TIMEOUT_S)
@@ -5572,11 +5627,11 @@ async def _job_runner(kind: str, prompt: str, result_name: str, conv_id: str, de
         found = await asyncio.to_thread(_lookup_started, prompt)
         sid = found[0] if found else ""
     if not _SESSION_ID_RE.fullmatch(sid):
-        _job_note("failed", "", "unreachable" if status in (None, 0) else f"http_{status}")
-        _push_line("watch_failed", deps)
+        _job_note("failed", "", "unreachable" if status in (None, 0) else f"http_{status}", kind)
+        await done("unreachable", None, "", conv_id, deps, slug)
         return
     _voice_started.append(sid)
-    _job_note("started", sid, "ok")
+    _job_note("started", sid, "ok", kind)
     deadline = deps.clock() + JOB_WAIT_S
     while deps.clock() < deadline:
         await asyncio.sleep(JOB_POLL_S)
@@ -5588,40 +5643,30 @@ async def _job_runner(kind: str, prompt: str, result_name: str, conv_id: str, de
                     if isinstance(f, dict) and f.get("name") == result_name), "")
         if fid and re.fullmatch(r"[A-Za-z0-9-]{1,64}", fid):
             text = await asyncio.to_thread(_companion_text, f"/central/cards/{sid}/files/{fid}")
-            lines = _summary_lines(text or "")
-            if not lines:
-                break
-            _mark_untrusted(conv_id)  # the summary is untrusted text in the conv it was asked in
-            card_ev = hud.validate_card({"id": "job-" + uuid.uuid4().hex[:8], "type": "info",
-                                         "title": "Video summary", "body": lines})
-            if card_ev:
-                bus.publish("hud", {"type": "card", "card": card_ev})
-            _push_line("watch_ready", deps)
-            _job_note("done", sid, "ok")
+            await done("file", text, sid, conv_id, deps, slug)
             return
         if row.get("state") in ("done", "stopped", "failed"):
             break
     else:
-        _job_note("timeout", sid, "ok")
-        _push_line("watch_timeout", deps)
+        await done("timeout", None, sid, conv_id, deps, slug)
         return
-    _job_note("no_summary", sid, "ok")
-    _push_line("watch_no_summary", deps)
+    await done("no_file", None, sid, conv_id, deps, slug)
 
 
-async def minipc_job(kind: str, prompt: str, result_name: str, conv_id: str, deps: OverlayDeps) -> str:
+async def minipc_job(kind: str, prompt: str, result_name: str, conv_id: str, deps: OverlayDeps,
+                     slug: str = "") -> str:
     """Start a fixed-prompt mini PC session in the background and return at once: the PHRASES key to
     speak now (job_started, or the refusal). The result file `result_name` comes back later as a pushed
     info card + a line. Own 3/hour bucket ("job"); never asks (fixed prompt, validated id only)."""
     if _sessions_access() is None:
-        _job_note("refused", "", "unset")
+        _job_note("refused", "", "unset", kind)
         return "watch_failed"
     now = deps.clock()
     if not _session_rate_ok("job", now):
-        _job_note("refused", "", "rate")
+        _job_note("refused", "", "rate", kind)
         return "watch_limit"
     _session_rate_sent("job", now)
-    task = asyncio.get_running_loop().create_task(_job_runner(kind, prompt, result_name, conv_id, deps))
+    task = asyncio.get_running_loop().create_task(_job_runner(kind, prompt, result_name, conv_id, deps, slug))
     _jobs.add(task)  # (f) one task per job, never holding the turn
     task.add_done_callback(_jobs.discard)
     return "job_started"
@@ -5642,6 +5687,178 @@ async def _video_watch_turn(body: TurnBody, raw_text: str, deps: OverlayDeps,
     async for ev in _line(key, deps):
         yield ev
     said.append(acks.PHRASES[key])
+
+
+# --- jfollow10d: 3D objects (create = a mini PC Blender job; pull up / list read the vault) ---------
+
+MODEL_KINDS = ("model_create", "model_list", "model_show")
+MODEL_SYNC_POLL_S = 5
+MODEL_SYNC_WAIT_S = 600
+MODEL_LIST_MAX = 5  # hud info cards hold <= 6 body lines: 5 names + "and N more"
+_MODEL_SHOW_HINT = re.compile(r"\b(?:pull up|show|bring up|open|display|load)\b", re.I)
+
+
+def _vault() -> str | None:
+    return os.environ.get("OVERLAY_VAULT", "").rstrip("/") or None
+
+
+def _model_detail(kind: str, slug: str = "", reason: str = "ok", size: int = 0, ms: int = 0) -> str:
+    """The model3d row: fixed words and numbers only (the slug's length, never the slug)."""
+    return f"kind={kind} slug_len={min(len(slug), 999)} bytes={size} ms={ms} reason={reason}"
+
+
+def _model_names(text: str) -> tuple[str, ...]:
+    return models3d.known_names(_vault()) if _MODEL_SHOW_HINT.search(text) else ()
+
+
+async def _push_spoken(text: str, deps: OverlayDeps) -> None:
+    """A templated line pushed outside a turn: its audio when there is a voice, else the say text.
+    The app drops a pushed `say` while the service has a voice (Mac live run: a silent ready line)."""
+    bus.publish("hud", await _audio(text, deps) or _say(text))
+
+
+async def _blender_done(outcome: str, text: str | None, sid: str, conv_id: str, deps: OverlayDeps,
+                        slug: str) -> None:
+    """The Blender job's end. The result file is untrusted: only its first `status:` and `slug:` lines
+    count, and the conv is marked. ok -> wait for Syncthing to bring a stable, checked GLB, then the
+    ready line + the preview card; anything else -> the failed line."""
+    name = models3d.name_of(slug)
+    reason = {"unreachable": "job_failed", "timeout": "timeout", "no_file": "job_failed"}.get(outcome, "job_failed")
+    if outcome == "file":
+        _mark_untrusted(conv_id)
+        status, got = models3d.parse_result(text or "")
+        _job_note("done", sid, "ok", "blender")
+        if status == "ok" and got == slug:
+            await _model_sync(slug, deps)
+            return
+        reason = "slug_mismatch" if status == "ok" else "job_failed"
+    elif outcome == "timeout":
+        _job_note("timeout", sid, "ok", "blender")
+    elif outcome == "no_file":
+        _job_note("no_summary", sid, "ok", "blender")
+    debug_log.note("model3d", _model_detail("failed", slug, reason))
+    await _push_spoken(acks.PHRASES["model_failed"].format(name=name), deps)
+
+
+async def _model_sync(slug: str, deps: OverlayDeps) -> None:
+    """Every 5 s up to 10 min: the GLB passes every check with the same size twice -> ready."""
+    t0 = deps.clock()
+    last = None
+    while True:
+        try:
+            size = await asyncio.to_thread(models3d.check_object, _vault(), slug, "glb")
+        except models3d.ModelError:
+            size = None
+        if size is not None and size == last:
+            ms = round((deps.clock() - t0) * 1000)
+            debug_log.note("model3d", _model_detail("ready", slug, "ok", size, ms))
+            await _push_spoken(acks.PHRASES["model_ready"].format(name=models3d.name_of(slug)), deps)
+            card = models3d.card(slug, "preview")
+            if card:
+                bus.publish("hud", {"type": "card", "card": card})
+            return
+        last = size
+        if deps.clock() - t0 >= MODEL_SYNC_WAIT_S:
+            break
+        await asyncio.sleep(MODEL_SYNC_POLL_S)
+    debug_log.note("model3d", _model_detail("not_synced", slug, "timeout", 0, round((deps.clock() - t0) * 1000)))
+    await _push_spoken(acks.PHRASES["model_not_synced"].format(name=models3d.name_of(slug)), deps)
+
+
+_JOB_DONE = {"watch": _watch_done, "blender": _blender_done}
+
+
+async def _model_turn(body: TurnBody, intent: intents.Intent, deps: OverlayDeps, said: list[str],
+                      on_step) -> AsyncIterator[dict]:
+    """create / list / show. Create never asks (fixed prompt + delimited description, whole-utterance
+    intent, no barge-in, the follow-up gate, the shared 3/hour job bucket) and returns at once."""
+    t0 = deps.clock()
+    vault = _vault()
+    kind = intent.kind.removeprefix("model_")
+    slug, size, key, line, card = "", 0, None, None, None
+    if intent.kind == "model_create":
+        if body.barge_in:  # a barge-in never starts a job
+            key, reason = "geo_barge", "barge"
+        elif not intent.arg:
+            key, reason = "model_what", "ask"
+        elif not vault:
+            key, reason = "model_unset", "unset"
+        else:
+            slug = models3d.new_slug(vault, intent.sub, intent.arg)
+            key = await minipc_job("blender", models3d.blender_job_prompt(slug, intent.arg), models3d.RESULT_NAME,
+                                   body.conv_id, deps, slug=slug)
+            reason = {"job_started": "ok", "watch_limit": "rate"}.get(key, "job_failed")
+            if key == "watch_limit":  # the bucket is shared with "watch it"; the line must not say videos
+                key = "model_limit"
+    elif not vault:
+        key, reason = "model_unset", "unset"
+    elif intent.kind == "model_list":
+        slugs = await asyncio.to_thread(models3d.list_index, vault)
+        if not slugs:
+            key, reason = "model_none", "no_match"
+        else:
+            names = [models3d.name_of(s) for s in slugs]
+            shown = names[:MODEL_LIST_MAX]
+            more = len(names) - len(shown)
+            reason = "ok"
+            card = hud.validate_card({"id": "ml" + uuid.uuid4().hex[:6], "type": "info", "title": "3D objects",
+                                      "body": shown + ([f"and {more} more"] if more else [])})
+            listed = shown + ([f"{more} more"] if more else [])
+            line = (f"You have {len(names)}: " + (", ".join(listed[:-1]) + " and " + listed[-1]
+                                                  if len(listed) > 1 else listed[0]) + ".")
+    else:
+        slug = await asyncio.to_thread(models3d.resolve, vault, intent.arg) or ""
+        if not slug:
+            key, kind, reason = "model_missing", "missing", "no_match"
+        else:
+            try:
+                size = await asyncio.to_thread(models3d.check_object, vault, slug, "glb")
+                card = models3d.card(slug, "model")
+                line, reason = acks.PHRASES["model_shown"].format(name=models3d.name_of(slug)), "ok"
+            except models3d.ModelError as e:
+                key, kind, reason = "model_bad_file", "bad_file", e.reason
+    if on_step:
+        on_step("model3d", detail=_model_detail(kind, slug, reason, size, round((deps.clock() - t0) * 1000)))
+    if card:  # a new show or list replaces this conv's last model card instead of stacking
+        drop = _drop_cards(body.conv_id, "model")
+        if drop:
+            yield drop
+        _card_ids.setdefault(body.conv_id, set()).add(card["id"])
+        yield _keep_card(body.conv_id, "model", card)
+    if key:
+        async for ev in _line(key, deps):
+            yield ev
+        said.append(acks.PHRASES[key])
+    elif line:
+        async for ev in _speak(line, deps):
+            yield ev
+        said.append(line)
+
+
+@router.get("/model3d/{slug}/{kind}", dependencies=_LOOP_DEPS)
+async def get_model3d(slug: str, kind: str) -> Response:
+    """A vault object's GLB or preview PNG for the app's model page (token native, loopback only),
+    served from the one fd that passed every check."""
+    t0 = time.monotonic()
+    try:
+        fd, size = await asyncio.to_thread(models3d.open_object, _vault(), slug, kind)
+    except models3d.ModelError as e:
+        debug_log.note("model3d", _model_detail("missing" if e.reason == "no_match" else "bad_file",
+                                                slug if models3d.SLUG_RE.fullmatch(slug) else "", e.reason,
+                                                0, round((time.monotonic() - t0) * 1000)))
+        raise HTTPException(status_code=e.status, detail="unavailable") from None
+    try:
+        chunks, got = [], 0
+        while got < size:
+            chunk = os.pread(fd, min(1 << 20, size - got), got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+    finally:
+        os.close(fd)
+    return Response(b"".join(chunks), media_type="model/gltf-binary" if kind == "glb" else "image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 # --- jfollow10b: map tiles for the web card (the app's scheme handler asks here; the token stays native)

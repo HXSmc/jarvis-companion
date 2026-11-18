@@ -19,9 +19,9 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
       video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
              .mp4/.mov/.m4v (no HLS), thumbnail_url? (file urls only), source_page?;
              no usable media -> link card on source_page/url, else dropped
-      web:   page: one of WEB_PAGES ("map", "drawing"), data: that page's validated JSON. Service-only:
+      web:   page: one of WEB_PAGES ("map", "drawing", "model"), data: that page's validated JSON. Service-only:
              dropped unless the caller passes allow_web=True (model, agent, workspace and fast-tier cards
-             never do); drawing data = {svg: svgsafe output, legend: [str<=80] <= 12}
+             never do); drawing data = {svg: svgsafe output, legend: [str<=80] <= 12}; model data = {slug, view: model|preview}
       chart: chart: one of CHART_KINDS, labels: [str<=24] <= 12, series: [{name, values}] 1-4,
              unit?: str<=12, caption?: str<=120, min?/max?: gauge only (rules in _chart)
     hud   = {shapes: [shape], cards: [card]}
@@ -381,7 +381,21 @@ def _drawing_data(raw) -> dict | None:
     return {"svg": res.svg, "legend": items[:MAX_LEGEND]}
 
 
-WEB_PAGES = {"map": _map_data, "drawing": _drawing_data}
+_MODEL_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
+
+
+def _model_data(raw) -> dict | None:
+    """The model page's data (jfollow10d): a vault object's slug and the view ("model" = the 3D
+    object, "preview" = the ready card's picture). Other keys are dropped; the app fetches the files."""
+    if not isinstance(raw, dict) or raw.get("view") not in ("model", "preview"):
+        return None
+    slug = raw.get("slug")
+    if not isinstance(slug, str) or not _MODEL_SLUG.fullmatch(slug):
+        return None
+    return {"slug": slug, "view": raw["view"]}
+
+
+WEB_PAGES = {"map": _map_data, "drawing": _drawing_data, "model": _model_data}
 
 
 def drawing_card(title: str, svg: str, legend: list) -> dict | None:
@@ -593,7 +607,11 @@ def schema_json() -> dict:
                          "properties": {"svg": {"type": "string", "maxLength": svgsafe.MAX_BYTES},
                                         "legend": {"type": "array", "maxItems": MAX_LEGEND,
                                                    "items": _str(MAX_LEGEND_ITEM)}},
-                         "required": ["svg", "legend"], "additionalProperties": False}]}},
+                         "required": ["svg", "legend"], "additionalProperties": False},
+                        {"type": "object",
+                         "properties": {"slug": {"type": "string", "pattern": "^" + _MODEL_SLUG.pattern + "$"},
+                                        "view": {"enum": ["model", "preview"]}},
+                         "required": ["slug", "view"], "additionalProperties": False}]}},
                         ["page", "data"]),
                     card("chart", {
                         "chart": {"enum": list(CHART_KINDS)},

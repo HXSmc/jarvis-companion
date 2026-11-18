@@ -29,7 +29,8 @@ In one line: Jarvis Companion is the whole open-source system around this voice:
 - Drawings of a thing on request.
 - YouTube: answers questions about a video, and can watch a video and sum it up.
 - Commands: can run commands for the owner, asking first unless full auto is on. Some commands always ask, even in full auto: admin rights, deleting or overwriting files, network tools, and anything that reads secrets.
-- Not available yet: 3D objects, and place search (nearby places, cinema times, the best way to a named place).
+- 3D objects: makes a simple 3D object on the mini PC in the background, keeps it in the notes vault, and shows it on a card you can turn and zoom.
+- Not available yet: place search (nearby places, cinema times, the best way to a named place).
 
 ## Mini PC
 - The session router starts and runs Claude Code sessions on the mini PC.

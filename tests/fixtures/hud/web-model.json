@@ -1,0 +1,15 @@
+{
+ "shapes": [],
+ "cards": [
+  {
+   "id": "md-fixture",
+   "type": "web",
+   "title": "test mug",
+   "page": "model",
+   "data": {
+    "slug": "test-mug",
+    "view": "model"
+   }
+  }
+ ]
+}
