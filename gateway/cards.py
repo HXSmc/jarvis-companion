@@ -6,9 +6,11 @@ with the shared gateway token (same door as `jarvis-hw-request`):
   POST /cards/event   {"session", "action", ...}   doing | ask | clear | delegate | link | steps
   POST /cards/file    raw body + ?session=&name=&title=   a report/plan/screenshot for the card
 
-  Ask kinds: approve | choice | yesno | checklist | preview | info | hardware
+  Ask kinds: approve | choice | yesno | checklist | preview | info | hardware | mac
   (`hardware` shows "Open in Hardware Mode" on the phone; the gateway's Hardware
-  Mode report marks it answered with `done`.)
+  Mode report marks it answered with `done`. `mac` = "the Mac is needed for
+  tests": fixed Free / Message buttons; the tap is only stored, no router
+  message, and the waiting tester reads it with GET /cards/need.)
 
   Steps (`action: "steps"`, `op` set | add | next | done | clear | task) keep an
   ordered step list on the card, shown as "3/6 <active step>" and a thin bar.
@@ -57,7 +59,7 @@ _ID_RE = re.compile(ID_PATTERN)
 FILE_ID_PATTERN = r"^[0-9a-f]{32}$"
 _FILE_ID_RE = re.compile(FILE_ID_PATTERN)
 
-NEED_KINDS = ("approve", "choice", "yesno", "checklist", "preview", "info", "hardware")
+NEED_KINDS = ("approve", "choice", "yesno", "checklist", "preview", "info", "hardware", "mac")
 MAX_OPTIONS = 6
 MAX_ITEMS = 12
 MAX_FILES = 8  # per session; the oldest goes first
@@ -298,6 +300,8 @@ def post_need(sid: str, kind: str, text: str, options: list[str] | None = None,
         raise HTTPException(status_code=422, detail="choice needs 2 to 6 options")
     if kind == "checklist" and not items:
         raise HTTPException(status_code=422, detail="checklist needs items")
+    if kind == "mac" and (options or items):
+        raise HTTPException(status_code=422, detail="mac takes no options")
     if file_id and not _FILE_ID_RE.fullmatch(file_id):
         raise HTTPException(status_code=422, detail="bad file id")
     need = {"id": uuid.uuid4().hex[:12], "kind": kind, "question": text, "options": options,
@@ -608,17 +612,35 @@ def valid_answer(need: dict, answer: str) -> bool:
     allowed = {
         "approve": ("Approve",), "preview": ("Looks good",), "yesno": ("Yes", "No"),
         "choice": tuple(need.get("options") or ()), "checklist": ("Send results",), "info": ("OK",),
-        "hardware": ("done",),
+        "hardware": ("done",), "mac": ("Free", "Message"),
     }.get(kind, ())
     return answer in allowed
 
 
-def mark_answered(sid: str, need_id: str, answer: str) -> None:
+def mark_answered(sid: str, need_id: str, answer: str, text: str | None = None) -> None:
     def change(e):
         need = e.get("need")
         if isinstance(need, dict) and need.get("id") == need_id:
             need["answered"] = {"answer": answer, "at": _iso(_now())}
+            if text is not None:
+                need["answered"]["text"] = text
     _update(sid, change)
+
+
+@session_router.get("/cards/need")
+async def card_need(session: str = Query(pattern=ID_PATTERN),
+                    need_id: str = Query(pattern=r"^[0-9a-f]{12}$")) -> dict:
+    """Poll one ask: waiting | answered | gone. Text is the stored _line value."""
+    sid = _session_or_404(session)
+    need = (load().get(sid) or {}).get("need")
+    if not isinstance(need, dict) or need.get("id") != need_id:
+        return {"state": "gone", "kind": None, "answer": None, "text": None, "at": None}
+    answered = need.get("answered") if isinstance(need.get("answered"), dict) else None
+    if not answered:
+        return {"state": "waiting", "kind": need.get("kind"), "answer": None, "text": None,
+                "at": None}
+    return {"state": "answered", "kind": need.get("kind"), "answer": answered.get("answer"),
+            "text": answered.get("text"), "at": answered.get("at")}
 
 
 # --- card assembly (called by central.sessions for every row) ------------------
