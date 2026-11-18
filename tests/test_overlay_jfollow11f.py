@@ -367,6 +367,62 @@ def test_calls_per_question(vault, client, world, tmp_path):
     assert after == before  # nothing written to disk
 
 
+def test_photon_fallback_offers(vault, client, world):
+    """Hub ruling R5-PHOTON: Overpass slow (op=down) and Photon has "Decimo" for "decim": asked, never stated.
+    Only a Photon name that IS the heard name is a sure hit."""
+    place_deps()
+
+    def renamed(doc, name):
+        return [{**h, "name": name} for h in doc]
+
+    def photon(request):
+        feats = fx("photon-dishoom.json")["features"]
+        name = "Decimo" if request.url.params["q"] == "decim" else "Dessun"
+        return httpx.Response(200, json={"features": [
+            {**f, "properties": {**f["properties"], "name": name}} for f in feats]})
+
+    def nominatim(request):
+        q = request.url.params["q"].lower()
+        return httpx.Response(200, json=renamed(fx("nominatim-dishoom.json"), "Decimo") if q == "decimo" else [])
+
+    world.override[OVERPASS_HOST] = lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=r))
+    world.override["photon.komoot.io"] = photon
+    world.override["nominatim.openstreetmap.org"] = nominatim
+    slow = ("api.tfl.gov.uk", "valhalla1.openstreetmap.de")
+
+    def offer(conv):
+        nearby.reset()
+        world.requests.clear()
+        events = turn(client, "take me to Decim", conv_id=conv)
+        assert last_line(events) == "Did you mean Decimo?" and not cards(events)
+        assert " op=down near=ask " in detail() and detail().endswith("reason=ask") and ROW_RE.match(detail())
+        assert len(world.requests) <= 3 and not [r for r in world.requests if r.url.host in slow]
+        assert conv in overlay._place_offer and conv in overlay._auto_tainted
+        assert all(e.get("private") for e in events if e["type"] in ("say", "audio"))
+        assert not any(w in detail().lower() for w in ("decim", "decimo"))
+
+    offer("P")
+    events = turn(client, "yes", conv_id="P", followup=True)
+    [card] = cards(events)
+    assert card["title"] == "Nearest Decimo" and all(r["name"] == "Decimo" for r in card["data"]["rows"])
+    assert "Decimo" in last_line(events) and " near=yes " in detail() and detail().endswith("reason=ok")
+    offer("P")
+    world.requests.clear()
+    events = turn(client, "no", conv_id="P", followup=True)
+    assert says(events) == [phrase("place_offer_no")] and world.requests == [] and not cards(events)
+    assert " near=declined " in detail() and detail().endswith("reason=declined")
+    # Photon has the very name that was heard: a sure hit, as before
+    nearby.reset()
+    b = nearby.Budget()
+    src, found = nearby.search("name", "dessun", HOME, b)
+    assert src == "photon" and found[0]["name"] == "Dessun" and b.op == "down" and b.near == "hit"
+    # below NEAR_RATIO: a miss, as before
+    nearby.reset()
+    with pytest.raises(nearby.SearchFailed) as e:
+        nearby.search("name", "purple walrus", HOME, nearby.Budget())
+    assert e.value.key == "place_none"
+
+
 # --- D: the drawing's grow line -------------------------------------------------------------------
 
 def test_drawing_grow_line(client):

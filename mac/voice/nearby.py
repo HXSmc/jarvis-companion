@@ -326,7 +326,8 @@ def _search_reason(e: geo.GeoError) -> str:
 def _misheard(query: str, point: tuple, box: tuple, home: tuple, budget: Budget) -> tuple[str, list]:
     """0 usable Nominatim hits for a name: ONE Overpass call for the names nearby, matched by sound. A sure
     match is searched on Nominatim at once (src overpass); an unsure one raises place_offer ("Did you mean");
-    Overpass down -> stage f's Photon retry. Returns (src, hits); [] = nothing alike."""
+    Overpass down -> stage f's Photon retry, where only the heard name itself is a hit and any other alike
+    name is offered too. Returns (src, hits); [] = nothing alike."""
     try:
         names = overpass_names(point, budget)
         budget.op = "ok"
@@ -336,10 +337,15 @@ def _misheard(query: str, point: tuple, box: tuple, home: tuple, budget: Budget)
             hits = near_miss(_photon_hits(geo._json(_fetch(photon_url(query, point), "photon", budget))), query, home)
         except geo.GeoError as e:
             raise SearchFailed("place_down", _search_reason(e)) from None
-        if candidates(hits, home):
+        found = candidates(hits, home)
+        if not found:
+            return "nominatim", []
+        # Photon's alike name is only said as the answer when it IS the heard name ("Decim" -> "Decimo" asks)
+        if any(_compact(r) == _compact(query) for r in _lead_runs(found[0]["name"])):
             budget.near = "hit"
             return "photon", hits
-        return "nominatim", []
+        budget.near = "ask"
+        raise SearchFailed("place_offer", "ask", found[0]["name"])
     budget.near, name = sound_alike(query, names)
     if budget.near == "ask":
         raise SearchFailed("place_offer", "ask", name)

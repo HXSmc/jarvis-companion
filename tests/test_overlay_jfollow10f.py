@@ -914,7 +914,8 @@ def test_category_nearest_first(vault, client, net):
 def test_misheard_name_near_miss(vault, client, net):
     """LIVE-1 #2: "Dishoom" heard as "Disham" found nothing (reason=none_near). A name with 0 hits near home
     gets ONE retry on Photon (fuzzy, near the rounded point), kept only for a nearby name alike enough.
-    jfollow11f: Overpass is tried first; this is its down path (404 here: op=down -> Photon as before)."""
+    jfollow11f: Overpass is tried first; this is its down path (404 here: op=down -> Photon, which now only
+    offers an alike name: "Did you mean Dishoom?")."""
     net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=[])
     deps_with()
     events = turn(client, "what's the best way to go to Disham", conv_id="m1")
@@ -922,11 +923,10 @@ def test_misheard_name_near_miss(vault, client, net):
     assert net.count("overpass-api.de") == 1
     ph = [r for r in net.requests if r.url.host == "photon.komoot.io"][0]
     assert ph.url.params["q"] == "disham" and ph.url.params["lat"] == "51.51" and ph.url.params["lon"] == "-0.13"
-    [card] = cards(events)
-    assert card["title"] == "Nearest Dishoom" and all(r["name"] == "Dishoom" for r in card["data"]["rows"])
-    assert last_line(events).startswith("Dishoom on ") and "Disham" not in last_line(events)
+    # jfollow11f R5-PHOTON: Photon's alike name is not the heard one, so it is asked, never stated
+    assert not cards(events) and last_line(events) == "Did you mean Dishoom?"
     detail = steps("place")[-1]["detail"]
-    assert "src=photon" in detail and " op=down near=hit " in detail and detail.endswith("reason=ok") and ROW_RE.match(detail)
+    assert " op=down near=ask " in detail and detail.endswith("reason=ask") and ROW_RE.match(detail)
     # a nearby name that is not alike ("this hun") or too far off ("Denham" for "disham") -> the honest line
     for words, said in (("this hun", "This Hun"), ("dishamxyz", "Dishamxyz")):
         nearby.reset()
