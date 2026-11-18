@@ -511,3 +511,12 @@ def test_keep_steps_jfollow10f():
     [row] = overlay_log.redact(snap)["turns"][0]["steps"]
     assert row == {"step": "place", "at": 1.0, "detail": detail}
 
+
+
+def test_keep_steps_jfollow11f():
+    """jfollow11f: the place row keeps its op/near fields (fixed words and counts); a name field is stripped."""
+    from gateway import overlay_log
+    detail = "kind=name src=overpass n=5 calls=7 ms=900 tfl=3 matrix=1 shows=0 op=ok near=hit reason=ok"
+    snap = {"turns": [{"id": "t1", "steps": [{"step": "place", "at": 1.0, "detail": detail, "name": "Dishoom"}]}]}
+    [row] = overlay_log.redact(snap)["turns"][0]["steps"]
+    assert row == {"step": "place", "at": 1.0, "detail": detail}

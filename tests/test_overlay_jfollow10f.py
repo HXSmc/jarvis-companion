@@ -328,7 +328,7 @@ def test_place_no_home_and_outside(tmp_path, monkeypatch, client, net):
 def test_place_hosts(net):
     base = {"valhalla1.openstreetmap.de", "routing.openstreetmap.de", "nominatim.openstreetmap.org",
             "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org"}
-    assert geo.HOSTS == base | {"photon.komoot.io", "clusterflick.com"}
+    assert geo.HOSTS == base | {"photon.komoot.io", "clusterflick.com", "overpass-api.de"}  # jfollow11f: + Overpass
     for url in (nearby.nominatim_search_url("dishoom", (-0.21, 51.56, -0.05, 51.46)), nearby.photon_url("x", HOME),
                 nearby.CF_INDEX, nearby.venue_url("ica.art"), geo.MATRIX):
         parts = httpx.URL(url)
@@ -369,7 +369,8 @@ def test_search_point_and_calls(net, clock):
     net.requests.clear()
     b = nearby.Budget()
     src, found = nearby.search("name", "dishoom", HOME, b)
-    assert src == "photon" and found and b.near == "hit" and len(net.requests) == 2
+    # jfollow11f: Overpass is asked first (404 here: op=down), then the Photon retry
+    assert src == "photon" and found and b.near == "hit" and b.op == "down" and len(net.requests) == 3
     # Nominatim 503 -> one Photon call for a name (lat/lon at 2 decimals), none for a category
     nearby.reset()
     net.requests.clear()
@@ -912,18 +913,20 @@ def test_category_nearest_first(vault, client, net):
 
 def test_misheard_name_near_miss(vault, client, net):
     """LIVE-1 #2: "Dishoom" heard as "Disham" found nothing (reason=none_near). A name with 0 hits near home
-    gets ONE retry on Photon (fuzzy, near the rounded point), kept only for a nearby name alike enough."""
+    gets ONE retry on Photon (fuzzy, near the rounded point), kept only for a nearby name alike enough.
+    jfollow11f: Overpass is tried first; this is its down path (404 here: op=down -> Photon as before)."""
     net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=[])
     deps_with()
     events = turn(client, "what's the best way to go to Disham", conv_id="m1")
     assert net.count("nominatim.openstreetmap.org") == 1 and net.count("photon.komoot.io") == 1  # 2 search calls
+    assert net.count("overpass-api.de") == 1
     ph = [r for r in net.requests if r.url.host == "photon.komoot.io"][0]
     assert ph.url.params["q"] == "disham" and ph.url.params["lat"] == "51.51" and ph.url.params["lon"] == "-0.13"
     [card] = cards(events)
     assert card["title"] == "Nearest Dishoom" and all(r["name"] == "Dishoom" for r in card["data"]["rows"])
     assert last_line(events).startswith("Dishoom on ") and "Disham" not in last_line(events)
     detail = steps("place")[-1]["detail"]
-    assert "src=photon" in detail and " near=hit " in detail and detail.endswith("reason=ok") and ROW_RE.match(detail)
+    assert "src=photon" in detail and " op=down near=hit " in detail and detail.endswith("reason=ok") and ROW_RE.match(detail)
     # a nearby name that is not alike ("this hun") or too far off ("Denham" for "disham") -> the honest line
     for words, said in (("this hun", "This Hun"), ("dishamxyz", "Dishamxyz")):
         nearby.reset()

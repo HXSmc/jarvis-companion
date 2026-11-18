@@ -143,6 +143,7 @@ PHRASES = {
     "watch_no_summary": "The mini PC finished without a summary.",
     "watch_limit": "That's three videos this hour. Try again later.",
     "web_no_enlarge": "The map stays this size. Zoom inside it instead.",
+    "drawing_no_enlarge": "The drawing stays this size. Zoom inside it instead.",  # jfollow11f
     "geo_barge": "Say that again once I've finished, sir.",
     # jfollow10f: general places near home (nearest Dishoom, the best way to the cinema, is a film on).
     "place_best": "{name} is closest, {mins} {how}. It's on the card.",
@@ -155,6 +156,8 @@ PHRASES = {
     "film_none": "I can't see {film} at any cinema near you {when}.",
     "shows_down": "I can't see showtimes right now. {name} is closest, {mins} {how}.",
     "place_none": "I can't find {query} near you.",
+    "place_offer": "Did you mean {name}",  # jfollow11f: unsure sound-alike name; the service adds the "?"
+    "place_offer_no": "OK. Try the name again.",
     "place_down": "I can't search places just now.",
     "place_outside": "I can only search places in London for now.",
     # jfollow10c: drawings

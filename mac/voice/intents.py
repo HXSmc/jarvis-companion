@@ -519,7 +519,7 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
     if not last:  # jfollow10b: whole-utterance kinds, before workspace and open
-        hit = _place_match(text, place_names)  # jfollow10f: before the map check
+        hit = _place_match(text, place_names, apps)  # jfollow10f: before the map check
         if hit and hit[0] == "place":
             return Intent("place", hit[1]["mode"])
         if hit:
@@ -1748,7 +1748,12 @@ _WHATS_ON_RES = (
 )
 _PLACE_WORDS_RE = re.compile(r"^[a-z0-9 '&-]{1,60}$")
 _PLACE_POSTCODE_RE = re.compile(r"^[a-z]{1,2}\d[a-z\d]? ?\d[a-z]{2}$")  # = geo.POSTCODE_RE (intents stays light)
-PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest)\b", re.I)  # the service loads saved names then
+PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest|take me)\b", re.I)  # the service loads saved names then
+# jfollow11f: "take me to Dishoom" / "take me home"; "take me back", "take me through ..." never match.
+_TAKE_ME_RE = re.compile(r"take me (?:to (?P<x>.+)|(?P<home>home))")
+_TAKE_ME_NOT_RE = re.compile(
+    r"^(?:the )?(?:top|bottom|end|start|beginning|next|previous|last|first)\b|^(?:it|that|this|there)$"
+    r"|\b(?:pages?|tabs?|settings|websites?|sites?|links?|lines?|changes?|chapters?|slides?|steps?)\b")
 
 
 def _place_target(x: str, place_names: tuple[str, ...]):
@@ -1770,7 +1775,14 @@ def _place_target(x: str, place_names: tuple[str, ...]):
     return ("place", "name", bare)
 
 
-def _place_match(text: str, place_names: tuple[str, ...]):
+def _take_me_target(x: str, apps: dict[str, str]) -> bool:
+    """A "take me to <x>" target that may be a place: not a page spot, a screen thing, an app or a site."""
+    bare = re.sub(r"^(?:the )?(?:(?:nearest|closest) )?", "", x).strip()
+    return not (_TAKE_ME_NOT_RE.search(x) or re.search(r"\b(?:to|from|than)\b", x) or "://" in x
+                or "www." in x or _HOST_RE.match(bare) or (apps and _match_app(bare, apps)))
+
+
+def _place_match(text: str, place_names: tuple[str, ...], apps: dict[str, str] | None = None):
     """The whole place form of one utterance: ("place", dict) | ("geo", target words) | None."""
     if len(text) > 200:
         return None
@@ -1788,6 +1800,13 @@ def _place_match(text: str, place_names: tuple[str, ...]):
                 and film not in _FILM_STOP and not re.search(r"\b(?:line|tube|bus|train)$", film)):
             return ("place", {"mode": "film", "query": "cinema", "film": film, "when": (m["when"] or " today")[1:]})
         return None
+    m = _TAKE_ME_RE.fullmatch(low)
+    if m:
+        x = m["home"] or m["x"].strip()
+        hit = _place_target(x, place_names) if _take_me_target(x, apps or {}) else None
+        if hit is None:
+            return None
+        return hit if hit[0] == "geo" else ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
     for rx in _PLACE_BEST_RES:
         m = rx.fullmatch(low)
         if not m:
@@ -1817,10 +1836,11 @@ def _place_match(text: str, place_names: tuple[str, ...]):
     return None
 
 
-def place_request(text: str, place_names: tuple[str, ...] = ()) -> dict | None:
+def place_request(text: str, place_names: tuple[str, ...] = (), apps: dict[str, str] | None = None) -> dict | None:
     """{"mode": name|category|cinema|film|whats_on, "query", "film", "when": today|tonight|tomorrow} or None.
-    Fixed code, owner words only; a saved name, home or a postcode is stage B's route (place_geo_request)."""
-    hit = _place_match(text, place_names)
+    Fixed code, owner words only; a saved name, home or a postcode is stage B's route (place_geo_request).
+    `apps`: installed apps, so "take me to Safari" is never a place."""
+    hit = _place_match(text, place_names, apps)
     return hit[1] if hit and hit[0] == "place" else None
 
 

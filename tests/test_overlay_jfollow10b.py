@@ -251,7 +251,7 @@ def test_prompt_show_dont_link():
 def test_hosts_allow_list(net):
     assert geo.HOSTS == {"valhalla1.openstreetmap.de", "routing.openstreetmap.de", "nominatim.openstreetmap.org",
                          "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org",
-                         "photon.komoot.io", "clusterflick.com"}  # jfollow10f
+                         "photon.komoot.io", "clusterflick.com", "overpass-api.de"}  # jfollow10f, 11f
     for url in (geo.VALHALLA, geo.OSRM_CAR, geo.NOMINATIM, geo.POSTCODES, geo.TFL, geo.TILE_URL.format(z=1, x=0, y=0)):
         parts = httpx.URL(url)
         assert parts.scheme == "https" and parts.host in geo.HOSTS, url

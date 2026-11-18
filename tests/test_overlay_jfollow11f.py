@@ -1,0 +1,367 @@
+"""jfollow11f: "take me to <place>", a misheard name matched by sound against Overpass names near the rounded
+point ("Did you mean Dishoom?" when unsure), and the drawing's own grow line.
+
+Network is always mocked (httpx.MockTransport, the Net of test_overlay_jfollow10f). The Overpass fixture is
+the real answer for the 2-decimal Trafalgar point (public names only). Clocks are fake.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+
+from common import hud  # noqa: E402
+from gateway import overlay  # noqa: E402
+from mac.voice import geo, intent_pick, intents, nearby  # noqa: E402
+from test_overlay_jfollow10f import (HOME, ROW_RE, cards, client, clock, deps_with, fresh, fx,  # noqa: E402,F401
+                                     last_line, net, phrase, steps, vault)
+from test_overlay_service import says, turn  # noqa: E402
+
+FX = ROOT / "tests" / "fixtures"
+OVERPASS_HOST = httpx.URL(nearby.OVERPASS).host
+POINT = (51.51, -0.13)
+WORDS = ("dishoom", "decim", "disham", "dessun", "dessu", "this hun")
+
+
+@pytest.fixture(autouse=True)
+def offers_clear():
+    overlay._place_offer.clear()
+    overlay._expired.clear()
+    overlay._drawing_ids.clear()
+    yield
+    overlay._place_offer.clear()
+    overlay._expired.clear()
+
+
+@pytest.fixture
+def world(net):
+    """Nominatim knows "Dishoom" only (a misheard name finds nothing); Overpass answers the real pull."""
+    def nominatim(request):
+        q = request.url.params["q"].lower()
+        return httpx.Response(200, json=fx("nominatim-dishoom.json") if q == "dishoom" else [])
+    net.override["nominatim.openstreetmap.org"] = nominatim
+    net.override[OVERPASS_HOST] = lambda r: httpx.Response(
+        200, content=(FX / "places" / "overpass-trafalgar.txt").read_bytes())
+    return net
+
+
+class Clock:
+    def __init__(self):
+        self.t = 5000.0
+
+    def __call__(self):
+        return self.t
+
+
+def place_deps(**kw):
+    d = deps_with(**kw)
+    d.clock = Clock()
+    return d
+
+
+def detail():
+    return steps("place")[-1]["detail"]
+
+
+def ask_turn(client, conv="C", words="Decim"):
+    events = turn(client, f"take me to {words}", conv_id=conv)
+    assert last_line(events) == "Did you mean Dishoom?" and " near=ask " in detail(), detail()
+    assert conv in overlay._place_offer
+    return events
+
+
+# --- A1: the form ---------------------------------------------------------------------------------
+
+def test_take_me_to_forms():
+    apps = {"Safari": "/Applications/Safari.app"}
+
+    def parse(t):
+        return intents.parse(t, apps=apps, place_names=("home", "gym"))
+    for t in ("take me to Dishoom", "take me to the nearest Dishoom", "take me to Decim"):
+        assert parse(t).kind == "place", t
+        assert intents.place_request(t, ("home", "gym"), apps)["query"] == t.split()[-1].lower()
+    ask = intents.place_request("take me to the closest pharmacy", ("home", "gym"), apps)
+    assert parse("take me to the closest pharmacy").kind == "place" and ask["mode"] == "category"
+    assert ask["query"] == "pharmacy"
+    for t in ("take me home", "take me to the gym", "take me to SW1A 2AA"):
+        assert parse(t).kind == "geo_map", t
+    for t in ("take me back", "take me through the changes", "take me to the top of the page",
+              "take me to the next change", "take me to settings", "take me to Safari",
+              "take me to https://example.com", "take me to it"):
+        assert parse(t).kind != "place", t
+        assert intents.place_request(t, ("home", "gym"), apps) is None, t
+    assert parse("stop").kind == "stop"
+    assert intents.PLACE_CUE_RE.search("take me to the gym")  # the service loads saved names for it
+
+
+def test_place_pick_wired(vault, client, world, monkeypatch):
+    assert intent_pick.KIND_TO_PICK["place"] == "place"
+    calls = []
+
+    def pick(msg):
+        calls.append(msg)
+        return json.dumps({"pick": "place", "sub": "", "confidence": 0.95,
+                           "slots": {"query": "evil words", "to": "elsewhere"}})
+    d = place_deps()
+    d.intent_pick = pick
+    asks = []
+    real = overlay._place_answer
+    monkeypatch.setattr(overlay, "_place_answer", lambda ask, budget: asks.append(dict(ask)) or real(ask, budget))
+    events = turn(client, "take me to Dishoom", conv_id="p1")
+    assert asks == [intents.place_request("take me to Dishoom")]  # the owner's words, never the model slots
+    assert cards(events) and "Dishoom" in last_line(events)
+    # a place pick on words that are no place ask: an answer, as before
+    word = intents.Intent("answer", "tell me about Dishoom's history")
+    p = intent_pick.Pick("place", "", 95, {"query": "dishoom"})
+    got, _extra, used = overlay._intent_from_pick(p, word, "tell me about Dishoom's history", "p1", d)
+    assert got.kind == "answer" and used == 0
+    p = intent_pick.Pick("place", "", 95, {})
+    got, _extra, used = overlay._intent_from_pick(p, word, "take me to Dishoom", "p1", d)
+    assert got == intents.Intent("place", "name") and used == 0
+
+
+# --- A2/A3: the Overpass request and the match (security) ------------------------------------------
+
+def test_overpass_request_is_fixed(vault, client, world):
+    place_deps()
+    turn(client, "take me to Decim", conv_id="o1")
+    reqs = [r for r in world.requests if r.url.host == OVERPASS_HOST]
+    assert len(reqs) == 1
+    [req] = reqs
+    assert req.method == "GET" and req.url.scheme == "https"
+    assert str(req.url) == nearby.overpass_url(POINT)
+    assert req.url.params["data"] == nearby.OVERPASS_QUERY.format(
+        radius=nearby.OVERPASS_RADIUS_M, lat=51.51, lon=-0.13, cap=nearby.OVERPASS_CAP)
+    assert set(req.url.params) == {"data"}
+    seen = (str(req.url) + json.dumps(dict(req.headers)) + req.content.decode()).lower()
+    assert "decim" not in seen and "51.508" not in seen and "-0.1281" not in seen
+
+
+def test_hosts_with_overpass(net):
+    base = {"valhalla1.openstreetmap.de", "routing.openstreetmap.de", "nominatim.openstreetmap.org",
+            "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org"}
+    assert geo.HOSTS == base | {"photon.komoot.io", "clusterflick.com", "overpass-api.de"}
+    net.override[OVERPASS_HOST] = lambda r: httpx.Response(302, headers={"Location": "https://evil.example/"})
+    with pytest.raises(geo.GeoError):
+        geo._get(nearby.overpass_url(POINT), "overpass")
+    assert len(net.requests) == 1
+    net.requests.clear()
+    with pytest.raises(geo.GeoError) as e:
+        geo._get(nearby.overpass_url(POINT).replace("https://", "http://"), "overpass")
+    assert e.value.reason == "bad_host" and net.requests == []
+    # too big, or a timeout: op=down and the Photon retry runs
+    for fail in (lambda r: httpx.Response(200, content=b"x\n" * (65 * 1024)),
+                 lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=r))):
+        nearby.reset()
+        net.requests.clear()
+        net.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=[])
+        net.override[OVERPASS_HOST] = fail
+        b = nearby.Budget()
+        src, found = nearby.search("name", "dishoom", HOME, b)
+        assert b.op == "down" and src == "photon" and found and net.count("photon.komoot.io") == 1
+    src = "\n".join(p.read_text() for p in (ROOT / "mac").rglob("*.py")) + "\n".join(
+        p.read_text() for d in ("gateway", "common") for p in (ROOT / d).rglob("*.py"))
+    assert src.count("overpass-api.de") == 2  # geo.HOSTS and the nearby.OVERPASS constant
+
+
+def test_sound_alike_rows(vault, client, world):
+    place_deps()
+    table = {}
+    for i, words in enumerate(("disham", "this hun", "decim", "dessun", "dessu")):
+        nearby.reset()
+        geo.reset()
+        overlay._place_offer.clear()
+        events = turn(client, f"take me to {words}", conv_id=f"s{i}")
+        d = detail()
+        assert ROW_RE.match(d) and " op=ok " in d
+        if " near=hit " in d:
+            [card] = cards(events)
+            assert card["title"] == "Nearest Dishoom" and "src=overpass" in d and d.endswith("reason=ok")
+            assert all(r["name"] == "Dishoom" for r in card["data"]["rows"])
+            table[words] = "hit"
+        else:
+            assert " near=ask " in d and d.endswith("reason=ask") and not cards(events)
+            assert last_line(events) == "Did you mean Dishoom?"
+            table[words] = "ask"
+    assert table == {"disham": "hit", "this hun": "ask", "decim": "ask", "dessun": "ask", "dessu": "ask"}
+    nearby.reset()
+    geo.reset()
+    events = turn(client, "take me to purple walrus", conv_id="sm")
+    assert not cards(events) and last_line(events) == phrase("place_none", query="Purple Walrus")
+    assert " near=miss " in detail() and detail().endswith("reason=none_near")
+    # "take me to the" trails off (the service waits for the rest), so "the" is checked on the search itself
+    b = nearby.Budget()
+    with pytest.raises(nearby.SearchFailed) as e:
+        nearby.search("name", "the", HOME, b)
+    assert e.value.key == "place_none" and b.near == "miss" and b.op == "ok"
+    nearby.reset()
+    geo.reset()
+    world.requests.clear()
+    events = turn(client, "take me to Dishoom", conv_id="sn")
+    assert cards(events) and " op=no near=no " in detail() and world.count(OVERPASS_HOST) == 0
+    # a key two names share is never a hit (only an ask), and the keys behave as documented
+    assert nearby.sound_alike("disham", ["Dishoom", "Dashama"])[0] == "ask"
+    assert nearby.sound_alike("disham", ["Dishoom"]) == ("hit", "Dishoom")
+    assert {nearby.sound_key(w) for w in ("dishoom", "disham", "this hun", "decim", "dessun")} == {"TSN"}
+    assert nearby.sound_alike("the", ["The Two Brewers"]) == ("miss", "")
+
+
+# --- A4: ask and act ---------------------------------------------------------------------------------
+
+def test_offer_flow(vault, client, world):
+    d = place_deps()
+    calls = []
+    d.intent_pick = lambda msg: calls.append(msg) or json.dumps(
+        {"pick": "place" if "take me" in msg else "answer", "sub": "", "confidence": 0.9, "slots": {}})
+    # (a) a follow-up "yes" that passes the level gate: the place turn with the offered name
+    ask_turn(client, "C")
+    events = turn(client, "yes", conv_id="C", followup=True)
+    [card] = cards(events)
+    assert card["type"] == "web" and card["page"] == "map"
+    assert all(r["name"] == "Dishoom" for r in card["data"]["rows"]) and card["title"] == "Nearest Dishoom"
+    assert "Dishoom" in last_line(events) and " near=yes " in detail() and detail().endswith("reason=ok")
+    assert "C" not in overlay._place_offer
+    # (b) "no": the one line, no request
+    ask_turn(client, "C")
+    world.requests.clear()
+    events = turn(client, "no", conv_id="C", followup=True)
+    assert says(events) == [phrase("place_offer_no")] and world.requests == [] and not cards(events)
+    assert " near=declined " in detail() and detail().endswith("reason=declined")
+    # (c) anything else: handled normally, the offer is gone
+    ask_turn(client, "C")
+    turn(client, "what time is it", conv_id="C")
+    assert steps("intent")[-1]["kind"] == "clock" and "C" not in overlay._place_offer
+    # (d) "yes" after 31 s: no place turn
+    ask_turn(client, "C")
+    n = len(steps("place"))
+    d.clock.t += 31
+    turn(client, "yes", conv_id="C")
+    assert len(steps("place")) == n and "C" not in overlay._place_offer
+    # (e) a barge-in "yes": geo_barge, no request, offer dropped
+    ask_turn(client, "C")
+    world.requests.clear()
+    events = turn(client, "yes", conv_id="C", barge_in=True)
+    assert says(events) == [phrase("geo_barge")] and world.requests == [] and "C" not in overlay._place_offer
+    # (f) an agent Confirm pending on C: "yes" settles only the Confirm, the offer is dropped
+    ask_turn(client, "C")
+    n = len(steps("place"))
+    # (the Confirm timed out a moment ago: the preflight still owns the yes and says the Confirm's line)
+    overlay._expired["C"] = (d.clock(), "Push the branch")
+    world.requests.clear()
+    events = turn(client, "yes", conv_id="C")
+    assert len(steps("place")) == n and world.requests == [] and "C" not in overlay._place_offer
+    assert "C" not in overlay._expired and says(events) and "Dishoom" not in " ".join(says(events))
+    # (g) an offer on C never answers a "yes" on D
+    ask_turn(client, "C")
+    n = len(steps("place"))
+    turn(client, "yes", conv_id="D")
+    assert len(steps("place")) == n and "C" in overlay._place_offer
+    # (h) the picker is never asked while the offer is open
+    calls.clear()
+    turn(client, "tell me a joke about cats", conv_id="C")
+    assert calls == [] and steps("intent_pick")[-1]["detail"].endswith("reason=pick_open")
+    turn(client, "tell me a joke about dogs", conv_id="C")
+    assert len(calls) == 1  # no offer now: the picker runs again
+
+
+def test_offer_quiet_room_yes_is_dropped(vault, client, world):
+    """A room "yes" below the owner's level never runs a search (the offer's yes passes the level gate)."""
+    place_deps()
+    turn(client, "take me to Decim", conv_id="Q", levels=[0.3] * 60)
+    world.requests.clear()
+    events = turn(client, "yes", conv_id="Q", followup=True, levels=[0.001] * 60)
+    assert says(events) == [] and world.requests == [] and steps("followup_dropped")
+
+
+def test_offer_privacy(vault, client, world):
+    place_deps()
+    events = ask_turn(client, "C")
+    assert all(e.get("private") for e in events if e["type"] in ("say", "audio"))
+    assert "C" in overlay._auto_tainted
+    events = turn(client, "yes", conv_id="C", followup=True)
+    assert all(e.get("private") for e in events if e["type"] in ("say", "audio"))
+    turn(client, "take me to Disham", conv_id="C")
+    assert {s["text"] for s in steps("spoke")} == {"[geo line]"}
+    tags = [s["text"] for s in steps("transcribed") + steps("continued")]
+    assert tags and set(tags) == {"[geo place]"}
+    history = json.dumps(list(overlay._history["C"])).lower()
+    assert history.count("(place question asked)") == 1 and "(place answer shown)" in history
+    assert not any(w in history for w in ("dishoom", "decim", "disham"))
+    for s in steps("place"):
+        d = s["detail"]
+        assert ROW_RE.match(d) and len(d) <= 200 and set(s) <= {"step", "at", "detail"}
+        assert not any(w in d.lower() for w in WORDS + ("51.5", "-0.12"))
+    # untrusted names: cleaned and capped before speech; links and card JSON stay plain words
+    for name, check in (("Dishoom <script>alert(1)</script> ‮evil​ " + "y" * 300,
+                         lambda line: "‮" not in line and "​" not in line and len(line) <= 60),
+                        ('Dishoom https://evil.example {"card": 1}', lambda line: "https://evil.example" in line)):
+        nearby.reset()
+        overlay._place_offer.clear()
+        world.override[OVERPASS_HOST] = lambda r, n=name: httpx.Response(200, content=n.encode() + b"\n")
+        events = turn(client, "take me to Decim", conv_id="U")
+        line = last_line(events)
+        assert line.startswith("Did you mean Dishoom") and check(line), line
+        assert not [e for e in events if e["type"] in ("card", "link")]
+
+
+def test_calls_per_question(vault, client, world, tmp_path):
+    place_deps()
+    before = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+    def asked(words, conv, **kw):
+        world.requests.clear()
+        turn(client, words, conv_id=conv, **kw)
+        return list(world.requests)
+
+    reqs = asked("take me to Dishoom", "k1")
+    assert len(reqs) <= 6
+    nearby.reset()
+    geo.reset()
+    reqs = asked("take me to Disham", "k2")
+    assert len(reqs) <= 7 and " near=hit " in detail()
+    nearby.reset()
+    geo.reset()
+    world.override[OVERPASS_HOST] = lambda r: httpx.Response(503)
+    reqs = asked("take me to Disham", "k3")
+    assert len(reqs) <= 7 and " op=down " in detail()
+    world.override[OVERPASS_HOST] = lambda r: httpx.Response(
+        200, content=(FX / "places" / "overpass-trafalgar.txt").read_bytes())
+    nearby.reset()
+    geo.reset()
+    reqs = asked("take me to Decim", "k4")
+    assert len(reqs) <= 3 and " near=ask " in detail()
+    assert not [r for r in reqs if r.url.host in ("api.tfl.gov.uk", "valhalla1.openstreetmap.de")]
+    reqs = asked("yes", "k4", followup=True)
+    assert len(reqs) <= 5 and " near=yes " in detail()
+    reqs = asked("take me to Dessun", "k5")  # within 10 min: the cached names, no second Overpass call
+    assert not [r for r in reqs if r.url.host == OVERPASS_HOST] and " near=ask " in detail()
+    after = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+    assert after == before  # nothing written to disk
+
+
+# --- D: the drawing's grow line -------------------------------------------------------------------
+
+def test_drawing_grow_line(client):
+    deps_with()
+    svg = json.loads((FX / "hud" / "web_drawing.json").read_text())["cards"][0]["data"]["svg"]
+    drawing = hud.drawing_card("Drawing", svg, ["1 a"])
+    overlay._index_card("g1", drawing)
+    events = turn(client, "make the drawing bigger", conv_id="g1")
+    assert says(events) == [phrase("drawing_no_enlarge")]
+    assert not [e for e in events if e["type"] == "card_size"]
+    overlay._index_card("g2", {"id": "pl-12345678", "type": "web", "page": "map", "title": "Map"})
+    events = turn(client, "make the map bigger", conv_id="g2")
+    assert says(events) == [phrase("web_no_enlarge")]
+    overlay._index_card("g3", {"id": "im1", "type": "image", "title": "Cat"})
+    events = turn(client, "make the cat bigger", conv_id="g3")
+    assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size", "id": "im1", "size": "max"}]
+    assert re.fullmatch(r"[A-Za-z .]+", phrase("drawing_no_enlarge"))

@@ -4,6 +4,9 @@ Fixed code only, no model. Every request goes through geo._get / geo._post (http
 geo.HOSTS, no redirects, a byte cap per kind). What each host sees:
 - Nominatim / Photon: the owner's place words and a box (or point) from home rounded to 2 decimals (~1 km);
   never the exact home. Cinemas skip place search: the Clusterflick index is ranked here, locally.
+- Overpass (OpenStreetMap): only for a name Nominatim finds nothing for. One GET of a fixed query holding the
+  rounded point and a fixed radius; the owner's words never go there. The names come back as data and are
+  matched here by sound (sound_alike).
 - Clusterflick: two fixed static paths (the index, a venue file built from a checked venue id); no query.
 - Valhalla matrix and TfL Journey: numbers only (home and the picked places), as stage B already sends.
 Untrusted web text (names, roads, hours, film titles) is cleaned with hud.place_text and capped; it is shown
@@ -12,6 +15,8 @@ and spoken only, never put in a URL, a prompt or a row. Nothing here logs a name
 
 from __future__ import annotations
 
+import csv
+import io
 import math
 import re
 import threading
@@ -38,6 +43,11 @@ STALE_S = 36 * 3600
 TURN_S = 15.0  # the whole place turn gives up here with what it has
 BYTES_PER_QUESTION = 1536 * 1024
 REACH_PAD_MIN = 10
+OVERPASS = "https://overpass-api.de/api/interpreter"
+# jfollow11f: the whole Overpass query; only the 2-decimal point and the fixed radius are filled in.
+OVERPASS_QUERY = ('[out:csv(name;false)][timeout:8];nwr["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"]'
+                  '["name"](around:{radius},{lat:.2f},{lon:.2f});out {cap};')
+OVERPASS_RADIUS_M, OVERPASS_CAP = 1000, 1000
 NEAR_RATIO, NEAR_MIN_CHARS = 0.75, 4  # misheard-name retry: how alike a nearby name must be ("disham" ~ "dishoom" 0.77)
 SHOWS_DOWN_LEAD = "I can't see showtimes right now."
 NOT_LISTED = "hours not listed"
@@ -51,6 +61,7 @@ _lock = threading.Lock()
 _index: list = []  # [stored at, parsed index]: the last good index, kept past its TTL for the down path
 _venues: dict[str, tuple[float, list]] = {}
 _searches: dict[tuple, tuple[float, str, list]] = {}
+_overpass: dict[tuple, tuple[float, list[str]]] = {}  # rounded point -> (stored at, names); memory only
 
 
 def reset() -> None:
@@ -59,6 +70,7 @@ def reset() -> None:
         _index.clear()
         _venues.clear()
         _searches.clear()
+        _overpass.clear()
 
 
 class Budget(geo.Budget):
@@ -67,7 +79,8 @@ class Budget(geo.Budget):
     def __init__(self) -> None:
         super().__init__()
         self.bytes = self.matrix = self.shows = 0
-        self.near = "no"  # misheard-name retry: no (not run) | hit | miss
+        self.near = "no"  # misheard name: no (not run) | hit | ask | miss; the service sets yes | declined
+        self.op = "no"  # the Overpass names: no (not run) | ok | down
         self.deadline = geo.clock() + TURN_S
         self.timed_out = False
 
@@ -225,23 +238,127 @@ def near_miss(hits: list[dict], query: str, home: tuple) -> list[dict]:
     return [h for h in hits if best_name and _compact(hud.place_text(h.get("name"), hud.MAX_LABEL)) == best_name]
 
 
+# --- jfollow11f: a misheard name, matched by sound against the names near the rounded point -------
+
+def overpass_url(point: tuple) -> str:
+    """The one Overpass request: the fixed query with the 2-decimal point and the radius; nothing else."""
+    query = OVERPASS_QUERY.format(radius=OVERPASS_RADIUS_M, lat=point[0], lon=point[1], cap=OVERPASS_CAP)
+    return OVERPASS + "?" + urlencode({"data": query}, quote_via=quote)
+
+
+def overpass_names(point: tuple, budget: Budget) -> list[str]:
+    """Food and drink names near the rounded point (cleaned, unique, <= 40 chars), cached 10 min per point.
+    Raises geo.GeoError when Overpass fails."""
+    with _lock:
+        hit = _overpass.get(point)
+    if hit and geo.clock() - hit[0] < SEARCH_TTL_S:
+        return hit[1]
+    text = _fetch(overpass_url(point), "overpass", budget).decode("utf-8", "replace")
+    names: dict[str, str] = {}
+    for row in csv.reader(io.StringIO(text), delimiter="\t"):
+        name = hud.place_text(row[0] if row else "", hud.MAX_LABEL)
+        if name:
+            names.setdefault(name.lower(), name)
+    out = list(names.values())
+    with _lock:
+        _overpass[point] = (geo.clock(), out)
+        while len(_overpass) > 8:
+            _overpass.pop(next(iter(_overpass)))
+    return out
+
+
+_SOUND = str.maketrans("dtszmncq", "TTSSNNKK")
+
+
+def sound_key(text: str) -> str:
+    """A consonant skeleton that misheard forms share: {d,t,th} -> T, {s,z,sh,ch,soft c} -> S, {m,n} -> N,
+    vowels/h/w/y dropped after the first letter (kept as its class), doubles merged.
+    "dishoom", "disham", "this hun", "decim", "dessun" -> "TSN"."""
+    t = re.sub(r"[^a-z]", "", text.lower())
+    if not t:
+        return ""
+    t = re.sub(r"c(?=[eiy])", "s", t)
+    t = t.replace("th", "t").replace("sh", "s").replace("ch", "s").replace("ck", "k").replace("ph", "f")
+    head = "A" if t[0] in "aeiou" else t[0]
+    t = (head + re.sub(r"[aeiouhwy]", "", t[1:])).translate(_SOUND).upper()
+    return re.sub(r"(.)\1+", r"\1", t)
+
+
+def _lead_runs(name: str) -> list[str]:
+    """The name's leading word runs, a leading "the" dropped: "The Dishoom Cafe" -> Dishoom, Dishoom Cafe.
+    (A brand leads its name; runs inside a name, "White Swan", made false matches in the real pull.)"""
+    words = re.sub(r"^the\s+", "", name.strip(), flags=re.I).split()[:8]
+    return [" ".join(words[:j]) for j in range(1, len(words) + 1)]
+
+
+def sound_alike(query: str, names: list[str]) -> tuple[str, str]:
+    """(verdict, name) for a name Nominatim did not find. hit: exactly one name has the query's sound key
+    and is alike enough (near_score >= 0.75); ask: the best name sharing the key (3+ letters), else one
+    whose key is the query's plus one more sound (STT drops a last sound: "dessu"); miss: none."""
+    key = sound_key(query)
+    if len(_compact(query)) < NEAR_MIN_CHARS or len(key) < 2:
+        return "miss", ""
+    full, longer = [], []
+    for name in names:
+        keys = {sound_key(r) for r in _lead_runs(name)}
+        if len(key) >= 3 and key in keys:
+            full.append(name)
+        elif any(len(k) == len(key) + 1 and k.startswith(key) for k in keys):
+            longer.append(name)
+    if len(full) == 1 and near_score(query, full[0]) >= NEAR_RATIO:
+        return "hit", full[0]
+    pool = full or longer
+    if not pool:
+        return "miss", ""
+    return "ask", min(pool, key=lambda n: (-near_score(query, n), n.lower()))
+
+
 class SearchFailed(Exception):
-    def __init__(self, key: str, reason: str):
+    def __init__(self, key: str, reason: str, name: str = ""):
         super().__init__(key)
-        self.key, self.reason = key, reason
+        self.key, self.reason, self.name = key, reason, name
 
 
 def _search_reason(e: geo.GeoError) -> str:
     return e.reason if e.reason in ("rate_cap", "timeout", "too_big") else "search_down"
 
 
-def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = True) -> tuple[str, list[dict]]:
+def _misheard(query: str, point: tuple, box: tuple, home: tuple, budget: Budget) -> tuple[str, list]:
+    """0 usable Nominatim hits for a name: ONE Overpass call for the names nearby, matched by sound. A sure
+    match is searched on Nominatim at once (src overpass); an unsure one raises place_offer ("Did you mean");
+    Overpass down -> stage f's Photon retry. Returns (src, hits); [] = nothing alike."""
+    try:
+        names = overpass_names(point, budget)
+        budget.op = "ok"
+    except geo.GeoError:
+        budget.op, budget.near = "down", "miss"
+        try:
+            hits = near_miss(_photon_hits(geo._json(_fetch(photon_url(query, point), "photon", budget))), query, home)
+        except geo.GeoError as e:
+            raise SearchFailed("place_down", _search_reason(e)) from None
+        if candidates(hits, home):
+            budget.near = "hit"
+            return "photon", hits
+        return "nominatim", []
+    budget.near, name = sound_alike(query, names)
+    if budget.near == "ask":
+        raise SearchFailed("place_offer", "ask", name)
+    if budget.near == "miss":
+        return "nominatim", []
+    try:  # the sure name, searched like a typed one; never back through this step
+        return "overpass", _nominatim_hits(_nominatim(nominatim_search_url(name, box), budget))
+    except geo.GeoError as e:
+        raise SearchFailed("place_down", _search_reason(e)) from None
+
+
+def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = True,
+           misheard: bool = True) -> tuple[str, list[dict]]:
     """(src, <= 5 candidates) for a name or category. Categories: Nominatim on the tight box (its 20 hits
     in a bigger box come by importance, not distance), then the small box when that had 0 usable hits.
-    Names: Nominatim on the small box; 0 usable hits -> ONE misheard-name retry on Photon (fuzzy, near the
-    rounded point) kept only when a nearby name is alike enough (near_miss). Photon also stands in when the
-    first Nominatim call fails for a name. widen=False: one small-box call only. At most 2 search calls.
-    Raises SearchFailed(place_down | place_none, reason)."""
+    Names: Nominatim on the small box; 0 usable hits -> _misheard (Overpass names matched by sound, Photon
+    when Overpass is down), unless misheard=False (the name the owner said yes to). Photon also stands in
+    when the first Nominatim call fails for a name. widen=False: one small-box call only. At most 2 search
+    calls + 1 Overpass call. Raises SearchFailed(place_down | place_none | place_offer, reason[, name])."""
     point = search_point(home)
     box = search_box(point, "tight" if mode == "category" and widen else "small")
     # categories ask for Nominatim's max of 40: the tight box near Trafalgar Square holds 27 pharmacies and
@@ -267,14 +384,9 @@ def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = Tru
             raise SearchFailed("place_down", _search_reason(e2)) from None
     found = candidates(hits, home, fallback)
     if not found and src == "nominatim" and widen and mode == "name":
-        budget.near = "miss"
-        try:
-            hits = near_miss(_photon_hits(geo._json(_fetch(photon_url(query, point), "photon", budget))), query, home)
-        except geo.GeoError as e:
-            raise SearchFailed("place_down", _search_reason(e)) from None
-        found = candidates(hits, home)
-        if found:
-            src, budget.near = "photon", "hit"
+        if misheard:
+            src, hits = _misheard(query, point, box, home, budget)
+            found = candidates(hits, home)
     elif not found and src == "nominatim" and widen:
         try:
             hits = _nominatim_hits(_nominatim(nominatim_search_url(query, search_box(point, "small"), limit), budget))
@@ -573,6 +685,7 @@ class Answer:
     credits: list[str] = field(default_factory=list)
     asof: str = ""
     web: bool = False  # the card or line holds web text: the service marks the conversation tainted
+    offer: str = ""  # jfollow11f: the Overpass name a "Did you mean" line asks about (memory only)
     home: tuple | None = None
 
 
@@ -664,9 +777,11 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
     shows_ok = False
     try:
         if not cinema:
-            ans.src, found = search(ask["mode"], ask["query"], home, budget)
+            offered = bool(ask.get("offered"))  # the name the owner said yes to: searched as is, once
+            ans.src, found = search(ask["mode"], ask["query"], home, budget, misheard=not offered)
             # a misheard name answers with the name it matched ("Dishoom", not "Disham")
-            ans.title = f"Nearest {found[0]['name'] if budget.near == 'hit' else capwords(ask['query'])}"[:hud.MAX_TITLE]
+            matched = budget.near == "hit" or offered
+            ans.title = f"Nearest {found[0]['name'] if matched else capwords(ask['query'])}"[:hud.MAX_TITLE]
         else:
             idx, fresh = clusterflick_index(budget)
             if idx is None:  # cold cache and Clusterflick down: one bounded Nominatim "cinema" search
@@ -684,6 +799,9 @@ def answer(ask: dict, home: tuple, budget: Budget) -> Answer:
             ans.title = (f"{capwords(ask['film'])} near you" if ask["mode"] == "film" else "Cinemas near you")[:hud.MAX_TITLE]
     except SearchFailed as e:
         ans.key, ans.reason = e.key, e.reason
+        if e.key == "place_offer":  # "Did you mean Dishoom?": a web name is spoken, so the turn is tainted
+            ans.offer, ans.fmt, ans.web = e.name, {"name": " ".join(e.name.split()[:6])}, True
+            return ans
         ans.fmt = {"query": _query_words(ask) if not cinema else "a cinema"} if e.key == "place_none" else {}
         return ans
     rows = [{**c, "walk": None, "tfl": None, "min": None, "mode": None, "shows": None, "picked": []} for c in found]
