@@ -504,7 +504,8 @@ assert not any(bad in arg for arg in _AGENT_ASK_ARGS for bad in agent.FORBIDDEN)
 
 def _agent_session(popen=subprocess.Popen) -> agent.AgentSession:
     """An agent session whose CLI argv also carries the Bash ask rule (appended last)."""
-    return agent.AgentSession(popen=lambda argv, *a, **k: popen([*argv, *_AGENT_ASK_ARGS], *a, **k))
+    return agent.AgentSession(claude_bin=lean.cli_bin(),  # read per session: tests can swap the CLI
+                              popen=lambda argv, *a, **k: popen([*argv, *_AGENT_ASK_ARGS], *a, **k))
 
 
 def _voice_present() -> bool:
