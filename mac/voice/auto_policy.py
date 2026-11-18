@@ -43,8 +43,13 @@ RUNS_CODE_PREFIXES = ("python", "pip", "perl", "ruby", "php", "tclsh", "ipython"
                       "bash", "zsh", "ksh", "fish", "dash", "csh", "tcsh")
 FIND_RUNS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
                        "-fls"})
-DELETE = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "trash", "truncate", "dd", "mv", "cp", "ln",
-                    "install", "ditto", "tee", "tar", "unzip", "gunzip", "patch", "split", "mkfile",
+# jfollow11a: a delete always asks, even in the scratch dir.
+DELETE_ALWAYS = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "trash", "truncate"})
+# jfollow11a: copies, moves and new folders/files run auto when every operand is an absolute path in the
+# owner's own folders (not ~/Library, no dot folder) or in the scratch dir (_write_area).
+WRITE_HOME = frozenset({"mkdir", "touch", "cp", "mv", "ditto"})
+# Other writers: auto only with absolute targets in the scratch dir.
+DELETE = frozenset({"ln", "install", "tee", "tar", "unzip", "gunzip", "patch", "split", "mkfile",
                     # builder additions: other tools that overwrite or move files
                     "zip", "gzip", "bzip2", "xz", "csplit", "sips", "textutil", "plutil",
                     # round 1: archivers that extract over any path
@@ -83,7 +88,7 @@ GIT_AUTO = frozenset({"add", "commit", "fetch", "stash"})
 STASH_AUTO = frozenset({"push", "list", "show"})
 GUARD = frozenset({"launchctl", "defaults", "kill", "killall", "pkill", "tccutil", "csrutil", "spctl",
                    "systemsetup", "scutil", "networksetup", "pmset", "chmod", "chown", "chflags", "xattr",
-                   "crontab", "at", "shutdown", "reboot", "halt", "diskutil",
+                   "crontab", "at", "shutdown", "reboot", "halt", "diskutil", "dd",
                    # builder additions: login items, privileges, disks, firmware
                    "sfltool", "dscl", "nvram", "bless", "fdesetup", "softwareupdate", "systemextensionsctl",
                    "kextload", "kextunload", "mount", "umount", "hdiutil",
@@ -100,6 +105,21 @@ READ_ONLY = frozenset({"date", "uptime", "df", "du", "memory_pressure", "vm_stat
 # The look-ups among them that print no file names or file text: running one leaves the mark unset.
 QUIET = frozenset({"date", "uptime", "df", "memory_pressure", "vm_stat", "sw_vers", "uname", "whoami",
                    "hostname", "pwd", "echo"})
+
+# jfollow11a (hub answer 1): the look-ups that run auto. Any program not here, in WRITE_HOME, the
+# scratch-only writers or git asks ("unknown"). The builder may not add names.
+LOOKUP = READ_ONLY | RECURSIVE_READERS | frozenset({
+    "find", "sort", "uniq", "xxd", "base64", "say", "diff", "cmp", "comm", "cut", "nl", "md5", "shasum",
+    "mdls", "mdfind", "tree", "ps", "id", "groups", "cal"})
+KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | {"git"}
+# A program named by path counts as known only from the system's own bin folders (a copy into home
+# named ls is not ls).
+# The running checkout (launchd runs `python -m mac.voice.service` from it): never a write area.
+CHECKOUT = os.path.realpath(Path(agent.__file__).resolve().parents[2])
+SYSTEM_BIN = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+# Agent instruction files: Claude Code (and glm-code) loads CLAUDE.md / CLAUDE.local.md from its folder
+# up to /, agy and other agents AGENTS.md / GEMINI.md, as trusted instructions. Case-folded (APFS).
+AGENT_NOTES = frozenset({"claude.md", "claude.local.md", "agents.md", "gemini.md"})
 
 _NAME_RE = re.compile(r"[A-Za-z0-9._+-]{1,32}")
 _PS_ENV_RE = re.compile(r"-?[A-Za-z]*[eE][A-Za-z]*")  # ps e / ps -E / ps auxe: may print environments
@@ -276,6 +296,95 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def _guard_roots(ctx: agent_policy.Ctx) -> list[str]:
+    roots = [os.path.realpath(os.path.join(ctx.home, d)) for d in GUARD_HOME]
+    roots += [os.path.realpath(str(agent.SUPPORT_DIR)), os.path.realpath(str(SETTINGS_FILE.parent))]
+    return roots + [os.path.realpath(d) for d in GUARD_ABS]
+
+
+def _code_dir(p: str, home: str) -> bool:
+    """Code something runs later: inside an .app bundle, or in a checkout (a folder from p up to, not
+    including, home holds .git; uvicorn and python -m put the checkout first on sys.path)."""
+    if any(c.endswith(".app") for c in agent_policy._home_parts(p, home)):
+        return True
+    d = p
+    while agent_policy._under(d, home) and agent_policy._fold(d) != agent_policy._fold(home):
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        d = os.path.dirname(d)
+    return False
+
+
+def _write_area(tok: str, ctx: agent_policy.Ctx) -> bool:
+    """An absolute path (as typed: a literal ~ or a relative path asks) that lands, by every _places
+    reading, in the owner's own folders (under home, not ~/Library, no dot component, not a startup
+    or guarded file) or in the agent's scratch dir."""
+    if not os.path.isabs(tok):
+        return False
+    home = os.path.realpath(ctx.home)
+    scratch = os.path.realpath(ctx.cwd) if ctx.cwd else None  # realpath("") would be our own cwd
+    for p in _places(tok, ctx):
+        if scratch is not None and _under(p, scratch):
+            continue
+        if _under(p.casefold(), CHECKOUT.casefold()):  # the service's own code (python -m puts it on sys.path)
+            return False
+        parts = agent_policy._home_parts(p, home)
+        if (not parts or parts[0] == "library" or any(c.startswith(".") for c in parts) or _code_dir(p, home)
+                or os.path.basename(p).casefold() in agent_policy._WRITE_DENY_NAMES
+                or os.path.basename(p).casefold() in AGENT_NOTES
+                or any(agent_policy._under(p, os.path.join(home, d)) for d in agent_policy._WRITE_DENY_HOME)
+                or any(agent_policy._under(p, r) for r in _guard_roots(ctx))):
+            return False
+    return True
+
+
+def _write_targets(name: str, args: list[str]) -> list[str] | None:
+    """Every operand and option-attached value of a WRITE_HOME command, plus <dir>/<source name> when
+    cp/mv copy into an existing folder (a link there would take the write elsewhere). None after `--`
+    (operands may then look like options) and for ditto with any option (-x/-c/-k unpack or pack archives)."""
+    if "--" in args or (name == "ditto" and any(a.startswith("-") for a in args)):
+        return None
+    ops = [a for a in args if not a.startswith("-")]
+    out = ops + [v for a in args if (v := _attached(a)) is not None]
+    if name in ("cp", "mv") and len(ops) > 1 and os.path.isdir(ops[-1]):
+        out += [os.path.join(ops[-1], os.path.basename(a.rstrip("/"))) for a in ops[:-1]]
+    return out
+
+
+def _overwrites(name: str, args: list[str]) -> bool:
+    """cp/mv/ditto onto a path that already exists: an overwrite (or a ditto merge) is a delete. The
+    final target is dst, or dst/<source name> when dst is an existing folder. Operands are absolute here.
+    Fail closed: fewer than two operands, an option-attached path (--target-directory=), or a cp source
+    ending in / into an existing folder (BSD cp -R copies its contents into dst) count as an overwrite."""
+    if name not in ("cp", "mv", "ditto"):
+        return False
+    ops = [a for a in args if not a.startswith("-")]
+    if len(ops) < 2 or any(_attached(a) is not None for a in args):
+        return True
+    dst = ops[-1]
+    if name == "ditto":
+        return os.path.lexists(dst)
+    if name == "cp" and os.path.isdir(dst) and any(a.endswith("/") for a in ops[:-1]):
+        return True
+    finals = [os.path.join(dst, os.path.basename(a.rstrip("/"))) for a in ops[:-1]] if os.path.isdir(dst) else [dst]
+    return any(os.path.lexists(f) for f in finals)
+
+
+def write_verdict(resolved_path, ctx: agent_policy.Ctx, *, tainted: bool, barge: bool,
+                  gate_ok: bool) -> tuple[str, str]:
+    """The Write tools (path already realpath'd by agent_policy._write). Order: off, outside the write
+    area, untrusted (a file write is never a look-up), barge, follow-up gate."""
+    if not auto_on():
+        return "asked", "off"
+    if not isinstance(resolved_path, str) or not _write_area(resolved_path, ctx):
+        return "asked", "outside"
+    if tainted:
+        return "asked", "untrusted"
+    if os.path.lexists(resolved_path):  # a Write over an existing file is a delete
+        return "asked", "delete"
+    return gate(barge=barge, gate_ok=gate_ok)
+
+
 def _git_sub(argv: list[str]) -> tuple[str, list[str]]:
     """(subcommand, its arguments) of a git argv, past -C <dir> / -c <k=v> and other options."""
     i = 1
@@ -303,9 +412,7 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
     if (name in RUNS_CODE or name.startswith(RUNS_CODE_PREFIXES)
             or (name == "find" and any(a in FIND_RUNS for a in args))):
         return "runs_code"
-    guard_roots = [os.path.realpath(os.path.join(ctx.home, d)) for d in GUARD_HOME]
-    guard_roots += [os.path.realpath(str(agent.SUPPORT_DIR)), os.path.realpath(str(SETTINGS_FILE.parent))]
-    guard_roots += [os.path.realpath(d) for d in GUARD_ABS]
+    guard_roots = _guard_roots(ctx)
     if name in GUARD or any(_is_path(v) and any(_under(p, r) for p in _places(v, ctx) for r in guard_roots)
                             for v in values):
         return "guard"
@@ -317,6 +424,8 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
             return "network"
         if sub not in GIT_AUTO or (sub == "stash" and rest and rest[0] not in STASH_AUTO):
             return "git"
+    if name in DELETE_ALWAYS:
+        return "delete"
     if name in DELETE:
         # plain arguments plus option-attached paths (tar --directory=/elsewhere, tar -C/elsewhere)
         targets = [a for a in args if not a.startswith("-")] + [
@@ -337,18 +446,45 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
                 problem = agent_policy._path_problem(v, resolved, ctx, search=False)
                 if problem and agent_policy.reason_code(problem) in ("secret", "vault"):
                     return "secret"
-    if name in RECURSIVE_READERS:
-        recursive = name in RECURSE_BY_DEFAULT or any(
+    if name in WRITE_HOME:
+        targets = _write_targets(name, args)
+        if targets is None:
+            return "outside"
+        # a source folder in home is copied whole: one holding a closed folder (~ holds .ssh) is a secret.
+        # Only sources: copying into a folder reads nothing from it.
+        home = os.path.realpath(ctx.home)
+        sources = [a for a in args if not a.startswith("-")][:-1] if name in ("cp", "mv", "ditto") else []
+        for t in sources:
+            for resolved in _places(t, ctx):
+                if (os.path.isdir(resolved) and agent_policy._under(resolved, home)
+                        and agent_policy._path_problem(t, resolved, ctx, search=True)):
+                    return "secret"
+        # moving a folder above the running checkout stops the service and opens a move-away-and-back;
+        # moving ~/Applications takes the overlay bundle away from its login item
+        if name == "mv" and any(_under(CHECKOUT.casefold(), r.casefold())
+                                or agent_policy._home_parts(r, home) == ["applications"]
+                                for t in sources for r in _places(t, ctx)):
+            return "outside"
+        if not targets or not all(_write_area(t, ctx) for t in targets):
+            return "outside"
+        if _overwrites(name, args):
+            return "delete"
+    if name in RECURSIVE_READERS or name == "find" or name == "diff":
+        recursive = name in RECURSE_BY_DEFAULT or name == "find" or any(
             a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a))
             for a in args)
         if recursive:
             dirs = [a for a in args if not a.startswith("-")]
-            if name not in ("cat", "head", "tail", "less", "more", "strings", "du") and len(dirs) < 2:
+            if name not in ("cat", "head", "tail", "less", "more", "strings", "du", "find", "diff") and len(dirs) < 2:
                 dirs.append(".")  # a searcher with only its pattern searches the working directory
+            if name == "find" and (not args or args[0].startswith(("-", "(", "!"))):
+                dirs.append(".")  # find with no start folder walks the working directory
             for d in dirs:
                 for resolved in _places(d, ctx):
                     if os.path.isdir(resolved) and agent_policy._path_problem(d, resolved, ctx, search=True):
                         return "secret"
+    if name not in KNOWN or ("/" in argv[0] and os.path.dirname(argv[0]) not in SYSTEM_BIN):
+        return "unknown"
     return "ok"
 
 

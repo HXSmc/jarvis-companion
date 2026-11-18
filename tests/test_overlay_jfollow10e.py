@@ -604,6 +604,7 @@ def test_barge_never_picks(client):
 
 def test_pick_cannot_widen_auto(client):
     from test_overlay_jfollow10a import _rows, bash, run_agent
+    from test_overlay_jfollow10a import _home_write
     auto_policy.SETTINGS_FILE.unlink()  # full auto on (the owner's default)
     overlay._mark_untrusted("w1")
     fake = FakePick(reply("agent", 0.99))
@@ -616,11 +617,12 @@ def test_pick_cannot_widen_auto(client):
 
     sys.modules["test_overlay_jfollow10a"].setup = setup_with_pick
     try:
-        run_agent(client, bash("uptime", "tool-x"), text="tell me how the machine is doing", conv_id="w1")
+        run_agent(client, bash("uptime", _home_write()), text="tell me how the machine is doing",
+                  conv_id="w1")
     finally:
         sys.modules["test_overlay_jfollow10a"].setup = real_setup
     assert len(fake.calls) == 1 and "pick=agent" in _row() and "path=model" in _row()
-    assert _rows()[-1] == "cmd=tool-x decision=asked reason=untrusted"
+    assert _rows()[-1] == "cmd=touch decision=asked reason=untrusted"
     # a follow-up that fails the gate is dropped before the model
     turn(client, "tell me how the machine is doing", conv_id="w1", followup=True, levels=QUIET, conf=0.9)
     assert len(fake.calls) == 1

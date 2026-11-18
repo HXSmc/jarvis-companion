@@ -54,6 +54,9 @@ from mac.mirroring.driver import (UNICODE_CHUNK, kCGEventLeftMouseDown,
 from mac.mirroring.window import (AX, CF, CG, CGPoint, CGRect, _cfstr,
                                   _cfstr_value, _enum_windows)
 
+# This driver enforces require_app (_guard); gateway/screen.py refuses a locked batch without it.
+FOCUS_LOCK = True
+
 # CG is not re-entrant-safe from multiple threads: one lock guards every
 # capture and every event batch (gateway calls run in a threadpool).
 _LOCK = threading.Lock()

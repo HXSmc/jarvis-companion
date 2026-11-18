@@ -4912,6 +4912,20 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                     elif isinstance(decision, agent_policy.Deny):
                         _cmd_row(on_step, auto_policy.cmd_name(command), "refused",
                                  agent_policy.reason_code(decision.reason))
+                elif name in agent_policy._WRITE_TOOLS and isinstance(decision, agent_policy.Confirm):
+                    # jfollow11a: a new file in the owner's own folders runs auto; same order and limits
+                    path = decision.updated_input.get("notebook_path" if name == "NotebookEdit" else "file_path")
+                    tainted = _session_marked(run.session) or run.conv_id in _auto_tainted
+                    try:
+                        how, why = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                            _POLICY_POOL, lambda: auto_policy.write_verdict(
+                                path, run.ctx, tainted=tainted, barge=run.barge, gate_ok=run.gate_ok)),
+                            POLICY_CHECK_S)
+                    except asyncio.TimeoutError:
+                        how, why = "asked", "timeout"
+                    _cmd_row(on_step, name, how, why)
+                    if how == "auto":
+                        decision, auto_run = agent_policy.Allow(decision.updated_input), True
                 now = deps.clock()
                 run.opening_key = None  # a tool call came first: its own progress rules apply
                 if metrics.get("agent_first_tool_s") is None:

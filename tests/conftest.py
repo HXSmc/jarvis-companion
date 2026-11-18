@@ -27,6 +27,7 @@ except OSError:
     _mac_driver = types.ModuleType("mac.screen.driver")
     _mac_driver.capture_jpeg = lambda w, q: (b"", w, q)
     _mac_driver.send_events = lambda events, *, locked=False: None
+    _mac_driver.FOCUS_LOCK = True
     _mac_driver.tcc_ok = lambda: True
     _mac_driver.display_asleep = lambda: False
 
