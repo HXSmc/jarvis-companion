@@ -216,4 +216,34 @@ final class FixtureDecodeTests: XCTestCase {
             XCTAssertEqual(try JSONDecoder().decode(HUDMessage.self, from: Data(json.utf8)).cards.map(\.typeName), ["info"], data)
         }
     }
+
+    /// jfollow10f criterion 24: the places map card decodes with its rows, credits and "as of";
+    /// a row with an unknown mode is skipped and the card still decodes; data.json re-encodes the rows.
+    func testPlacesMapCardRows() throws {
+        let file = Self.fixturesDir.appendingPathComponent("web-places.json")
+        let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(contentsOf: file))
+        guard case .web(let web) = msg.cards.first else { return XCTFail("expected a web card, got \(msg.cards)") }
+        XCTAssertEqual(web.page, "map")
+        XCTAssertEqual(web.data.rows?.count, 5)
+        XCTAssertEqual(web.data.credits?.count, 3)
+        XCTAssertEqual(web.data.asof, "20:37")
+        XCTAssertEqual(web.data.rows?.first?.times?.count, 2)
+        let odd = #"{"shapes":[],"cards":[{"id":"w2","type":"web","title":"T","page":"map","data":{"routes":[],"pins":[{"lat":51.5,"lon":-0.12,"label":"Home"}],"attribution":"x","rows":[{"name":"Car Park","km":1,"mode":"car"},{"name":"Kept","km":1.2,"min":7,"mode":"walk","times":[{"at":"25:00","film":"x"},{"at":"18:00","film":"Ebenezer"}]}],"credits":["osm","evil"],"asof":"<b>"}}]}"#
+        let oddMsg = try JSONDecoder().decode(HUDMessage.self, from: Data(odd.utf8))
+        guard case .web(let w2) = oddMsg.cards.first else { return XCTFail("the card itself must still decode") }
+        XCTAssertEqual(w2.data.rows?.map(\.name), ["Kept"])
+        XCTAssertEqual(w2.data.rows?.first?.times?.map(\.at), ["18:00"])
+        XCTAssertEqual(w2.data.credits, ["osm"])
+        XCTAssertNil(w2.data.asof)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(web.data)) as? [String: Any])
+        XCTAssertEqual((json["rows"] as? [Any])?.count, 5)
+        XCTAssertEqual(json["asof"] as? String, "20:37")
+    }
+
+    func testPlacesRowNoteTomorrow() throws {
+        let raw = #"{"shapes":[],"cards":[{"id":"w3","type":"web","title":"T","page":"map","data":{"routes":[],"pins":[{"lat":51.5,"lon":-0.12,"label":"Home"}],"attribution":"x","rows":[{"name":"A","km":1,"note":"none_tomorrow"},{"name":"B","km":2,"note":"<b>"}]}}]}"#
+        let msg = try JSONDecoder().decode(HUDMessage.self, from: Data(raw.utf8))
+        guard case .web(let web) = msg.cards.first else { return XCTFail("expected a web card") }
+        XCTAssertEqual(web.data.rows?.map(\.note), ["none_tomorrow", nil])
+    }
 }

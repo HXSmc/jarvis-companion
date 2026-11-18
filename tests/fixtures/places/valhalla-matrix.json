@@ -1,0 +1,49 @@
+{
+ "sources_to_targets": [
+  [
+   {
+    "from_index": 0,
+    "to_index": 0,
+    "time": 495,
+    "distance": 0.632,
+    "cost": 556.1
+   },
+   {
+    "from_index": 0,
+    "to_index": 1,
+    "time": 315,
+    "distance": 0.369,
+    "cost": 345.381
+   },
+   {
+    "from_index": 0,
+    "to_index": 2,
+    "time": 3311,
+    "distance": 6.725,
+    "cost": 3224.939
+   }
+  ]
+ ],
+ "sources": [
+  {
+   "lat": 51.507998,
+   "lon": -0.128097
+  }
+ ],
+ "targets": [
+  {
+   "lat": 51.512422,
+   "lon": -0.127004
+  },
+  {
+   "lat": 51.509976,
+   "lon": -0.130182
+  },
+  {
+   "lat": 51.524474,
+   "lon": -0.077113
+  }
+ ],
+ "units": "kilometers",
+ "algorithm": "timedistancematrix"
+}

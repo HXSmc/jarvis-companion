@@ -341,6 +341,10 @@ public struct MapData: Codable, Equatable {
     public var routes: [MapRoute]
     public var pins: [MapPin]
     public var attribution: String
+    /// jfollow10f: the ranked places under the map (<= 5), the credit keys, the showtimes' "as of" time.
+    public var rows: [PlaceRow]?
+    public var credits: [String]?
+    public var asof: String?
 
     public static let osmAttribution = "© OpenStreetMap contributors"
 
@@ -348,7 +352,7 @@ public struct MapData: Codable, Equatable {
         lat.isFinite && lon.isFinite && (-90...90).contains(lat) && (-180...180).contains(lon)
     }
 
-    private enum CodingKeys: String, CodingKey { case routes, pins, attribution }
+    private enum CodingKeys: String, CodingKey { case routes, pins, attribution, rows, credits, asof }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -361,6 +365,14 @@ public struct MapData: Codable, Equatable {
         pins = rawPins.prefix(2).filter { Self.inRange($0.lat, $0.lon) }
             .map { MapPin(lat: $0.lat, lon: $0.lon, label: String($0.label.prefix(40))) }
         attribution = Self.osmAttribution
+        // Lenient like the routes: a bad row is skipped, never the card.
+        let rawRows = (try? c.decode([Lossy<PlaceRow>].self, forKey: .rows))?.compactMap(\.value) ?? []
+        rows = rawRows.isEmpty ? nil : Array(rawRows.prefix(5))
+        var seen = Set<String>()
+        let keys = ((try? c.decode([Lossy<String>].self, forKey: .credits))?.compactMap(\.value) ?? [])
+            .filter { PlaceRow.creditKeys.contains($0) && seen.insert($0).inserted }
+        credits = keys.isEmpty ? nil : keys
+        asof = (try? c.decode(String.self, forKey: .asof)).flatMap { PlaceRow.isClock($0) ? $0 : nil }
         guard !routes.isEmpty || !pins.isEmpty else {
             throw DecodingError.dataCorruptedError(forKey: .routes, in: c, debugDescription: "empty map")
         }
@@ -375,6 +387,67 @@ extension MapData {
         routes = []
         pins = []
         attribution = MapData.osmAttribution
+    }
+}
+
+/// One showing on a place row: "HH:MM" and the film title (plain text, <= 40).
+public struct PlaceTime: Codable, Equatable {
+    public var at: String
+    public var film: String
+}
+
+/// jfollow10f: one ranked place under the map, re-checked like common/hud.py _place_row. Plain text only;
+/// the page puts every field in with textContent.
+public struct PlaceRow: Codable, Equatable {
+    public var name: String
+    public var road: String?
+    public var min: Int?
+    public var mode: String?
+    public var km: Double
+    public var hours: String?
+    public var times: [PlaceTime]?
+    public var note: String?
+
+    public static let modes: Set<String> = ["walk", "bus", "tube", "train"]
+    public static let notes: Set<String> = ["times_not_listed", "none", "none_tomorrow"]
+    public static let creditKeys: Set<String> = ["osm", "tfl", "clusterflick"]
+    static let hoursForms = ["open 24 hours", "closed now", "hours not listed", "open until midnight"]
+
+    static func isClock(_ s: String) -> Bool {
+        let p = s.split(separator: ":")
+        guard s.count == 5, p.count == 2, let h = Int(p[0]), let m = Int(p[1]) else { return false }
+        return (0...23).contains(h) && (0...59).contains(m)
+    }
+
+    static func hoursOK(_ s: String) -> Bool {
+        if hoursForms.contains(s) { return true }
+        let prefix = "open until "
+        return s.hasPrefix(prefix) && isClock(String(s.dropFirst(prefix.count)))
+    }
+
+    private enum CodingKeys: String, CodingKey { case name, road, min, mode, km, hours, times, note }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = String(try c.decode(String.self, forKey: .name).prefix(40))
+        let k = try c.decode(Double.self, forKey: .km)
+        guard !name.isEmpty, k.isFinite, (0...50).contains(k) else {
+            throw DecodingError.dataCorruptedError(forKey: .km, in: c, debugDescription: "bad row")
+        }
+        km = k
+        road = (try? c.decode(String.self, forKey: .road)).map { String($0.prefix(40)) }
+        min = (try? c.decode(Int.self, forKey: .min)).flatMap { (0...600).contains($0) ? $0 : nil }
+        if let m = try c.decodeIfPresent(String.self, forKey: .mode) {
+            guard Self.modes.contains(m) else {  // an unknown mode drops the row (like the gateway)
+                throw DecodingError.dataCorruptedError(forKey: .mode, in: c, debugDescription: "bad mode")
+            }
+            mode = m
+        }
+        hours = (try? c.decode(String.self, forKey: .hours)).flatMap { Self.hoursOK($0) ? $0 : nil }
+        let raw = (try? c.decode([Lossy<PlaceTime>].self, forKey: .times))?.compactMap(\.value) ?? []
+        let good = raw.filter { Self.isClock($0.at) }.prefix(3).map { PlaceTime(at: $0.at, film: String($0.film.prefix(40))) }
+        times = good.isEmpty ? nil : Array(good)
+        note = (try? c.decode(String.self, forKey: .note)).flatMap { Self.notes.contains($0) ? $0 : nil }
     }
 }
 

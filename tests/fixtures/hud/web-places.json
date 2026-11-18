@@ -1,0 +1,113 @@
+{
+ "shapes": [],
+ "cards": [
+  {
+   "id": "c-places",
+   "type": "web",
+   "title": "Cinemas near you",
+   "page": "map",
+   "data": {
+    "routes": [
+     {
+      "points": [
+       [
+        51.508,
+        -0.1281
+       ],
+       [
+        51.50899,
+        -0.12902
+       ],
+       [
+        51.50997,
+        -0.13018
+       ]
+      ],
+      "km": 0.4,
+      "min": 4.0
+     }
+    ],
+    "pins": [
+     {
+      "lat": 51.508,
+      "lon": -0.1281,
+      "label": "Home"
+     },
+     {
+      "lat": 51.50997,
+      "lon": -0.13018,
+      "label": "ODEON Luxe West End"
+     }
+    ],
+    "attribution": "© OpenStreetMap contributors",
+    "rows": [
+     {
+      "name": "ODEON Luxe West End",
+      "road": "Leicester Square",
+      "min": 4,
+      "mode": "walk",
+      "km": 0.3,
+      "times": [
+       {
+        "at": "18:00",
+        "film": "Ebenezer"
+       },
+       {
+        "at": "20:45",
+        "film": "Ebenezer"
+       }
+      ]
+     },
+     {
+      "name": "ODEON Luxe Haymarket",
+      "road": "Haymarket",
+      "min": 5,
+      "mode": "walk",
+      "km": 0.3,
+      "times": [
+       {
+        "at": "19:10",
+        "film": "Dune: Part Three"
+       }
+      ]
+     },
+     {
+      "name": "Institute of Contemporary Arts",
+      "road": "The Mall",
+      "min": 5,
+      "mode": "walk",
+      "km": 0.3,
+      "note": "times_not_listed"
+     },
+     {
+      "name": "Cineworld Leicester Square",
+      "road": "Leicester Square",
+      "min": 6,
+      "mode": "walk",
+      "km": 0.4,
+      "note": "none"
+     },
+     {
+      "name": "Prince Charles Cinema",
+      "road": "Leicester Place",
+      "min": 8,
+      "mode": "bus",
+      "km": 0.4,
+      "times": [
+       {
+        "at": "21:00",
+        "film": "Wild Horse Nine"
+       }
+      ]
+     }
+    ],
+    "credits": [
+     "osm",
+     "tfl",
+     "clusterflick"
+    ],
+    "asof": "20:37"
+   }
+  }
+ ]
+}

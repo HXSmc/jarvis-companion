@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field
 
 from common import facts, hud, svgsafe
 from mac.voice import (acks, agent, agent_policy, auto_policy, geo, gitdiff, ground, intents, lean,
-                       intent_pick, media_lookup, memory, models3d, places, workspaces, youtube)
+                       intent_pick, media_lookup, memory, models3d, nearby, places, workspaces, youtube)
 
 logger = logging.getLogger(__name__)
 
@@ -2527,7 +2527,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         # and a one-card remove are (jfollow9: they act on the screen, room talk must not).
         if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind
                 in ("answer", "clear", "card_remove", "auto_mode", *GEO_KINDS, "video_ask", "video_watch",
-                    "draw", "model_create")
+                    "draw", "model_create", "place")
                 and not (intents.is_cancel(body.text) or intents.is_confirm(body.text)
                          or intents.is_no(body.text) or intents.is_stop(body.text))):
             reason, level = _followup_gate(body)
@@ -2589,11 +2589,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             return
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
     private_turn = False  # jfollow10b: a geo turn stores no words in _history or rows
+    place_turn = False  # jfollow10f: a place turn: the same, with its own history note
     sessions_turn = False  # this turn answered a sessions question (S2 deadline at the end)
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         ws_names = await asyncio.to_thread(_ws_names)
-        place_names = await asyncio.to_thread(places.names) if "forget" in body.text.lower() else ()
+        place_names = (await asyncio.to_thread(places.names)
+                       if "forget" in body.text.lower() or intents.PLACE_CUE_RE.search(body.text) else ())
         model_names = await asyncio.to_thread(_model_names, body.text)
         word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names,
                              model_names=model_names)
@@ -2656,17 +2658,23 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             media_ask = intents.media_request(raw_text)
             if media_ask is not None:
                 intent = intents.Intent("media", media_ask.kind)
-        geo_ask = (intents.first_form(raw_text, lambda t: intents.geo_request(t, place_names))
+        geo_ask = (intents.first_form(raw_text, lambda t: intents.geo_request(t, place_names)
+                                      or intents.place_geo_request(t, place_names))
                    if intent.kind in GEO_KINDS else None)
         if geo_ask is None and isinstance(picked, intents.GeoAsk) and intent.kind == picked.kind:
             geo_ask = picked  # the model's slots, each a substring of the owner's words
         if intent.kind in GEO_KINDS and geo_ask is None:  # a join hid the ask: a plain answer turn
             intent = intents.Intent("answer", intents._clean(body.text))
-        if intent.kind in GEO_KINDS:
+        place_ask = (intents.first_form(raw_text, lambda t: intents.place_request(t, place_names))
+                     if intent.kind == "place" else None)
+        if intent.kind == "place" and place_ask is None:  # a join hid the ask: a plain answer turn
+            intent = intents.Intent("answer", intents._clean(body.text))
+        if intent.kind in GEO_KINDS or intent.kind == "place":
             private_turn = True
+            place_turn = intent.kind == "place"
             if on_step:  # (d) the turn's words never stay in a row: transcribed/continued rewritten
                 on_step("private", tag=f"[geo {intent.kind}]")
-        if on_step and intent.kind in GEO_KINDS:
+        if on_step and (intent.kind in GEO_KINDS or intent.kind == "place"):
             on_step("intent", kind=intent.kind)  # no arg: it holds place words
         elif on_step:
             if sess_ask is not None:  # A7: the session row carries the action's own fields
@@ -2684,7 +2692,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                           else acks.ack_key(intent.kind, intent.sub))
         # A notes search with no vault set would start the file agent in some repo: say it is unset.
         notes_unset = intent.kind == "agent" and intent.sub == "notes" and not os.environ.get("OVERLAY_VAULT")
-        if intent.kind == "sessions" and _sessions_access() is None:
+        if intent.kind == "place" and body.barge_in:
+            ack_phrase_key = None  # the geo_barge line is the whole speech
+        elif intent.kind == "sessions" and _sessions_access() is None:
             ack_phrase_key = None  # no gateway access: the no_sessions_access line is the whole speech
         elif notes_unset:
             ack_phrase_key = None  # the vault_unset line is the whole speech
@@ -2702,11 +2712,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             ack_text, ack_pcm, ack_rate = deps.acks.get(ack_phrase_key)
         else:  # clock/media/stop/card_size/open_*: answered by their own first line, no ack
             ack_text = ack_pcm = None
+        ack_private = {"private": True} if private_turn else {}  # the spoke row logs [geo line]
         if ack_pcm:
             yield {"type": "audio", "text": ack_text, "rate": ack_rate,
-                   "pcm_b64": base64.b64encode(ack_pcm).decode()}
+                   "pcm_b64": base64.b64encode(ack_pcm).decode(), **ack_private}
         elif ack_text:
-            yield _say(ack_text)
+            yield {**_say(ack_text), **ack_private}
         metrics["ack_ms"] = round((deps.clock() - start) * 1000, 1)
 
         if intent.kind == "stop":
@@ -3194,6 +3205,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     ev = {**ev, "private": True}  # the app speaks it; the spoke row logs [geo line]
                 yield ev
 
+        elif intent.kind == "place":
+            async for ev in _place_turn(body, place_ask, deps, said, on_step):
+                yield ev
+
         elif intent.kind == "video_ask":
             async for ev in _video_ask_turn(body, raw_text, deps, said, on_step):
                 yield ev
@@ -3397,7 +3412,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             _sessions_follow.pop(next(iter(_sessions_follow)))
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     # (e) a geo turn's words, places and stop names never reach a later prompt
-    history.append(("(route/transit answer shown)", "") if private_turn else (body.text, " ".join(said)))
+    history.append(("(place answer shown)", "") if place_turn
+                   else ("(route/transit answer shown)", "") if private_turn else (body.text, " ".join(said)))
     if body.conv_id in _web_replied:  # this history may echo a fetched page: later agent turns see it
         _web_replied.discard(body.conv_id)
         _auto_tainted.add(body.conv_id)
@@ -5276,6 +5292,61 @@ async def _geo_turn(body: TurnBody, ask: intents.GeoAsk, deps: OverlayDeps, said
             ms = round((deps.clock() - t0) * 1000)
             on_step("geo", detail=f"kind={res.row_kind} src={budget.src} routes={res.routes} stops={res.stops}"
                                   f" calls={budget.calls} ms={ms} reason={res.reason}")
+
+
+# --- jfollow10f: general places near home (fixed code, never a model) ---------------------------
+
+def _place_answer(ask: dict, budget: nearby.Budget) -> nearby.Answer:
+    """Home (stage B's saved place), the London check, then nearby.answer (runs in a thread)."""
+    try:
+        home = _geo_point("", _TurnPlaces(), budget)[:2]
+    except _GeoLine as stop:
+        return nearby.Answer(key=stop.key, fmt=stop.fmt or {}, reason="no_home" if stop.key == "place_missing"
+                             else "unset" if stop.key in ("places_unset", "places_unreadable") else stop.reason)
+    except geo.GeoError as e:  # the saved home's first lookup failed
+        return nearby.Answer(key="place_down", reason=_GEO_REASON.get(e.reason, e.reason))
+    if not nearby.in_london(home):
+        return nearby.Answer(key="place_outside", reason="outside_london")
+    return nearby.answer(ask, home, budget)
+
+
+def _place_line(ans: nearby.Answer) -> str:
+    if ans.key == "shows_down_km":  # no minutes known and no showtimes: the lead + the km line
+        return nearby.SHOWS_DOWN_LEAD + " " + acks.PHRASES["place_best_km"].format(**ans.fmt)
+    return acks.PHRASES[ans.key].format(**ans.fmt)
+
+
+async def _place_turn(body: TurnBody, ask: dict, deps: OverlayDeps, said: list[str] | None = None,
+                      on_step=None) -> AsyncIterator[dict]:
+    """One place turn from an ask dict (intents.place_request, or later a model pick): at most one card
+    + one spoken line, both private; web text taints the conversation first; the row holds counts only."""
+    said = [] if said is None else said
+    t0 = deps.clock()
+    budget = nearby.Budget()
+    ans = nearby.Answer(reason="api_error")
+    try:
+        if body.barge_in:  # a barge-in never runs a place search
+            ans = nearby.Answer(key="geo_barge", reason="barge")
+        else:
+            ans = await asyncio.to_thread(_place_answer, ask, budget)
+        if ans.web:  # ruling 7: Nominatim/Photon/Clusterflick text reaches the card or the line
+            _auto_tainted.add(body.conv_id)
+        card = nearby.card(ans)
+        if card:
+            _card_ids.setdefault(body.conv_id, set()).add(card["id"])
+            _card_text.setdefault(body.conv_id, deque(maxlen=3)).append(card["title"].lower())
+            yield _keep_card(body.conv_id, "geo", card)
+        text = _place_line(ans)
+        async for ev in _speak(text, deps):
+            yield {**ev, "private": True}  # the app speaks it; the spoke row logs [geo line]
+        said.append(text)
+    finally:
+        if on_step:
+            ms = round((deps.clock() - t0) * 1000)
+            kind = ask.get("mode") if ask.get("mode") in nearby.MODES else "none"
+            on_step("place", detail=f"kind={kind} src={ans.src} n={len(ans.rows)}"
+                                    f" calls={budget.calls} ms={ms} tfl={budget.tfl} matrix={budget.matrix}"
+                                    f" shows={budget.shows} near={budget.near} reason={ans.reason}")
 
 
 # --- jfollow10b: questions about a YouTube video (captions, one tool-less model call) ------------

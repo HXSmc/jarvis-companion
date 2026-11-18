@@ -359,7 +359,66 @@ def _map_data(raw) -> dict | None:
             break
     if not routes and not pins:
         return None
-    return {"routes": routes, "pins": pins, "attribution": MAP_ATTRIBUTION}
+    out = {"routes": routes, "pins": pins, "attribution": MAP_ATTRIBUTION}
+    # jfollow10f: the ranked places under the map; each field optional, absent stays absent.
+    rows = [r for r in map(_place_row, raw["rows"] if isinstance(raw.get("rows"), list) else []) if r][:MAX_ROWS]
+    if rows:
+        out["rows"] = rows
+    credits = [k for k in PLACE_CREDITS if isinstance(raw.get("credits"), list) and k in raw["credits"]]
+    if credits:
+        out["credits"] = credits
+    if isinstance(raw.get("asof"), str) and _CLOCK.fullmatch(raw["asof"]):
+        out["asof"] = raw["asof"]
+    return out
+
+
+MAX_ROWS = 5
+PLACE_MODES = ("walk", "bus", "tube", "train")
+PLACE_NOTES = ("times_not_listed", "none", "none_tomorrow")
+PLACE_CREDITS = ("osm", "tfl", "clusterflick")  # the page maps each key to its fixed credit line
+_CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+_HOURS = re.compile(r"open 24 hours|closed now|hours not listed|open until (?:midnight|(?:[01]\d|2[0-3]):[0-5]\d)")
+# Bidi controls, zero-width marks and the BOM: web place names must not reorder or hide text.
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def place_text(value, limit: int) -> str:
+    """Untrusted web text (a place name, road, film title) -> plain single-line text within `limit`."""
+    return _text(_INVISIBLE.sub("", value) if isinstance(value, str) else value, limit)
+
+
+def _place_row(raw) -> dict | None:
+    """One ranked place: name, road, minutes, mode, straight km, hours, <= 3 showings, a note.
+    A row with no name, no km, or a mode/minutes outside the fixed set is dropped."""
+    if not isinstance(raw, dict):
+        return None
+    name, km, mins = place_text(raw.get("name"), MAX_LABEL), raw.get("km"), raw.get("min")
+    if not name or not (isinstance(km, (int, float)) and not isinstance(km, bool) and math.isfinite(km)
+                        and 0 <= km <= 50):
+        return None
+    if "mode" in raw and raw["mode"] not in PLACE_MODES:
+        return None
+    if mins is not None and not (type(mins) is int and 0 <= mins <= 600):
+        return None
+    row = {"name": name, "km": round(float(km), 1)}
+    road = place_text(raw.get("road"), MAX_LABEL)
+    if road:
+        row["road"] = road
+    if mins is not None:
+        row["min"] = mins
+    if "mode" in raw:
+        row["mode"] = raw["mode"]
+    if isinstance(raw.get("hours"), str) and _HOURS.fullmatch(raw["hours"]):
+        row["hours"] = raw["hours"]
+    times = []
+    for t in raw["times"] if isinstance(raw.get("times"), list) else []:
+        if isinstance(t, dict) and isinstance(t.get("at"), str) and _CLOCK.fullmatch(t["at"]):
+            times.append({"at": t["at"], "film": place_text(t.get("film"), MAX_LABEL)})
+    if times:
+        row["times"] = times[:3]
+    if raw.get("note") in PLACE_NOTES:
+        row["note"] = raw["note"]
+    return row
 
 
 # The bundled pages a web card may name -> their data validator. Adding a page: the files under
@@ -601,7 +660,25 @@ def schema_json() -> dict:
                                                "lon": {"type": "number", "minimum": -180, "maximum": 180},
                                                "label": _str(MAX_LABEL)},
                                 "required": ["lat", "lon", "label"], "additionalProperties": False}},
-                            "attribution": {"const": MAP_ATTRIBUTION}},
+                            "attribution": {"const": MAP_ATTRIBUTION},
+                            "rows": {"type": "array", "minItems": 1, "maxItems": MAX_ROWS, "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {**_str(MAX_LABEL), "minLength": 1}, "road": _str(MAX_LABEL),
+                                    "min": {"type": "integer", "minimum": 0, "maximum": 600},
+                                    "mode": {"enum": list(PLACE_MODES)},
+                                    "km": {"type": "number", "minimum": 0, "maximum": 50},
+                                    "hours": {"type": "string", "pattern": f"^(?:{_HOURS.pattern})$"},
+                                    "times": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
+                                        "type": "object",
+                                        "properties": {"at": {"type": "string", "pattern": f"^{_CLOCK.pattern}$"},
+                                                       "film": _str(MAX_LABEL)},
+                                        "required": ["at", "film"], "additionalProperties": False}},
+                                    "note": {"enum": list(PLACE_NOTES)}},
+                                "required": ["name", "km"], "additionalProperties": False}},
+                            "credits": {"type": "array", "minItems": 1, "maxItems": len(PLACE_CREDITS),
+                                        "items": {"enum": list(PLACE_CREDITS)}},
+                            "asof": {"type": "string", "pattern": f"^{_CLOCK.pattern}$"}},
                         "required": ["routes", "pins", "attribution"], "additionalProperties": False},
                         {"type": "object",
                          "properties": {"svg": {"type": "string", "maxLength": svgsafe.MAX_BYTES},

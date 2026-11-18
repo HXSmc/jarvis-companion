@@ -1,0 +1,149 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Upper St Martin's Lane",
+    "postcode": "WC2H 9FB",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.126856,
+     51.5124271
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Kingly Street",
+    "postcode": "W1B 5QP",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.139712,
+     51.5130832
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Stable Street",
+    "postcode": "N1C 4AB",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.1255161,
+     51.5361156
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Boundary Street",
+    "postcode": "E2 7JE",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.0768246,
+     51.5244991
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Electric Boulevard",
+    "postcode": "SW11 8BJ",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.1446698,
+     51.4799914
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Portobello Road",
+    "postcode": "W11 1LA",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.204868,
+     51.5160384
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Water Street",
+    "postcode": "E14 5GX",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.0135114,
+     51.5031149
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "osm_key": "amenity",
+    "osm_value": "restaurant",
+    "name": "Dishoom",
+    "street": "Derry Street",
+    "postcode": "W8 5SE",
+    "city": "London"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -0.1910754,
+     51.5012637
+    ]
+   }
+  }
+ ]
+}

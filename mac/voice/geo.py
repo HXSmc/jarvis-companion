@@ -25,11 +25,15 @@ from mac.voice import media_lookup
 logger = logging.getLogger(__name__)
 
 HOSTS = frozenset({"valhalla1.openstreetmap.de", "routing.openstreetmap.de", "nominatim.openstreetmap.org",
-                   "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org"})
+                   "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org",
+                   "photon.komoot.io", "clusterflick.com"})  # jfollow10f: place search fallback, showtimes
 USER_AGENT = media_lookup.USER_AGENT  # client name/version + the public repo; no personal data
 CONNECT_S, TOTAL_S = 5.0, 8.0
 CAPS = {"tile": 256 * 1024, "route": 512 * 1024, "tfl": 512 * 1024, "nominatim": 64 * 1024,
-        "postcodes": 16 * 1024}
+        "postcodes": 16 * 1024,
+        # jfollow10f (nearby.py): place search, the walk-time matrix, the cinema index and one venue file
+        "nominatim_search": 128 * 1024, "photon": 64 * 1024, "matrix": 32 * 1024,
+        "cf_index": 512 * 1024, "cf_venue": 400 * 1024}
 VALHALLA = "https://valhalla1.openstreetmap.de/route"
 OSRM_CAR = "https://routing.openstreetmap.de/routed-car/route/v1/driving/"
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
@@ -213,6 +217,16 @@ def _valhalla_body(a: tuple, b: tuple, costing: str, alternates: int) -> dict:
     return {"locations": [{"lat": float(a[0]), "lon": float(a[1])}, {"lat": float(b[0]), "lon": float(b[1])}],
             "costing": costing, "alternates": alternates, "units": "kilometers", "language": "en-GB",
             "directions_options": {"units": "kilometers", "language": "en-GB"}}
+
+
+MATRIX = "https://valhalla1.openstreetmap.de/sources_to_targets"
+
+
+def valhalla_matrix_body(src: tuple, targets: list[tuple]) -> dict:
+    """jfollow10f: one walking-time matrix call, home to <= 5 places; numbers only go out."""
+    return {"sources": [{"lat": float(src[0]), "lon": float(src[1])}],
+            "targets": [{"lat": float(t[0]), "lon": float(t[1])} for t in targets[:5]],
+            "costing": "pedestrian", "units": "kilometers"}
 
 
 def _valhalla_trip(trip: dict) -> dict:
