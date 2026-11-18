@@ -507,16 +507,55 @@ def _agent_session(popen=subprocess.Popen) -> agent.AgentSession:
     return agent.AgentSession(popen=lambda argv, *a, **k: popen([*argv, *_AGENT_ASK_ARGS], *a, **k))
 
 
+def _voice_present() -> bool:
+    """Cheap start-up check: the voice files are installed (no model load, no kokoro import)."""
+    from hwmode import tts
+
+    voice = tts.Voice()
+    return voice.model.is_file() and voice.voices.is_file()
+
+
+def _load_voice():
+    from hwmode import tts
+
+    return tts.get_voice()
+
+
+class _BackgroundVoice:
+    """The voice loads in its own thread so the port opens first (jfollow11b). A synth call waits
+    for the load in the caller's thread (always a worker thread, never the event loop). A failed
+    load leaves synth raising, so lines fall back to captions as with no voice at all."""
+
+    def __init__(self, load: Callable[[], object]) -> None:
+        self.failed = False
+        self._voice = None
+        self._ready = threading.Event()
+        threading.Thread(target=self._load, args=(load,), name="voice-load", daemon=True).start()
+
+    def _load(self, load) -> None:
+        try:
+            self._voice = load()
+        except Exception:
+            self._voice = None
+        if self._voice is None:
+            self.failed = True
+            logger.warning("startup phase=deps_failed")
+        self._ready.set()
+
+    def __call__(self, text: str) -> tuple[bytes, int]:
+        self._ready.wait()
+        if self._voice is None:
+            raise RuntimeError("no voice")
+        return self._voice.synth(text)
+
+
 def get_deps() -> OverlayDeps:
     """The process-wide deps, built once; the voice is optional (None synth = text acks)."""
     global _deps
     if _deps is None:
         synth: Callable[[str], tuple[bytes, int]] | None = None
         try:
-            from hwmode import tts
-
-            voice = tts.get_voice()
-            synth = voice.synth if voice else None
+            synth = _BackgroundVoice(_load_voice) if _voice_present() else None
         except Exception:
             synth = None
         _deps = OverlayDeps(
@@ -1006,6 +1045,20 @@ _FENCE_RE = re.compile(r"`{3,}\s*[\w-]*")
 
 def _say(text: str) -> dict:
     return {"type": "say", "text": text}
+
+
+async def _fail_events(reason: str, deps: OverlayDeps, said: list[str]) -> AsyncIterator[dict]:
+    """An ANSWER_FAIL line + its info card; at most once per turn (a pick limit then an answer
+    limit is still one line)."""
+    line_text, title = ANSWER_FAIL[reason]
+    if line_text in said:
+        return
+    card = hud.validate_card({"id": uuid.uuid4().hex[:8], "type": "info", "title": title, "body": [line_text]})
+    if card:  # the card goes first: it does not wait on the voice
+        yield {"type": "card", "card": card}
+    async for ev in _speak(line_text, deps):
+        yield ev
+    said.append(line_text)
 
 
 async def _speak(text: str, deps: OverlayDeps) -> AsyncIterator[dict]:
@@ -2508,8 +2561,8 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
             abandon = getattr(deps.intent_pick, "__self__", None)
             if isinstance(abandon, intent_pick.Picker):
                 abandon.abandon()
-        except Exception:
-            raw, reason = None, "error"
+        except Exception as exc:  # a usage limit is named; the turn goes on on word rules
+            raw, reason = None, "usage_limit" if getattr(exc, "reason", None) == "usage_limit" else "error"
         ms = max(0, round((deps.clock() - t0) * 1000))
         p = intent_pick.parse_pick(raw, raw_text) if raw is not None else None
         if not reason and p is None:
@@ -2776,9 +2829,14 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         else:  # clock/media/stop/card_size/open_*: answered by their own first line, no ack
             ack_text = ack_pcm = None
         ack_private = {"private": True} if private_turn else {}  # the spoke row logs [geo line]
+        ack_audio = None
         if ack_pcm:
-            yield {"type": "audio", "text": ack_text, "rate": ack_rate,
-                   "pcm_b64": base64.b64encode(ack_pcm).decode(), **ack_private}
+            ack_audio = {"type": "audio", "text": ack_text, "rate": ack_rate,
+                         "pcm_b64": base64.b64encode(ack_pcm).decode()}
+        elif ack_text and deps.synth is not None:  # clip not rendered yet (warm-up): one synth now
+            ack_audio = await _audio(ack_text, deps)
+        if ack_audio:
+            yield {**ack_audio, **ack_private}
         elif ack_text:
             yield {**_say(ack_text), **ack_private}
         metrics["ack_ms"] = round((deps.clock() - start) * 1000, 1)
@@ -3077,7 +3135,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield {"type": "card", "card": card}
             else:
                 g = await _ground(body, deps)
-                if g["pick"] is None:
+                if g["pick"] is None and g["reason"] == "usage_limit":
+                    async for ev in _fail_events("usage_limit", deps, said):
+                        yield ev
+                elif g["pick"] is None:
                     async for ev in _speak("I can't see it on screen.", deps):
                         yield ev
                     said.append("I can't see it on screen.")
@@ -3393,6 +3454,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     if on_step:
                         why = "handover" if handover else (summary_failed[0] if summary_failed else "empty")
                         on_step("sessions", detail=f"summary=host reason={why}")
+                    if summary_failed == ["answer_usage_limit"]:  # say why there is no summary first
+                        async for ev in _fail_events("usage_limit", deps, said):
+                            yield ev
                     line = _sessions_count_line(rows)
                     async for ev in _speak(line, deps):
                         yield ev
@@ -3541,6 +3605,8 @@ async def _ground(body: TurnBody, deps: OverlayDeps) -> dict:
             ground.choose, body.text, candidates, jpeg, deps.vlm_ask, context), timeout=GROUND_TIMEOUT_S)
     except asyncio.TimeoutError:
         chosen, g["reason"] = None, "timeout"
+    except lean.LeanError as exc:  # the CLI failed twice (_LazyVLM retries once): a named class, no crash
+        chosen, g["reason"] = None, "usage_limit" if exc.reason == "usage_limit" else "error"
     g["ms"] = round((time.monotonic() - t0) * 1000)
     if chosen is not None:
         g.update(pick=chosen, via="ground")
@@ -4127,14 +4193,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 failed.append(f"answer_{fail_reason}")
             if not produced and fail_line:  # never a second line after speech or a handover;
                 # fail_line=False: the caller speaks its own fixed answer instead
-                line_text, title = ANSWER_FAIL[fail_reason]
-                card = hud.validate_card({"id": uuid.uuid4().hex[:8], "type": "info", "title": title,
-                                          "body": [line_text]})
-                if card:  # the card goes first: it does not wait on the voice
-                    yield {"type": "card", "card": card}
-                async for ev in _speak(line_text, deps):
+                async for ev in _fail_events(fail_reason, deps, said):
                     yield ev
-                said.append(line_text)
         if fail_reason is None:
             async for event in picture_events(wait=True):
                 yield event
@@ -4201,6 +4261,8 @@ class AgentRun:
     confirm_summary: str = ""  # what the owner was asked, for the card that replaces the Confirm card
     cancelled: bool = False
     vault_denied: bool = False  # a tool call hit the vault: the fixed line replaces the reply
+    cli_error: str | None = None  # the CLI's assistant `error` field this turn (rate_limit, ...)
+    rate_rejected: bool = False  # a rate_limit_event said "rejected" this turn
     opening_key: str | None = None  # progress line the 1.5 s timer speaks once if no tool call came first
     opening_said: str | None = None  # the line it spoke; a tool's progress line never repeats it
     screen_file: str | None = None  # repo-relative file on screen whose last change the host shows
@@ -4307,7 +4369,15 @@ def _line_events(key: str, deps: OverlayDeps) -> list[dict]:
 
 
 async def _line(key: str, deps: OverlayDeps) -> AsyncIterator[dict]:
-    for ev in _line_events(key, deps):
+    """A fixed line in a turn; a clip not rendered yet (warm-up after a start) is synthesized now.
+    shortcut: background pushes (_push_line, the confirm watchdog) still send a lone say before the
+    clips are ready; they come minutes after a start, upgrade if a live row shows one."""
+    events = _line_events(key, deps)
+    if events[0]["type"] == "say" and deps.synth is not None:
+        async for ev in _speak(events[0]["text"], deps):
+            yield ev
+        return
+    for ev in events:
         yield ev
 
 
@@ -4867,6 +4937,10 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
             if ev is None:
                 raise RuntimeError("agent session ended")
             kind = ev.get("type")
+            if kind == "assistant" and ev.get("error"):  # the fields lean.classify_failure reads
+                run.cli_error = str(ev.get("error"))
+            elif kind == "rate_limit_event" and isinstance(ev.get("rate_limit_info"), dict):
+                run.rate_rejected = run.rate_rejected or ev["rate_limit_info"].get("status") == "rejected"
             if metrics.get("agent_first_token_s") is None and kind in ("stream_event", "assistant"):
                 metrics["agent_first_token_s"] = round(deps.clock() - start, 3)  # the model's first output
             if kind == "user" and run.tool is not None:  # tool result arrived (content never logged)
@@ -4992,10 +5066,19 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                 if metrics.get("agent_first_progress_s") is None:
                     metrics["agent_first_progress_s"] = metrics["agent_total_s"]
                 spoke = len(said)
+                failure = None
+                if ev.get("is_error") is True or ev.get("subtype") not in (None, "success"):
+                    status = ev.get("api_error_status")
+                    failure = lean.classify_failure(run.cli_error, status if isinstance(status, int) else None,
+                                                    run.rate_rejected, str(ev.get("result") or ""))
+                    logger.warning("overlay agent failed: class=%s", failure)
                 if run.vault_denied:  # D1: the fixed line replaces the model's own say and cards
                     async for out in _line("vault_off_limits", deps):
                         yield out
                     said.append(acks.PHRASES["vault_off_limits"])
+                elif failure == "usage_limit":  # the limit line + card, never the CLI's own text
+                    async for out in _fail_events("usage_limit", deps, said):
+                        yield out
                 else:
                     for line in str(ev.get("result") or "").splitlines():
                         async for out in _agent_flush(line, run, deps, metrics, said, start, on_step):
@@ -5488,7 +5571,9 @@ async def _video_answer(body: TurnBody, raw_text: str, deps: OverlayDeps) -> tup
     try:
         reply = await asyncio.wait_for(asyncio.to_thread(deps.video_ask or _lean_video_ask, prompt),
                                        timeout=_answer_wall_s())
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, "reason", None) == "usage_limit":
+            return "usage_limit", "", {**row, "reason": "usage_limit"}
         return "video_not_found", "", {**row, "reason": "model_error"}
     answer, _notes = intents.drop_injection_notes(" ".join(str(reply or "").split()))
     if not answer or "NOT_IN_TRANSCRIPT" in answer:
@@ -5510,6 +5595,10 @@ async def _video_ask_turn(body: TurnBody, raw_text: str, deps: OverlayDeps, said
     if on_step:
         on_step("video_ask", detail=f"src={row['src']} chars={row['chars']} found={row['found']}"
                                     f" ms={round((deps.clock() - t0) * 1000)} reason={row['reason']}")
+    if key == "usage_limit":
+        async for ev in _fail_events(key, deps, said):
+            yield ev
+        return
     if key:
         async for ev in _line(key, deps):
             yield ev
@@ -5635,11 +5724,15 @@ async def _draw_turn(body: TurnBody, subject: str, deps: OverlayDeps, said: list
             row = {**row, "reason": "timeout"}
         except Exception as exc:  # LeanError or a broken session: the fixed fail line
             logger.info("draw failed: %s", type(exc).__name__)
-            row = {**row, "reason": "model_error"}
+            row = {**row, "reason": "usage_limit" if getattr(exc, "reason", None) == "usage_limit" else "model_error"}
         finally:
             if session is not None:
                 session.close()  # also on timeout and barge-in: a hung ask never outlives the turn
         note(row)
+        if card is None and row["reason"] == "usage_limit":
+            async for ev in _fail_events("usage_limit", deps, said):
+                yield ev
+            return
         if card is None:
             async for ev in _line("draw_failed", deps):
                 yield ev
@@ -6163,7 +6256,7 @@ async def post_debug_note(body: DebugNote) -> dict:
             # only the wanted line number goes into lines_short).
             _off_view_said = now
             deps = get_deps()
-            events = (_line_events(key, deps) if n is None
+            events = ([ev async for ev in _line(key, deps)] if n is None
                       else [ev async for ev in _speak(acks.PHRASES[key].format(n=n), deps)])
             for ev in events:
                 bus.publish("hud", ev)
@@ -6252,7 +6345,7 @@ def barge_in_on() -> bool:
 @router.get("/health", dependencies=_LOOP_DEPS)
 async def get_health() -> dict:
     return {"ok": True,
-            "voice": "bm_daniel" if get_deps().synth else None,
+            "voice": "bm_daniel" if (synth := get_deps().synth) and not getattr(synth, "failed", False) else None,
             "brain": shutil.which("claude") is not None,
             "tail_level_ratio": TAIL_LEVEL_RATIO,
             # A6: the barge-in switches and the installed bundle's commit, read at request time.

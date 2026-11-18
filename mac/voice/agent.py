@@ -134,11 +134,12 @@ def hidden_mcp_tools() -> tuple:
 class AgentSession:
     """One agent CLI process. Events come off `next_event`; answers go in via `respond`."""
 
-    def __init__(self, model: str | None = None, claude_bin: str = "claude", popen=subprocess.Popen):
+    def __init__(self, model: str | None = None, claude_bin: str | None = None, popen=subprocess.Popen):
+        # claude_bin None = the env stand-in CLI (tests, the Mac faked limit) read now, else claude.
         self.cwd = tempfile.mkdtemp(prefix="jov-agent-")  # empty: the CLI pre-approves nothing in it
         self.proc = popen(
             agent_argv(model or os.environ.get("OVERLAY_AGENT_MODEL", "sonnet"),
-                       mcp_config=default_mcp_config(), claude_bin=claude_bin),
+                       mcp_config=default_mcp_config(), claude_bin=claude_bin or os.environ.get("OVERLAY_CLAUDE_BIN") or "claude"),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             cwd=self.cwd, env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
         )
