@@ -354,3 +354,34 @@ def test_any_checkout_or_app_bundle_is_not_a_write_area(ctx, auto_on, monkeypatc
         assert got == OK, command
     assert auto_policy.write_verdict(str(Path(ctx.home) / "Desktop" / "personal" / "n.md"), ctx,
                                      tainted=False, barge=False, gate_ok=True) == OK
+
+
+def test_agent_instruction_files_are_not_a_write_area(client, ctx, auto_on):
+    """Round 3 (security 1): CLAUDE.md / CLAUDE.local.md / AGENTS.md / GEMINI.md anywhere in home are
+    standing instructions for the owner's other agents, never auto (case-folded: APFS). Moving
+    ~/Applications (the overlay bundle's folder) asks too."""
+    home = Path(ctx.home)
+    (home / "Downloads").mkdir()
+    (home / "Downloads" / "CLAUDE.md").write_text("x")
+    (home / "Downloads" / "evil.py").write_text("x")
+    (home / "Applications").mkdir()
+
+    def wv(path):
+        return auto_policy.write_verdict(str(path), ctx, tainted=False, barge=False, gate_ok=True)
+
+    for path in (home / "Desktop" / "CLAUDE.md", home / "AGENTS.md", home / "Desktop" / "claude.local.md",
+                 home / "Documents" / "Gemini.md"):
+        assert wv(path) == OUT, path
+    assert wv(home / "Documents" / "new.md") == OK
+    for command in ("cp ~/Downloads/CLAUDE.md ~/Desktop", "mv ~/Downloads/CLAUDE.md ~/Desktop/claude.md",
+                    "cp ~/Downloads/evil.py ~/Desktop/CLAUDE.md", "mv ~/Applications ~/A2"):
+        got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
+        assert got == OUT, command
+    assert auto_policy.verdict(fill("cp ~/Downloads/evil.py ~/Desktop/notes.md", ctx), ctx, tainted=False,
+                               barge=False, gate_ok=True) == OK
+    # through a turn in a fresh (unmarked) conversation: the Confirm card comes
+    real = Path.home()
+    (real / "Desktop").mkdir(exist_ok=True)
+    overlay.debug_log.clear()
+    pool, events = _write_turn(client, [("Write", {"file_path": f"{real}/Desktop/CLAUDE.md", "content": "x"})], "w9")
+    assert _rows() == ["cmd=Write decision=asked reason=outside"] and _confirm_card(events)

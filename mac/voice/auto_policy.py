@@ -117,6 +117,9 @@ KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | {"git"}
 # The running checkout (launchd runs `python -m mac.voice.service` from it): never a write area.
 CHECKOUT = os.path.realpath(Path(agent.__file__).resolve().parents[2])
 SYSTEM_BIN = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+# Agent instruction files: Claude Code (and glm-code) loads CLAUDE.md / CLAUDE.local.md from its folder
+# up to /, agy and other agents AGENTS.md / GEMINI.md, as trusted instructions. Case-folded (APFS).
+AGENT_NOTES = frozenset({"claude.md", "claude.local.md", "agents.md", "gemini.md"})
 
 _NAME_RE = re.compile(r"[A-Za-z0-9._+-]{1,32}")
 _PS_ENV_RE = re.compile(r"-?[A-Za-z]*[eE][A-Za-z]*")  # ps e / ps -E / ps auxe: may print environments
@@ -328,6 +331,7 @@ def _write_area(tok: str, ctx: agent_policy.Ctx) -> bool:
         parts = agent_policy._home_parts(p, home)
         if (not parts or parts[0] == "library" or any(c.startswith(".") for c in parts) or _code_dir(p, home)
                 or os.path.basename(p).casefold() in agent_policy._WRITE_DENY_NAMES
+                or os.path.basename(p).casefold() in AGENT_NOTES
                 or any(agent_policy._under(p, os.path.join(home, d)) for d in agent_policy._WRITE_DENY_HOME)
                 or any(agent_policy._under(p, r) for r in _guard_roots(ctx))):
             return False
@@ -455,8 +459,11 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
                 if (os.path.isdir(resolved) and agent_policy._under(resolved, home)
                         and agent_policy._path_problem(t, resolved, ctx, search=True)):
                     return "secret"
-        # moving a folder above the running checkout stops the service and opens a move-away-and-back
-        if name == "mv" and any(_under(CHECKOUT.casefold(), r.casefold()) for t in sources for r in _places(t, ctx)):
+        # moving a folder above the running checkout stops the service and opens a move-away-and-back;
+        # moving ~/Applications takes the overlay bundle away from its login item
+        if name == "mv" and any(_under(CHECKOUT.casefold(), r.casefold())
+                                or agent_policy._home_parts(r, home) == ["applications"]
+                                for t in sources for r in _places(t, ctx)):
             return "outside"
         if not targets or not all(_write_area(t, ctx) for t in targets):
             return "outside"
