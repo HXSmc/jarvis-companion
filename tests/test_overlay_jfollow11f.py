@@ -350,8 +350,16 @@ def test_calls_per_question(vault, client, world, tmp_path):
     nearby.reset()
     geo.reset()
     world.override[OVERPASS_HOST] = lambda r: httpx.Response(503)
-    reqs = asked("take me to Disham", "k3")
-    assert len(reqs) <= 7 and " op=down " in detail()
+    reqs = asked("take me to Disham", "k3")  # R5-PHOTON: Photon's "Dishoom" is not the heard name: an offer
+    assert len(reqs) <= 3 and " op=down near=ask " in detail()
+    nearby.reset()
+    geo.reset()
+    world.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(200, json=[])
+    reqs = asked("take me to Dishoom", "k3b")  # Overpass down, Photon has the heard name: the down hit
+    assert len(reqs) <= 7 and " op=down near=hit " in detail()
+    assert [r for r in reqs if r.url.host in ("api.tfl.gov.uk", "valhalla1.openstreetmap.de")]
+    world.override["nominatim.openstreetmap.org"] = lambda r: httpx.Response(
+        200, json=fx("nominatim-dishoom.json") if r.url.params["q"].lower() == "dishoom" else [])
     world.override[OVERPASS_HOST] = lambda r: httpx.Response(
         200, content=(FX / "places" / "overpass-trafalgar.txt").read_bytes())
     nearby.reset()
@@ -369,43 +377,44 @@ def test_calls_per_question(vault, client, world, tmp_path):
 
 def test_photon_fallback_offers(vault, client, world):
     """Hub ruling R5-PHOTON: Overpass slow (op=down) and Photon has "Decimo" for "decim": asked, never stated.
-    Only a Photon name that IS the heard name is a sure hit."""
+    Only a Photon name that IS the heard name is a sure hit. Nominatim never knows the offered name here, so
+    the yes turn's card comes from the Photon hits the offer turn kept (no second offer, no extra call)."""
     place_deps()
-
-    def renamed(doc, name):
-        return [{**h, "name": name} for h in doc]
+    offered = {"name": "Decimo"}
 
     def photon(request):
         feats = fx("photon-dishoom.json")["features"]
-        name = "Decimo" if request.url.params["q"] == "decim" else "Dessun"
+        name = offered["name"] if request.url.params["q"] == "decim" else "Dessun"
         return httpx.Response(200, json={"features": [
             {**f, "properties": {**f["properties"], "name": name}} for f in feats]})
 
-    def nominatim(request):
-        q = request.url.params["q"].lower()
-        return httpx.Response(200, json=renamed(fx("nominatim-dishoom.json"), "Decimo") if q == "decimo" else [])
-
     world.override[OVERPASS_HOST] = lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=r))
     world.override["photon.komoot.io"] = photon
-    world.override["nominatim.openstreetmap.org"] = nominatim
     slow = ("api.tfl.gov.uk", "valhalla1.openstreetmap.de")
 
     def offer(conv):
         nearby.reset()
         world.requests.clear()
         events = turn(client, "take me to Decim", conv_id=conv)
-        assert last_line(events) == "Did you mean Decimo?" and not cards(events)
+        assert last_line(events) == f"Did you mean {offered['name']}?" and not cards(events)
         assert " op=down near=ask " in detail() and detail().endswith("reason=ask") and ROW_RE.match(detail())
         assert len(world.requests) <= 3 and not [r for r in world.requests if r.url.host in slow]
         assert conv in overlay._place_offer and conv in overlay._auto_tainted
         assert all(e.get("private") for e in events if e["type"] in ("say", "audio"))
         assert not any(w in detail().lower() for w in ("decim", "decimo"))
 
-    offer("P")
-    events = turn(client, "yes", conv_id="P", followup=True)
-    [card] = cards(events)
-    assert card["title"] == "Nearest Decimo" and all(r["name"] == "Decimo" for r in card["data"]["rows"])
-    assert "Decimo" in last_line(events) and " near=yes " in detail() and detail().endswith("reason=ok")
+    for name in ("Decimo", "The Decimo"):  # a leading "the" must not turn the yes into a second offer
+        offered["name"] = name
+        offer("P")
+        world.requests.clear()
+        events = turn(client, "yes", conv_id="P", followup=True)
+        [card] = cards(events)
+        assert card["title"] == f"Nearest {name}" and all(r["name"] == name for r in card["data"]["rows"])
+        assert name in last_line(events) and " near=yes " in detail() and detail().endswith("reason=ok")
+        assert len(world.requests) <= 5 and not [r for r in world.requests
+                                                 if r.url.host in (OVERPASS_HOST, "photon.komoot.io")]
+        assert "P" not in overlay._place_offer
+    offered["name"] = "Decimo"
     offer("P")
     world.requests.clear()
     events = turn(client, "no", conv_id="P", followup=True)

@@ -345,6 +345,10 @@ def _misheard(query: str, point: tuple, box: tuple, home: tuple, budget: Budget)
             budget.near = "hit"
             return "photon", hits
         budget.near = "ask"
+        # the yes turn searches this name as is (no match step); Nominatim's box may miss what Photon found,
+        # so its hits wait in the 10-min search cache under the offered name (memory only, no extra call)
+        with _lock:
+            _searches[(found[0]["name"], box)] = (geo.clock(), "photon", hits[:40], "hit")
         raise SearchFailed("place_offer", "ask", found[0]["name"])
     budget.near, name = sound_alike(query, names)
     if budget.near == "ask":
