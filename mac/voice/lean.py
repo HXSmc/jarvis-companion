@@ -108,6 +108,9 @@ class LeanSession:
             env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
         )
         self.turns = 0
+        # jfollow11c D2: the context the session holds (last assistant usage) and the model's window.
+        self.context_tokens = 0
+        self.context_window = DEFAULT_CONTEXT_WINDOW
         self._lock = threading.Lock()
         # Bounded stderr tail (about 2 KB) for the failure log; drained so the pipe never fills.
         self._err_tail: deque[str] = deque(maxlen=20)
@@ -151,11 +154,13 @@ class LeanSession:
                             on_text(delta["text"])
                 elif ev.get("type") == "assistant":
                     assistant_error = ev.get("error") or assistant_error
+                    self.context_tokens = _usage_tokens(ev) or self.context_tokens
                 elif ev.get("type") == "rate_limit_event":
                     info = ev.get("rate_limit_info")
                     rate_rejected = rate_rejected or (isinstance(info, dict) and info.get("status") == "rejected")
                 elif ev.get("type") == "result":
                     self.turns += 1
+                    self.context_window = _context_window(ev) or self.context_window
                     raw = ev.get("result") or ""
                     status = ev.get("api_error_status")
                     if ev.get("is_error") is True or not (ev.get("subtype") in (None, "success")):
@@ -177,6 +182,27 @@ class LeanSession:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+
+
+DEFAULT_CONTEXT_WINDOW = 200_000
+_USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def _usage_tokens(ev: dict) -> int:
+    """Tokens in context after an `assistant` event: its message.usage input + cache + output."""
+    usage = (ev.get("message") or {}).get("usage") if isinstance(ev.get("message"), dict) else None
+    if not isinstance(usage, dict):
+        return 0
+    return sum(v for k in _USAGE_KEYS if isinstance(v := usage.get(k), int) and v >= 0)
+
+
+def _context_window(ev: dict) -> int:
+    """The largest `modelUsage.<model>.contextWindow` of a `result` event; 0 when absent."""
+    usage = ev.get("modelUsage")
+    if not isinstance(usage, dict):
+        return 0
+    wins = [m.get("contextWindow") for m in usage.values() if isinstance(m, dict)]
+    return max((w for w in wins if isinstance(w, int) and w > 0), default=0)
 
 
 class Conversations:
@@ -208,6 +234,11 @@ class Conversations:
                 evicted.append(self._sessions.popitem(last=False)[1])
         self._close_later(evicted)
         return session
+
+    def peek(self, conv_id: str):
+        """conv_id's live session or None; never starts one."""
+        with self._lock:
+            return self._sessions.get(conv_id)
 
     def __contains__(self, conv_id: object) -> bool:
         """True while conv_id has a live session; never starts one."""
