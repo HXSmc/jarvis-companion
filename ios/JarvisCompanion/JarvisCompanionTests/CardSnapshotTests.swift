@@ -296,6 +296,28 @@ final class CardSnapshotTests: XCTestCase {
         XCTAssertEqual(s.card?.need?.answered?.text, "give me 10 minutes")
     }
 
+    /// Round 1 design finding: a re-posted `mac` ask must not open with the old
+    /// field open or the old text in it; a sent message is cleared.
+    func testMacMessageDraftBelongsToOneAsk() {
+        var draft = MacMessageDraft()
+        XCTAssertFalse(draft.isOpen(for: "aaaaaaaaaaaa"))
+        draft.open(for: "aaaaaaaaaaaa")
+        draft.text = "give me 10 minutes"
+        XCTAssertTrue(draft.isOpen(for: "aaaaaaaaaaaa"))
+        XCTAssertFalse(draft.isOpen(for: "bbbbbbbbbbbb"))  // the new ask starts closed
+        draft.cancel()
+        draft.open(for: "aaaaaaaaaaaa")
+        XCTAssertEqual(draft.text, "give me 10 minutes")  // Cancel keeps the text for the same ask
+        draft.open(for: "bbbbbbbbbbbb")
+        XCTAssertEqual(draft.text, "")  // a new ask never shows the old text
+        draft.text = "wait"
+        draft.sent()
+        XCTAssertFalse(draft.isOpen(for: "bbbbbbbbbbbb"))
+        XCTAssertEqual(draft.text, "")
+        draft.text = String(repeating: "x", count: 400)
+        XCTAssertEqual(draft.text.count, MacMessageDraft.maxLength)  // same cap as the gateway
+    }
+
     func testHardwareAskOpensHardwareMode() throws {
         let s = try Self.session(Self.hardware)
         XCTAssertEqual(s.card?.need?.kind, "hardware")

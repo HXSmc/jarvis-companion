@@ -1962,6 +1962,24 @@ struct CardFileTarget: Identifiable {
     var id: String { file.id }
 }
 
+/// The Message field of a `mac` ask. It belongs to one ask (need id): a re-posted
+/// ask opens empty and closed, and a sent message is cleared.
+struct MacMessageDraft: Equatable {
+    static let maxLength = 300  // the gateway keeps the first 300 characters
+    private(set) var needID: String?
+    private(set) var isOpen = false
+    var text = "" { didSet { if text.count > Self.maxLength { text = String(text.prefix(Self.maxLength)) } } }
+
+    func isOpen(for id: String) -> Bool { isOpen && needID == id }
+    mutating func open(for id: String) {
+        if needID != id { needID = id; text = "" }
+        isOpen = true
+    }
+    /// Cancel: closed, the text kept for this same ask.
+    mutating func cancel() { isOpen = false }
+    mutating func sent() { isOpen = false; text = "" }
+}
+
 struct CardExtras: View {
     let session: CentralSession
     let card: CardInfo
@@ -1976,16 +1994,16 @@ struct CardExtras: View {
     @State private var sending: String?
     @State private var error: String?
     @State private var checked: [Bool] = []
-    /// The Message field of a `mac` ask: open state and its text.
-    @State private var messageOpen: Bool
-    @State private var message = ""
+    @State private var draft: MacMessageDraft
 
     /// `messageOpen` is for the snapshot test only; the app always starts closed.
     init(session: CentralSession, card: CardInfo, model: SessionsModel, compact: Bool,
          openChat: @escaping (ChatTarget) -> Void, openFile: @escaping (CardFileTarget) -> Void,
          openSession: @escaping (String) -> Void,
          openHardware: @escaping (HWTarget) -> Void = { _ in }, messageOpen: Bool = false) {
-        _messageOpen = State(initialValue: messageOpen)
+        var draft = MacMessageDraft()
+        if messageOpen, let id = card.need?.id { draft.open(for: id) }
+        _draft = State(initialValue: draft)
         self.session = session
         self.card = card
         self.model = model
@@ -2110,7 +2128,7 @@ struct CardExtras: View {
                     }
                 }
                 buttonRows(need)
-                if need.kind == "mac" && messageOpen {
+                if need.kind == "mac" && draft.isOpen(for: need.id) {
                     messageField(need)
                 }
             }
@@ -2152,12 +2170,13 @@ struct CardExtras: View {
     /// Inline field under the `mac` ask's buttons: the text is stored on the card
     /// for the waiting tester to read, so it never opens the chat.
     private func messageField(_ need: CardInfo.Need) -> some View {
-        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return VStack(alignment: .leading, spacing: 4) {
             Text("Message for the tester")
                 .font(.footnote.weight(.semibold))
                 .foregroundColor(.jarvisText)
-            TextField("Message for the tester", text: $message,
+                .accessibilityHidden(true)  // the field carries the same label
+            TextField("Message for the tester", text: $draft.text,
                       prompt: Text("For example: give me 10 minutes").foregroundColor(.jarvisMuted), axis: .vertical)
                 .lineLimit(2...5)
                 .font(.subheadline)
@@ -2171,7 +2190,7 @@ struct CardExtras: View {
                 .accessibilityHint("The waiting test reads it. Up to 300 characters.")
             HStack(spacing: 8) {
                 Button {
-                    messageOpen = false
+                    draft.cancel()
                 } label: {
                     Text("Cancel")
                         .font(.subheadline.weight(.bold))
@@ -2185,6 +2204,7 @@ struct CardExtras: View {
                         sending = "Send"
                         error = await model.answer(sessionID: session.sessionId, needID: need.id,
                                                    answer: "Message", note: text)
+                        if error == nil { draft.sent() }
                         sending = nil
                     }
                 } label: {
@@ -2210,7 +2230,7 @@ struct CardExtras: View {
         let opensMessage = need.kind == "mac" && label == "Message"
         return Button {
             if opensMessage {
-                messageOpen = true
+                draft.open(for: need.id)
             } else if opensHardware {
                 // No answer is posted here; the gateway's Hardware Mode report-back marks it done.
                 openHardware(HWTarget(id: session.sessionId, task: need.question))
