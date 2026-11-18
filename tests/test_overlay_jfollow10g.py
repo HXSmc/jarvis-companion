@@ -338,8 +338,8 @@ def test_list_marks_like_stage_a(client, monkeypatch, tmp_path, auto_on):
     turn(client, "list my done sessions", conv_id="L2")
     assert "L2" in overlay._tainted and "L2" not in overlay._auto_tainted
     overlay.debug_log.clear()
-    run_agent(client, bash("tool-x"), conv_id="L")
-    assert _rows() == ["cmd=tool-x decision=asked reason=untrusted"]
+    run_agent(client, bash(f"touch {Path.home()}/jf-made.txt"), conv_id="L")
+    assert _rows() == ["cmd=touch decision=asked reason=untrusted"]
 
 
 @pytest.fixture

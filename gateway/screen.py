@@ -359,7 +359,7 @@ async def screen_status(request: Request, target: Target) -> dict:
         return {
             "target": "mac", "online": True,
             "tcc_ok": driver.tcc_ok(), "display_asleep": driver.display_asleep(),
-            "focus_lock": True,  # the box proxy checks this before forwarding require_app
+            "focus_lock": getattr(driver, "FOCUS_LOCK", False) is True,  # the box proxy checks this
         }
     if target == "minipc":
         from gateway.vnc import online
@@ -464,6 +464,8 @@ async def screen_input(request: Request, target: Target, body: InputBody) -> dic
         await _mac_forward("POST", "input", json={"events": events})
     elif target == "mac":
         from mac.screen import driver
+        if locked and getattr(driver, "FOCUS_LOCK", False) is not True:  # a driver that drops require_app
+            raise HTTPException(status_code=409, detail=FOCUS_LOCK_UNSUPPORTED)
         try:
             await run_in_threadpool(driver.send_events, events)
         except (driver.FocusMismatch, driver.InputHalted, driver.ShortcutDenied) as exc:
