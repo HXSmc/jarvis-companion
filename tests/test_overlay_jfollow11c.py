@@ -509,7 +509,7 @@ def test_kept_never_looser(client, monkeypatch, tmp_path, ctx, auto_on):
     assert auto_policy.verdict(command, ctx, tainted="v1" in overlay._auto_tainted, barge=False,
                                gate_ok=True)[0] == "asked"
     turn(client, "new topic", conv_id="v1")
-    assert "v1" not in overlay._tainted and "v1" not in overlay._history or [
-        u for u, _ in overlay._history["v1"]] == ["new topic"]
+    assert "v1" not in overlay._tainted and "v1" not in overlay._auto_tainted  # taint and text went together
+    assert [u for u, _ in overlay._history.get("v1", [])] in ([], ["new topic"])
     turn(client, "what is the capital of France", conv_id="v1")
     assert loud.gets == 1  # the web pool again

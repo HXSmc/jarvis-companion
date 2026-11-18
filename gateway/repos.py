@@ -189,8 +189,8 @@ def read_file(name: str, path: str) -> dict:
     if path == "README":
         check_path(rel)
     text, size = _text(_open_inside(repo, rel), MAX_READ_BYTES)
-    return {"repo": name, "path": rel, "text": mask(text[:MAX_TEXT]), "truncated": len(text) > MAX_TEXT,
-            "bytes": size}
+    text = mask(text)  # mask before the cut, so a key split at the cut is still masked
+    return {"repo": name, "path": rel, "text": text[:MAX_TEXT], "truncated": len(text) > MAX_TEXT, "bytes": size}
 
 
 def query_words(q: str) -> list[str]:
