@@ -604,6 +604,7 @@ def test_barge_never_picks(client):
 
 def test_pick_cannot_widen_auto(client):
     from test_overlay_jfollow10a import _rows, bash, run_agent
+    from test_overlay_jfollow10a import _home_write
     auto_policy.SETTINGS_FILE.unlink()  # full auto on (the owner's default)
     overlay._mark_untrusted("w1")
     fake = FakePick(reply("agent", 0.99))
@@ -616,7 +617,7 @@ def test_pick_cannot_widen_auto(client):
 
     sys.modules["test_overlay_jfollow10a"].setup = setup_with_pick
     try:
-        run_agent(client, bash("uptime", f"touch {Path.home()}/jf-made.txt"), text="tell me how the machine is doing",
+        run_agent(client, bash("uptime", _home_write()), text="tell me how the machine is doing",
                   conv_id="w1")
     finally:
         sys.modules["test_overlay_jfollow10a"].setup = real_setup

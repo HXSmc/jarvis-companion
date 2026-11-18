@@ -21,7 +21,8 @@ from gateway import overlay  # noqa: E402
 from mac.voice import acks, agent, agent_policy, auto_policy  # noqa: E402
 from test_overlay_agent import Clock, client, reset, setup  # noqa: F401,E402
 from test_overlay_jfollow10a import (  # noqa: F401,E402
-    LOUD, ROW_RE, RUN_LINE, SeqAgent, _confirm_card, _rows, auto_on, bash, fresh_auto_state, run_agent)
+    LOUD, ROW_RE, RUN_LINE, SeqAgent, _confirm_card, _rows, _short_home, auto_on, bash, fresh_auto_state,
+    run_agent)
 from test_overlay_jfollow4 import _steps  # noqa: E402
 from test_overlay_service import says, turn  # noqa: E402
 
@@ -198,9 +199,8 @@ def test_write_tool_through_a_turn(client, tmp_path, auto_on):
 
 
 def test_bash_write(client, auto_on):
-    """Through a turn. Short test name: pytest's tmp home is in the command, and the policy refuses a
-    command summary over 120 characters."""
-    home = Path.home()
+    """Through a turn."""
+    home = _short_home()  # a link into the test home: CI temp paths are long
     pool, events = run_agent(client, bash(f"cp {home}/a {home}/b"), conv_id="c1")
     assert _rows() == ["cmd=cp decision=auto reason=ok"] and not _confirm_card(events)
     assert [r["behavior"] for r in pool.made[0].responses] == ["allow"]
@@ -217,10 +217,10 @@ def test_bash_write(client, auto_on):
 
 
 def test_no_widening(client, auto_on):
-    """Nothing outside a direct request widens auto (short name: see test_bash_write)."""
+    """Nothing outside a direct request widens auto."""
     from test_overlay_agent import REPO
     from test_overlay_service import FakeConversations
-    home = Path.home()
+    home = _short_home()  # a link into the test home: CI temp paths are long
     cp = f"cp {home}/a {home}/b"
     # card or screen text
     overlay._mark_untrusted("n1")

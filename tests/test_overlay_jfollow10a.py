@@ -8,6 +8,7 @@ The conftest fixture runs every other test file with the switch OFF; these tests
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -490,9 +491,20 @@ def test_git_rows_through_a_turn(client, auto_on):
     assert _confirm_card(events) and _rows() == ["cmd=git decision=asked reason=git"]
 
 
+def _short_home() -> str:
+    """jfollow11a: a short link to the test home (realpath lands every path through it in home). The
+    policy refuses a command summary over 120 characters, and CI temp homes are long."""
+    link = Path("/tmp") / f"jf11a-{os.getpid()}"
+    if os.path.lexists(link):
+        link.unlink()
+    link.symlink_to(Path.home())
+    atexit.register(lambda: os.path.lexists(link) and link.unlink())
+    return str(link)
+
+
 def _home_write() -> str:
     """jfollow11a: an absolute write in the owner's own folders, the auto command the taint tests need."""
-    return f"touch {Path.home()}/jf-made.txt"
+    return f"touch {_short_home()}/jf-made.txt"
 
 
 def test_untrusted_turn_asks(client, tmp_path, auto_on):
