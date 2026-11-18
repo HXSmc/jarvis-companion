@@ -37,7 +37,7 @@ HIT_CHARS = 300
 _NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _WORD = re.compile(r"[A-Za-z0-9_.-]{2,40}")
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "Pods",
-              "DerivedData"}
+              "DerivedData", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
 _DENY = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.p8", "*.ppk", "*.keystore", "*.jks",
          "*.kdbx", "id_rsa*", "id_ed25519*", "id_ecdsa*", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
          "credentials*", "*secret*", "*token*", "service-account*.json", "secrets")

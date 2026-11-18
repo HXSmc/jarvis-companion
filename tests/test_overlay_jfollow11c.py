@@ -599,3 +599,64 @@ def test_repo_ack_and_empty_list(client, monkeypatch, tmp_path):
     events = turn(client, "what does the README of alpha say", conv_id="e4")
     assert says(events) == [acks.PHRASES["repo"], acks.LONG_LINES["repo_off"]] and not _cards(events)
     assert _steps("repo")[-1]["result"] == "no_repo"
+
+
+# --- Round 3 (Mac live run) ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "What does the read me of Jarvis's companion public say",  # O1: Apple STT's possessive
+    "What does the read me of Jarvis’s companion public say",
+    "what does the README of the jarvis companion public's repo say",
+])
+def test_repo_possessive_forms(text):
+    got = intents.parse(text, apps={})
+    assert (got.kind, got.arg, got.sub) == ("repo", "jarvis companion public", "read")
+
+
+@pytest.mark.parametrize("pick", ["answer", "agent"])
+def test_repo_readme_skips_pick(client, monkeypatch, tmp_path, pick):
+    """R3 O1: a README ask in the owner's words is a repo read, whatever the pick model says (or a timeout)."""
+    from test_overlay_jfollow10g import picker
+    seen = repo_gateway(monkeypatch, tmp_path)
+    calls: list = []
+    deps, made = deps_for(quiet=Counter(lines({"say": "It sorts lists."})), pick=picker(pick, calls))
+    turn(client, "What does the read me of Jarvis's companion public say", conv_id="w1")
+    assert _steps("intent")[0]["kind"] == "repo" and calls == [] and made == []
+    assert "reason=word_only" in _steps("intent_pick")[0]["detail"]
+    assert [(c[1], c[2]) for c in repo_calls(seen)][-1] == ("/central/repos/jarvis-companion-public/file",
+                                                            {"path": "README"})
+
+
+def test_repo_secret_name_skips_pick(client, monkeypatch, tmp_path):
+    """R3 M4: a private-looking file named for a repo gets the fixed refusal; the pick model (it said agent
+    live) is never asked and the agent never runs."""
+    from test_overlay_jfollow10g import picker
+    seen = repo_gateway(monkeypatch, tmp_path)
+    calls: list = []
+    deps, made = deps_for(quiet=Counter(lines({"say": "x"})), pick=picker("agent", calls))
+    events = turn(client, "read the .env file in the jarvis companion public repo", conv_id="w2")
+    assert says(events) == [acks.PHRASES["repo_refused"]] and calls == [] and made == []
+    assert _steps("repo")[-1]["result"] == "secret_name" and repo_calls(seen) == []
+    # a search ask with no private name still asks the pick model (stage e's pick stays the decider)
+    turn(client, "where is the sorter defined in the alpha repo", conv_id="w3")
+    assert len(calls) == 1
+
+
+def test_one_session_says_what_it_did(client, monkeypatch, tmp_path):
+    """R3 M5/O3: a one-session ask with a recap tells the model to say what it did, not only its state."""
+    rows = [row("h1", phase="in_review", title="Hub builder", doing="Waiting on you",
+                recap=["Fixed the flaky lint step", "Ran the tests"], at=ago(minutes=1))]
+    env(monkeypatch, tmp_path, rows)
+    quiet = Counter(lines({"say": "It fixed the lint step."}))
+    deps_for(quiet=quiet)
+    turn(client, "what is session hub doing", conv_id="w4")
+    [prompt] = quiet.sessions["w4"].prompts
+    assert prompt.startswith("what is session hub doing")
+    assert overlay.SESSION_DID_HINT in prompt.split('<context untrusted="true">')[0]
+
+
+def test_battery_only_when_asked():
+    """R3 live: replies tacked on "Your battery is at 14 percent"; the prompt names when to use it."""
+    for p in (overlay.ANSWER_PROMPT, overlay.QUIET_PROMPT):
+        assert "Mention the battery only when the owner asks about it, power or charging." in p

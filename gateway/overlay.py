@@ -116,7 +116,7 @@ Explanations, charts, flowcharts and links go in cards, never in say lines. Use 
 
 Pictures: when the owner asks to see a picture, photo or images of something, first say one short neutral line that promises no result and names no number, such as "Looking for a picture of a dog." (never "here is" or "here are"), then emit {"image_search": {"query": "<2-6 plain English words>", "count": N}} on its own line (N = 1 for one picture, 4 for "pictures" with no number, else the number the owner asked for, at most 6). Write the query in English even when the owner speaks another language. The service finds the pictures and shows them, or says when it finds none. Never write image URLs. Videos: when the owner asks to see a video of something, first say one short neutral line such as "Looking for a video of a rocket launch." (never "here is"), then emit {"video_search": {"query": "<2-6 plain English words>"}} on its own line. The service finds one video and shows it, or says when it finds none. Never write video links or ids.
 
-Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. To open an app, reply with ONLY {"open": "<app name as the owner said it>"} (one line, nothing else). Do this whenever the owner clearly asks to open, launch, pull up or bring up an app, in any wording, even if the name is rough ("a VS code"). Never ask the owner to rephrase or to say "open" plus a name. Speak the whole answer; a card (text, chart, picture or video) only adds to what you say, never replaces it, so never say "the card shows" in place of the answer. Show the thing itself in that card, not a link: give a link card only when the owner asks for a link, a URL or a website, or says to open it.
+Each message ends with <local_context>: this Mac's clock (date, time, time zone), the frontmost app and the battery. Use it for any time, date or "what am I in" question; never say you cannot see the clock. Mention the battery only when the owner asks about it, power or charging. To open an app, reply with ONLY {"open": "<app name as the owner said it>"} (one line, nothing else). Do this whenever the owner clearly asks to open, launch, pull up or bring up an app, in any wording, even if the name is rough ("a VS code"). Never ask the owner to rephrase or to say "open" plus a name. Speak the whole answer; a card (text, chart, picture or video) only adds to what you say, never replaces it, so never say "the card shows" in place of the answer. Show the thing itself in that card, not a link: give a link card only when the owner asks for a link, a URL or a website, or says to open it.
 
 When the owner asks to hide, show, move or clear the overlay in any wording, do it with one {"clear": true} or {"layout": ...} line after a short say line; never say you cannot, never say you are hiding, moving or clearing anything without that line, and never suggest keys, gestures or any other way to do it.
 
@@ -1380,6 +1380,10 @@ def _mark_session_rows(conv_id: str, rows: list[dict]) -> None:
         _auto_tainted.add(conv_id)
 
 
+# Fixed code after the owner's question on a one-session ask with a recap (never row text).
+SESSION_DID_HINT = "(Say its state in a few words, then what it did, from its lines that start with did.)"
+
+
 def _sessions_note(rows: list[dict]) -> str:
     """The rows as one untrusted-context block for the model: data only, never instructions. The
     first line is fixed code (totals over every row); then the first 20 rows."""
@@ -2568,7 +2572,9 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
     result, extra, path, reason, conf, ms, used = word, None, "fast", "", -1, 0, 0
     if word.kind == "stop":
         reason = "stop"
-    elif word.kind in intent_pick.WORD_ONLY:
+    elif word.kind in intent_pick.WORD_ONLY or (word.kind == "repo" and (
+            word.sub == "read" or _repo_secret_named(raw_text))):
+        # R3 live: a README ask or a private file named for a repo is fixed code (the pick said agent/timeout)
         reason = "word_only"
     elif body.barge_in:
         reason = "barge"
@@ -3748,6 +3754,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 # the untrusted block. An S2 follow-up ("check it through the router") is asked as a
                 # fixed sessions question: its own words made the model hand over (Mac run 3).
                 question = SESSIONS_FOLLOW_QUESTION if intent.sub == "follow" else intents._clean(body.text)
+                if one and rows[0]["recap"]:  # R3 M5/O3: the spoken answer skipped the did: lines live
+                    question += " " + SESSION_DID_HINT
                 before, handover, summary_failed = len(said), [], []
                 async for event in _answer_turn(body, question, deps, metrics, said,
                                                 start, escalate=handover, failed=summary_failed,

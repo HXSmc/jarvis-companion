@@ -144,6 +144,7 @@ def test_search(root, tmp_path, monkeypatch):
         "src/wake.py": "import x\ndef on_wakeword():\n    return 1\n",
         "node_modules/m/wake.js": "wakeword\n", ".env": "wakeword=1\n", "bin.dat": b"wakeword\x00\x00",
         "long.txt": "wakeword " + "z" * 600 + "\n",
+        ".pytest_cache/v/cache/nodeids": "wakeword\n", ".mypy_cache/x.json": "wakeword\n",  # R3 live: caches
     })
     (repo / ".git" / "wake").write_text("wakeword\n")
     os.symlink(outside, repo / "linkdir")
@@ -154,7 +155,7 @@ def test_search(root, tmp_path, monkeypatch):
     paths = [h["path"] for h in body["hits"]]
     assert paths[0] == "src/wake.py" and body["hits"][0]["line"] == 2
     assert len(body["hits"]) <= 8 and all(len(h["text"]) <= 300 for h in body["hits"])
-    assert not any(p.startswith((".git", "node_modules", "linkdir")) or p in (".env", "bin.dat", "link.py")
+    assert not any(p.startswith((".git", "node_modules", "linkdir", ".pytest_cache", ".mypy_cache")) or p in (".env", "bin.dat", "link.py")
                    for p in paths)
     all_hits = repos._search(str(repo.resolve()), ["wakeword"])
     assert all_hits["capped"] is False
