@@ -103,6 +103,25 @@ def test_take_me_to_forms():
     assert intents.PLACE_CUE_RE.search("take me to the gym")  # the service loads saved names for it
 
 
+def test_take_me_to_keeps_other_intents():
+    """Round 1 (code lens): "take me to <x>" loses to every other intent and never takes a screen/dev thing."""
+    apps = {"Safari": "/Applications/Safari.app"}
+
+    def parse(t):
+        return intents.parse(t, apps=apps, place_names=("home", "gym"))
+    for t in ("take me to my notes", "take me to the inbox", "take me to github", "take me to my mail",
+              "take me to my calendar"):
+        assert parse(t).kind == "agent", t  # as at BASE
+    for t in ("take me to the dashboard", "take me to the file", "take me to the repo", "take me to the video",
+              "take me to the window", "take me to the workspace", "take me to the overlay", "take me to the card",
+              "take me to the map", "take me to the code", "take me to main", "take me to two minutes in",
+              "take me to youtube", "take me to bed", "take me to lunch", "take me to my mum's"):
+        assert parse(t).kind == "answer", t  # as at BASE
+        assert intents.place_request(t, ("home", "gym"), apps) is None, t
+    assert parse("take me to my gym").kind == "geo_map"  # a saved name with "my" still maps
+    assert parse("take me to Dishoom").kind == "place"
+
+
 def test_place_pick_wired(vault, client, world, monkeypatch):
     assert intent_pick.KIND_TO_PICK["place"] == "place"
     calls = []

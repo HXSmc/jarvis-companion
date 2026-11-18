@@ -519,7 +519,7 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
     if not last:  # jfollow10b: whole-utterance kinds, before workspace and open
-        hit = _place_match(text, place_names, apps)  # jfollow10f: before the map check
+        hit = _place_match(text, place_names, apps, take_me=False)  # jfollow10f: before the map check
         if hit and hit[0] == "place":
             return Intent("place", hit[1]["mode"])
         if hit:
@@ -630,7 +630,12 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
     near = model_near(text, model_names) if model_names else None  # a misheard name, before a free answer
-    return near or Intent("answer", t)
+    if near:
+        return near
+    hit = _place_match(text, place_names or (), apps, take_me=True)  # "take me to <x>": last, never steals a kind
+    if hit:
+        return Intent("place", hit[1]["mode"]) if hit[0] == "place" else Intent("geo_map", hit[1])
+    return Intent("answer", t)
 
 
 def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
@@ -1753,7 +1758,10 @@ PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest|take me)\b", re.I) 
 _TAKE_ME_RE = re.compile(r"take me (?:to (?P<x>.+)|(?P<home>home))")
 _TAKE_ME_NOT_RE = re.compile(
     r"^(?:the )?(?:top|bottom|end|start|beginning|next|previous|last|first)\b|^(?:it|that|this|there)$"
-    r"|\b(?:pages?|tabs?|settings|websites?|sites?|links?|lines?|changes?|chapters?|slides?|steps?)\b")
+    r"|\b(?:pages?|tabs?|settings|websites?|sites?|links?|lines?|changes?|chapters?|slides?|steps?)\b"
+    # round 1: screen, dev and day words are never a place ("take me to the repo", "take me to bed")
+    r"|\b(?:dashboards?|files?|folders?|repos?|repository|videos?|windows?|workspaces?|overlay|cards?|maps?"
+    r"|code|inbox|notes|main|minutes?|seconds?|youtube|github|bed|lunch|dinner|breakfast)\b")
 
 
 def _place_target(x: str, place_names: tuple[str, ...]):
@@ -1782,8 +1790,10 @@ def _take_me_target(x: str, apps: dict[str, str]) -> bool:
                 or "www." in x or _HOST_RE.match(bare) or (apps and _match_app(bare, apps)))
 
 
-def _place_match(text: str, place_names: tuple[str, ...], apps: dict[str, str] | None = None):
-    """The whole place form of one utterance: ("place", dict) | ("geo", target words) | None."""
+def _place_match(text: str, place_names: tuple[str, ...], apps: dict[str, str] | None = None,
+                 take_me: bool = True):
+    """The whole place form of one utterance: ("place", dict) | ("geo", target words) | None.
+    `take_me=False` skips "take me to <x>": parse tries it only after every other kind (round 1)."""
     if len(text) > 200:
         return None
     t = destutter(_strip_tail(strip_lead(_clean(text)))).strip().rstrip(".?!,").strip()
@@ -1800,9 +1810,11 @@ def _place_match(text: str, place_names: tuple[str, ...], apps: dict[str, str] |
                 and film not in _FILM_STOP and not re.search(r"\b(?:line|tube|bus|train)$", film)):
             return ("place", {"mode": "film", "query": "cinema", "film": film, "when": (m["when"] or " today")[1:]})
         return None
-    m = _TAKE_ME_RE.fullmatch(low)
+    m = _TAKE_ME_RE.fullmatch(low) if take_me else None
     if m:
         x = m["home"] or m["x"].strip()
+        if x.startswith("my ") and place_name(x) != "home" and place_name(x) not in place_names:
+            return None  # "take me to my notes": only a saved "my" name maps
         hit = _place_target(x, place_names) if _take_me_target(x, apps or {}) else None
         if hit is None:
             return None
