@@ -124,6 +124,7 @@ class FakeClock:
 def net(monkeypatch):
     n = Net()
     monkeypatch.setattr(geo, "_transport", httpx.MockTransport(n))
+    monkeypatch.setattr(nearby, "_spawn", lambda fn: None)  # jfollow11f R6: no background names fetch in tests
     return n
 
 

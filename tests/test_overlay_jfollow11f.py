@@ -30,6 +30,7 @@ FX = ROOT / "tests" / "fixtures"
 OVERPASS_HOST = httpx.URL(nearby.OVERPASS).host
 POINT = (51.51, -0.13)
 WORDS = ("dishoom", "decim", "disham", "dessun", "dessu", "this hun")
+THREAD_SPAWN = nearby._spawn  # the real daemon-thread start (the net fixture swaps in a no-op)
 
 
 @pytest.fixture(autouse=True)
@@ -221,7 +222,7 @@ def test_sound_alike_rows(vault, client, world):
     b = nearby.Budget()
     with pytest.raises(nearby.SearchFailed) as e:
         nearby.search("name", "the", HOME, b)
-    assert e.value.key == "place_none" and b.near == "miss" and b.op == "ok"
+    assert e.value.key == "place_none" and b.near == "miss" and b.op == "cache"  # R6: names from the turn before
     nearby.reset()
     geo.reset()
     world.requests.clear()
@@ -430,6 +431,133 @@ def test_photon_fallback_offers(vault, client, world):
     with pytest.raises(nearby.SearchFailed) as e:
         nearby.search("name", "purple walrus", HOME, nearby.Budget())
     assert e.value.key == "place_none"
+
+
+# --- R6-NAMES: the names fetched in the background after a slow Overpass, kept 6 hours ----------
+
+def _slow(request):
+    raise httpx.ReadTimeout("slow", request=request)
+
+
+def _search(words, b=None):
+    """nearby.search for a name; a place_offer / place_none is a normal outcome here."""
+    b = b or nearby.Budget()
+    try:
+        return b, nearby.search("name", words, HOME, b)[1]
+    except nearby.SearchFailed as e:
+        return b, e
+
+
+def test_names_cache_after_slow_overpass(vault, client, world, monkeypatch):
+    """Turn 1 times out on Overpass (op=down) and starts ONE background fetch; once it is done the next
+    misheard turn matches from the cache (op=cache, no Overpass request), with the yes and the sure hit."""
+    place_deps()
+    nearby.reset()
+    geo.reset()
+    jobs = []
+    monkeypatch.setattr(nearby, "_spawn", jobs.append)
+    good = world.override[OVERPASS_HOST]
+    world.override[OVERPASS_HOST] = _slow
+    turn(client, "take me to Decim", conv_id="r1")
+    assert " op=down " in detail() and ROW_RE.match(detail()) and len(jobs) == 1
+    turn(client, "take me to Dessun", conv_id="r2")  # a second timeout while the fetch is alive
+    assert " op=down " in detail() and len(jobs) == 1
+    world.override[OVERPASS_HOST] = good
+    world.requests.clear()
+    jobs[0]()  # the background fetch finishes
+    assert world.count(OVERPASS_HOST) == 1 and len(nearby._overpass) == 1 and not nearby._bg_alive[0]
+    assert world.requests[0].url == nearby.overpass_url(nearby.search_point(HOME))  # the same GET, nothing new
+    world.requests.clear()
+    events = turn(client, "take me to Decim", conv_id="r3")
+    assert last_line(events) == "Did you mean Dishoom?" and not cards(events)
+    assert " op=cache near=ask " in detail() and detail().endswith("reason=ask") and ROW_RE.match(detail())
+    assert world.count(OVERPASS_HOST) == 0 and not any(w in detail().lower() for w in ("decim", "dishoom"))
+    events = turn(client, "yes", conv_id="r3", followup=True)
+    [card] = cards(events)
+    assert card["title"] == "Nearest Dishoom" and " near=yes " in detail() and detail().endswith("reason=ok")
+    world.requests.clear()
+    events = turn(client, "take me to disham", conv_id="r4")
+    [card] = cards(events)
+    assert card["title"] == "Nearest Dishoom" and " op=cache near=hit " in detail()
+    assert world.count(OVERPASS_HOST) == 0 and len(jobs) == 1
+
+
+def test_names_cache_calls_and_age(world, clock, monkeypatch):
+    """op=cache is one call fewer than op=ok; an entry older than 6 h means a live call again; a live op=ok
+    call fills the cache too; at most NAMES_KEEP points are kept."""
+    monkeypatch.setattr(nearby, "_spawn", lambda fn: pytest.fail("no background fetch on a good Overpass"))
+    nearby.reset()
+    b_ok, _ = _search("decim")
+    b_cache, _ = _search("decim")
+    assert (b_ok.op, b_cache.op) == ("ok", "cache") and b_cache.calls == b_ok.calls - 1
+    assert world.count(OVERPASS_HOST) == 1
+    clock.t += nearby.NAMES_TTL_S + 1
+    b, _ = _search("decim")
+    assert b.op == "ok" and world.count(OVERPASS_HOST) == 2
+    for i in range(nearby.NAMES_KEEP + 2):
+        nearby._keep_names((51.0 + i / 100, 0.0), "Cafe\n")
+    assert len(nearby._overpass) == nearby.NAMES_KEEP
+
+
+def test_names_background_failure_and_caps(world, clock, monkeypatch):
+    """A background fetch failing twice (502, then a timeout) leaves no entry and the next turn is op=down
+    again, no exception; one fetch alive at a time; no more than 4 started per hour."""
+    nearby.reset()
+    jobs = []
+    monkeypatch.setattr(nearby, "_spawn", jobs.append)
+    answers = iter([httpx.Response(502, text="at capacity")])
+    world.override[OVERPASS_HOST] = lambda r: next(answers, None) or _slow(r)
+    b, _ = _search("decim")
+    assert b.op == "down" and len(jobs) == 1
+    world.requests.clear()
+    jobs[0]()
+    assert world.count(OVERPASS_HOST) == 2 and not nearby._overpass and not nearby._bg_alive[0]
+    b, _ = _search("decim")
+    assert b.op == "down" and len(jobs) == 2  # a new fetch: the last one ended
+    _search("decim")
+    assert len(jobs) == 2  # job 2 still alive: no second thread
+    jobs[1]()
+    for _ in range(4):
+        _search("decim")
+        jobs[-1]()
+    assert len(jobs) == 4  # the hourly cap
+    clock.t += 3600
+    _search("decim")
+    assert len(jobs) == 5
+    # a thread that cannot start holds nothing
+    nearby.reset()
+    monkeypatch.setattr(nearby, "_spawn", lambda fn: (_ for _ in ()).throw(RuntimeError("no thread")))
+    b, _ = _search("decim")
+    assert b.op == "down" and not nearby._bg_alive[0]
+
+
+def test_names_background_real_thread(world, monkeypatch):
+    """The real start: a daemon thread fills the cache while the turn has already returned."""
+    import threading
+    import time
+    nearby.reset()
+    gate = threading.Event()
+    good = world.override[OVERPASS_HOST]
+    first = []
+
+    def overpass(r):
+        if not first:  # the turn's own call times out
+            first.append(1)
+            return _slow(r)
+        assert gate.wait(5)  # the background call waits until the turn is over
+        return good(r)
+
+    world.override[OVERPASS_HOST] = overpass
+    monkeypatch.setattr(nearby, "_spawn", THREAD_SPAWN)
+    b, _ = _search("decim")
+    assert b.op == "down" and nearby._bg_alive[0] and not nearby._overpass
+    gate.set()
+    end = time.monotonic() + 5
+    while nearby._bg_alive[0] and time.monotonic() < end:
+        time.sleep(0.01)
+    assert not nearby._bg_alive[0] and len(nearby._overpass) == 1
+    b, e = _search("decim")
+    assert b.op == "cache" and isinstance(e, nearby.SearchFailed) and e.name == "Dishoom"
 
 
 # --- D: the drawing's grow line -------------------------------------------------------------------

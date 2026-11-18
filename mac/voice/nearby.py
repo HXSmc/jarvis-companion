@@ -6,7 +6,8 @@ geo.HOSTS, no redirects, a byte cap per kind). What each host sees:
   never the exact home. Cinemas skip place search: the Clusterflick index is ranked here, locally.
 - Overpass (OpenStreetMap): only for a name Nominatim finds nothing for. One GET of a fixed query holding the
   rounded point and a fixed radius; the owner's words never go there. The names come back as data and are
-  matched here by sound (sound_alike).
+  matched here by sound (sound_alike). When that call fails inside a turn, the same GET is retried once in
+  the background with a longer limit and the names are kept in memory for 6 hours (no disk, no rows).
 - Clusterflick: two fixed static paths (the index, a venue file built from a checked venue id); no query.
 - Valhalla matrix and TfL Journey: numbers only (home and the picked places), as stage B already sends.
 Untrusted web text (names, roads, hours, film titles) is cleaned with hud.place_text and capped; it is shown
@@ -21,6 +22,7 @@ import math
 import re
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -48,6 +50,8 @@ OVERPASS = "https://overpass-api.de/api/interpreter"
 OVERPASS_QUERY = ('[out:csv(name;false)][timeout:8];nwr["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"]'
                   '["name"](around:{radius},{lat:.2f},{lon:.2f});out {cap};')
 OVERPASS_RADIUS_M, OVERPASS_CAP = 1000, 1000
+NAMES_TTL_S, NAMES_KEEP = 6 * 3600, 4  # R6: the Overpass names per rounded point, memory only
+BG_TRY_S, BG_TRIES, BG_PER_HOUR = 40.0, 2, 4  # R6 background names fetch: 2 x (40 s + 5 s connect) <= 90 s
 NEAR_RATIO, NEAR_MIN_CHARS = 0.75, 4  # misheard-name retry: how alike a nearby name must be ("disham" ~ "dishoom" 0.77)
 SHOWS_DOWN_LEAD = "I can't see showtimes right now."
 NOT_LISTED = "hours not listed"
@@ -62,6 +66,9 @@ _index: list = []  # [stored at, parsed index]: the last good index, kept past i
 _venues: dict[str, tuple[float, list]] = {}
 _searches: dict[tuple, tuple[float, str, list]] = {}
 _overpass: dict[tuple, tuple[float, list[str]]] = {}  # rounded point -> (stored at, names); memory only
+_bg_alive: list[bool] = [False]  # R6: one background names fetch at a time
+_bg_starts: deque = deque()  # R6: when each background fetch started (geo.clock), for the hourly cap
+_spawn = lambda fn: threading.Thread(target=fn, daemon=True).start()  # noqa: E731 (tests run or drop it)
 
 
 def reset() -> None:
@@ -71,6 +78,8 @@ def reset() -> None:
         _venues.clear()
         _searches.clear()
         _overpass.clear()
+        _bg_alive[0] = False
+        _bg_starts.clear()
 
 
 class Budget(geo.Budget):
@@ -80,7 +89,7 @@ class Budget(geo.Budget):
         super().__init__()
         self.bytes = self.matrix = self.shows = 0
         self.near = "no"  # misheard name: no (not run) | hit | ask | miss; the service sets yes | declined
-        self.op = "no"  # the Overpass names: no (not run) | ok | down
+        self.op = "no"  # the Overpass names: no (not run) | ok | cache | down
         self.deadline = geo.clock() + TURN_S
         self.timed_out = False
 
@@ -246,14 +255,8 @@ def overpass_url(point: tuple) -> str:
     return OVERPASS + "?" + urlencode({"data": query}, quote_via=quote)
 
 
-def overpass_names(point: tuple, budget: Budget) -> list[str]:
-    """Food and drink names near the rounded point (cleaned, unique, <= 40 chars), cached 10 min per point.
-    Raises geo.GeoError when Overpass fails."""
-    with _lock:
-        hit = _overpass.get(point)
-    if hit and geo.clock() - hit[0] < SEARCH_TTL_S:
-        return hit[1]
-    text = _fetch(overpass_url(point), "overpass", budget).decode("utf-8", "replace")
+def _keep_names(point: tuple, text: str) -> list[str]:
+    """Overpass CSV -> cleaned, unique names (<= 40 chars), kept NAMES_TTL_S for the point (<= NAMES_KEEP)."""
     names: dict[str, str] = {}
     for row in csv.reader(io.StringIO(text), delimiter="\t"):
         name = hud.place_text(row[0] if row else "", hud.MAX_LABEL)
@@ -261,10 +264,64 @@ def overpass_names(point: tuple, budget: Budget) -> list[str]:
             names.setdefault(name.lower(), name)
     out = list(names.values())
     with _lock:
+        _overpass.pop(point, None)
         _overpass[point] = (geo.clock(), out)
-        while len(_overpass) > 8:
+        while len(_overpass) > NAMES_KEEP:
             _overpass.pop(next(iter(_overpass)))
     return out
+
+
+def _names_fetch(point: tuple) -> None:
+    """R6 background thread: the same names GET, longer limit, <= BG_TRIES tries (a 502 is a try). A failure
+    leaves no entry and one fixed log line; nothing it does can reach a turn but the cache."""
+    try:
+        for _ in range(BG_TRIES):
+            try:
+                text = geo._get(overpass_url(point), "overpass", total_s=BG_TRY_S).decode("utf-8", "replace")
+            except geo.GeoError:
+                continue
+            _keep_names(point, text)
+            return
+        geo.logger.info("overpass names: background fetch failed")
+    except Exception:  # never let the daemon thread die loudly; the next failed turn may try again
+        geo.logger.info("overpass names: background fetch error")
+    finally:
+        with _lock:
+            _bg_alive[0] = False
+
+
+def _names_later(point: tuple) -> None:
+    """Start the background names fetch unless one is alive or BG_PER_HOUR started in the last hour."""
+    t = geo.clock()
+    with _lock:
+        while _bg_starts and t - _bg_starts[0] >= 3600:
+            _bg_starts.popleft()
+        if _bg_alive[0] or len(_bg_starts) >= BG_PER_HOUR:
+            return
+        _bg_alive[0] = True
+        _bg_starts.append(t)
+    try:
+        _spawn(lambda: _names_fetch(point))
+    except RuntimeError:  # no thread to be had: the turn goes on, nothing is held
+        with _lock:
+            _bg_alive[0] = False
+
+
+def overpass_names(point: tuple, budget: Budget) -> list[str]:
+    """Food and drink names near the rounded point; sets budget.op to cache (fresh entry, no call) or ok.
+    Raises geo.GeoError when Overpass fails, after starting the background fetch."""
+    with _lock:
+        hit = _overpass.get(point)
+    if hit and geo.clock() - hit[0] < NAMES_TTL_S:
+        budget.op = "cache"
+        return hit[1]
+    try:
+        text = _fetch(overpass_url(point), "overpass", budget).decode("utf-8", "replace")
+    except geo.GeoError:
+        _names_later(point)
+        raise
+    budget.op = "ok"
+    return _keep_names(point, text)
 
 
 _SOUND = str.maketrans("dtszmncq", "TTSSNNKK")
@@ -330,7 +387,6 @@ def _misheard(query: str, point: tuple, box: tuple, home: tuple, budget: Budget)
     name is offered too. Returns (src, hits); [] = nothing alike."""
     try:
         names = overpass_names(point, budget)
-        budget.op = "ok"
     except geo.GeoError:
         budget.op, budget.near = "down", "miss"
         try:
@@ -347,8 +403,7 @@ def _misheard(query: str, point: tuple, box: tuple, home: tuple, budget: Budget)
         budget.near = "ask"
         # the yes turn searches this name as is (no match step); Nominatim's box may miss what Photon found,
         # so its hits wait in the 10-min search cache under the offered name (memory only, no extra call)
-        with _lock:
-            _searches[(found[0]["name"], box)] = (geo.clock(), "photon", hits[:40], "hit")
+        _keep_search((found[0]["name"], box), (geo.clock(), "photon", hits[:40], "hit"))
         raise SearchFailed("place_offer", "ask", found[0]["name"])
     budget.near, name = sound_alike(query, names)
     if budget.near == "ask":
@@ -405,11 +460,15 @@ def search(mode: str, query: str, home: tuple, budget: Budget, widen: bool = Tru
         found = candidates(hits, home, fallback)
     if not found:
         raise SearchFailed("place_none", "none_near")
+    _keep_search(key, (geo.clock(), src, hits[:40], budget.near))
+    return src, found
+
+
+def _keep_search(key: tuple, value: tuple) -> None:
     with _lock:
-        _searches[key] = (geo.clock(), src, hits[:40], budget.near)
+        _searches[key] = value
         while len(_searches) > 32:
             _searches.pop(next(iter(_searches)))
-    return src, found
 
 
 # --- walk minutes (one Valhalla matrix call) and TfL for the top 3 ------------------------------

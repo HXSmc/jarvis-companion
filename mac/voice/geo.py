@@ -102,13 +102,13 @@ def _check(url: str) -> None:
 
 
 def _request(method: str, url: str, kind: str, params: dict | None = None,
-             json_body: dict | None = None) -> bytes:
+             json_body: dict | None = None, total_s: float = TOTAL_S) -> bytes:
     """One allow-listed request -> body bytes, or GeoError(reason). Checked before anything is sent."""
     _check(url)
     cap = CAPS[kind]
-    deadline = clock() + TOTAL_S
+    deadline = clock() + total_s
     try:
-        with httpx.Client(timeout=httpx.Timeout(TOTAL_S, connect=CONNECT_S), follow_redirects=False,
+        with httpx.Client(timeout=httpx.Timeout(total_s, connect=CONNECT_S), follow_redirects=False,
                           transport=_transport,
                           headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}) as client:
             with client.stream(method, url, params=params, json=json_body) as resp:
@@ -130,8 +130,8 @@ def _request(method: str, url: str, kind: str, params: dict | None = None,
     return bytes(body)
 
 
-def _get(url: str, kind: str = "route", params: dict | None = None) -> bytes:
-    return _request("GET", url, kind, params=params)
+def _get(url: str, kind: str = "route", params: dict | None = None, total_s: float = TOTAL_S) -> bytes:
+    return _request("GET", url, kind, params=params, total_s=total_s)
 
 
 def _post(url: str, body: dict, kind: str = "route") -> bytes:
