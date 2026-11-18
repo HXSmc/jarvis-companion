@@ -62,7 +62,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents, cards, central, desktop, hwmode, inbox, notify, overlay, overlay_log, quick, screen, vnc, wake
+from gateway import agents, cards, central, desktop, hwmode, inbox, notify, overlay, overlay_log, quick, repos, screen, vnc, wake
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
@@ -77,6 +77,7 @@ app.include_router(wake.router, prefix="")
 app.include_router(inbox.router, prefix="")
 app.include_router(notify.router)  # /notify/notes: app catch-up on missed owner notes (ios_token only)
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
+app.include_router(repos.router)  # /central/repos*: read-only repo answers (ios_token only; off unless JARVIS_REPO_ROOTS)
 app.include_router(cards.session_router)  # /cards/*: jarvis-card from box sessions (shared token)
 app.include_router(hwmode.router)  # /hwmode/ws: phone camera frames -> lean Claude brain (ios_token only)
 app.include_router(overlay_log.router)  # /overlay-log: redacted overlay turns (ios_token only); forwards when split-deployed
