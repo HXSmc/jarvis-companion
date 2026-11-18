@@ -594,5 +594,38 @@
   "expect_answer_not_contains": [],
   "note": "page spot, not a place",
   "model_only": false
+ },
+ {
+  "id": "cmd-1",
+  "text": "copy the file report.txt in my Documents folder to my Desktop",
+  "expect_intent": [
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11a: a file command goes to the agent (routing only)",
+  "model_only": true
+ },
+ {
+  "id": "cmd-2",
+  "text": "make a new folder called invoices in my Documents folder",
+  "expect_intent": [
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11a: a file command goes to the agent (routing only)",
+  "model_only": true
+ },
+ {
+  "id": "cmd-3",
+  "text": "delete the file old-notes.txt from my Desktop",
+  "expect_intent": [
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11a: a file command goes to the agent (routing only)",
+  "model_only": true
  }
 ]
