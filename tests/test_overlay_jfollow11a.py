@@ -291,7 +291,10 @@ def test_overwrite_asks_delete(ctx, auto_on):
     for command in ("cp ~/Documents/empty.txt ~/Documents/thesis.docx",
                     "mv ~/Documents/empty.txt ~/Documents/thesis.docx",
                     "ditto ~/Pictures/a ~/Pictures/b",
-                    "cp -R ~/src ~/Documents/dst"):
+                    "cp -R ~/src ~/Documents/dst",
+                    "cp -R ~/src/ ~/Pictures/b",  # BSD: the contents of src land in b itself (b/src is new)
+                    "cp --target-directory=~/Documents ~/Documents/thesis.docx",
+                    "cp -t~/Documents ~/Documents/thesis.docx"):
         got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
         assert got == D, command
     # new targets still run; mkdir -p and touch on an existing path destroy nothing

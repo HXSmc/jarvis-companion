@@ -336,15 +336,19 @@ def _write_targets(name: str, args: list[str]) -> list[str] | None:
 
 def _overwrites(name: str, args: list[str]) -> bool:
     """cp/mv/ditto onto a path that already exists: an overwrite (or a ditto merge) is a delete. The
-    final target is dst, or dst/<source name> when dst is an existing folder. Operands are absolute here."""
+    final target is dst, or dst/<source name> when dst is an existing folder. Operands are absolute here.
+    Fail closed: fewer than two operands, an option-attached path (--target-directory=), or a cp source
+    ending in / into an existing folder (BSD cp -R copies its contents into dst) count as an overwrite."""
     if name not in ("cp", "mv", "ditto"):
         return False
     ops = [a for a in args if not a.startswith("-")]
-    if len(ops) < 2:
-        return False
+    if len(ops) < 2 or any(_attached(a) is not None for a in args):
+        return True
     dst = ops[-1]
     if name == "ditto":
         return os.path.lexists(dst)
+    if name == "cp" and os.path.isdir(dst) and any(a.endswith("/") for a in ops[:-1]):
+        return True
     finals = [os.path.join(dst, os.path.basename(a.rstrip("/"))) for a in ops[:-1]] if os.path.isdir(dst) else [dst]
     return any(os.path.lexists(f) for f in finals)
 
