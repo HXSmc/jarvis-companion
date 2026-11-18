@@ -19,7 +19,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -257,12 +257,18 @@ _CARD_REMOVE_BLOCKED = frozenset(
     # A place or topic after the target ("the picture from my notes", "the diagram in
     # Preview") is owner-data or app work for the agent, never a card on screen.
     "from in on about into inside onto at to off within under".split())
+_SESS_NAME = r"(?!(?:it|that|this|my|your|a|an)\b)[a-z0-9][\w'.-]*(?: [\w'.-]+){0,3}"
 # Sessions read-only question; "what went wrong with X" carries the session name.
 _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anything stuck"
                           r"|are any sessions waiting(?: for me| on me)?"
                           r"|what went wrong with (?P<name>.+)|how are my sessions(?: doing)?"
                           r"|session status"
-                          r"|(?P<itref>what is it doing|how is it going|what's it doing))"
+                          r"|(?P<itref>what is it doing|how is it going|what's it doing)"
+                          # jfollow11c C1: what one session is doing or did (the name filters by title)
+                          r"|(?P<last>what did my last session do)"
+                          r"|what(?: is|'s|s) (?:the )?session (?P<sname>" + _SESS_NAME + r") doing"
+                          r"|what(?: is|'s|s) the (?P<sname2>" + _SESS_NAME + r") session doing"
+                          r"|what did (?:the )?(?P<sname3>" + _SESS_NAME + r") session do)"
                           + _WRAP_TRAIL)
 # jfollow6 D: a wider net of read-only sessions questions/asks ("what's running on my
 # companion"); matched after session/memory/workspace, before the hide/clear verbs, so
@@ -374,6 +380,71 @@ def fast_forms(text: str) -> list[str]:
         if 2 <= len(pieces) <= 3:
             forms.append(pieces[-1])
     return forms
+
+
+# jfollow11c D4: start the conversation over (whole short utterance only).
+_NEW_TOPIC_RE = re.compile(_WRAP_LEAD + r"(?:(?:let's |lets |ok |okay )?(?:new topic|start over|start again"
+                           r"|(?:start )?(?:a )?new conversation|change (?:the )?topic))" + _WRAP_TRAIL)
+
+
+@dataclass
+class RepoAsk:
+    action: str  # "read" (the README) | "search"
+    name: str    # the owner's words for the repo; fixed code maps them to a listed name
+    query: str   # search words from the owner's words ("" for read)
+
+
+_README = r"\b(?:readme(?:\.md)?|read me)\b"
+_REPO_README_RE = re.compile(_README + r"(?: file)? (?:of|for|in|from) (?:the |my )?"
+                             r"(?P<name>[a-z0-9][\w.-]*(?: [\w.-]+){0,4}?)"
+                             r"(?: (?:repo|repository))?(?: (?:say|says|said|file|contain|contains))?$")
+_REPO_LEAD = re.compile(r"\b(?:where|which file|what file|find|search|look|grep|read|in which"
+                        r"|how (?:does|do|is))\b")
+# A change, a run or a session ask is never a read-only repo question.
+_REPO_CHANGE = re.compile(r"\b(?:fix|edit|update|change|changed|write|rewrite|add|remove|delete|create|commit"
+                          r"|push|pull|merge|refactor|rename|move|start|stop|run|install|deploy|open|diff"
+                          r"|session|sessions|clone|build|test)\b")
+_REPO_STOP = frozenset("the a an this that my our your in of for from on at to is it its which what where and or "
+                       "with whole same current local code git github".split())
+_QUERY_STOP = _REPO_STOP | frozenset(
+    "is are was be handled handle handles defined define implemented implement done located lives live kept set up "
+    "used use found does do did how show me find search look grep read please jarvis hey can you could would tell "
+    "about whats where's wheres file files line lines repo repository repos part place thing get gets readme "
+    "say says there any all".split())
+_QUERY_WORD = re.compile(r"[A-Za-z0-9_.-]{2,40}")
+
+
+def repo_query(low: str) -> str:
+    """Up to 6 search words from the owner's words: stop words off, each [A-Za-z0-9_.-]{2,40}."""
+    out: list[str] = []
+    for w in re.findall(r"[a-z0-9_.-]+", low):
+        w = w.rstrip(".")
+        if w and w not in _QUERY_STOP and _QUERY_WORD.fullmatch(w) and w not in out:
+            out.append(w)
+    return " ".join(out[:6])
+
+
+def repo_request(text: str) -> RepoAsk | None:
+    """jfollow11c B6: "what does the README of X say" (read) or "where is Y in the X repo" (search)."""
+    low = _clean(text).lower().replace(",", "")
+    if _REPO_CHANGE.search(low):
+        return None
+    m = _REPO_README_RE.search(low)
+    if m:
+        return RepoAsk("read", m["name"].strip(), "")
+    words = low.split()
+    for i in range(len(words) - 1, -1, -1):
+        if words[i] in ("repo", "repository", "repo's"):
+            j = i
+            while j > 0 and i - j < 4 and words[j - 1] not in _REPO_STOP:
+                j -= 1
+            if j == i:
+                return None
+            if not _REPO_LEAD.search(low):
+                return None
+            rest = " ".join(words[:j] + words[i + 1:])
+            return RepoAsk("read" if re.search(_README, rest) else "search", " ".join(words[j:i]), repo_query(rest))
+    return None
 
 
 def first_form(text: str, fn):
@@ -505,7 +576,10 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         return Intent("draw", subject)
     m = _form_hit(_SESSIONS_RE, low.replace(",", ""))
     if m:
-        return Intent("sessions", (m["name"] or "").strip(), "ref" if m.group("itref") else "")
+        name = m["name"] or m["sname"] or m["sname2"] or m["sname3"] or ""
+        return Intent("sessions", name.strip(), "ref" if m.group("itref") else "last" if m.group("last") else "")
+    if _form_hit(_NEW_TOPIC_RE, low.replace(",", "")):
+        return Intent("new_topic")
     ask = session_request(text)
     if ask:
         return Intent("session", ask.action)
@@ -538,6 +612,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         ask = None
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
+    repo = repo_request(t)
+    if repo is not None:
+        return Intent("repo", repo.name, repo.action)
     if _form_hit(_SESSIONS_TOPIC_RE, low.replace(",", "")):
         return Intent("sessions", "", "")
     # Hide first: "get rid of it for now" is temporary, not the final clear.

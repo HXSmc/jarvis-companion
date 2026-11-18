@@ -37,6 +37,7 @@ PICKS: dict[str, tuple[frozenset, frozenset]] = {
     "youtube": (frozenset(), frozenset({"query"})),
     "watch": (frozenset(), frozenset()),
     "sessions": (frozenset(), frozenset()),
+    "repo": (frozenset({"read", "search"}), frozenset({"repo", "query"})),
     "agent": (frozenset(), frozenset()),
     "answer": (frozenset(), frozenset()),
 }
@@ -51,7 +52,7 @@ ENUM_SLOTS = {
 WORD_ONLY = frozenset({
     "auto_mode", "session", "memory", "workspace", "vault_secrets", "open_app", "open_site", "card_size",
     "card_help", "hide", "show", "aside", "restore", "clock", "hunk", "git_diff", "ground", "look",
-    "place_save", "place_forget", "media", "model_show", "model_list",
+    "place_save", "place_forget", "media", "model_show", "model_list", "new_topic",
 })
 KIND_TO_PICK = {
     "stop": "stop", "clear": "clear", "card_remove": "card_remove", "move": "move",
@@ -61,6 +62,7 @@ KIND_TO_PICK = {
     "sessions": "sessions", "agent": "agent", "answer": "answer",
     "model_create": "3d", "model_list": "3d", "model_show": "3d",
     "place": "place",  # jfollow11f
+    "repo": "repo",  # jfollow11c
 }
 
 PICK_PROMPT = """You sort one spoken request for a voice assistant into exactly one command type. Speech-to-text often mishears: "so me" is "show me", "Java's companion" is "Jarvis Companion", "three D" is "3D", "over, overlay" is "overlay".
@@ -79,6 +81,7 @@ Types:
 - youtube: find a YouTube video, or a question about a video. Slot query.
 - watch: watch a video and sum it up.
 - sessions: what the owner's Claude Code sessions are doing, how many run, which failed; done or finished sessions; sessions by device or date; "router sessions" and "sessions on the Companion app" (router sessions means every session on the app).
+- repo: a question about one of the owner's code repositories named by its name: what its README says (sub read) or where something is in it (sub search). Slots repo: the repo's name, query: the words to look for.
 - agent: a task on the owner's files, code, repository, GitHub, mail, calendar or notes.
 - answer: anything else: a question, a fact, small talk, or a question about Jarvis Companion itself.
 

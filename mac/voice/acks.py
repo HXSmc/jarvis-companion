@@ -71,6 +71,13 @@ PHRASES = {
     "sessions": "Checking your sessions.",
     "no_sessions": "No sessions to report.",
     "no_session_named": "I don't see a session called that.",
+    # jfollow11c: read-only repo answers, sessions that say what they did, and a fresh start.
+    "repo_refused": "I won't read that file, sir. It looks private.",
+    "repo_unreachable": "I can't reach the mini PC right now, sir.",
+    # A template ({repo} = a listed repo name only): spoken through the synth, never prerendered.
+    "repo_no_hits": "I didn't find that in {repo}, sir.",
+    "session_title_only": "I only have its title, sir. It's on the card.",
+    "new_topic": "Okay, new topic, sir.",
     # jfollow4: session/memory/workspace helpers and the vault/cut-off guards.
     "session_none_named": "I don't see that session.",
     "session_device": "Mini PC only.",
@@ -194,6 +201,13 @@ THINKING_POOL: tuple[tuple[str, str, str], ...] = tuple(
 PHRASES.update({key: text for key, text, _tag in THINKING_POOL})
 
 
+# jfollow11c B8: two repo lines are longer than the 12-word ack rule (PHRASES): kept apart, synthesized per use.
+LONG_LINES = {
+    "repo_off": "I can't read your repos yet, sir. They're not set up on the mini PC.",
+    "repo_unknown": "I don't see a repo by that name, sir. The closest ones are on the card.",
+}
+
+
 def sir_rate() -> float:
     """Chance a thinking ack carries ", sir"; OVERLAY_SIR_RATE overrides at call time."""
     try:
@@ -215,6 +229,7 @@ ACK_POLICY: dict[str, str | None] = {
     "sessions": "sessions",
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
     "card_remove": None, "card_help": None,
+    "repo": None, "new_topic": None,  # jfollow11c: their own fixed line (or the answer) is the speech
     "answer": "answer",
 }
 

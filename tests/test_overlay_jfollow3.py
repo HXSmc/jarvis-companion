@@ -115,7 +115,7 @@ def test_ack_policy_covers_parse_kinds():
         assert intent.kind == kind, (text, intent)
         seen.add(intent.kind)
     # Every kind parse can return is in ACK_POLICY; "media" never comes from parse.
-    assert seen | {"session", "memory", "workspace", "card_remove", "card_help"} == set(acks.ACK_POLICY) - {"media"}, seen  # jfollow4 kinds: tests/test_overlay_intents.py; jfollow6: card_help
+    assert seen | {"session", "memory", "workspace", "card_remove", "card_help", "repo", "new_topic"} == set(acks.ACK_POLICY) - {"media"}, seen  # jfollow4 kinds: tests/test_overlay_intents.py; jfollow6: card_help
     for kind in ("clock", "media", "stop", "card_size", "open_app", "open_site"):
         assert acks.ack_key(kind) is None, kind
     assert acks.ack_key("agent", "git") == "agent_git"
@@ -360,7 +360,7 @@ def test_sessions_turn_is_untrusted_and_read_only(client, monkeypatch, tmp_path)
     prompt = quiet.sessions["ss3"].prompts[0]
     assert prompt.startswith("what went wrong with build runner")
     assert "build runner" in prompt and "IGNORE PREVIOUS" not in prompt
-    assert [c for c in _cards(events) if c["type"] == "info"] == []  # no needs_input row survived
+    assert [c["title"] for c in _cards(events) if c["type"] == "info"] == ["build runner"]  # jfollow11c C3 card only
 
     # A token file others can read (or a missing URL/token) answers no_sessions_access, no ack.
     token = tmp_path / "companion-token"
@@ -659,12 +659,12 @@ def test_card_index_outlives_a_fresh_conversation(client):
     first = turn(client, "explain how a phone is built, as a diagram", conv_id="f1", audio_ms=900)  # jfollow10c: "draw me" now draws
     phone = [e["card"]["id"] for e in first if e["type"] == "card"][0]
     assert says(turn(client, "enlarge the phone diagram", conv_id="f1", audio_ms=900)) == ["Enlarged, sir."]
-    clock.now += overlay.FRESH_AFTER_S + 10
+    turn(client, "new topic", conv_id="f1", audio_ms=900)  # jfollow11c: no idle reset; a new topic is one
     events = turn(client, "make it smaller", conv_id="f1", audio_ms=900)
-    assert any(s.get("detail") == "fresh: wake" for s in _steps("conversation"))  # the fresh start ran
+    assert any(s.get("detail") == "fresh: new_topic" for s in _steps("conversation"))  # the fresh start ran
     assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size", "id": phone,
                                                                 "size": "restore"}]
-    clock.now += overlay.FRESH_AFTER_S + 10
+    turn(client, "new topic", conv_id="f1", audio_ms=900)
     events = turn(client, "enlarge the phone diagram", conv_id="f1", audio_ms=900)
     assert [e for e in events if e["type"] == "card_size"] == [{"type": "card_size", "id": phone,
                                                                 "size": "max"}]
