@@ -644,5 +644,65 @@
   ],
   "note": "jfollow11b: at a usage limit the answer says so, never 'not running' (the answer step is faked)",
   "model_only": false
+ },
+ {
+  "id": "repo-1",
+  "text": "what does the README of jarvis companion public say",
+  "expect_intent": [
+   "repo"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c B: README read by name"
+ },
+ {
+  "id": "repo-2",
+  "text": "where is the wake word handled in the jarvis companion public repo",
+  "expect_intent": [
+   "repo"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c B: repo search by name"
+ },
+ {
+  "id": "sess-8",
+  "text": "what is the hub session doing",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c C1: one named session"
+ },
+ {
+  "id": "sess-9",
+  "text": "what did my last session do",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c C1: the newest session"
+ },
+ {
+  "id": "ctx-1",
+  "text": "new topic",
+  "expect_intent": [
+   "new_topic"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c D4: start the conversation over"
+ },
+ {
+  "id": "ctx-2",
+  "text": "start over",
+  "expect_intent": [
+   "new_topic"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c D4: start the conversation over"
  }
 ]

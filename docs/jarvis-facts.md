@@ -1,3 +1,5 @@
+Test copy. The live sheet is the vault note Projects/Jarvis Companion/Capabilities.md; edit that one.
+
 # Jarvis Companion: what each part can do
 
 This sheet is the source for questions about Jarvis, Jarvis Companion and its parts. Answer from it. When an answer about what a part can do rests only on reading code, not on a line here or a live check, start it with "from the code, " instead of a flat yes or no.
@@ -28,12 +30,13 @@ In one line: Jarvis Companion is the whole open-source system around this voice:
 - Maps and routes between places, and live TfL bus and tube times and line status.
 - Drawings of a thing on request.
 - YouTube: answers questions about a video, and can watch a video and sum it up.
-- Commands: can run commands for the owner, asking first unless full auto is on. Some commands always ask, even in full auto: admin rights, deleting or overwriting files, network tools, and anything that reads secrets.
+- Commands: in full auto, look-ups and file writes in your own folders run at once; deletes and risky commands (admin rights, overwriting files, network tools, anything that reads secrets) still ask. With full auto off, every command asks first.
 - 3D objects: makes a simple 3D object on the mini PC in the background, keeps it in the notes vault, and shows it on a card you can turn and zoom.
 - Not available yet: place search (nearby places, cinema times, the best way to a named place).
 
 ## Mini PC
 - The session router starts and runs Claude Code sessions on the mini PC.
+- On request, Jarvis reads your repos on the mini PC (read-only).
 
 ## Windows PC
 - A Windows agent answers and acts on the PC by voice or from a Claude session.
