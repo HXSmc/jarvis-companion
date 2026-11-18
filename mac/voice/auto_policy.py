@@ -299,6 +299,19 @@ def _guard_roots(ctx: agent_policy.Ctx) -> list[str]:
     return roots + [os.path.realpath(d) for d in GUARD_ABS]
 
 
+def _code_dir(p: str, home: str) -> bool:
+    """Code something runs later: inside an .app bundle, or in a checkout (a folder from p up to, not
+    including, home holds .git; uvicorn and python -m put the checkout first on sys.path)."""
+    if any(c.endswith(".app") for c in agent_policy._home_parts(p, home)):
+        return True
+    d = p
+    while agent_policy._under(d, home) and agent_policy._fold(d) != agent_policy._fold(home):
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        d = os.path.dirname(d)
+    return False
+
+
 def _write_area(tok: str, ctx: agent_policy.Ctx) -> bool:
     """An absolute path (as typed: a literal ~ or a relative path asks) that lands, by every _places
     reading, in the owner's own folders (under home, not ~/Library, no dot component, not a startup
@@ -313,7 +326,7 @@ def _write_area(tok: str, ctx: agent_policy.Ctx) -> bool:
         if _under(p.casefold(), CHECKOUT.casefold()):  # the service's own code (python -m puts it on sys.path)
             return False
         parts = agent_policy._home_parts(p, home)
-        if (not parts or parts[0] == "library" or any(c.startswith(".") for c in parts)
+        if (not parts or parts[0] == "library" or any(c.startswith(".") for c in parts) or _code_dir(p, home)
                 or os.path.basename(p).casefold() in agent_policy._WRITE_DENY_NAMES
                 or any(agent_policy._under(p, os.path.join(home, d)) for d in agent_policy._WRITE_DENY_HOME)
                 or any(agent_policy._under(p, r) for r in _guard_roots(ctx))):
@@ -442,6 +455,9 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
                 if (os.path.isdir(resolved) and agent_policy._under(resolved, home)
                         and agent_policy._path_problem(t, resolved, ctx, search=True)):
                     return "secret"
+        # moving a folder above the running checkout stops the service and opens a move-away-and-back
+        if name == "mv" and any(_under(CHECKOUT.casefold(), r.casefold()) for t in sources for r in _places(t, ctx)):
+            return "outside"
         if not targets or not all(_write_area(t, ctx) for t in targets):
             return "outside"
         if _overwrites(name, args):

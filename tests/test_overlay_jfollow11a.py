@@ -321,3 +321,36 @@ def test_service_checkout_is_not_a_write_area(ctx, auto_on, monkeypatch):
     assert auto_policy.write_verdict(str(repo / "json.py"), ctx, tainted=False, barge=False, gate_ok=True) == OUT
     assert auto_policy.write_verdict(str(repo.parent / "jarvis2.py"), ctx, tainted=False, barge=False,
                                      gate_ok=True) == OK
+
+
+def test_any_checkout_or_app_bundle_is_not_a_write_area(ctx, auto_on, monkeypatch):
+    """Round 2 (security 1): a folder holding .git (any checkout, e.g. a second gateway clone that
+    runs from home) and an .app bundle are code, never a write area; moving a parent of the running
+    checkout asks too (it would stop the service and open the checkout to a move-away-and-back)."""
+    other = Path(ctx.home) / "Desktop" / "personal" / "gw"
+    (other / ".git").mkdir(parents=True)
+    (other / "gateway").mkdir()
+    mine = Path(ctx.home) / "Desktop" / "personal" / "mine"
+    mine.mkdir()
+    monkeypatch.setattr(auto_policy, "CHECKOUT", str(mine))
+    (Path(ctx.home) / "Applications" / "X.app" / "Contents").mkdir(parents=True)
+    (Path(ctx.home) / "Documents" / "a.py").write_text("x")
+    for command in ("cp ~/Documents/a.py ~/Desktop/personal/gw/httpx.py",
+                    "cp ~/Documents/a.py ~/Desktop/personal/gw/gateway/new.py",
+                    "mkdir ~/Desktop/personal/gw/gateway/x",
+                    "mv ~/Desktop/personal/gw ~/Desktop/gw2",
+                    "cp ~/Documents/a.py ~/Applications/X.app/Contents/MacOS",
+                    "mkdir -p ~/Applications/X.app/Contents/MacOS",
+                    "mv ~/Applications/X.app ~/Applications/old.app",
+                    "mv ~/Desktop/personal ~/Desktop/p2", "mv ~/Desktop ~/D2"):
+        got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
+        assert got == OUT, command
+    for path in (other / "httpx.py", other / "gateway" / "new.py", Path(ctx.home) / "Applications" / "X.app" / "y"):
+        assert auto_policy.write_verdict(str(path), ctx, tainted=False, barge=False, gate_ok=True) == OUT, path
+    # a copy of a parent of the checkout (not a move) and plain writes next to the checkouts stay auto
+    for command in ("cp -R ~/Desktop/personal ~/Documents/p2", "mkdir ~/Desktop/personal/notes",
+                    "cp ~/Documents/a.py ~/Desktop/b.py"):
+        got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
+        assert got == OK, command
+    assert auto_policy.write_verdict(str(Path(ctx.home) / "Desktop" / "personal" / "n.md"), ctx,
+                                     tainted=False, barge=False, gate_ok=True) == OK
