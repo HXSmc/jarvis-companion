@@ -19,7 +19,7 @@ from pathlib import Path
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -519,6 +519,11 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
     if not last:  # jfollow10b: whole-utterance kinds, before workspace and open
+        hit = _place_match(text, place_names, apps, take_me=False)  # jfollow10f: before the map check
+        if hit and hit[0] == "place":
+            return Intent("place", hit[1]["mode"])
+        if hit:
+            return Intent("geo_map", hit[1])
         geo = geo_request(text, place_names)
         if geo:
             return Intent(geo.kind, geo.b or geo.a, geo.mode)
@@ -625,7 +630,12 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
     near = model_near(text, model_names) if model_names else None  # a misheard name, before a free answer
-    return near or Intent("answer", t)
+    if near:
+        return near
+    hit = _place_match(text, place_names or (), apps, take_me=True)  # "take me to <x>": last, never steals a kind
+    if hit:
+        return Intent("place", hit[1]["mode"]) if hit[0] == "place" else Intent("geo_map", hit[1])
+    return Intent("answer", t)
 
 
 def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
@@ -1710,6 +1720,146 @@ def geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
             g = m.groupdict()
             return GeoAsk("geo_map", (g.get("a") or "").strip(), (g.get("b") or "").strip())
     return None
+
+
+# --- jfollow10f: general places ("best way to the cinema", "nearest Dishoom", "is Ebenezer on near me") ---
+
+CATEGORY = {"pharmacy": "pharmacy", "chemist": "pharmacy", "supermarket": "supermarket", "cafe": "cafe",
+            "coffee shop": "cafe", "restaurant": "restaurant", "pub": "pub", "bank": "bank", "cash machine": "atm",
+            "cash point": "atm", "cashpoint": "atm",
+            "atm": "atm", "post office": "post office", "hospital": "hospital", "petrol station": "petrol station",
+            "library": "library", "park": "park", "gym": "gym", "bakery": "bakery", "bookshop": "bookshop"}
+_CINEMA_WORDS = frozenset({"cinema", "cinemas", "pictures", "movies", "movie theatre", "movie theater"})
+_NOT_A_PLACE = r"(?!(?:grips|know|sleep|be|terms|the bottom|the point|work|school|it|that)\b)"
+_PLACE_BEST_RES = (
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?:go to|get to) " + _NOT_A_PLACE + r"(?P<x>.+)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?:go|get) (?P<x>home)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?P<x>(?:the|a|an) .+)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?P<bare>.+)"),
+    re.compile(r"how (?:do|can|should) i get to (?:the )?(?:nearest|closest) (?P<x>.+)"),
+    re.compile(r"(?:what'?s |what is |where'?s |where is |find(?: me)? )?(?:the |a )?(?:nearest|closest) (?P<x>.+)"),
+)
+_PLACE_FIND_RE = re.compile(r"find(?: me)? (?:a|an) (?P<x>.+)", re.I)  # case kept: a name is capitalised
+_FIND_MEDIA_RE = re.compile(r"\b(?:picture|photo|image|video|youtube|song|clip|gif|map|recipe|film|movie|book)s?\b", re.I)
+_FILM_RE = re.compile(r"is (?P<film>.+?) (?P<verb>on|showing|playing)"
+                      r"(?P<place> near me| nearby| at the cinema| in cinemas| at the pictures)?"
+                      r"(?P<when> tonight| today| tomorrow)?")
+_FILM_STOP = frozenset({"tv", "telly", "light", "lights", "heating", "oven", "wifi", "bluetooth", "camera", "mic",
+                        "screen", "overlay", "alarm", "music", "it", "that", "this", "they", "he", "she", "there"})
+_WHATS_ON_RES = (
+    re.compile(r"what'?s on at the (?:cinema|pictures|movies)(?P<when> tonight| today| tomorrow)?"),
+    re.compile(r"what is on at the (?:cinema|pictures|movies)(?P<when> tonight| today| tomorrow)?"),
+    re.compile(r"what films are on(?P<when> tonight| today)?(?: near me)?"),
+)
+_PLACE_WORDS_RE = re.compile(r"^[a-z0-9 '&-]{1,60}$")
+_PLACE_POSTCODE_RE = re.compile(r"^[a-z]{1,2}\d[a-z\d]? ?\d[a-z]{2}$")  # = geo.POSTCODE_RE (intents stays light)
+PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest|take me)\b", re.I)  # the service loads saved names then
+# jfollow11f: "take me to Dishoom" / "take me home"; "take me back", "take me through ..." never match.
+_TAKE_ME_RE = re.compile(r"take me (?:to (?P<x>.+)|(?P<home>home))")
+_TAKE_ME_NOT_RE = re.compile(
+    r"^(?:the )?(?:top|bottom|end|start|beginning|next|previous|last|first)\b|^(?:it|that|this|there)$"
+    r"|\b(?:pages?|tabs?|settings|websites?|sites?|links?|lines?|changes?|chapters?|slides?|steps?)\b"
+    # round 1: screen, dev and day words are never a place ("take me to the repo", "take me to bed")
+    r"|\b(?:dashboards?|files?|folders?|repos?|repository|videos?|windows?|workspaces?|overlay|cards?|maps?"
+    r"|code|inbox|notes|main|minutes?|seconds?|youtube|github|bed|lunch|dinner|breakfast)\b")
+
+
+def _place_target(x: str, place_names: tuple[str, ...]):
+    """Target words -> ("geo", words) for a saved name / home / postcode, ("place", mode, query), or None."""
+    x = " ".join(x.replace("’", "'").split()).strip(" .,?!")
+    # "best way to get to the nearest Dishoom": the target is "dishoom" (a saved name then still wins)
+    x = re.sub(r"^(?:(?:the|a|an) )?(?:nearest|closest) ", "", x)
+    if not x or "://" in x or "www." in x or len(x) > 60:
+        return None
+    if x.startswith("my ") or place_name(x) == "home" or place_name(x) in place_names or _PLACE_POSTCODE_RE.fullmatch(x):
+        return ("geo", x)
+    bare = re.sub(r"^(?:the|a|an) ", "", x)
+    if not _PLACE_WORDS_RE.fullmatch(bare) or bare in ("nearest", "closest"):
+        return None
+    if bare in _CINEMA_WORDS:
+        return ("place", "cinema", "cinema")
+    if bare in CATEGORY:
+        return ("place", "category", CATEGORY[bare])
+    return ("place", "name", bare)
+
+
+def _take_me_target(x: str, apps: dict[str, str]) -> bool:
+    """A "take me to <x>" target that may be a place: not a page spot, a screen thing, an app or a site."""
+    bare = re.sub(r"^(?:the )?(?:(?:nearest|closest) )?", "", x).strip()
+    return not (_TAKE_ME_NOT_RE.search(x) or re.search(r"\b(?:to|from|than)\b", x) or "://" in x
+                or "www." in x or _HOST_RE.match(bare) or (apps and _match_app(bare, apps)))
+
+
+def _place_match(text: str, place_names: tuple[str, ...], apps: dict[str, str] | None = None,
+                 take_me: bool = True):
+    """The whole place form of one utterance: ("place", dict) | ("geo", target words) | None.
+    `take_me=False` skips "take me to <x>": parse tries it only after every other kind (round 1)."""
+    if len(text) > 200:
+        return None
+    t = destutter(_strip_tail(strip_lead(_clean(text)))).strip().rstrip(".?!,").strip()
+    low = t.lower().replace("’", "'").replace(",", "")
+    for rx in _WHATS_ON_RES:
+        m = rx.fullmatch(low)
+        if m:
+            return ("place", {"mode": "whats_on", "query": "cinema", "film": "", "when": (m["when"] or " today")[1:]})
+    m = _FILM_RE.fullmatch(low)
+    if m and (m["place"] or m["when"] or m["verb"] != "on"):
+        film = " ".join(m["film"].split())
+        bare = re.sub(r"^(?:the|a|an) ", "", film)
+        if (film and len(film) <= 60 and _PLACE_WORDS_RE.fullmatch(film) and bare not in _FILM_STOP
+                and film not in _FILM_STOP and not re.search(r"\b(?:line|tube|bus|train)$", film)):
+            return ("place", {"mode": "film", "query": "cinema", "film": film, "when": (m["when"] or " today")[1:]})
+        return None
+    m = _TAKE_ME_RE.fullmatch(low) if take_me else None
+    if m:
+        x = m["home"] or m["x"].strip()
+        if x.startswith("my ") and place_name(x) != "home" and place_name(x) not in place_names:
+            return None  # "take me to my notes": only a saved "my" name maps
+        hit = _place_target(x, place_names) if _take_me_target(x, apps or {}) else None
+        if hit is None:
+            return None
+        return hit if hit[0] == "geo" else ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    for rx in _PLACE_BEST_RES:
+        m = rx.fullmatch(low)
+        if not m:
+            continue
+        if "bare" in m.groupdict() and m["bare"] is not None:
+            word = m["bare"].strip()
+            if word not in _CINEMA_WORDS and word not in CATEGORY:
+                return None  # "best way to cook rice": not a place
+            x = word
+        else:
+            x = m["x"]
+            if re.search(r"\b(?:to|from|than)\b", x):  # "the closest planet to the sun": a question, not a place
+                return None
+        hit = _place_target(x, place_names)
+        if hit is None:
+            return None
+        return hit if hit[0] == "geo" else ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    m = _PLACE_FIND_RE.fullmatch(t)
+    if m and not _FIND_MEDIA_RE.search(m["x"]):
+        x = m["x"].strip()
+        # "find me a Pret" (a capitalised name, <= 3 words) or a category word; "find me a picture of a cat"
+        # and other lower-case asks stay with the media and answer kinds.
+        if x.lower() in CATEGORY or (x[:1].isupper() and len(x.split()) <= 3):
+            hit = _place_target(x.lower(), place_names)
+            if hit and hit[0] == "place":
+                return ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    return None
+
+
+def place_request(text: str, place_names: tuple[str, ...] = (), apps: dict[str, str] | None = None) -> dict | None:
+    """{"mode": name|category|cinema|film|whats_on, "query", "film", "when": today|tonight|tomorrow} or None.
+    Fixed code, owner words only; a saved name, home or a postcode is stage B's route (place_geo_request).
+    `apps`: installed apps, so "take me to Safari" is never a place."""
+    hit = _place_match(text, place_names, apps)
+    return hit[1] if hit and hit[0] == "place" else None
+
+
+def place_geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
+    """"best way to go to the gym / home / SW1A 2AA" -> stage B's map route from home."""
+    hit = _place_match(text, place_names)
+    return GeoAsk("geo_map", "", hit[1]) if hit and hit[0] == "geo" else None
 
 
 @dataclass

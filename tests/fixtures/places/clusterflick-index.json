@@ -1,0 +1,106 @@
+{
+ "licence": "CC BY 4.0",
+ "generatedAt": "2026-11-16T20:37:58.975Z",
+ "venues": {
+  "odeon.co.uk-west-end": {
+   "name": "ODEON Luxe West End",
+   "type": "Cinema",
+   "address": "38 Leicester Square, London, WC2H 7DX, UK",
+   "geo": {
+    "lat": 51.509968860027634,
+    "lon": -0.13017680497804437
+   },
+   "data": "/datasets/venues/odeon.co.uk-west-end.json"
+  },
+  "odeon.co.uk-haymarket": {
+   "name": "ODEON Luxe Haymarket",
+   "type": "Cinema",
+   "address": "11-18 Panton Street, London, SW1Y 4DP, UK",
+   "geo": {
+    "lat": 51.50977762735127,
+    "lon": -0.13114905789292086
+   },
+   "data": "/datasets/venues/odeon.co.uk-haymarket.json"
+  },
+  "odeon.co.uk-leicester-square": {
+   "name": "ODEON Luxe Leicester Square",
+   "type": "Cinema",
+   "address": "24-26 Leicester Square, London, WC2H 7JY, UK",
+   "geo": {
+    "lat": 51.51053736313127,
+    "lon": -0.12932277571696912
+   },
+   "data": "/datasets/venues/odeon.co.uk-leicester-square.json"
+  },
+  "ica.art": {
+   "name": "Institute of Contemporary Arts",
+   "type": "Cinema",
+   "address": "The Mall, London, SW1Y 5AH, UK",
+   "geo": {
+    "lat": 51.50606885842036,
+    "lon": -0.1311647210085773
+   },
+   "data": "/datasets/venues/ica.art.json"
+  },
+  "cineworld.co.uk-leicester-square": {
+   "name": "Cineworld Leicester Square",
+   "type": "Cinema",
+   "address": "5-6 Leicester Square, London, WC2H 7NA, UK",
+   "geo": {
+    "lat": 51.510957471585925,
+    "lon": -0.1304760309735258
+   },
+   "data": "/datasets/venues/cineworld.co.uk-leicester-square.json"
+  },
+  "myvue.com-leicester-square": {
+   "name": "Vue West End",
+   "type": "Cinema",
+   "address": "Leicester Square, 3 Cranbourn Street, London, WC2H 7AL, UK",
+   "geo": {
+    "lat": 51.51154027444083,
+    "lon": -0.12948804448422094
+   },
+   "data": "/datasets/venues/myvue.com-leicester-square.json"
+  },
+  "princecharlescinema.com": {
+   "name": "Prince Charles Cinema",
+   "type": "Cinema",
+   "address": "7 Leicester Place, London, WC2H 7BY, UK",
+   "geo": {
+    "lat": 51.51149384362524,
+    "lon": -0.130186840699272
+   },
+   "data": "/datasets/venues/princecharlescinema.com.json"
+  },
+  "myvue.com-piccadilly": {
+   "name": "Vue Piccadilly",
+   "type": "Cinema",
+   "address": "19 Lower Regent Street, London, SW1Y 4LR, UK",
+   "geo": {
+    "lat": 51.50888866495835,
+    "lon": -0.13420100172148164
+   },
+   "data": "/datasets/venues/myvue.com-piccadilly.json"
+  },
+  "odeon.co.uk-uxbridge": {
+   "name": "ODEON Luxe Uxbridge",
+   "type": "Cinema",
+   "address": "302 The chimes shopping centre, Uxbridge, London, UB8 1GD, UK",
+   "geo": {
+    "lat": 51.54521947784089,
+    "lon": -0.475636859742944
+   },
+   "data": "/datasets/venues/odeon.co.uk-uxbridge.json"
+  },
+  "229.london": {
+   "name": "229",
+   "type": "Music Venue",
+   "address": "229 Great Portland Street, London, W1W 5PN, UK",
+   "geo": {
+    "lat": 51.52380018095376,
+    "lon": -0.14442287288963185
+   },
+   "data": "/datasets/venues/229.london.json"
+  }
+ }
+}

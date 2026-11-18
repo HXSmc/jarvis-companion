@@ -42,6 +42,8 @@ KEEP_STEPS = frozenset({
     "intent_pick",
     # jfollow10d: one row per 3D object step (fixed words and numbers; never a name, slug or path).
     "model3d",
+    # jfollow10f: one row per place question (fixed words and counts only, never a name or a point).
+    "place",
 })
 # String fields a kept row may hold; every other string field is dropped.
 KEEP_FIELDS = frozenset({"step", "at", "detail", "text", "reason", "kind", "stt"})

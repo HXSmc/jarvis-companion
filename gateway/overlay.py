@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field
 
 from common import facts, hud, svgsafe
 from mac.voice import (acks, agent, agent_policy, auto_policy, geo, gitdiff, ground, intents, lean,
-                       intent_pick, media_lookup, memory, models3d, places, workspaces, youtube)
+                       intent_pick, media_lookup, memory, models3d, nearby, places, workspaces, youtube)
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +422,16 @@ class DebugLog:
         self.add(turn, step, detail=detail)
         return turn
 
+    def alone(self, step: str, detail: str) -> dict:
+        """A row from outside any turn (jfollow11f R6: the background names fetch ending): its own turn.
+        shortcut: landing during a wake that waits for its words splits that wake from its turn in this
+        log only; upgrade if live rows show it."""
+        turn = {"id": uuid.uuid4().hex[:8], "steps": []}
+        with self._lock:
+            self._turns.append(turn)
+        self.add(turn, step, detail=detail)
+        return turn
+
     def snapshot(self) -> dict:
         with self._lock:
             turns = [{"id": t["id"], "steps": [dict(s) for s in t["steps"]]}
@@ -434,6 +444,7 @@ class DebugLog:
 
 
 debug_log = DebugLog()
+nearby.on_names = lambda detail: debug_log.alone("place", detail)  # R6: the background names fetch row
 
 
 # --- Dependencies (tests replace the whole bundle via set_deps) ---
@@ -708,6 +719,7 @@ def _forget(conv_id: str) -> None:
     _session_ref.pop(conv_id, None)
     _host_ask.pop(conv_id, None)
     _card_pick.pop(conv_id, None)
+    _place_offer.pop(conv_id, None)
     _sessions_follow.pop(conv_id, None)
     _sessions_list_flt.pop(conv_id, None)
     _ws_pages.pop(conv_id, None)
@@ -743,10 +755,16 @@ def _forget_cards(conv_id: str) -> None:
     _card_pick.pop(conv_id, None)
 
 
+# jfollow11f: ids of drawing web cards, so a grow ask on one says "The drawing stays this size" (ids only)
+_drawing_ids: deque = deque(maxlen=64)
+
+
 def _index_card(conv_id: str, card: dict) -> None:
     """Record a sent card for a later `card_size` ask: (id, type, title words), newest last."""
     _card_index.setdefault(conv_id, deque(maxlen=12)).append(
         (card["id"], card["type"], intents.card_words(str(card.get("title", "")))))
+    if card["type"] == "web" and card.get("page") == "drawing" and card["id"] not in _drawing_ids:
+        _drawing_ids.append(card["id"])
 
 
 def _keep_card(conv_id: str, group: str, card: dict) -> dict:
@@ -1490,6 +1508,34 @@ def _live_pick(conv_id: str, deps: OverlayDeps) -> CardPick | None:
 def _drop_pick(conv_id: str) -> None:
     with _confirm_lock:
         _card_pick.pop(conv_id, None)
+
+
+@dataclass
+class PlaceOffer:
+    """jfollow11f: a "Did you mean <name>?" line: the owner's next yes runs the place turn with `ask`."""
+
+    ask: dict  # the place ask for the offered name (offered=True: searched as is, never matched again)
+    deadline: float
+
+
+PLACE_OFFER_S = 30
+# conv -> PlaceOffer, under _confirm_lock like _card_pick; expiry is judged on the next utterance.
+_place_offer: dict[str, PlaceOffer] = {}
+
+
+def _live_offer(conv_id: str, deps: OverlayDeps) -> PlaceOffer | None:
+    """conv_id's open place offer, or None; an expired one is dropped here (silently)."""
+    with _confirm_lock:
+        offer = _place_offer.get(conv_id)
+        if offer is not None and deps.clock() >= offer.deadline:
+            _place_offer.pop(conv_id, None)
+            offer = None
+    return offer
+
+
+def _drop_offer(conv_id: str) -> None:
+    with _confirm_lock:
+        _place_offer.pop(conv_id, None)
 
 
 # Words a spoken name never starts (after "the ") or ends on: "the the roman", "rise and fall of".
@@ -2419,8 +2465,11 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
         if p.sub == "show" and slots.get("name"):
             return intents.Intent("model_show", slots["name"]), None, 1
         return intents.Intent("model_list"), None, 0
-    # answer, chart (the answer model draws the chart card) and place (not on this build: the answer
-    # says so from the fact sheet)
+    if p.pick == "place":  # jfollow11f: only the owner's own words build a place ask; never model slots
+        ask = intents.first_form(raw_text, intents.place_request)
+        if ask is not None:
+            return intents.Intent("place", ask["mode"]), None, 0
+    # answer, chart (the answer model draws the chart card), and a place pick the owner's words do not parse
     return intents.Intent("answer", clean), None, 0
 
 
@@ -2506,6 +2555,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                         or body.conv_id in _agent_busy or body.conv_id in _host_ask)
     if owner_answer_due:  # the preflight owns this turn: a pick never settles or skips a Confirm
         _drop_pick(body.conv_id)
+        _drop_offer(body.conv_id)  # jfollow11f: one "yes" never settles a Confirm and a place offer
     fresh: str | None = None
     # A pending confirmation is settled first, on the raw transcript (before the continuation
     # join and the trail-off check): only the owner's spoken words (body.text) can say yes.
@@ -2521,15 +2571,21 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     pick_hit = intents.card_pick(body.text, pick.names) if pick is not None else None
     # A reply shaped like a pick ("the purple one") answers the line too: never room noise.
     pick_reply = pick is not None and (pick_hit is not None or intents.pick_shaped(body.text))
+    # jfollow11f: an open "Did you mean" offer. Its yes/no passes the level gate like a pick reply (a quiet
+    # room "yes" never runs a search) and is never a short follow-up to drop (other room noise still is).
+    offer = _live_offer(body.conv_id, deps)
+    offer_answer = offer is not None and (intents.is_confirm(body.text) or intents.is_no(body.text))
+    pick_reply = pick_reply or offer_answer
     if body.followup and not owner_answer_due:
         # Room talk is not the owner: a quiet or unsure follow-up is dropped before it can join a
         # pending head or reach a model. A known command ("next change", "stop") never is; "clear"
         # and a one-card remove are (jfollow9: they act on the screen, room talk must not).
         if (_hunk_rewrite(intents.parse(body.text, apps={}), body.text, body.conv_id, None).kind
                 in ("answer", "clear", "card_remove", "auto_mode", *GEO_KINDS, "video_ask", "video_watch",
-                    "draw", "model_create")
+                    "draw", "model_create", "place")
                 and not (intents.is_cancel(body.text) or intents.is_confirm(body.text)
-                         or intents.is_no(body.text) or intents.is_stop(body.text))):
+                         or intents.is_no(body.text) or intents.is_stop(body.text))
+                or offer_answer):
             reason, level = _followup_gate(body)
             if reason:
                 _followup_dropped(body, reason, level, len(re.findall(r"[A-Za-z0-9']+", body.text)), on_step)
@@ -2589,19 +2645,27 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             return
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
     private_turn = False  # jfollow10b: a geo turn stores no words in _history or rows
+    place_turn = False  # jfollow10f: a place turn: the same, with its own history note
     sessions_turn = False  # this turn answered a sessions question (S2 deadline at the end)
     try:
         apps = deps.apps if deps.apps is not None else await asyncio.to_thread(_installed_apps)
         ws_names = await asyncio.to_thread(_ws_names)
-        place_names = await asyncio.to_thread(places.names) if "forget" in body.text.lower() else ()
+        place_names = (await asyncio.to_thread(places.names)
+                       if "forget" in body.text.lower() or intents.PLACE_CUE_RE.search(body.text) else ())
         model_names = await asyncio.to_thread(_model_names, body.text)
         word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names,
                              model_names=model_names)
         intent, picked = await _pick_intent(body, raw_text, word, joined=joined,
-                                            pick_open=pick is not None or owner_answer_due, deps=deps,
-                                            on_step=on_step)
+                                            pick_open=pick is not None or owner_answer_due or offer is not None,
+                                            deps=deps, on_step=on_step)
         if intent.kind == "agent" and word.kind == "sessions":
             intent = word  # jfollow10g: a word sessions read reaches strictly less than a model agent pick
+        offer_reply = ""  # jfollow11f: "yes" | "no" to this conv's "Did you mean" line
+        if offer is not None:
+            _drop_offer(body.conv_id)  # any reply settles it; anything but yes/no is handled normally
+            offer_reply = ("yes" if intents.is_confirm(raw_text) else "no" if intents.is_no(raw_text) else "")
+            if offer_reply:
+                intent = intents.Intent("place", "name")
         if intent.kind == "hunk" and intent.arg == "why" and body.conv_id not in _hunks:
             intent = intents.Intent("answer", intents._clean(body.text))  # no list yet: old behaviour
         pick_ids: list[str] | None = None  # set: this turn answers the conv's "Which one" line
@@ -2656,17 +2720,24 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             media_ask = intents.media_request(raw_text)
             if media_ask is not None:
                 intent = intents.Intent("media", media_ask.kind)
-        geo_ask = (intents.first_form(raw_text, lambda t: intents.geo_request(t, place_names))
+        geo_ask = (intents.first_form(raw_text, lambda t: intents.geo_request(t, place_names)
+                                      or intents.place_geo_request(t, place_names))
                    if intent.kind in GEO_KINDS else None)
         if geo_ask is None and isinstance(picked, intents.GeoAsk) and intent.kind == picked.kind:
             geo_ask = picked  # the model's slots, each a substring of the owner's words
         if intent.kind in GEO_KINDS and geo_ask is None:  # a join hid the ask: a plain answer turn
             intent = intents.Intent("answer", intents._clean(body.text))
-        if intent.kind in GEO_KINDS:
+        place_ask = (offer.ask if offer_reply and offer is not None
+                     else intents.first_form(raw_text, lambda t: intents.place_request(t, place_names, apps))
+                     if intent.kind == "place" else None)
+        if intent.kind == "place" and place_ask is None:  # a join hid the ask: a plain answer turn
+            intent = intents.Intent("answer", intents._clean(body.text))
+        if intent.kind in GEO_KINDS or intent.kind == "place":
             private_turn = True
+            place_turn = intent.kind == "place"
             if on_step:  # (d) the turn's words never stay in a row: transcribed/continued rewritten
                 on_step("private", tag=f"[geo {intent.kind}]")
-        if on_step and intent.kind in GEO_KINDS:
+        if on_step and (intent.kind in GEO_KINDS or intent.kind == "place"):
             on_step("intent", kind=intent.kind)  # no arg: it holds place words
         elif on_step:
             if sess_ask is not None:  # A7: the session row carries the action's own fields
@@ -2684,7 +2755,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                           else acks.ack_key(intent.kind, intent.sub))
         # A notes search with no vault set would start the file agent in some repo: say it is unset.
         notes_unset = intent.kind == "agent" and intent.sub == "notes" and not os.environ.get("OVERLAY_VAULT")
-        if intent.kind == "sessions" and _sessions_access() is None:
+        if intent.kind == "place" and (body.barge_in or offer_reply == "no"):
+            ack_phrase_key = None  # the geo_barge / place_offer_no line is the whole speech
+        elif intent.kind == "sessions" and _sessions_access() is None:
             ack_phrase_key = None  # no gateway access: the no_sessions_access line is the whole speech
         elif notes_unset:
             ack_phrase_key = None  # the vault_unset line is the whole speech
@@ -2702,11 +2775,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             ack_text, ack_pcm, ack_rate = deps.acks.get(ack_phrase_key)
         else:  # clock/media/stop/card_size/open_*: answered by their own first line, no ack
             ack_text = ack_pcm = None
+        ack_private = {"private": True} if private_turn else {}  # the spoke row logs [geo line]
         if ack_pcm:
             yield {"type": "audio", "text": ack_text, "rate": ack_rate,
-                   "pcm_b64": base64.b64encode(ack_pcm).decode()}
+                   "pcm_b64": base64.b64encode(ack_pcm).decode(), **ack_private}
         elif ack_text:
-            yield _say(ack_text)
+            yield {**_say(ack_text), **ack_private}
         metrics["ack_ms"] = round((deps.clock() - start) * 1000, 1)
 
         if intent.kind == "stop":
@@ -2805,9 +2879,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 said.append(line)
             elif hit is not None and any(c[0] == hit[0] and c[1] == "web" for c in cards):
                 card_id, how, refused = hit[0], hit[1], "web"  # the enlarged layer is click-through
-                async for ev in _line("web_no_enlarge", deps):
+                no_grow = "drawing_no_enlarge" if hit[0] in _drawing_ids else "web_no_enlarge"
+                async for ev in _line(no_grow, deps):
                     yield ev
-                said.append(acks.PHRASES["web_no_enlarge"])
+                said.append(acks.PHRASES[no_grow])
             elif hit is not None:
                 card_id, how = hit
                 _enlarged[body.conv_id] = card_id
@@ -3194,6 +3269,10 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     ev = {**ev, "private": True}  # the app speaks it; the spoke row logs [geo line]
                 yield ev
 
+        elif intent.kind == "place":
+            async for ev in _place_turn(body, place_ask, deps, said, on_step, reply=offer_reply):
+                yield ev
+
         elif intent.kind == "video_ask":
             async for ev in _video_ask_turn(body, raw_text, deps, said, on_step):
                 yield ev
@@ -3397,7 +3476,9 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             _sessions_follow.pop(next(iter(_sessions_follow)))
     history = _history.setdefault(body.conv_id, deque(maxlen=6))
     # (e) a geo turn's words, places and stop names never reach a later prompt
-    history.append(("(route/transit answer shown)", "") if private_turn else (body.text, " ".join(said)))
+    history.append(("(place question asked)", "") if place_turn and body.conv_id in _place_offer
+                   else ("(place answer shown)", "") if place_turn
+                   else ("(route/transit answer shown)", "") if private_turn else (body.text, " ".join(said)))
     if body.conv_id in _web_replied:  # this history may echo a fetched page: later agent turns see it
         _web_replied.discard(body.conv_id)
         _auto_tainted.add(body.conv_id)
@@ -5276,6 +5357,74 @@ async def _geo_turn(body: TurnBody, ask: intents.GeoAsk, deps: OverlayDeps, said
             ms = round((deps.clock() - t0) * 1000)
             on_step("geo", detail=f"kind={res.row_kind} src={budget.src} routes={res.routes} stops={res.stops}"
                                   f" calls={budget.calls} ms={ms} reason={res.reason}")
+
+
+# --- jfollow10f: general places near home (fixed code, never a model) ---------------------------
+
+def _place_answer(ask: dict, budget: nearby.Budget) -> nearby.Answer:
+    """Home (stage B's saved place), the London check, then nearby.answer (runs in a thread)."""
+    try:
+        home = _geo_point("", _TurnPlaces(), budget)[:2]
+    except _GeoLine as stop:
+        return nearby.Answer(key=stop.key, fmt=stop.fmt or {}, reason="no_home" if stop.key == "place_missing"
+                             else "unset" if stop.key in ("places_unset", "places_unreadable") else stop.reason)
+    except geo.GeoError as e:  # the saved home's first lookup failed
+        return nearby.Answer(key="place_down", reason=_GEO_REASON.get(e.reason, e.reason))
+    if not nearby.in_london(home):
+        return nearby.Answer(key="place_outside", reason="outside_london")
+    return nearby.answer(ask, home, budget)
+
+
+def _place_line(ans: nearby.Answer) -> str:
+    if ans.key == "shows_down_km":  # no minutes known and no showtimes: the lead + the km line
+        return nearby.SHOWS_DOWN_LEAD + " " + acks.PHRASES["place_best_km"].format(**ans.fmt)
+    if ans.key == "place_offer":  # a real question: PHRASES hold no "?" (the speakable rule), the line does
+        return acks.PHRASES["place_offer"].format(**ans.fmt) + "?"
+    return acks.PHRASES[ans.key].format(**ans.fmt)
+
+
+async def _place_turn(body: TurnBody, ask: dict, deps: OverlayDeps, said: list[str] | None = None,
+                      on_step=None, reply: str = "") -> AsyncIterator[dict]:
+    """One place turn from an ask dict (intents.place_request, or later a model pick): at most one card
+    + one spoken line, both private; web text taints the conversation first; the row holds counts only."""
+    said = [] if said is None else said
+    t0 = deps.clock()
+    budget = nearby.Budget()
+    ans = nearby.Answer(reason="api_error")
+    try:
+        if body.barge_in:  # a barge-in never runs a place search
+            ans = nearby.Answer(key="geo_barge", reason="barge")
+        elif reply == "no":  # jfollow11f: "no" to "Did you mean": no request
+            ans, budget.near = nearby.Answer(key="place_offer_no", reason="declined"), "declined"
+        else:
+            ans = await asyncio.to_thread(_place_answer, ask, budget)
+            if reply == "yes":
+                budget.near = "yes"
+        if ans.key == "place_offer" and ans.offer:  # "Did you mean <name>?": the next yes searches that name
+            with _confirm_lock:
+                _place_offer[body.conv_id] = PlaceOffer(
+                    {"mode": "name", "query": ans.offer, "film": "", "when": "today", "offered": True},
+                    deps.clock() + PLACE_OFFER_S)
+                while len(_place_offer) > 32:
+                    _place_offer.pop(next(iter(_place_offer)))
+        if ans.web:  # ruling 7: Nominatim/Photon/Clusterflick text reaches the card or the line
+            _auto_tainted.add(body.conv_id)
+        card = nearby.card(ans)
+        if card:
+            _card_ids.setdefault(body.conv_id, set()).add(card["id"])
+            _card_text.setdefault(body.conv_id, deque(maxlen=3)).append(card["title"].lower())
+            yield _keep_card(body.conv_id, "geo", card)
+        text = _place_line(ans)
+        async for ev in _speak(text, deps):
+            yield {**ev, "private": True}  # the app speaks it; the spoke row logs [geo line]
+        said.append(text)
+    finally:
+        if on_step:
+            ms = round((deps.clock() - t0) * 1000)
+            kind = ask.get("mode") if ask.get("mode") in nearby.MODES else "none"
+            on_step("place", detail=f"kind={kind} src={ans.src} n={len(ans.rows)}"
+                                    f" calls={budget.calls} ms={ms} tfl={budget.tfl} matrix={budget.matrix}"
+                                    f" shows={budget.shows} op={budget.op} near={budget.near} reason={ans.reason}")
 
 
 # --- jfollow10b: questions about a YouTube video (captions, one tool-less model call) ------------

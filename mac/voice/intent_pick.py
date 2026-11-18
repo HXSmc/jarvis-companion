@@ -60,6 +60,7 @@ KIND_TO_PICK = {
     "draw": "draw", "video_ask": "youtube", "video_watch": "watch",
     "sessions": "sessions", "agent": "agent", "answer": "answer",
     "model_create": "3d", "model_list": "3d", "model_show": "3d",
+    "place": "place",  # jfollow11f
 }
 
 PICK_PROMPT = """You sort one spoken request for a voice assistant into exactly one command type. Speech-to-text often mishears: "so me" is "show me", "Java's companion" is "Jarvis Companion", "three D" is "3D", "over, overlay" is "overlay".
