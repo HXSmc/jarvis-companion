@@ -67,6 +67,12 @@ def classify_failure(assistant_error: str | None, status: int | None, rate_rejec
     return "error"
 
 
+def cli_bin() -> str:
+    """The claude binary for a new session, read when it is built; tests and the Mac tester's
+    faked usage limit point it at a stand-in CLI. Process env only, never a request field."""
+    return os.environ.get("OVERLAY_CLAUDE_BIN") or "claude"
+
+
 def lean_argv(model: str, system_prompt: str, tools: str = "", claude_bin: str = "claude") -> list[str]:
     """The claude argv for one lean session; ValueError on any tool outside the allowlist."""
     if tools and any(t not in ALLOWED_TOOLS for t in tools.split(",")):
@@ -90,12 +96,12 @@ class LeanSession:
         model: str = "sonnet",
         system_prompt: str = "",
         tools: str = "",
-        claude_bin: str = "claude",
+        claude_bin: str | None = None,
     ):
         # Empty scratch cwd so no project CLAUDE.md / .mcp.json / hooks get picked up.
         self._cwd = tempfile.mkdtemp(prefix="jov-overlay-")
         self.proc = subprocess.Popen(
-            lean_argv(model, system_prompt, tools, claude_bin),
+            lean_argv(model, system_prompt, tools, claude_bin or cli_bin()),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
             cwd=self._cwd,

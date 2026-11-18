@@ -537,3 +537,90 @@ def test_repeated_model_card_id_gets_a_fresh_id(client):
     ids = [e["card"]["id"] for e in turn(client, "what is a monad", conv_id="k1") if e["type"] == "card"]
     ids += [e["card"]["id"] for e in turn(client, "and again", conv_id="k1") if e["type"] == "card"]
     assert ids[0] == "dup" and len(set(ids)) == 4
+
+
+# --- jfollow11b: the port opens before the warm-up ------------------------------------------------
+
+_FAKE_CLI = Path(__file__).resolve().parent / "fixtures" / "fake_claude_limit.py"
+
+
+def _service_env(monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN)
+    monkeypatch.setattr(overlay, "TOKEN_FILE", token_file)
+    monkeypatch.setenv("OVERLAY_WAKEWORD", "0")
+    monkeypatch.setenv("OVERLAY_CLAUDE_BIN", str(_FAKE_CLI))  # never a real claude from a service test
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+
+def test_service_starts_when_prewarm_fails(monkeypatch, tmp_path):
+    """Criterion 10: every pool's prewarm at the usage limit; the service still serves /health."""
+    _service_env(monkeypatch, tmp_path)
+    from mac.voice import service
+
+    class LimitPool:
+        def prewarm(self):
+            raise lean.LeanError("usage_limit", "test")
+
+    d = make_deps()
+    d.conversations = d.quiet_conversations = d.agent_conversations = LimitPool()
+    overlay.set_deps(d)
+    with TestClient(service.app, client=("127.0.0.1", 50000)) as svc:
+        assert svc.get("/overlay/health", headers=AUTH_HEADER).status_code == 200
+
+
+def test_port_opens_before_warmup(monkeypatch, tmp_path, caplog):
+    """Criterion 15: a 3 s voice load and 0.5 s per clip never hold the port, health or the first ack."""
+    _service_env(monkeypatch, tmp_path)
+    from mac.voice import service
+
+    class SlowVoice:
+        def synth(self, text):
+            time.sleep(0.5)
+            return b"\x00\x01" * 64, 24000
+
+    def slow_load():
+        time.sleep(3)
+        return SlowVoice()
+
+    monkeypatch.setattr(overlay, "_voice_present", lambda: True)
+    monkeypatch.setattr(overlay, "_load_voice", slow_load)
+    monkeypatch.setattr(acks, "PHRASES", {k: acks.PHRASES[k] for k in ("generic", "answer", "open", "look")})
+    caplog.set_level(logging.INFO, logger="mac.voice.service")
+
+    def phases():
+        return [r.getMessage().split()[1].split("=")[1] for r in caplog.records
+                if r.getMessage().startswith("startup phase=")]
+
+    t_start = time.monotonic()
+    with TestClient(service.app, client=("127.0.0.1", 50000)) as svc:
+        assert time.monotonic() - t_start < 2.0  # the lifespan never waits on the voice
+        deps = overlay.get_deps()
+        try:
+            t0 = time.monotonic()
+            health = svc.get("/overlay/health", headers=AUTH_HEADER)
+            assert time.monotonic() - t0 < 2.0 and health.status_code == 200
+            assert health.json()["voice"] == "bm_daniel"
+            assert "acks_ready" not in phases()
+            assert phases()[:4] == ["imports", "deps", "token", "health_up"]
+            got: list = []
+            worker = threading.Thread(target=lambda: got.extend(turn(svc, "what is the capital of France",
+                                                                      conv_id="w1")))
+            worker.start()
+            while worker.is_alive():  # health keeps answering while the turn waits on the voice
+                t0 = time.monotonic()
+                h = svc.get("/overlay/health", headers=AUTH_HEADER)
+                assert time.monotonic() - t0 < 2.0 and h.status_code == 200 and h.json()["voice"] == "bm_daniel"
+                time.sleep(0.2)
+            worker.join()
+            assert got[0]["type"] == "audio" and got[0]["pcm_b64"]  # the ack: synthesized now, never a lone say
+            deadline = time.monotonic() + 15
+            while "prewarm_done" not in phases() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert phases()[4:] == ["acks_ready", "prewarm_done"]
+        finally:
+            for pool in (deps.conversations, deps.quiet_conversations, deps.agent_conversations):
+                for s in [*pool._sessions.values(), pool._spare]:
+                    if s is not None:
+                        s.close()

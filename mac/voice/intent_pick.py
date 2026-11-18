@@ -162,6 +162,7 @@ class Picker:
         self._session = None
         self._asks = 0
         self._warming = False
+        self._failure = None  # the LeanError of the last failed build, when it was a usage limit
         self._rewarm()  # prewarm off the turn's path
 
     def _rewarm(self) -> None:
@@ -177,12 +178,16 @@ class Picker:
             fresh = self._factory()
             for _ in range(WARM_ASKS):
                 fresh.ask(message("hello", 0, False, False))
-        except Exception:
+        except Exception as exc:
             if fresh is not None:
                 _close(fresh)
             fresh = None
+            failure = exc if getattr(exc, "reason", None) == "usage_limit" else None
+        else:
+            failure = None
         with self._lock:
             self._warming = False
+            self._failure = failure
             old = None
             if fresh is not None:
                 old, self._session, self._asks = self._session, fresh, 0
@@ -194,7 +199,8 @@ class Picker:
             session = self._session
             if session is None:  # still warming (or the build failed): word rules this turn, never a cold ask
                 self._rewarm()
-                raise RuntimeError("picker not warm")
+                # the last build hit the usage limit: say so (the pick row names it), else "not warm"
+                raise self._failure or RuntimeError("picker not warm")
             self._asks += 1
             try:
                 raw = session.ask(msg).raw

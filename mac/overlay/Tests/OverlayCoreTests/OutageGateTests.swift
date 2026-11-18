@@ -77,21 +77,36 @@ final class OutageGateTests: XCTestCase {
         XCTAssertTrue(OutageGate.announcement(timedOut: true).spoken.contains("not answering"))
     }
 
-    // Regression (cause b, proven live in jfollow10i round 3): a service restart refuses
-    // connections for ~37-45 s while the voice model loads. Replays the measured windows on
-    // the gate the app uses. Before: grace 30 announced a false outage on every restart.
+    // Regression (cause b, proven live in jfollow10i round 3): a restart must not be said. jfollow11b
+    // opens the port before the voice warms up, so a restart refuses for a few seconds; 20 s is a
+    // slow one. A 45 s stop plus that start-up is still said, once.
     func testServiceRestartWindowIsNotAnOutage() {
         let t0 = Date()
-        var restart = OutageGate.service                                // kickstart: refused 45 s
-        for s in stride(from: 0.0, through: 45.0, by: 3.0) {
+        var restart = OutageGate.service                                // kickstart: refused 20 s
+        for s in stride(from: 0.0, through: 20.0, by: 3.0) {
             XCTAssertFalse(restart.failed(at: t0.addingTimeInterval(s)), "announced at \(s) s")
         }
         XCTAssertFalse(restart.reached())                               // back: nothing was said
-        var stopped = OutageGate.service                                // 45 s stop + ~37 s start
+        var stopped = OutageGate.service                                // 45 s stop + start-up
         var said = 0
-        for s in stride(from: 0.0, through: 82.0, by: 3.0) where stopped.failed(at: t0.addingTimeInterval(s)) {
+        for s in stride(from: 0.0, through: 60.0, by: 3.0) where stopped.failed(at: t0.addingTimeInterval(s)) {
             said += 1
         }
         XCTAssertEqual(said, 1)                                         // a real stop is still said once
+    }
+
+    // jfollow11b criterion 18: the app's gate is quiet at grace - 1 s and speaks at grace, once.
+    func testServiceGateAnnouncesAtGraceExactlyOnce() {
+        let t0 = Date()
+        var gate = OutageGate.service
+        let grace = gate.grace
+        var s = 0.0
+        while s < grace - 1 {                                           // retries 2 s apart, under maxGap
+            XCTAssertFalse(gate.failed(at: t0.addingTimeInterval(s)), "announced at \(s) s")
+            s += 2
+        }
+        XCTAssertFalse(gate.failed(at: t0.addingTimeInterval(grace - 1)))
+        XCTAssertTrue(gate.failed(at: t0.addingTimeInterval(grace)))
+        XCTAssertFalse(gate.failed(at: t0.addingTimeInterval(grace + 2)))  // said once
     }
 }

@@ -1,27 +1,40 @@
 """Standalone overlay service: `python -m mac.voice.service` on the Mac.
 
 Serves only the /overlay router, on loopback, port OVERLAY_PORT (8791). The
-lifespan prerenders the ack phrases in a thread so the first turn is not the
-slow one, and starts the wake-word thread unless OVERLAY_WAKEWORD=0. Every
+lifespan opens the port first; the voice, the ack clips and the warm claude
+sessions get ready in background threads after it (jfollow11b: they took the
+37-45 s a restart used to refuse connections for). It starts the wake-word
+thread unless OVERLAY_WAKEWORD=0. Every
 optional piece (voice, wake word) degrades to a warning, never a crash: the
 overlay must always come up.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
-import os
-import sys
-import threading
-from contextlib import asynccontextmanager
+import time
+
+_T0 = time.monotonic()  # the start-up phase clock: ms since this module began to import
+
+import logging  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+import threading  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI  # noqa: E402
 
-from gateway.overlay import debug_log, get_deps, overlay_token, router
+from gateway.overlay import debug_log, get_deps, overlay_token, router  # noqa: E402
 
 logger = logging.getLogger(__name__)
+_IMPORTS_MS = round((time.monotonic() - _T0) * 1000)
+_phases: dict[str, int] = {}
+
+
+def _phase(name: str, ms: int | None = None) -> None:
+    """One `startup phase=<name> ms=<n>` line (fixed words and numbers only)."""
+    _phases[name] = round((time.monotonic() - _T0) * 1000) if ms is None else ms
+    logger.info("startup phase=%s ms=%d", name, _phases[name])
 
 HOST = "127.0.0.1"
 
@@ -76,21 +89,37 @@ def _start_wake_thread() -> None:
     threading.Thread(target=run, name="wakeword", daemon=True).start()
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    # Create the overlay token before serving: the app reads this file before its first request.
-    overlay_token()
+def _warm_up(deps) -> None:
+    """After the port opened: render the ack clips (waits on the voice load), then start one spare
+    claude per pool. A clip asked for before it is ready is synthesized on demand by the turn."""
     try:
-        await asyncio.to_thread(get_deps().acks.prerender)
-    except Exception as exc:  # prewarm must never keep the overlay from serving
+        deps.acks.prerender()
+    except Exception as exc:  # warm-up must never take the overlay down
         logger.warning("ack prerender failed (%s), continuing", type(exc).__name__)
+    _phase("acks_ready")
     for pool_name in ("conversations", "quiet_conversations", "agent_conversations"):
         try:
-            getattr(get_deps(), pool_name).prewarm()  # first answer skips the CLI cold start
+            getattr(deps, pool_name).prewarm()  # first answer skips the CLI cold start
         except Exception as exc:
             logger.warning("%s prewarm failed (%s), continuing", pool_name, type(exc).__name__)
+    _phase("prewarm_done")
+    debug_log.alone("service_start", " ".join(f"{k}={v}" for k, v in _phases.items()))
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _phases.clear()
+    _phase("imports", _IMPORTS_MS)
+    deps = get_deps()  # cheap now: the voice loads in its own thread
+    _phase("deps")
+    # Create the overlay token before serving: the app reads this file before its first request.
+    overlay_token()
+    _phase("token")
     if os.environ.get("OVERLAY_WAKEWORD", "1") != "0":
         _start_wake_thread()
+        _phase("wake_started")
+    _phase("health_up")  # uvicorn opens the port as soon as this returns
+    threading.Thread(target=_warm_up, args=(deps,), name="warm-up", daemon=True).start()
     yield
 
 

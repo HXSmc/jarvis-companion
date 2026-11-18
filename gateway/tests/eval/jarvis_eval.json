@@ -627,5 +627,22 @@
   "expect_answer_not_contains": [],
   "note": "jfollow11a: a file command goes to the agent (routing only)",
   "model_only": true
+ },
+ {
+  "id": "lim-1",
+  "text": "what is the capital of France",
+  "fake_failure": "usage_limit",
+  "expect_intent": [
+   "answer"
+  ],
+  "expect_answer_contains": [
+   "usage limit"
+  ],
+  "expect_answer_not_contains": [
+   "not running",
+   "Paris"
+  ],
+  "note": "jfollow11b: at a usage limit the answer says so, never 'not running' (the answer step is faked)",
+  "model_only": false
  }
 ]
