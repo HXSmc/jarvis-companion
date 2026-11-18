@@ -319,8 +319,9 @@ def _write_area(tok: str, ctx: agent_policy.Ctx) -> bool:
 
 def _write_targets(name: str, args: list[str]) -> list[str] | None:
     """Every operand and option-attached value of a WRITE_HOME command, plus <dir>/<source name> when
-    cp/mv copy into an existing folder. None after `--` (operands may then look like options)."""
-    if "--" in args:
+    cp/mv copy into an existing folder (a link there would take the write elsewhere). None after `--`
+    (operands may then look like options) and for ditto with any option (-x/-c/-k unpack or pack archives)."""
+    if "--" in args or (name == "ditto" and any(a.startswith("-") for a in args)):
         return None
     ops = [a for a in args if not a.startswith("-")]
     out = ops + [v for a in args if (v := _attached(a)) is not None]

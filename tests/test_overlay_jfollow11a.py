@@ -58,7 +58,8 @@ TABLE = [
     ("cp ~/a ~/.zshrc", False, OUT), ("mv ~/a ~/Library/Preferences/x.plist", False, OUT),
     ("mkdir ~/.config/x", False, OUT), ("cp '~/a' '~/b'", False, OUT), ("cp ~/a ~", False, OUT),
     ("mv ~/Library/x ~/Documents/x", False, OUT), ("cp ~/Documents/.envrc2 ~/Documents/sub", False, OUT),
-    ("cp ~/a -- ~/b", False, OUT), ("mkdir", False, OUT), ("touch -t 202001010000 ~/a", False, OUT),
+    ("cp ~/a -- ~/b", False, OUT), ("cp ~/Documents/a ~/Documents/sub", False, OUT),
+    ("ditto -x -k ~/a.zip ~/Documents/out", False, OUT), ("mkdir", False, OUT), ("touch -t 202001010000 ~/a", False, OUT),
     # guard
     ("cp ~/a ~/Library/LaunchAgents/x.plist", False, G), ("shutdown -h now", False, G),
     ("launchctl bootout gui/1/x", False, G), ("killall Safari", False, G), ("kill 1", False, G),
@@ -101,6 +102,7 @@ def ctx(tmp_path):
     (home / ".ssh" / "id_rsa").write_text("x")
     (home / ".env").write_text("x")
     (home / "Documents" / "sub").mkdir(parents=True)
+    (home / "Documents" / "sub" / "a").symlink_to(home / ".zshrc")  # a copy into sub/ would follow it
     (home / "Desktop").mkdir()
     (home / "repo" / ".git" / "hooks").mkdir(parents=True)
     (home / "vault" / "Secrets").mkdir(parents=True)
@@ -179,6 +181,12 @@ def test_write_tool_through_a_turn(client, tmp_path, auto_on):
     assert not _confirm_card(events) and not _steps("agent_confirm")
     assert says(events).count(RUN_LINE) == 1
     assert [r["behavior"] for r in pool.made[0].responses] == ["allow"]
+    # hub answer 2: an auto write marks the session, so a second write in the conversation asks
+    overlay.debug_log.clear()
+    pool, events = _write_turn(client, [("Write", {"file_path": f"{home}/Documents/jf3.md", "content": "x"}),
+                                        ("Write", {"file_path": f"{home}/Documents/jf4.md", "content": "x"})], "w5")
+    assert _rows() == ["cmd=Write decision=auto reason=ok", "cmd=Write decision=asked reason=untrusted"]
+    assert _confirm_card(events)
     # (b) a Read first marks the session: the write asks
     overlay.debug_log.clear()
     note = REPO / "note.md"

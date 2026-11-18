@@ -26,7 +26,8 @@ from mac.voice import auto_policy, intent_pick, intents  # noqa: E402
 from test_overlay_agent import Clock, FakeAgentPool, client, reset  # noqa: F401,E402
 from test_overlay_jfollow2 import lines  # noqa: E402
 from test_overlay_jfollow4 import _cards, _deps, _steps, fresh_session_state  # noqa: F401,E402
-from test_overlay_jfollow10a import _home_write, bash, run_agent, _rows  # noqa: E402
+from test_overlay_jfollow10a import bash, run_agent, _rows  # noqa: E402
+from test_overlay_jfollow10a import _home_write  # noqa: E402
 from test_overlay_service import FakeConversations, says, turn  # noqa: E402
 
 TOKEN = "not-a-real-token"
