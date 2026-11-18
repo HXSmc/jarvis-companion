@@ -276,3 +276,45 @@ def test_agent_cannot_reach_the_switch(auto_on):
     else:
         assert isinstance(decision, agent_policy.Deny)
     assert auto_policy.write_verdict(settings, ctx, tainted=False, barge=False, gate_ok=True) == OUT
+
+
+def test_overwrite_asks_delete(ctx, auto_on):
+    """Round 1 (security 1): cp/mv/ditto onto a path that exists overwrite or merge it: a delete."""
+    h = Path(ctx.home)
+    (h / "Documents" / "thesis.docx").write_text("x")
+    (h / "Pictures" / "b").mkdir(parents=True)
+    (h / "Pictures" / "b" / "f").write_text("x")
+    (h / "src").mkdir()
+    (h / "Library" / "LaunchAgents").mkdir(parents=True)
+    (h / "Documents" / "dst" / "src").mkdir(parents=True)
+    (h / "Documents" / "dst" / "src" / "inner").symlink_to(h / "Library" / "LaunchAgents")
+    for command in ("cp ~/Documents/empty.txt ~/Documents/thesis.docx",
+                    "mv ~/Documents/empty.txt ~/Documents/thesis.docx",
+                    "ditto ~/Pictures/a ~/Pictures/b",
+                    "cp -R ~/src ~/Documents/dst"):
+        got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
+        assert got == D, command
+    # new targets still run; mkdir -p and touch on an existing path destroy nothing
+    for command in ("cp ~/Documents/empty.txt ~/Documents/new.docx", "cp -R ~/src ~/Documents/fresh",
+                    "mkdir -p ~/Documents/dst", "touch ~/Documents/thesis.docx"):
+        got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
+        assert got == OK, command
+    assert auto_policy.write_verdict(str(h / "Documents" / "thesis.docx"), ctx, tainted=False, barge=False,
+                                     gate_ok=True) == D
+
+
+def test_service_checkout_is_not_a_write_area(ctx, auto_on, monkeypatch):
+    """Round 1 (security 2): the running checkout (launchd runs `python -m` from it) is never auto."""
+    assert auto_policy.CHECKOUT == os.path.realpath(ROOT)
+    repo = Path(ctx.home) / "Desktop" / "jarvis"
+    (repo / "mac" / "voice").mkdir(parents=True)
+    monkeypatch.setattr(auto_policy, "CHECKOUT", str(repo))
+    for command in ("cp ~/Documents/empty.txt ~/Desktop/jarvis/mac/voice/auto_policy.py",
+                    "cp ~/Documents/empty.txt ~/Desktop/jarvis/json.py",
+                    "cp ~/Documents/empty.txt ~/DESKTOP/Jarvis/json.py",
+                    "mkdir ~/Desktop/jarvis/x"):
+        got = auto_policy.verdict(fill(command, ctx), ctx, tainted=False, barge=False, gate_ok=True)
+        assert got == OUT, command
+    assert auto_policy.write_verdict(str(repo / "json.py"), ctx, tainted=False, barge=False, gate_ok=True) == OUT
+    assert auto_policy.write_verdict(str(repo.parent / "jarvis2.py"), ctx, tainted=False, barge=False,
+                                     gate_ok=True) == OK

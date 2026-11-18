@@ -114,6 +114,8 @@ LOOKUP = READ_ONLY | RECURSIVE_READERS | frozenset({
 KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | {"git"}
 # A program named by path counts as known only from the system's own bin folders (a copy into home
 # named ls is not ls).
+# The running checkout (launchd runs `python -m mac.voice.service` from it): never a write area.
+CHECKOUT = os.path.realpath(Path(agent.__file__).resolve().parents[2])
 SYSTEM_BIN = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
 
 _NAME_RE = re.compile(r"[A-Za-z0-9._+-]{1,32}")
@@ -308,6 +310,8 @@ def _write_area(tok: str, ctx: agent_policy.Ctx) -> bool:
     for p in _places(tok, ctx):
         if scratch is not None and _under(p, scratch):
             continue
+        if _under(p.casefold(), CHECKOUT.casefold()):  # the service's own code (python -m puts it on sys.path)
+            return False
         parts = agent_policy._home_parts(p, home)
         if (not parts or parts[0] == "library" or any(c.startswith(".") for c in parts)
                 or os.path.basename(p).casefold() in agent_policy._WRITE_DENY_NAMES
@@ -330,6 +334,21 @@ def _write_targets(name: str, args: list[str]) -> list[str] | None:
     return out
 
 
+def _overwrites(name: str, args: list[str]) -> bool:
+    """cp/mv/ditto onto a path that already exists: an overwrite (or a ditto merge) is a delete. The
+    final target is dst, or dst/<source name> when dst is an existing folder. Operands are absolute here."""
+    if name not in ("cp", "mv", "ditto"):
+        return False
+    ops = [a for a in args if not a.startswith("-")]
+    if len(ops) < 2:
+        return False
+    dst = ops[-1]
+    if name == "ditto":
+        return os.path.lexists(dst)
+    finals = [os.path.join(dst, os.path.basename(a.rstrip("/"))) for a in ops[:-1]] if os.path.isdir(dst) else [dst]
+    return any(os.path.lexists(f) for f in finals)
+
+
 def write_verdict(resolved_path, ctx: agent_policy.Ctx, *, tainted: bool, barge: bool,
                   gate_ok: bool) -> tuple[str, str]:
     """The Write tools (path already realpath'd by agent_policy._write). Order: off, outside the write
@@ -340,6 +359,8 @@ def write_verdict(resolved_path, ctx: agent_policy.Ctx, *, tainted: bool, barge:
         return "asked", "outside"
     if tainted:
         return "asked", "untrusted"
+    if os.path.lexists(resolved_path):  # a Write over an existing file is a delete
+        return "asked", "delete"
     return gate(barge=barge, gate_ok=gate_ok)
 
 
@@ -419,6 +440,8 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
                     return "secret"
         if not targets or not all(_write_area(t, ctx) for t in targets):
             return "outside"
+        if _overwrites(name, args):
+            return "delete"
     if name in RECURSIVE_READERS or name == "find" or name == "diff":
         recursive = name in RECURSE_BY_DEFAULT or name == "find" or any(
             a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a))
