@@ -68,16 +68,20 @@ Leaflet 1.9.4
 
 Vendored in mac/overlay/Resources/web/vendor/leaflet/ (the map page of the web card).
 Source: https://registry.npmjs.org/leaflet/-/leaflet-1.9.4.tgz (npm tarball, files from package/dist
-and package/LICENSE, unmodified). Published integrity:
+and package/LICENSE; all unmodified except leaflet.css, see below). Published integrity:
 sha512-nxS1ynzJOmOlHp+iL3FyWqK89GtNL8U8rvlMOsQdTTssxZwCXh8N2NB3GDQOL+YR3XnWyZAxwQixURb+FA74PA==
 
 sha256 of each vendored file:
   00179c4c1ee830d3a108412ae0d294f55776cfeb085c60129a39aa6fc4ae2528  vendor/leaflet/images/marker-icon-2x.png
   574c3a5cca85f4114085b6841596d62f00d7c892c7b03f28cbfa301deb1dc437  vendor/leaflet/images/marker-icon.png
   264f5c640339f042dd729062cfc04c17f8ea0f29882b538e3848ed8f10edb4da  vendor/leaflet/images/marker-shadow.png
-  a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6  vendor/leaflet/leaflet.css
+  4c16bf0dde298ae950f15bf5eac8788bc0a457d0111f4af10d658cdc3fef9e88  vendor/leaflet/leaflet.css
   db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a  vendor/leaflet/leaflet.js
   53e8dc25862014e4324741ca18fbe3611e11d42ef69f59f86ea8c5389647d4cb  vendor/leaflet/LICENSE
+
+leaflet.css is modified: restyled to the overlay colours (every colour, font and shadow now
+reads a map.css token), layout unchanged; the old-IE VML behavior line is dropped. Upstream 1.9.4 sha256 before the restyle:
+  a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6  (upstream leaflet.css)
 
 BSD 2-Clause License
 

@@ -539,5 +539,60 @@
   "expect_answer_not_contains": [],
   "note": "polite pull-up that is not a 3D object",
   "model_only": false
+ },
+ {
+  "id": "place-4",
+  "text": "take me to Dishoom",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "take me to a chain: nearest branch",
+  "model_only": false
+ },
+ {
+  "id": "place-5",
+  "text": "what's the best way to get to Decim",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "misheard chain name, Overpass sound-alike",
+  "model_only": false
+ },
+ {
+  "id": "place-6",
+  "text": "nearest Dishoom",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "nearest form",
+  "model_only": false
+ },
+ {
+  "id": "place-7",
+  "text": "take me home",
+  "expect_intent": [
+   "geo_map"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "saved place goes to the stage b map",
+  "model_only": false
+ },
+ {
+  "id": "place-8",
+  "text": "take me to the top of the page",
+  "expect_intent": [
+   "answer"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "page spot, not a place",
+  "model_only": false
  }
 ]

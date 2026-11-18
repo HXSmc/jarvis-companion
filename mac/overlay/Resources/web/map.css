@@ -13,6 +13,8 @@
   --glass: rgba(18, 20, 24, 0.84);
   --best: #3d8bfd;
   --alt: #8b97a8;
+  --font: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
 
 html, body {
@@ -21,7 +23,7 @@ html, body {
   overflow: clip;
   background: var(--page);
   color: var(--ink);
-  font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  font: 12px/1.35 var(--font);
 }
 
 #map {
@@ -134,6 +136,19 @@ html, body {
   outline-offset: 1px;
 }
 
+/* Route lines: Leaflet's SVG paths take their colour and weight from the tokens, not from map.js. */
+.route-best {
+  stroke: var(--best);
+  stroke-width: 6;
+  stroke-opacity: 0.95;
+}
+
+.route-alt {
+  stroke: var(--alt);
+  stroke-width: 4;
+  stroke-opacity: 0.75;
+}
+
 /* jfollow10f: ranked places. The map keeps the top half; the numbered list scrolls under it. */
 .places #map {
   bottom: 54%;
@@ -205,12 +220,4 @@ html, body {
   color: var(--ink-soft);
   font-size: 11px;
   white-space: normal;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .leaflet-zoom-anim .leaflet-zoom-animated,
-  .leaflet-fade-anim .leaflet-tile,
-  .leaflet-fade-anim .leaflet-popup {
-    transition: none;
-  }
 }

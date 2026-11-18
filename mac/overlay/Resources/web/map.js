@@ -122,9 +122,7 @@
     for (var i = routes.length - 1; i >= 0; i -= 1) {
       var best = i === 0;
       layers.push(L.polyline(routes[i].points, {
-        color: best ? "#3d8bfd" : "#8b97a8",
-        weight: best ? 6 : 4,
-        opacity: best ? 0.95 : 0.75,
+        className: best ? "route-best" : "route-alt",  // colour + weight live in map.css
         interactive: false
       }).addTo(map));
     }
