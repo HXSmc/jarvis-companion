@@ -160,7 +160,7 @@ def test_limit_sessions(client, monkeypatch, tmp_path, fake_limit):
     events = turn(client, "how many sessions are running", conv_id="s1")
     assert_limit_once(events)
     spoken = says(events)
-    assert spoken.index(LIMIT) < len(spoken) - 1 and spoken[-1].startswith("30 sessions")
+    assert spoken.index(LIMIT) < len(spoken) - 1 and spoken[-1].startswith("7 sessions")  # jfollow11z: open sessions, not all 30
 
 
 def test_limit_draw(client, fake_limit):

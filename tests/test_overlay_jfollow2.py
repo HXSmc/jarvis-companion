@@ -229,9 +229,9 @@ def test_quiet_prompt_gives_the_reason():
     assert "show me a picture of" in overlay.QUIET_PROMPT
     for bad in ("image_search", "video_search", "WebSearch"):
         assert bad not in overlay.QUIET_PROMPT
-    # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3 (persona "sir" line), jfollow9 D2 (About you), jfollow9 R5 F1 (questions only), jfollow10b A3 (show, don't link), jfollow10b hub ruling 2 (spoken answer stays whole), jfollow10c D (chart cards), jfollow10e B3 (fact sheet block), jfollow10g hub answer 10 (fact line: router sessions), jfollow11d (3D fact line), jfollow11c A2 (fact sheet test-copy line + repos bullet), jfollow11c R3 (battery only when asked; run 3: no unasked time, date or other fact)
+    # ANSWER_PROMPT at base 2540d60; re-pinned for jfollow3 E3 (persona "sir" line), jfollow9 D2 (About you), jfollow9 R5 F1 (questions only), jfollow10b A3 (show, don't link), jfollow10b hub ruling 2 (spoken answer stays whole), jfollow10c D (chart cards), jfollow10e B3 (fact sheet block), jfollow10g hub answer 10 (fact line: router sessions), jfollow11d (3D fact line), jfollow11c A2 (fact sheet test-copy line + repos bullet), jfollow11c R3 (battery only when asked; run 3: no unasked time, date or other fact), jfollow11z Z-LIST 15 (an ignored instruction is never mentioned)
     assert hashlib.sha256(overlay.ANSWER_PROMPT.encode()).hexdigest() == \
-        "4e49668d6489701ba61eb1b40e961291361a924ae494c67e4e608e338c6e900a"
+        "5c0c436f50ab510cb85eeb324bc618007a4299e9ccc09c330bbbb256345ebe81"
 
 
 def test_media_turn_joined_continuation_falls_back(client, monkeypatch):

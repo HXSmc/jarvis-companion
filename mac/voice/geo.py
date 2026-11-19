@@ -15,11 +15,13 @@ import tempfile
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import httpx
 
+from common import hud
 from mac.voice import media_lookup
 
 logger = logging.getLogger(__name__)
@@ -293,14 +295,18 @@ def walk_cycle(a: tuple, b: tuple, budget: Budget) -> dict:
     hit = _cached("other", key, ROUTE_TTL_S)
     if hit is not None:
         return hit
-    out = {}
-    for costing, name in (("pedestrian", "walk"), ("bicycle", "cycle")):
+
+    def one(costing: str) -> float | None:
         try:
-            trips = _valhalla(a, b, costing, 0, budget)
+            trips = _valhalla(a, b, costing, 0, Budget())  # its post is counted below, in this thread
         except GeoError:
-            continue
-        if trips:
-            out[name] = trips[0]["min"]
+            return None
+        return trips[0]["min"] if trips else None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:  # jfollow11z R6b: both posts at once, one wait
+        mins = list(pool.map(one, ("pedestrian", "bicycle")))
+    budget.calls += 2
+    out = {name: m for name, m in zip(("walk", "cycle"), mins) if m is not None}
     _store("other", key, out)
     return out
 
@@ -563,8 +569,8 @@ def journey_lines(found: list[dict]) -> tuple[list[str], str]:
 # --- answers -----------------------------------------------------------------------------------
 
 def map_data(routes: list[dict], pins: list[dict]) -> dict:
-    return {"routes": [{"points": r["points"], "km": r["km"], "min": r["min"]} for r in routes[:3]],
-            "pins": pins[:2]}
+    return {"routes": [{"points": r["points"], "km": r["km"], "min": r["min"]} for r in routes[:hud.MAX_ROUTES]],
+            "pins": pins[:hud.MAX_PINS]}
 
 
 def map_line(routes: list[dict]) -> str:
@@ -667,9 +673,13 @@ def tile(root: Path, z: int, x: int, y: int) -> bytes:
         if d.is_symlink():
             raise GeoError("bad_tile")
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)  # a failed write (disk full) leaves no .tmp behind
+        raise
     with _lock:
         _since_prune[0] += len(data)
         walk = _since_prune[0] >= TILE_PRUNE_EVERY

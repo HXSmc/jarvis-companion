@@ -136,7 +136,10 @@ def test_facts_are_data(tmp_path, monkeypatch, client):
     if base:
         diff = subprocess.run(["git", "diff", base, "--", "mac/voice/agent.py", "mac/voice/agent_policy.py"],
                               cwd=ROOT, capture_output=True, text=True).stdout
-        assert diff == ""
+        # jfollow11z Z-LIST 9 (hub-sanctioned): the TOOLS line gained Write; nothing else may change
+        changed = [ln for ln in diff.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))
+                   and not ln.startswith(('-TOOLS = "Read,Grep,Glob,Bash"', '+TOOLS = "Read,Grep,Glob,Bash,Write"'))]
+        assert changed == []
 
 
 # --- criterion 21 ----------------------------------------------------------------------------------

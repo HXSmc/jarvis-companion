@@ -704,5 +704,45 @@
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
   "note": "jfollow11c D4: start the conversation over"
+ },
+ {
+  "id": "z11-move-1",
+  "text": "move the cards to the left",
+  "expect_intent": [
+   "move"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
+ },
+ {
+  "id": "z11-move-2",
+  "text": "could you move them to the top right please",
+  "expect_intent": [
+   "move"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
+ },
+ {
+  "id": "z11-clear-1",
+  "text": "could you clear everything for me",
+  "expect_intent": [
+   "clear"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
+ },
+ {
+  "id": "z11-card-1",
+  "text": "close the map card",
+  "expect_intent": [
+   "card_remove"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
  }
 ]

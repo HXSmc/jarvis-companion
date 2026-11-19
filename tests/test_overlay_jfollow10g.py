@@ -150,7 +150,7 @@ def test_counts_match_the_board(client, monkeypatch, tmp_path):
     # (i) an empty quiet reply forces the fixed fallback line, counted over all 30
     deps, _ = deps_for(quiet=Counter([]))
     events = turn(client, "how many sessions are running", conv_id="c5a")
-    assert says(events)[-1] == "30 sessions, sir: 2 waiting on you, 4 running."
+    assert says(events)[-1] == "7 sessions, sir: 2 waiting on you, 4 running."  # jfollow11z: open ones, not all 30
     assert _steps("sessions")[0]["detail"] == "result=ok rows=30"
     assert detail().startswith("summary=host reason=")
     # (ii) the quiet prompt's untrusted block opens with the fixed totals line, then 20 rows
@@ -162,7 +162,8 @@ def test_counts_match_the_board(client, monkeypatch, tmp_path):
     first = note.splitlines()[0]
     done = sum(1 for r in rows if r["phase"] == "done")
     assert done == 23  # done/idle + done/done; in_review/done is not done
-    assert first == ("Totals from the Companion app: 30 sessions; 3 in progress, 3 in review, 1 attention, "
+    assert first == ("Totals from the Companion app: 7 open sessions, 30 listed; 3 in progress, "
+                     "3 in review, 1 attention, "
                      "23 done; 27 on the Mini PC, 2 on the Mac, 1 on the Windows PC.")
     assert sum(1 for ln in note.splitlines() if ln.startswith("- device ")) == 20
     assert _steps("sessions")[-1]["detail"] == "result=ok rows=30"

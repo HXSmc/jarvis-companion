@@ -259,6 +259,8 @@ def test_owner_rows_replay(text):
     got, _, rows = _pick(text, _deps_with(fake))
     if OWNER_ROWS[text] in ("stop",) or OWNER_ROWS[text] in intent_pick.WORD_ONLY:
         assert fake.calls == [] and "path=fast" in rows[-1]
+    elif OWNER_ROWS[text] in intent_pick.WORD_SURE:  # jfollow11z R2: a sure word hit skips the model
+        assert fake.calls == [] and got.kind == OWNER_ROWS[text] and rows[-1].endswith("reason=word_sure")
     else:
         assert len(fake.calls) == 1 and "path=model" in rows[-1]
         if kind:
@@ -317,7 +319,8 @@ def test_model_slots_reach_the_geo_handler(client, monkeypatch):
 def test_place_takes_the_answer_path():
     """Hub ruling F-HELD, superseded by jfollow11f P2: a place pick on owner words that parse runs the place
     kind (KIND_TO_PICK["place"]); the pick row is unchanged. (FACTS still carry the old line: out of 11f's files.)"""
-    got, _, rows = _pick("what's the best way to go to Dishoom", _deps_with(FakePick(reply("place", 0.95))))
+    # jfollow11z LIVE-2: "best way to go to Dishoom" is now a sure word hit; a film ask still takes the model pick
+    got, _, rows = _pick("is Ebenezer on near me tonight", _deps_with(FakePick(reply("place", 0.95))))
     assert got.kind == "place" and rows[-1].startswith("pick=place conf=95 path=model")
     assert "not available yet" in overlay.FACTS_RULE
     assert "Not available yet: place search" in facts.load(None).text
@@ -734,7 +737,9 @@ def test_eval_no_model():
 
 
 def test_model_stop_keeps_word_clear():
-    """'stop and clear everything': a model `stop` never narrows the word rules' `clear` (the clear also stops)."""
-    deps = _deps_with(FakePick(reply("stop", 0.6)))
-    got, _, rows = _pick("stop and clear everything", deps)
-    assert got.kind == "clear" and rows[-1].startswith("pick=stop ") and "path=model" in rows[-1]
+    """'stop and clear everything': the word rules' `clear` (the clear also stops) is sure (jfollow11z R2):
+    no model call, so a model `stop` can never narrow it."""
+    fake = FakePick(reply("stop", 0.6))
+    got, _, rows = _pick("stop and clear everything", _deps_with(fake))
+    assert got.kind == "clear" and not fake.calls
+    assert rows[-1] == "pick=clear conf=-1 path=fast ms=0 slots=0 reason=word_sure"

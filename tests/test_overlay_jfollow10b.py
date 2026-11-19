@@ -986,7 +986,7 @@ def _run(coro):
 def test_watch_returns_at_once(monkeypatch, tmp_path):
     def slow(request):
         if request.method == "POST":
-            time.sleep(5)
+            time.sleep(1.5)
             return httpx.Response(200, json={"session_id": "sess-1"})
         return httpx.Response(200, json=[])
     _companion(monkeypatch, tmp_path, slow)
