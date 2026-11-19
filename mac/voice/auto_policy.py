@@ -41,6 +41,9 @@ RUNS_CODE = frozenset(agent_policy._WRAPPERS) | frozenset({
 # python3, python3.12, pip3, perl5.34, ruby3.2, ipython, pypy3, bash5.2, zsh5 ...
 RUNS_CODE_PREFIXES = ("python", "pip", "perl", "ruby", "php", "tclsh", "ipython", "pypy", "jython",
                       "bash", "zsh", "ksh", "fish", "dash", "csh", "tcsh")
+# jfollow11z: options that name a program to run (rg --pre, sort --compress-program, any --pager); long
+# options may be abbreviated, so a prefix counts.
+RUNS_OPTS = {"rg": ("--pre",), "sort": ("--co",)}
 FIND_RUNS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
                        "-fls"})
 # jfollow11a: a delete always asks, even in the scratch dir.
@@ -60,7 +63,9 @@ DELETE = frozenset({"ln", "install", "tee", "tar", "unzip", "gunzip", "patch", "
 # operand (uniq, xxd); that file counts as a delete target, with the same scratch-dir exception.
 OUTPUT_OPT = frozenset({"sort", "base64", "say", "osacompile",
                         # round 2: tiffutil -out f; compilers -o f
-                        "tiffutil", "cc", "gcc", "clang", "c++", "g++", "clang++", "swiftc"})
+                        "tiffutil", "cc", "gcc", "clang", "c++", "g++", "clang++", "swiftc",
+                        # jfollow11z: tree -o FILE writes its listing there
+                        "tree"})
 OUTPUT_OPERAND = frozenset({"uniq", "xxd", "afconvert"})
 SECRET = frozenset({"security", "printenv", "env", "set", "export", "pbpaste", "screencapture", "keychain",
                     # builder additions: other ways to dump the environment or the clipboard/screen
@@ -344,6 +349,8 @@ def _write_targets(name: str, args: list[str]) -> list[str] | None:
     (operands may then look like options) and for ditto with any option (-x/-c/-k unpack or pack archives)."""
     if "--" in args or (name == "ditto" and any(a.startswith("-") for a in args)):
         return None
+    if name in ("cp", "mv") and any(a.startswith("-") and not a.startswith("--") and "t" in a[1:] for a in args):
+        return None  # jfollow11z: GNU -t DIR names the target first, so the last operand is not it
     ops = [a for a in args if not a.startswith("-")]
     out = ops + [v for a in args if (v := _attached(a)) is not None]
     if name in ("cp", "mv") and len(ops) > 1 and os.path.isdir(ops[-1]):
@@ -410,7 +417,8 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
     if name in SUDO:
         return "sudo"
     if (name in RUNS_CODE or name.startswith(RUNS_CODE_PREFIXES)
-            or (name == "find" and any(a in FIND_RUNS for a in args))):
+            or (name == "find" and any(a in FIND_RUNS for a in args))
+            or any(a.startswith(RUNS_OPTS.get(name, ()) + ("--pag",)) for a in args)):
         return "runs_code"
     guard_roots = _guard_roots(ctx)
     if name in GUARD or any(_is_path(v) and any(_under(p, r) for p in _places(v, ctx) for r in guard_roots)
@@ -497,6 +505,8 @@ def classify(command, ctx: agent_policy.Ctx) -> tuple[str, str]:
         code = _one(argv, ctx)
         if code != "ok":
             return "asked", code
+    if any(_base(argv) in WRITE_HOME for argv in argvs[:-1]):
+        return "asked", "chain"  # jfollow11z: later parts were checked before this write changed the disk
     return "auto", "ok"
 
 

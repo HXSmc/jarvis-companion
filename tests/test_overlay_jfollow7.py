@@ -408,7 +408,7 @@ def test_sessions_followup_summary_never_fails(client, monkeypatch, tmp_path, se
     events = turn(client, MEANT, conv_id="r7", followup=True, audio_ms=3000, levels=NEAR, conf=0.9)
     spoken = says(events)
     assert spoken[0] == "Checking your sessions."
-    assert spoken[-1] == "2 sessions, sir: 2 waiting on you, 0 running."
+    assert spoken[-1] == "0 sessions running, sir; 2 waiting on you."
     assert "Something went wrong on my side." not in spoken
     assert not [c for c in (e.get("card") for e in events) if c and c["title"] == "No answer"]
     assert _steps("done")[-1]["error"] is None

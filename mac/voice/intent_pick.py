@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from mac.voice import lean
 
 PICK_MODEL = "haiku"
-PICK_TIMEOUT_S = 1.5
+PICK_TIMEOUT_S = 2.5  # jfollow11z: 18 Nov picks ran at a ~1.5 s median and timed out at 1.5 s
 PICK_CONF = 0.6
 JOB_CONF = 0.85
 REBUILD_AFTER = 25
@@ -54,6 +54,9 @@ WORD_ONLY = frozenset({
     "card_help", "hide", "show", "aside", "restore", "clock", "hunk", "git_diff", "ground", "look",
     "place_save", "place_forget", "media", "model_show", "model_list", "new_topic",
 })
+# jfollow11z R2: word kinds whose rule is an anchored whole-request form (every eval and owner row checked):
+# the turn skips the pick model for them.
+WORD_SURE = frozenset({"clear", "card_remove", "move"})
 KIND_TO_PICK = {
     "stop": "stop", "clear": "clear", "card_remove": "card_remove", "move": "move",
     "geo_map": "map", "geo_roads": "map",

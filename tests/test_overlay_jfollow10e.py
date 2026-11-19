@@ -734,7 +734,9 @@ def test_eval_no_model():
 
 
 def test_model_stop_keeps_word_clear():
-    """'stop and clear everything': a model `stop` never narrows the word rules' `clear` (the clear also stops)."""
-    deps = _deps_with(FakePick(reply("stop", 0.6)))
-    got, _, rows = _pick("stop and clear everything", deps)
-    assert got.kind == "clear" and rows[-1].startswith("pick=stop ") and "path=model" in rows[-1]
+    """'stop and clear everything': the word rules' `clear` (the clear also stops) is sure (jfollow11z R2):
+    no model call, so a model `stop` can never narrow it."""
+    fake = FakePick(reply("stop", 0.6))
+    got, _, rows = _pick("stop and clear everything", _deps_with(fake))
+    assert got.kind == "clear" and not fake.calls
+    assert rows[-1] == "pick=clear conf=-1 path=fast ms=0 slots=0 reason=word_sure"

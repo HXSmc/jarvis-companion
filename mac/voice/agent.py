@@ -19,7 +19,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-TOOLS = "Read,Grep,Glob,Bash"
+TOOLS = "Read,Grep,Glob,Bash,Write"
 # Flags that would skip or widen the host gate. agent_argv refuses them in any argument.
 FORBIDDEN = ("--allowedTools", "--allowed-tools", "--add-dir", "bypassPermissions", "acceptEdits",
              "dontAsk", "--dangerously-skip-permissions", "WebSearch", "WebFetch",

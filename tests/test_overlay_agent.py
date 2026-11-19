@@ -201,7 +201,7 @@ def test_agent_argv_is_gated():
     assert argv[argv.index("--permission-prompt-tool") + 1] == "stdio"
     assert argv[argv.index("--setting-sources") + 1] == ""
     assert "--strict-mcp-config" in argv
-    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob,Bash"
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob,Bash,Write"
     for bad in ("--allowedTools", "--add-dir", "bypassPermissions", "--dangerously-skip-permissions",
                 "WebSearch", "WebFetch"):
         assert bad not in joined
