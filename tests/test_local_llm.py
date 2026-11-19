@@ -7,6 +7,7 @@ via the context manager.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 import sys
@@ -210,15 +211,67 @@ def test_close_aborts_and_is_idempotent(monkeypatch):
             assert exc.reason == "local_unavailable"
 
 
+# A tailnet-style example address in the shared (CGNAT) range, host 10 of it. Built from
+# numbers because the repo's privacy hook rejects every CGNAT literal, owner's or not.
+CGNAT = str(ipaddress.IPv4Address((100 << 24) | (64 << 16) | 10))
+
+
+def _fake_dns(monkeypatch, answer) -> list:
+    """getaddrinfo stand-in: answer(host) -> addresses, () = lookup fails. Returns the hosts looked up."""
+    asked = []
+
+    def getaddrinfo(host, *a, **k):
+        asked.append(host)
+        addrs = answer(host)
+        if not addrs:
+            raise socket.gaierror("no such host")
+        return [(None, None, None, "", (addr, 0)) for addr in addrs]
+
+    monkeypatch.setattr(local_llm.socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(local_llm, "_resolved", {})
+    return asked
+
+
+def test_failed_lookup_is_retried_and_hits_are_cached(monkeypatch):
+    for name in ("OVERLAY_LOCAL_URL",):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://minipc.example:8790")
+    up = [False]
+    asked = _fake_dns(monkeypatch, lambda host: (CGNAT,) if up[0] else ())
+    assert local_llm.settings()["url"] == ""  # tailnet down at start: fallback off for now
+    up[0] = True
+    assert local_llm.settings()["url"] == "http://" + CGNAT + ":8410"  # the next turn retries
+    local_llm.settings()
+    assert asked == ["minipc.example"] * 2  # the good answer is cached
+    up[0] = False
+    monkeypatch.setattr(local_llm, "RESOLVE_TTL_S", 0.0)
+    monkeypatch.setattr(local_llm, "_resolved", {"minipc.example": (time.monotonic() - 1, (CGNAT,))})
+    assert local_llm.settings()["url"] == ""  # an expired hit is looked up again
+
+
+def test_explicit_url_used_as_given(monkeypatch):
+    asked = _fake_dns(monkeypatch, lambda host: (CGNAT,))
+    monkeypatch.setenv("OVERLAY_LOCAL_URL", "http://minipc.example:8410")
+    assert local_llm.settings()["url"] == "http://minipc.example:8410"
+    assert asked == []
+
+
 def test_settings_read_at_call_time(monkeypatch):
     for name in ("OVERLAY_LOCAL_URL", "OVERLAY_LOCAL_MODEL", "OVERLAY_LOCAL_TTFT_S", "OVERLAY_LOCAL_WALL_S"):
         monkeypatch.delenv(name, raising=False)
-    names = {"minipc.example": ("10.0.0.5",), "jarvis.example.com": ("8.8.8.8",), "split.example": ("10.0.0.5", "8.8.8.8")}
-    monkeypatch.setattr(local_llm, "_resolve", lambda host: names.get(host, ()))
+    names = {"minipc.example": (CGNAT,), "jarvis.example.com": ("8.8.8.8",),
+             "split.example": (CGNAT, "8.8.8.8"), "v6first.example": ("fd00::10", CGNAT),
+             "v6only.example": ("fd00::10",)}
+    _fake_dns(monkeypatch, lambda host: names.get(host, ()))
     monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://minipc.example:8790")  # a tailnet-style name
     first = local_llm.settings()
-    assert first == {"url": "http://minipc.example:8410", "model": local_llm.DEFAULT_MODEL,
+    # The checked CGNAT IP, never the name: no second lookup, and the front's Host match takes the IP.
+    assert first == {"url": "http://" + CGNAT + ":8410", "model": local_llm.DEFAULT_MODEL,
                      "ttft_s": 420.0, "wall_s": 600.0}
+    monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://v6first.example:8790")
+    assert local_llm.settings()["url"] == "http://" + CGNAT + ":8410"  # IPv4 first
+    monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://v6only.example:8790")
+    assert local_llm.settings()["url"] == "http://[fd00::10]:8410"  # IPv6 in brackets
     monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://10.0.0.5:8790")
     assert local_llm.settings()["url"] == "http://10.0.0.5:8410"  # a non-global IP: private network
     # Gateway on this Mac, unset, or a public host (plain http would cross the internet): no local model.

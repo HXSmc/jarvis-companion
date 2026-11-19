@@ -8,7 +8,6 @@ credential header and only ever takes its URL from the process environment.
 
 from __future__ import annotations
 
-import functools
 import ipaddress
 import json
 import os
@@ -33,33 +32,55 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-@functools.lru_cache(maxsize=8)
+RESOLVE_TTL_S = 300.0
+_resolved: dict[str, tuple[float, tuple[str, ...]]] = {}  # host -> (monotonic expiry, addresses); hits only
+
+
 def _resolve(host: str) -> tuple[str, ...]:
-    """The host's addresses (a tailnet name resolves to tailnet IPs); () when it does not resolve."""
+    """The host's addresses in resolver order (a tailnet name resolves to tailnet IPs); () when it does
+    not resolve. Only a non-empty answer is cached (RESOLVE_TTL_S): a lookup that fails while DNS or the
+    tailnet is down is retried on the next turn."""
+    hit = _resolved.get(host)
+    if hit is not None and hit[0] > time.monotonic():
+        return hit[1]
     try:
-        return tuple({info[4][0] for info in socket.getaddrinfo(host, None)})
+        addrs = tuple(dict.fromkeys(info[4][0] for info in socket.getaddrinfo(host, None)))
     except (OSError, UnicodeError):
-        return ()
+        addrs = ()
+    if addrs:
+        _resolved[host] = (time.monotonic() + RESOLVE_TTL_S, addrs)
+    return addrs
 
 
-def _private_host(host: str) -> bool:
-    """True when every address of host is non-global (tailnet, LAN): plain http then stays off the
-    public internet. An IP literal is checked as is; a name by what it resolves to."""
+def _private_ip(host: str) -> str:
+    """The IP to connect to when every address of host is non-global (tailnet, LAN): plain http then
+    stays off the public internet. "" otherwise. IPv4 first (the front's Host match names its IPv4)."""
     try:
-        addrs = (host,) if ipaddress.ip_address(host) else ()
+        addrs = [str(ipaddress.ip_address(host))]
     except ValueError:
-        addrs = _resolve(host)
-    return bool(addrs) and all(not ipaddress.ip_address(a.split("%")[0]).is_global for a in addrs)
+        addrs = [a.split("%")[0] for a in _resolve(host)]
+    try:
+        ips = [ipaddress.ip_address(a) for a in addrs]
+    except ValueError:
+        return ""
+    if not ips or any(ip.is_global for ip in ips):
+        return ""
+    return str(min(ips, key=lambda ip: ip.version))
 
 
 def default_url() -> str:
-    """http://<companion gateway host>:LOCAL_PORT when that host is private (all its addresses non-global);
+    """http://<checked IP of the companion gateway host>:LOCAL_PORT when all its addresses are non-global;
     "" when the gateway is this Mac, unset or public (the prompt would cross the internet in clear text).
+    The URL carries the IP literal, not the name: the connection goes to the address that was checked
+    (no second lookup to rebind), and the front on the mini PC answers 421 to any Host but its IP.
     No address is written here: this repo is public, the host comes from the Mac's setup env."""
     host = urllib.parse.urlsplit(os.environ.get("OVERLAY_COMPANION_URL", "")).hostname or ""
-    if host in ("", "localhost", "::1") or host.startswith("127.") or not _private_host(host):
+    if host in ("", "localhost", "::1") or host.startswith("127."):
         return ""
-    return f"http://{'[' + host + ']' if ':' in host else host}:{LOCAL_PORT}"
+    ip = _private_ip(host)
+    if not ip or ipaddress.ip_address(ip).is_loopback:
+        return ""
+    return f"http://{'[' + ip + ']' if ':' in ip else ip}:{LOCAL_PORT}"
 
 
 def settings() -> dict:
