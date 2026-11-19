@@ -483,12 +483,15 @@ def _bash(inp: dict, ctx: Ctx) -> Allow | Deny | Confirm:
 
 
 def _confirm_bash(summary: str, inp: dict, command: str, ctx: Ctx | None = None) -> Confirm | Deny:
-    """ctx given (plain commands only, jauto): a long summary is kept when the command would run auto."""
+    """ctx given (plain commands only, jauto): a long summary is kept when the command would run auto
+    even after untrusted text (auto_policy.read_only) and the summary was not cut."""
     clean = _clip(summary, 10_000)
     if len(clean) > 120:  # the owner must hear exactly what runs
         if ctx is not None:
             from mac.voice import auto_policy  # lazy: auto_policy imports this module at its top
-            if auto_policy.auto_on() and auto_policy.classify(command, ctx) == ("auto", "ok"):
+            # review r1: only taint-exempt commands (look-ups, path-form open), and never a cut summary
+            if (auto_policy.auto_on() and auto_policy.classify(command, ctx) == ("auto", "ok")
+                    and auto_policy.read_only(command) and not clean.endswith("…")):
                 return Confirm(clean, {**inp, "command": command}, spoken_ok=False)
         return Deny("too long to confirm out loud; split it into smaller steps")
     return Confirm(clean, {**inp, "command": command})

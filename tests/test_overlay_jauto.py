@@ -30,7 +30,7 @@ OK = ("auto", "ok")
 RC = ("asked", "runs_code")
 OUT = ("asked", "outside")
 OWNER_NOTE = "Desktop/ObsidianVault/Brain/Research/llm-switch-local-vs-agents-benchmark-2026-11-18.md"
-DOCS = ["a.pdf", "a.md", "b.md", "a.txt", "a.png", "x.command", "x.tool", "x.terminal", "x.scpt", "x.sh", "x.pkg",
+DOCS = ["a.doc", "a.pdf", "a.md", "b.md", "a.txt", "a.png", "x.command", "x.tool", "x.terminal", "x.scpt", "x.sh", "x.pkg",
         "x.dmg", "x.html", "x.svg", "x.webloc", "x.inetloc", "x.url", "x.fileloc", ".env", "k.pem"]
 
 
@@ -143,6 +143,9 @@ ASK_ROWS = [(f"open H/Documents/x.{e}", RC) for e in (
     ("open -- H/Documents/a.md", RC), ("open", RC), ("open H/Documents/a.md" + " H/Documents/a.md" * 4, RC),
     # spec advice 6: -a with no value, -e / -g with nothing to open, a second -a, a cluster
     ("open -a", RC), ("open -e", RC), ("open -g", RC), ("open -a Safari -a Preview", RC), ("open -gR H/Documents", RC),
+    # review round 1: a non-ASCII app name, an option after an operand
+    ("open -a ſafari", RC), ("open -a Keynote", RC), ("open H/Documents/a.md -g", RC),
+    ("open H/Documents/a.md -a Safari", RC), ("open https://example.com -R", RC),
     ("open 'https://[x'", RC), ("open 'https://[x]'", RC),
     ("open Documents/a.md", OUT), ("open '~/Documents/a.md'", OUT), ("open /etc/hosts", OUT),
     ("open H/Library/Prefs/a.txt", OUT), ("open H/.config/a.txt", OUT), ("open H/Documents/missing.md", OUT),
@@ -255,6 +258,68 @@ def test_long_command_rules(H, ctx, auto_on, tmp_path):
     _switch_off()
     got = agent_policy.decide("Bash", {"command": long_open}, ctx)  # (c)
     assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"
+
+
+# --- review round 1 (security findings 1-6) ----------------------------------------------------
+
+def test_r1_long_non_exempt_commands_refused(H, ctx, auto_on):
+    """Finding 1: the long-summary exception covers only taint-exempt commands with an uncut summary."""
+    public = H / "Public"
+    public.mkdir()
+    srcs = []
+    for i in range(12):
+        f = H / "Documents" / f"private-file-number-{i:02d}.txt"
+        f.write_text("x")
+        srcs.append(str(f))
+    long_cp = f"cp {' '.join(srcs)} {public}/"
+    assert v(long_cp, ctx) == OK and v(long_cp, ctx, tainted=True) == ("asked", "untrusted")
+    long_url = "open https://example.com/?d=" + "x" * 130
+    long_mv = f"mv {srcs[0]} {public}/{'deep-name-' * 12}.txt"
+    for command in (long_cp, long_url, long_mv):
+        got = agent_policy.decide("Bash", {"command": command}, ctx)
+        assert isinstance(got, agent_policy.Deny), command
+        assert got.reason == "too long to confirm out loud; split it into smaller steps"
+    long_open = f"open {_deep(H, 'n.md')}"  # the owner's case: a long path-form open is not refused
+    got = agent_policy.decide("Bash", {"command": long_open}, ctx)
+    assert isinstance(got, agent_policy.Confirm) and got.spoken_ok is False
+    assert v(long_open, ctx, tainted=True) == OK
+
+
+def test_r1_cut_summary_refused(H, ctx, auto_on):
+    """Finding 1: a summary cut at 10,000 characters never reaches a Confirm."""
+    d = H / "Documents"
+    for _ in range(10):
+        d = d / ("d" * 250)
+    d.mkdir(parents=True)
+    (d / "a.md").write_text("x")
+    command = "open " + " ".join([str(d / "a.md")] * 4)
+    assert len(command) > 10_000 and v(command, ctx) == OK
+    got = agent_policy.decide("Bash", {"command": command}, ctx)
+    assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"
+
+
+def test_r1_legacy_office_not_taint_exempt(H, ctx, auto_on):
+    """Finding 2: .doc/.xls/.ppt may hold macros: auto untainted, asked after untrusted text."""
+    (H / "Documents" / "doclink.md").symlink_to(H / "Documents" / "a.doc")
+    assert v(fill("open H/Documents/a.doc", H), ctx) == OK
+    assert v(fill("open H/Documents/doclink.md", H), ctx) == OK
+    for command in ("open H/Documents/a.doc", "open H/Documents/doclink.md", "open H/Documents/a.md H/Documents/a.doc"):
+        assert v(fill(command, H), ctx, tainted=True) == ("asked", "untrusted"), command
+
+
+@pytest.mark.parametrize("head", [b"book\0\0\0\0mark", b"alis\0\0\0\0"])
+def test_r1_finder_alias_asks(head, H, ctx, auto_on):
+    """Finding 3: a Finder alias / bookmark opens its target, which realpath cannot see."""
+    (H / "Documents" / "report.pdf").write_bytes(head + b"rest")
+    assert v(fill("open H/Documents/report.pdf", H), ctx) == RC
+
+
+def test_r1_marks_only_allowlisted_open_is_quiet():
+    """Finding 6: open forms outside the allowlist (-h, --stdout ...) may print text."""
+    assert auto_policy.marks("open /x/a.md") is False
+    assert auto_policy.marks("open -a Safari") is False
+    for command in ("open -h", "open --stdout /x/o.txt -a Safari", "open /x/a.md -g", "open -a"):
+        assert auto_policy.marks(command) is True, command
 
 
 # --- criteria 10-11 ---------------------------------------------------------------------------

@@ -129,6 +129,8 @@ OPEN_APPS = frozenset({"finder", "preview", "textedit", "safari", "google chrome
 OPEN_DOCS = frozenset({"md", "markdown", "txt", "rtf", "pdf", "csv", "tsv", "png", "jpg", "jpeg", "gif", "heic",
                        "heif", "webp", "tif", "tiff", "bmp", "mov", "mp4", "m4v", "mp3", "m4a", "wav", "aif", "aiff",
                        "aac", "flac", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "epub"})
+# review r1: legacy Office types may hold macros: auto only on untainted turns (not in _open_local).
+OPEN_MACRO = frozenset({"doc", "xls", "ppt"})
 OPEN_FLAGS = frozenset({"-R", "-g", "-e"})  # reveal in Finder, keep in background, open in TextEdit
 KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | PLAIN | {"git", "open"}
 # A program named by path counts as known only from the system's own bin folders (a copy into home
@@ -423,9 +425,11 @@ def _git_sub(argv: list[str]) -> tuple[str, list[str]]:
 
 def _open_args(args: list[str]) -> tuple[str | None, list[str]] | None:
     """(the -a app, the operands) of an `open` argv; None for any option outside -a/-R/-g/-e, a second
-    -a, or an -a with no value (fail closed)."""
+    -a, an -a with no value, or any option after the first operand (fail closed)."""
     app, ops, it = None, [], iter(args)
     for a in it:
+        if a.startswith("-") and ops:
+            return None
         if a == "-a":
             if app is not None or (app := next(it, None)) is None:
                 return None
@@ -466,7 +470,7 @@ def _open_code(argv: list[str], ctx: agent_policy.Ctx) -> str:
     app, ops = parsed
     if app is not None:
         name = app.casefold().removesuffix(".app")
-        if "/" in app or name not in OPEN_APPS:
+        if "/" in app or not app.isascii() or name not in OPEN_APPS:  # isascii: no ſafari / K folding
             return "runs_code"
     if (not ops and app is None) or len(ops) > 4:
         return "runs_code"
@@ -495,17 +499,30 @@ def _open_code(argv: list[str], ctx: agent_policy.Ctx) -> str:
             except OSError:
                 return "runs_code"
             if (not stat.S_ISREG(st.st_mode) or st.st_mode & 0o111
-                    or any(os.path.splitext(n)[1][1:].casefold() not in OPEN_DOCS for n in names)):
+                    or any(os.path.splitext(n)[1][1:].casefold() not in OPEN_DOCS for n in names)
+                    or _alias(p)):
                 return "runs_code"
     return "ok"
 
 
+def _alias(path: str) -> bool:
+    """review r1: a Finder alias / bookmark file: LaunchServices opens its target, which realpath cannot see."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return True  # fail closed
+    return head == b"book\0\0\0\0" or head.startswith(b"alis")
+
+
 def _open_local(argv: list[str]) -> bool:
-    """jauto (hub Q4): `open` of local paths only, in the default app (no -a or -e, no URL, >= 1 operand).
-    Form only: verdict calls it after classify checked every file."""
+    """jauto (hub Q4): `open` of local paths only, in the default app (no -a or -e, no URL, >= 1 operand,
+    no legacy macro document). Form only: verdict calls it after classify checked every file."""
     parsed = _open_args(argv[1:]) if _base(argv) == "open" else None
     return (parsed is not None and parsed[0] is None and "-e" not in argv[1:] and bool(parsed[1])
-            and not any(map(_is_url, parsed[1])))
+            and not any(map(_is_url, parsed[1]))
+            and not any(os.path.splitext(n)[1][1:].casefold() in OPEN_MACRO
+                        for o in parsed[1] for n in (o.rstrip("/"), os.path.realpath(o))))
 
 
 def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
@@ -639,7 +656,10 @@ def _file_reads_list(argv: list[str]) -> bool:
 def marks(command) -> bool:
     """Running this command lets untrusted text in (its output may carry file names or text)."""
     argvs = _parts(command)
-    return argvs is None or not all(_base(a) in QUIET | NO_OUTPUT for a in argvs)
+    # review r1: an `open` is quiet only in an allowlisted form (-h, --stdout ... print text)
+    return argvs is None or not all(
+        _base(a) in QUIET or (_base(a) in NO_OUTPUT and (_base(a) != "open" or _open_args(a[1:]) is not None))
+        for a in argvs)
 
 
 def verdict(command, ctx: agent_policy.Ctx, *, tainted: bool, barge: bool, gate_ok: bool) -> tuple[str, str]:
