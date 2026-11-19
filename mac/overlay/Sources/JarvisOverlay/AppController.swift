@@ -1131,11 +1131,10 @@ final class AppController {
 
     // MARK: - Latency log
 
-    /// Same conversation id for 5 minutes, then a fresh UUID.
+    /// One conversation id for the app's life (jfollow11c): the service ends the context on its
+    /// size cap, "clear" or "new topic", never on idle time.
     private func conversationID() -> String {
-        let now = Date()
-        if now.timeIntervalSince(lastConvUse) > 300 { convId = UUID().uuidString }
-        lastConvUse = now
+        lastConvUse = Date()
         return convId
     }
 
