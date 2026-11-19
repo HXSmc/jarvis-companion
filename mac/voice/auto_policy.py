@@ -132,6 +132,10 @@ OPEN_DOCS = frozenset({"md", "markdown", "txt", "rtf", "pdf", "csv", "tsv", "png
 # review r1: legacy Office types may hold macros: auto only on untainted turns (not in _open_local).
 OPEN_MACRO = frozenset({"doc", "xls", "ppt"})
 OPEN_FLAGS = frozenset({"-R", "-g", "-e"})  # reveal in Finder, keep in background, open in TextEdit
+# jauto2: -a apps that may show a local regular file after untrusted text (read_only): plain viewers that
+# neither fetch what the file names (browsers), import it into a library (Music, Photos) nor run its macros.
+# Its own allowlist, never "OPEN_APPS minus browsers".
+OPEN_LOCAL_APPS = frozenset({"obsidian", "preview", "textedit", "quicktime player"})
 KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | PLAIN | {"git", "open"}
 # A program named by path counts as known only from the system's own bin folders (a copy into home
 # named ls is not ls).
@@ -516,10 +520,19 @@ def _alias(path: str) -> bool:
 
 
 def _open_local(argv: list[str]) -> bool:
-    """jauto (hub Q4): `open` of local paths only, in the default app (no -a or -e, no URL, >= 1 operand,
-    no legacy macro document). Form only: verdict calls it after classify checked every file."""
+    """jauto (hub Q4): `open` of local paths only (no URL, >= 1 operand, no legacy macro document), in the
+    default app or (jauto2) an OPEN_LOCAL_APPS app or -e on regular files only: a folder given to -a can
+    become a vault (Obsidian writes .obsidian/ in it). Verdict calls it after classify checked every file."""
     parsed = _open_args(argv[1:]) if _base(argv) == "open" else None
-    return (parsed is not None and parsed[0] is None and "-e" not in argv[1:] and bool(parsed[1])
+    if parsed is None:
+        return False
+    app = parsed[0]
+    if app is not None and ("/" in app or not app.isascii()
+                            or app.casefold().removesuffix(".app") not in OPEN_LOCAL_APPS):
+        return False
+    if (app is not None or "-e" in argv[1:]) and not all(os.path.isfile(os.path.realpath(o)) for o in parsed[1]):
+        return False
+    return (bool(parsed[1])
             and not any(map(_is_url, parsed[1]))
             and not any(os.path.splitext(n)[1][1:].casefold() in OPEN_MACRO
                         for o in parsed[1] for n in (o.rstrip("/"), os.path.realpath(o))))

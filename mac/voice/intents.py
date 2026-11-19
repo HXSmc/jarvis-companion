@@ -16,6 +16,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from mac.voice.auto_policy import OPEN_DOCS
+
 
 @dataclass
 class Intent:
@@ -94,6 +96,12 @@ _GROUND_LEAD_RE = re.compile(r"\b(" + "|".join(_GROUND_LEADS) + r")\b")
 _UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
 # "open the clock app" -> "clock"; "notes.app" is a bundle, not a domain.
 _APP_NOISE_RE = re.compile(r"^the\s+|(?:\.app|\s+app)$", re.I)
+# jauto2: "open https://..." is the site ask without its scheme (open_site always opens https).
+_SCHEME_RE = re.compile(r"^https?://", re.I)
+# jauto2: "open the note X" / "open my file X": a named document for the agent, never an app launch.
+_DOC_TARGET_RE = re.compile(r"^(?:the|my|this|that|a)\s+(?:note|file|document|doc|pdf|folder|page|web\s?page"
+                            r"|link|url|website)\s+\S", re.I)
+_NOTE_WORD_RE = re.compile(r"\b(?:notes?|obsidian|vault)\b|\.(?:md|markdown)\b")
 # Whole-utterance clock questions only: "what time is it in Tokyo" still goes to the brain.
 _TIME_RE = re.compile(r"^(?:what(?:'s| is) the time|what time is it|tell me the time)(?: now| right now| please)?$")
 # "highlight the last debugging session": a visual verb about something on screen but no UI
@@ -711,7 +719,11 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if model is not None:
         return model
     if low.startswith("open "):
-        return Intent("open_app", t[5:].strip())
+        target = t[5:].strip()
+        # jauto2: a note, document, path or URL nothing installed answers to goes to the agent (a tie still asks)
+        if _doc_target(target) and not app_candidates(target, apps if apps is not None else list_apps()):
+            return Intent("agent", t, "notes" if _NOTE_WORD_RE.search(low) else _agent_sub(low))
+        return Intent("open_app", target)
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
     near = model_near(text, model_names) if model_names else None  # a misheard name, before a free answer
@@ -731,9 +743,22 @@ def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
     name = _APP_NOISE_RE.sub("", arg).strip()
     if _match_app(name, apps if apps is not None else list_apps()):
         return Intent("open_app", name)
-    if _HOST_RE.match(arg.lower().partition("/")[0]):
-        return Intent("open_site", arg)
+    site = _SCHEME_RE.sub("", arg)  # jauto2: a URL with a scheme is the same site ask
+    host, sep, path = site.partition("/")
+    if (_HOST_RE.match(host.lower()) and (not sep or _PATH_RE.match(path))  # jauto2: ?&=# -> agent
+            and (sep or site != arg or not _doc_name(site))):  # jauto2: "report.pdf" is a file, not a host
+        return Intent("open_site", site)
     return None
+
+
+def _doc_name(name: str) -> bool:
+    """jauto2: the name ends in a document extension the open policy knows (report.pdf, x.md)."""
+    return "." in name and name.rpartition(".")[2].casefold() in OPEN_DOCS
+
+
+def _doc_target(target: str) -> bool:
+    """jauto2: "open <target>" names a document, a path or a URL rather than an app."""
+    return bool(_SCHEME_RE.match(target) or "/" in target or _doc_name(target) or _DOC_TARGET_RE.match(target))
 
 
 def _agent_sub(low: str) -> str:
