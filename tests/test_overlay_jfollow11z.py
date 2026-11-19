@@ -89,6 +89,24 @@ def test_take_me_home_without_home_says_the_saved_line(client, vault):
     assert _row() == "pick=map " + SURE_ROW
 
 
+# --- R3 LIVE-2: "take me to <name>" with no origin is the place word parse, never the model's map pick ---
+
+@pytest.mark.parametrize("text", ["take me to Dishoom", "Take me to Dishoom.", "what's the best way to go to Dishoom"])
+def test_take_me_to_a_name_is_the_place_parse(text):
+    fake = FakePick(reply("map", 0.8))  # the live pick: map conf=80, then geo reason=no_place
+    got, extra, rows = _pick(text, _deps_with(fake))
+    assert fake.calls == [] and got.kind == "place" and got.arg == "name" and extra is None
+    assert rows[-1] == "pick=place " + SURE_ROW
+
+
+@pytest.mark.parametrize("text", ["take me from King's Cross to Tower Bridge",
+                                  "show me a map from King's Cross to Tower Bridge"])
+def test_a_route_with_an_origin_still_asks_the_model(text):
+    fake = FakePick(reply("map", 0.95))
+    _pick(text, _deps_with(fake))
+    assert len(fake.calls) == 1
+
+
 # --- R4: a failed tile write leaves no temp file ---------------------------------------------------
 
 def test_tile_write_failure_leaves_no_tmp(tmp_path, monkeypatch):

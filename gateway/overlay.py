@@ -2606,9 +2606,11 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
         reason = "joined"
     elif ((word.kind in intent_pick.WORD_SURE
            and (word.kind != "card_remove" or _sure_card_remove(raw_text, body.conv_id, deps)))
-          or (word.kind == "geo_map" and intents.place_name(word.arg) == "home")):
+          or (word.kind == "geo_map" and intents.place_name(word.arg) == "home")
+          or (word.kind == "place" and intents.PLACE_CUE_RE.search(raw_text))):
         # jfollow11z R2: a sure word hit needs no model call; Z-LIST 1: "take me home" is the map's
-        # fixed parse (no home saved -> the existing "No home saved yet" line), never the place search
+        # fixed parse (no home saved -> the existing "No home saved yet" line), never the place search;
+        # LIVE-2: "take me to / best way to / nearest <name>" (a place form never holds to/from) is the place parse
         reason = "word_sure"
     elif deps.intent_pick is None or not auto_policy.pick_on():
         path, reason = "fallback", "off"

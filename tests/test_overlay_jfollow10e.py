@@ -319,7 +319,8 @@ def test_model_slots_reach_the_geo_handler(client, monkeypatch):
 def test_place_takes_the_answer_path():
     """Hub ruling F-HELD, superseded by jfollow11f P2: a place pick on owner words that parse runs the place
     kind (KIND_TO_PICK["place"]); the pick row is unchanged. (FACTS still carry the old line: out of 11f's files.)"""
-    got, _, rows = _pick("what's the best way to go to Dishoom", _deps_with(FakePick(reply("place", 0.95))))
+    # jfollow11z LIVE-2: "best way to go to Dishoom" is now a sure word hit; a film ask still takes the model pick
+    got, _, rows = _pick("is Ebenezer on near me tonight", _deps_with(FakePick(reply("place", 0.95))))
     assert got.kind == "place" and rows[-1].startswith("pick=place conf=95 path=model")
     assert "not available yet" in overlay.FACTS_RULE
     assert "Not available yet: place search" in facts.load(None).text
