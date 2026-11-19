@@ -64,7 +64,8 @@ class FakeConversations:
 
 
 def make_deps(*, chunks=(), synth=None, ack_synth=None, run=None, apps=None,
-              vlm=None, conversations=None, quiet_conversations=None) -> overlay.OverlayDeps:
+              vlm=None, conversations=None, quiet_conversations=None,
+              clock=None, local_conversations=None) -> overlay.OverlayDeps:
     cache = acks.AckCache(ack_synth if ack_synth is not None else synth)
     cache.prerender()
     return overlay.OverlayDeps(
@@ -76,6 +77,8 @@ def make_deps(*, chunks=(), synth=None, ack_synth=None, run=None, apps=None,
         vlm_ask=vlm or (lambda prompt, jpeg: '{"id": null}'),
         run=run or (lambda *a, **k: SimpleNamespace(returncode=0, stdout="")),
         apps=apps,
+        **({"clock": clock} if clock is not None else {}),
+        local_conversations=local_conversations,
     )
 
 
@@ -112,6 +115,9 @@ def reset_overlay_state():
     overlay._card_ids.clear()
     overlay._pending.clear()
     overlay._hunks.clear()
+    overlay._local_until = None
+    overlay._local_slow_said = False
+    overlay._local_announce_due = False
     yield
     overlay.set_deps(None)
     overlay._history.clear()
@@ -119,6 +125,9 @@ def reset_overlay_state():
     overlay._tainted.clear()
     overlay._card_ids.clear()
     overlay._hunks.clear()
+    overlay._local_until = None
+    overlay._local_slow_said = False
+    overlay._local_announce_due = False
 
 
 @pytest.fixture
