@@ -613,6 +613,8 @@ def test_repo_ack_and_empty_list(client, monkeypatch, tmp_path):
     "What does the read me of Jarvis's companion public say",  # O1: Apple STT's possessive
     "What does the read me of Jarvis’s companion public say",
     "what does the README of the jarvis companion public's repo say",
+    "What does the read me of Jarvis' companion public say",  # live run 3: a bare apostrophe, no s
+    "What does the read me of Jarvis’ companion public say",
 ])
 def test_repo_possessive_forms(text):
     got = intents.parse(text, apps={})
@@ -662,6 +664,40 @@ def test_one_session_says_what_it_did(client, monkeypatch, tmp_path):
 
 
 def test_battery_only_when_asked():
-    """R3 live: replies tacked on "Your battery is at 14 percent"; the prompt names when to use it."""
+    """R3 live: replies tacked on "Your battery is at 14 percent" (run 2) and "it's just gone midnight"
+    (run 3); the prompt says the clock and battery are for when the owner asks, and no unasked facts."""
     for p in (overlay.ANSWER_PROMPT, overlay.QUIET_PROMPT):
-        assert "Mention the battery only when the owner asks about it, power or charging." in p
+        assert ("Mention the time, the date or the battery only when the owner asks about them;"
+                " never add a fact the owner did not ask for.") in p
+        assert "Mention the battery only when" not in p
+
+
+def test_repo_pick_drops_a_word(client, monkeypatch, tmp_path):
+    """Live run 3 O1: the pick's repo slot dropped "public" and the shorter, real repo was read. A longer
+    listed name the owner said in full wins over the pick's shorter one."""
+    seen = repo_gateway(monkeypatch, tmp_path, names=("alpha", "jarvis-companion", "jarvis-companion-public"))
+    calls: list = []
+
+    def pick(msg):
+        calls.append(msg)
+        return json.dumps({"pick": "repo", "sub": "search", "confidence": 0.95,
+                           "slots": {"repo": "Jarvis Companion", "query": "wake word"}})
+    deps_for(quiet=Counter(lines({"say": "It is in src/wake.py."})), pick=pick)
+    turn(client, "tell me about the wake word code in jarvis companion public", conv_id="w5")
+    assert len(calls) == 1 and _steps("repo")[-1]["repo"] == "jarvis-companion-public"
+    assert repo_calls(seen)[-1][1] == "/central/repos/jarvis-companion-public/search"
+    # the pick's own name still stands when the owner said nothing longer
+    turn(client, "tell me about the wake word code in jarvis companion", conv_id="w6")
+    assert _steps("repo")[-1]["repo"] == "jarvis-companion"
+
+
+def test_repo_text_not_on_screen(client, monkeypatch, tmp_path):
+    """Live run 3 M2/O1: "The README on your screen describes ..." was untrue; the fetched text is from the
+    mini PC, and the question says so (fixed words, before the untrusted block)."""
+    repo_gateway(monkeypatch, tmp_path)
+    quiet = Counter(lines({"say": "It sorts lists."}))
+    deps_for(quiet=quiet)
+    turn(client, "what does the README of alpha say", conv_id="w7")
+    [prompt] = quiet.sessions["w7"].prompts
+    assert overlay.REPO_TEXT_HINT in prompt.split('<context untrusted="true">')[0]
+    assert "not on the screen" in overlay.REPO_TEXT_HINT

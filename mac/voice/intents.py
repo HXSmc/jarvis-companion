@@ -427,7 +427,8 @@ def repo_query(low: str) -> str:
 def repo_request(text: str) -> RepoAsk | None:
     """jfollow11c B6: "what does the README of X say" (read) or "where is Y in the X repo" (search)."""
     low = _clean(text).lower().replace(",", "")
-    low = re.sub(r"(?<=\w)['\u2019]s\b", "", low)  # R3 O1: Apple STT writes "jarvis's companion public"
+    # R3 O1: Apple STT writes "jarvis's companion public", and (live run 3) "jarvis' companion public"
+    low = re.sub(r"(?<=\w)['\u2019](?:s\b|(?=\s|$))", "", low)
     if _REPO_CHANGE.search(low):
         return None
     m = _REPO_README_RE.search(low)
