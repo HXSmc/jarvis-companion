@@ -19,10 +19,10 @@ sys.path.insert(0, str(ROOT / "tests"))
 import pytest  # noqa: E402
 
 from mac.voice import agent, agent_policy, auto_policy, intents  # noqa: E402
-from test_overlay_agent import Clock, FakeAgent, client, result, setup  # noqa: F401,E402
+from test_overlay_agent import Clock, FakeAgent, client, reset, result, setup  # noqa: F401,E402
 from test_overlay_jauto import (  # noqa: F401,E402
     H, OK, OUT, OWNER_NOTE, RC, ctx, fill, v, _deep, _switch_off)
-from test_overlay_jfollow10a import _steps, auto_on  # noqa: F401,E402
+from test_overlay_jfollow10a import _steps, auto_on, fresh_auto_state  # noqa: F401,E402
 from test_overlay_openapp import APPS, run_turn  # noqa: E402
 from test_overlay_service import says, turn  # noqa: F401,E402
 
@@ -78,6 +78,8 @@ PIN_ROWS = [
     ("open code", APPS),  # tie: open_app still resolves the tie question, not the agent
     ("open the note Projects in the Secrets folder", {"notes": "Notes"}),  # secrets vault note: unchanged
     ("open notes.app", {}),  # .app name: open_site, not the notes agent
+    ("open Secrets/Projects.md", {}),  # jauto2: a Secrets path is the refusal, never routed to the agent
+    ("open the note in the Secrets folder", {}),
 ]
 
 
@@ -185,6 +187,10 @@ def test_open_local_apps_pinned(H, ctx, auto_on):
     (H / "Documents" / "doc.md").write_text("x")
     for app in ("ſafari", "OBSİDİAN"):  # jauto2: non-ascii lookalikes are not viewer names
         assert v(fill(f"open -a {app} H/Documents/doc.md", H), ctx, tainted=True)[0] == "asked", app
+        assert auto_policy._open_local(["open", "-a", app, str(H / "Documents" / "doc.md")]) is False, app
+    for app in ("obſidian", "OBSİDİAN", "/Applications/Obsidian.app"):  # the new guard itself, past classify
+        assert auto_policy._open_local(["open", "-a", app, str(H / "Documents" / "doc.md")]) is False, app
+    assert auto_policy._open_local(["open", "-a", "Obsidian", str(H / "Documents" / "doc.md")]) is True
 
 
 # --- criterion 10: states, code files, secrets unchanged ------------------------------------

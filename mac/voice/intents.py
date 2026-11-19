@@ -722,6 +722,8 @@ def parse(text: str, apps: dict[str, str] | None = None,
         target = t[5:].strip()
         # jauto2: a note, document, path or URL nothing installed answers to goes to the agent (a tie still asks)
         if _doc_target(target) and not app_candidates(target, apps if apps is not None else list_apps()):
+            if re.search(r"\bsecrets\b", low):  # "open Secrets/x.md": the Secrets refusal, never an agent hunt
+                return Intent("vault_secrets")
             return Intent("agent", t, "notes" if _NOTE_WORD_RE.search(low) else _agent_sub(low))
         return Intent("open_app", target)
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
