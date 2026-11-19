@@ -259,7 +259,7 @@ def steps_named(client, name):
 def test_fresh_wake(client, monkeypatch):
     deps, web, quiet, log = life(monkeypatch)
     screen_question(client, "w1", **SPOKEN)
-    deps.clock.t += 91
+    deps.clock.t += overlay.TAINTED_FRESH_AFTER_S + 1
     events = turn(client, DOG, conv_id="w1", **SPOKEN)
     assert len(media_cards(events)) == 1 and overlay.QUIET_MEDIA_LINE not in says(events)
     [prompt] = web.prompts()
@@ -331,7 +331,7 @@ def seed(conv, deps):
 def test_clearing(client, monkeypatch):
     deps, web, quiet, log = life(monkeypatch)
     seed("s1", deps)
-    deps.clock.t += 91
+    deps.clock.t += overlay.TAINTED_FRESH_AFTER_S + 1
     turn(client, "what is the capital of France", conv_id="s1", **SPOKEN)
     assert ("web", "drop", "s1") in log and ("quiet", "drop", "s1") in log
     assert [u for u, _ in overlay._history["s1"]] == ["what is the capital of France"]
@@ -399,11 +399,11 @@ def test_fresh_clear_after_confirm(client, monkeypatch):
 def test_debug_fresh(client, monkeypatch):
     deps, _web, _quiet, _log = life(monkeypatch)
     screen_question(client, "d1")
-    deps.clock.t += 91
+    deps.clock.t += overlay.TAINTED_FRESH_AFTER_S + 1
     turn(client, "what is the capital of France", conv_id="d1", **SPOKEN)
     turn(client, "clear", conv_id="d1", followup=True)
     got = steps_named(client, "conversation")
-    assert [s["detail"] for s in got] == ["fresh: clear", "fresh: wake"]  # newest turn first
+    assert [s["detail"] for s in got] == ["fresh: clear", "fresh: tainted_idle"]  # newest turn first
     assert all(set(s) == {"step", "at", "detail"} for s in got)
 
 

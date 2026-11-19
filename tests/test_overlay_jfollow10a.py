@@ -798,7 +798,7 @@ def test_screen_document_outside_the_repo_marks(client, auto_on):
     note.write_text("hello")
     run_agent(client, bash(_home_write()), conv_id="sd2", screen={"app": "Code", "document": str(note)})
     assert _rows() == ["cmd=touch decision=auto reason=ok"]
-    assert "sd2" not in overlay._auto_tainted
+    assert overlay._marked_sessions.get("sd2") is not None  # jfollow11c R1: only the touch's output marks
 
 
 def test_web_answer_history_marks_the_next_agent_turn(client, auto_on):
