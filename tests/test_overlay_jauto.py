@@ -285,17 +285,16 @@ def test_r1_long_non_exempt_commands_refused(H, ctx, auto_on):
     assert v(long_open, ctx, tainted=True) == OK
 
 
-def test_r1_cut_summary_refused(H, ctx, auto_on):
-    """Finding 1: a summary cut at 10,000 characters never reaches a Confirm."""
-    d = H / "Documents"
-    for _ in range(10):
-        d = d / ("d" * 250)
-    d.mkdir(parents=True)
-    (d / "a.md").write_text("x")
-    command = "open " + " ".join([str(d / "a.md")] * 4)
-    assert len(command) > 10_000 and v(command, ctx) == OK
+def test_r1_cut_summary_refused(ctx, auto_on, monkeypatch):
+    """Finding 1: a summary cut at 10,000 characters never reaches a Confirm. macOS paths stop at 1024
+    bytes, so no real file gets there: the classifier is stubbed to say auto and taint-exempt."""
+    command = "open " + " ".join(["/" + "d" * 2600] * 4)
+    monkeypatch.setattr(auto_policy, "classify", lambda c, x: OK)
+    monkeypatch.setattr(auto_policy, "read_only", lambda c: True)
     got = agent_policy.decide("Bash", {"command": command}, ctx)
     assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"
+    short = "open /" + "d" * 200  # same stubs, uncut long summary: kept
+    assert isinstance(agent_policy.decide("Bash", {"command": short}, ctx), agent_policy.Confirm)
 
 
 def test_r1_legacy_office_not_taint_exempt(H, ctx, auto_on):
