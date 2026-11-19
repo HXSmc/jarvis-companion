@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -700,4 +701,23 @@ def test_repo_text_not_on_screen(client, monkeypatch, tmp_path):
     turn(client, "what does the README of alpha say", conv_id="w7")
     [prompt] = quiet.sessions["w7"].prompts
     assert overlay.REPO_TEXT_HINT in prompt.split('<context untrusted="true">')[0]
-    assert "not on the screen" in overlay.REPO_TEXT_HINT
+    assert "mini PC" in overlay.REPO_TEXT_HINT and "cannot see it" in overlay.REPO_TEXT_HINT
+
+
+def test_fixed_hints_pull_no_screen_data(client, monkeypatch, tmp_path):
+    """The fixed hints ride on the owner's question, so they must not trip the screen or code reference
+    words: "that"/"screen" in a hint attached the screen's text to every repo and one-session turn."""
+    for hint in (overlay.REPO_TEXT_HINT, overlay.SESSION_DID_HINT):
+        assert not re.search(overlay.SCREEN_REF, hint, re.IGNORECASE), hint
+        assert not re.search(overlay.CODE_REF, hint, re.IGNORECASE), hint
+    screen = {"ocr": [{"text": "INVOICE TOTAL 42"}]}
+    rows = [row("h1", phase="in_review", title="Hub builder", doing="Waiting on you",
+                recap=["Fixed the flaky lint step"], at=ago(minutes=1))]
+    repo_gateway(monkeypatch, tmp_path, sessions=rows)
+    quiet = Counter(lines({"say": "It sorts lists."}))
+    deps_for(quiet=quiet)
+    turn(client, "what does the README of alpha say", conv_id="w8", screen=screen)
+    turn(client, "what is session hub doing", conv_id="w9", screen=screen)
+    for conv in ("w8", "w9"):
+        [prompt] = quiet.sessions[conv].prompts
+        assert "INVOICE TOTAL" not in prompt and "<screen_data>" not in prompt

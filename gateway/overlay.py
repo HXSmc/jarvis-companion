@@ -1382,8 +1382,9 @@ def _mark_session_rows(conv_id: str, rows: list[dict]) -> None:
 
 # Fixed code after the owner's question on a one-session ask with a recap (never row text).
 # Live run 3: "The README on your screen describes ..." was untrue (fixed words, never repo text).
-REPO_TEXT_HINT = "(The repo text below was read from the mini PC, not on the screen; never say it is on screen.)"
-SESSION_DID_HINT = "(Say its state in a few words, then what it did, from its lines that start with did.)"
+# No SCREEN_REF/CODE_REF word in a hint: it rides on the question and would pull in screen text.
+REPO_TEXT_HINT = "(The repo text below came from the mini PC; the owner cannot see it, so never call it visible to them.)"
+SESSION_DID_HINT = "(Say its state in a few words, then what it did, from its lines starting with did.)"
 
 
 def _sessions_note(rows: list[dict]) -> str:
