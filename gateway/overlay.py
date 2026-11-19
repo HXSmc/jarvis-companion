@@ -531,7 +531,6 @@ class _BackgroundVoice:
     load leaves synth raising, so lines fall back to captions as with no voice at all."""
 
     def __init__(self, load: Callable[[], object]) -> None:
-        self.failed = False
         self._voice = None
         self._ready = threading.Event()
         threading.Thread(target=self._load, args=(load,), name="voice-load", daemon=True).start()
@@ -542,7 +541,6 @@ class _BackgroundVoice:
         except Exception:
             self._voice = None
         if self._voice is None:
-            self.failed = True
             logger.warning("startup phase=deps_failed")
         self._ready.set()
 
