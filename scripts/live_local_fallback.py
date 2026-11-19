@@ -8,7 +8,7 @@ through the real `_answer_turn` with real lean/local pools; only the macOS-only 
 
     python3 scripts/live_local_fallback.py [--url http://127.0.0.1:8410] [--out result.json]
 
-The local timeouts default to 400 s / 600 s here so a cold mini PC prompt (about 6 minutes) is
+The local timeouts are 420 s / 600 s (the defaults) so a cold mini PC prompt (about 6 minutes) is
 part of the evidence. Prints one table row per turn; exit 0 when every turn ended with a done event.
 """
 
@@ -35,7 +35,7 @@ def main() -> int:
     args = ap.parse_args()
     os.environ["OVERLAY_CLAUDE_BIN"] = str(ROOT / "tests" / "fixtures" / "fake_claude_limit.py")
     os.environ["OVERLAY_LOCAL_URL"] = args.url
-    os.environ.setdefault("OVERLAY_LOCAL_TTFT_S", "400")
+    os.environ.setdefault("OVERLAY_LOCAL_TTFT_S", "420")
     os.environ.setdefault("OVERLAY_LOCAL_WALL_S", "600")
     sys.path.insert(0, str(ROOT))
     scratch = tempfile.mkdtemp(prefix="live-local-")
