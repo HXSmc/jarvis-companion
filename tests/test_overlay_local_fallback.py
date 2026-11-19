@@ -24,6 +24,7 @@ from test_overlay_service import (  # noqa: E402,F401  (shared stubs + fixtures)
     client, make_deps, reset_overlay_state, says, turn,
 )
 from test_overlay_answerfail import POOL, Pool, ScriptedSession  # noqa: E402  (shared stubs)
+from test_overlay_service import FakeConversations as FakeConversationsBase  # noqa: E402
 from gateway import overlay  # noqa: E402
 from mac.voice import lean, local_llm, youtube  # noqa: E402
 from tests.fixtures.fake_local_llm import FakeLocalLLM  # noqa: E402
@@ -156,10 +157,77 @@ def test_recheck_returns_to_claude(client, monkeypatch, local_pools):
         now[0] += overlay._local_recheck_s() + 1  # the window expired
         d.conversations = d.quiet_conversations = Pool(ScriptedSession(chunks=['{"say": "Lyon."}\n']))
         second = turn(client, "and the second city")
+        third = turn(client, "and the third city")
     assert "Paris." in lines(first) and "Lyon." in lines(second)
     assert lines(second).count(SWITCH_LINE) == 0
     assert overlay._local_until is None  # a fine Claude answer closes the window
     assert len(completions(srv)) == 1  # only turn 1 needed the local model
+    back_line, back_title = overlay.LOCAL_BACK
+    assert lines(second).count(back_line) == 1  # once per cleared window, after the answer
+    assert lines(second).index(back_line) > lines(second).index("Lyon.")
+    assert [c["title"] for c in cards(second)].count(back_title) == 1
+    assert back_line not in lines(third)
+
+
+def test_expired_window_is_a_new_switch(client, monkeypatch, local_pools):
+    """A window that lapsed while Claude stayed limited: the next local answer announces the switch again."""
+    now = [1000.0]
+    with FakeLocalLLM(reply='{"say": "Paris."}') as srv:
+        set_local(monkeypatch, srv)
+        make_local_deps(local_pools, local_pool(local_pools), clock=lambda: now[0])
+        first = turn(client, QUESTION)
+        now[0] += overlay._local_recheck_s() + 1  # lapsed; Claude is still limited
+        second = turn(client, QUESTION + " again")
+    assert lines(first).count(SWITCH_LINE) == 1 and lines(second).count(SWITCH_LINE) == 1
+    assert [c["title"] for c in cards(second)].count(SWITCH_TITLE) == 1
+    assert overlay.LOCAL_BACK[0] not in lines(second)
+
+
+def test_second_hold_line(client, monkeypatch, local_pools):
+    """A cold first question: the still-working line, then the slow-first-question line, then the answer."""
+    monkeypatch.setattr(overlay, "LOCAL_HOLD_S", 0.2)
+    monkeypatch.setattr(overlay, "LOCAL_HOLD2_S", 0.5)
+    with FakeLocalLLM(mode="hang", hang_s=1.2, reply='{"say": "Paris."}') as srv:
+        set_local(monkeypatch, srv)
+        make_local_deps(local_pools, local_pool(local_pools))
+        events = turn(client, QUESTION)
+    assert lines(events) == [SWITCH_LINE, overlay.LOCAL_HOLD_LINE, overlay.LOCAL_HOLD2_LINE, "Paris."]
+
+
+def test_ground_pick_local_hold_line(client, monkeypatch, local_pools):
+    """A slow local screen pick gets the switch and still-working lines, then the highlight."""
+    monkeypatch.setattr(overlay, "LOCAL_HOLD_S", 0.2)
+    with FakeLocalLLM(mode="hang", hang_s=1.0, reply='{"id": 1}') as srv:
+        set_local(monkeypatch, srv)
+        make_local_deps(local_pools, local_pool(local_pools), ScriptedSession(chunks=['{"say": "unused"}']),
+                        vlm=lambda prompt, jpeg: (_ for _ in ()).throw(limit_error()))
+        events = turn(client, "where is the Send button", conv_id="r2",
+                      screen={"scale": 1.0, "ax": [{"role": "AXButton", "label": "Send", "box": [10, 20, 50, 60]}]})
+    spoken = [s for s in lines(events) if s != "Having a look."]  # the look ack never counts
+    assert spoken[:2] == [SWITCH_LINE, overlay.LOCAL_HOLD_LINE] and "Here." in spoken
+    assert spoken.count(SWITCH_LINE) == 1
+    assert any(e["type"] == "shape" for e in events)
+
+
+def test_fresh_start_drops_local_session(client, monkeypatch, local_pools):
+    """A fresh start clears the taint and the local session that holds the same screen text."""
+    with FakeLocalLLM(reply='{"say": "It shows an invoice."}') as srv:
+        set_local(monkeypatch, srv)
+        d, _ = make_local_deps(local_pools, local_pool(local_pools))
+        overlay._local_until = time.monotonic() + 900  # deps default clock is time.monotonic
+        turn(client, "what does this screen say", conv_id="f1",
+             screen={"scale": 1.0, "ocr": [{"text": "Invoice total 42", "box": [1, 2, 3, 4]}]})
+        assert d.local_conversations.peek("f1") is not None and "f1" in overlay._tainted
+        overlay._fresh_conversation("f1", d)
+        assert d.local_conversations.peek("f1") is None and "f1" not in overlay._tainted
+        turn(client, "tell me a joke", conv_id="f1")
+    assert "Invoice total 42" not in json.dumps(completions(srv)[-1]["body"])
+
+
+def test_loopback_upstream_forms():
+    assert overlay._loopback_upstream("127.0.0.1:8411") and overlay._loopback_upstream("[::1]:8411")
+    assert overlay._loopback_upstream("localhost:8411")
+    assert not overlay._loopback_upstream("fast-pc:8411") and not overlay._loopback_upstream("")
 
 
 def test_fallback_off(client, monkeypatch):
@@ -346,15 +414,27 @@ def test_no_anthropic_contact(client, fake_limit, monkeypatch, local_pools):
         set_local(monkeypatch, srv)
         claude = lean.Conversations(lambda: lean.LeanSession(model="sonnet", system_prompt=""))
         fake_limit.append(claude)  # real CLI processes on the always-limited stand-in
-        overlay.set_deps(make_deps(conversations=claude, quiet_conversations=claude,
-                                   local_conversations=local_pool(local_pools), apps={}))
+        d = make_deps(conversations=claude, quiet_conversations=claude,
+                      local_conversations=local_pool(local_pools), apps={})
+        agent_gets = []
+
+        class AgentGuard(FakeConversationsBase):
+            def get(self, conv_id):
+                agent_gets.append(conv_id)
+                raise AssertionError("no agent session while the limit window is live")
+
+        d.agent_conversations = AgentGuard()
+        overlay.set_deps(d)
         events = turn(client, QUESTION)
         popen = []
         monkeypatch.setattr(lean.subprocess, "Popen", lambda *a, **k: popen.append(a) or 1 / 0)
         sticky = turn(client, QUESTION + " again")  # inside the window: no claude process may start
+        srv.reply = '{"agent": true}'  # the local model hands a question to the agent tier
+        handed = turn(client, "tell me about rust lifetimes")
     assert "Paris." in lines(events) and "Paris." in lines(sticky)
-    assert popen == []
-    assert len(completions(srv)) == 2
+    assert lines(handed) == [overlay.LOCAL_NO_AGENT_LINE]  # honest line, no agent run, no limit card dance
+    assert popen == [] and agent_gets == []
+    assert len(completions(srv)) == 3
     for req in srv.requests:
         assert not any(h in req["headers"] for h in ("authorization", "x-api-key", "cookie"))
         blob = json.dumps(req["headers"]) + json.dumps(req.get("body") or "")

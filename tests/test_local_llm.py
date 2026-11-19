@@ -213,16 +213,22 @@ def test_close_aborts_and_is_idempotent(monkeypatch):
 def test_settings_read_at_call_time(monkeypatch):
     for name in ("OVERLAY_LOCAL_URL", "OVERLAY_LOCAL_MODEL", "OVERLAY_LOCAL_TTFT_S", "OVERLAY_LOCAL_WALL_S"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://minipc.example:8790")
+    names = {"minipc.example": ("10.0.0.5",), "jarvis.example.com": ("8.8.8.8",), "split.example": ("10.0.0.5", "8.8.8.8")}
+    monkeypatch.setattr(local_llm, "_resolve", lambda host: names.get(host, ()))
+    monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://minipc.example:8790")  # a tailnet-style name
     first = local_llm.settings()
     assert first == {"url": "http://minipc.example:8410", "model": local_llm.DEFAULT_MODEL,
-                     "ttft_s": 120.0, "wall_s": 180.0}
-    for loopback in ("http://127.0.0.1:8787", "http://localhost:8787", ""):
-        monkeypatch.setenv("OVERLAY_COMPANION_URL", loopback)
-        assert local_llm.settings()["url"] == ""  # gateway on this Mac or unset: no local model
+                     "ttft_s": 420.0, "wall_s": 600.0}
+    monkeypatch.setenv("OVERLAY_COMPANION_URL", "https://10.0.0.5:8790")
+    assert local_llm.settings()["url"] == "http://10.0.0.5:8410"  # a non-global IP: private network
+    # Gateway on this Mac, unset, or a public host (plain http would cross the internet): no local model.
+    for off in ("http://127.0.0.1:8787", "http://localhost:8787", "", "https://jarvis.example.com:8790",
+                "https://8.8.8.8:8790", "https://split.example:8790", "https://unresolved.example:8790"):
+        monkeypatch.setenv("OVERLAY_COMPANION_URL", off)
+        assert local_llm.settings()["url"] == "", off
     _env(monkeypatch, "http://127.0.0.1:9999/", model="m2", ttft_s="bad", wall_s="1.5")
     second = local_llm.settings()
     assert second["url"] == "http://127.0.0.1:9999"  # trailing / stripped
     assert second["model"] == "m2"
-    assert second["ttft_s"] == 120.0  # non-numeric falls back
+    assert second["ttft_s"] == 420.0  # non-numeric falls back
     assert second["wall_s"] == 1.5

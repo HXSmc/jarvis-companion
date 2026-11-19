@@ -8,6 +8,8 @@ credential header and only ever takes its URL from the process environment.
 
 from __future__ import annotations
 
+import functools
+import ipaddress
 import json
 import os
 import socket
@@ -31,11 +33,31 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+@functools.lru_cache(maxsize=8)
+def _resolve(host: str) -> tuple[str, ...]:
+    """The host's addresses (a tailnet name resolves to tailnet IPs); () when it does not resolve."""
+    try:
+        return tuple({info[4][0] for info in socket.getaddrinfo(host, None)})
+    except (OSError, UnicodeError):
+        return ()
+
+
+def _private_host(host: str) -> bool:
+    """True when every address of host is non-global (tailnet, LAN): plain http then stays off the
+    public internet. An IP literal is checked as is; a name by what it resolves to."""
+    try:
+        addrs = (host,) if ipaddress.ip_address(host) else ()
+    except ValueError:
+        addrs = _resolve(host)
+    return bool(addrs) and all(not ipaddress.ip_address(a.split("%")[0]).is_global for a in addrs)
+
+
 def default_url() -> str:
-    """http://<companion gateway host>:LOCAL_PORT; "" when that gateway is this Mac or unset.
+    """http://<companion gateway host>:LOCAL_PORT when that host is private (all its addresses non-global);
+    "" when the gateway is this Mac, unset or public (the prompt would cross the internet in clear text).
     No address is written here: this repo is public, the host comes from the Mac's setup env."""
     host = urllib.parse.urlsplit(os.environ.get("OVERLAY_COMPANION_URL", "")).hostname or ""
-    if host in ("", "localhost", "::1") or host.startswith("127."):
+    if host in ("", "localhost", "::1") or host.startswith("127.") or not _private_host(host):
         return ""
     return f"http://{'[' + host + ']' if ':' in host else host}:{LOCAL_PORT}"
 
@@ -45,8 +67,8 @@ def settings() -> dict:
     return {
         "url": (os.environ.get("OVERLAY_LOCAL_URL") or default_url()).rstrip("/"),
         "model": os.environ.get("OVERLAY_LOCAL_MODEL") or DEFAULT_MODEL,
-        "ttft_s": _float_env("OVERLAY_LOCAL_TTFT_S", 120.0),
-        "wall_s": _float_env("OVERLAY_LOCAL_WALL_S", 180.0),
+        "ttft_s": _float_env("OVERLAY_LOCAL_TTFT_S", 420.0),
+        "wall_s": _float_env("OVERLAY_LOCAL_WALL_S", 600.0),
     }
 
 

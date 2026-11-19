@@ -211,13 +211,19 @@ ANSWER_FAIL = {
     "error": ("Something went wrong on my side.", "No answer"),
 }
 ANSWER_FAIL["local_unavailable"] = ("I've hit my usage limit and the local model isn't available, "
-                                    "so I can't answer right now.", "No model available")
+                                    "so I can't answer right now. Please try again in a few minutes.",
+                                    "No model available")
 ANSWER_FAIL["local_timeout"] = ("I've hit my usage limit and the local model took too long, "
-                                "so I stopped.", "Local model too slow")
-LOCAL_SWITCH = ("I've reached my usage limit, so my local model will answer for now.", "Local model")
-LOCAL_SLOW_LINE = "It's running on the small machine, so it will be slow."
+                                "so I stopped. Please try again in a few minutes.", "Local model too slow")
+LOCAL_SWITCH = ("I've reached my usage limit, so my local model will answer for now.", "Using local model")
+LOCAL_BACK = ("My usage limit has reset, so I'm answering normally again.", "Usage limit reset")
+LOCAL_SLOW_LINE = "That came from the small machine, so answers will be slow for now."
 LOCAL_HOLD_LINE = "Still working on it."
 LOCAL_HOLD_S = 20.0
+LOCAL_HOLD2_LINE = "The small machine is slow with a first question. It can take a few minutes."
+LOCAL_HOLD2_S = 60.0
+# The local model has no tools: a task it would hand to the agent tier cannot run while Claude is limited.
+LOCAL_NO_AGENT_LINE = "I can't do tasks like that while my usage limit is reached."
 LOCAL_RECHECK_S = 900.0
 
 
@@ -639,13 +645,17 @@ _last_video: dict[str, str] = {}
 _local_until: float | None = None  # deps.clock() reading
 _local_slow_said = False  # the slow-machine line is spoken once per limit window
 _local_announce_due = False  # the switch line waits for the local model to actually answer
+_local_back_due = False  # the "answering normally again" line after a Claude answer closed a window
 _TO_LOCAL = object()  # queue sentinel: the limited Claude ask handed this turn to the local model
 
 
 def _loopback_upstream(host: str) -> bool:
     """True when the local model's own upstream is this same machine: that path is the slow one."""
-    h = host.rsplit(":", 1)[0] if host.count(":") == 1 else host  # strip one :port
-    return h.strip("[]") in ("localhost", "::1", "127.0.0.1") or h.startswith("127.")
+    try:
+        h = urllib.parse.urlsplit("//" + host).hostname or ""  # strips :port and [] of IPv6
+    except ValueError:
+        return False
+    return h in ("localhost", "::1") or h.startswith("127.")
 
 
 def _mark_untrusted(conv_id: str) -> None:
@@ -886,6 +896,8 @@ def _fresh_conversation(conv_id: str, deps: OverlayDeps) -> int:
         _card_pick[conv_id] = pick
     deps.conversations.drop(conv_id)
     deps.quiet_conversations.drop(conv_id)
+    if deps.local_conversations is not None:  # its history holds the same screen text
+        deps.local_conversations.drop(conv_id)
     _resets[conv_id] = _resets.get(conv_id, 0) + 1
     return _resets[conv_id]
 
@@ -1123,18 +1135,35 @@ def _local_sticky(deps: OverlayDeps) -> bool:
 
 def _arm_local(deps: OverlayDeps) -> None:
     """Claude hit its limit: route new turns to the local model for one recheck window.
-    The switch line is announced only on a NEW window (not on a re-arm of an expired one)."""
-    global _local_until, _local_announce_due, _local_slow_said
-    fresh = _local_until is None
+    A new window (none live, or the last one expired) is a new switch: announced again."""
+    global _local_until, _local_announce_due, _local_slow_said, _local_back_due
+    fresh = _local_until is None or deps.clock() >= _local_until
     _local_until = deps.clock() + _local_recheck_s()
     if fresh:
         _local_announce_due = True
         _local_slow_said = False
+        _local_back_due = False
 
 
 def _clear_local() -> None:
-    global _local_until
+    """Claude answered again: the window closes and the next answer says so once."""
+    global _local_until, _local_back_due
     _local_until = None
+    _local_back_due = True
+
+
+async def _back_events(deps: OverlayDeps) -> AsyncIterator[dict]:
+    """The back-to-Claude card + line, once per cleared window."""
+    global _local_back_due
+    if not _local_back_due:
+        return
+    _local_back_due = False
+    line_text, title = LOCAL_BACK
+    card = hud.validate_card({"id": uuid.uuid4().hex[:8], "type": "info", "title": title, "body": [line_text]})
+    if card:
+        yield {"type": "card", "card": card}
+    async for ev in _speak(line_text, deps):
+        yield ev
 
 
 async def _switch_events(deps: OverlayDeps) -> AsyncIterator[dict]:
@@ -1151,14 +1180,26 @@ async def _switch_events(deps: OverlayDeps) -> AsyncIterator[dict]:
         yield ev
 
 
-async def _keepalive_while(task: asyncio.Future) -> AsyncIterator[dict]:
+async def _keepalive_while(task: asyncio.Future, deps: OverlayDeps | None = None) -> AsyncIterator[dict]:
     """Keep the app's stream alive while a long step runs: a keepalive event every KEEPALIVE_S.
+    With deps, a step still running at LOCAL_HOLD_S on the local model gets the switch + hold lines.
     A barge-in or disconnect closes this generator: the step is cancelled with it, as a plain await was."""
+    start, held = time.monotonic(), deps is None
     try:
         while not task.done():
-            await asyncio.wait({task}, timeout=KEEPALIVE_S)
-            if not task.done():
-                yield {"type": "keepalive"}
+            wait = KEEPALIVE_S if held else min(KEEPALIVE_S, max(0.0, start + LOCAL_HOLD_S - time.monotonic()))
+            await asyncio.wait({task}, timeout=wait)
+            if task.done():
+                break
+            if not held and time.monotonic() - start >= LOCAL_HOLD_S:
+                held = True
+                if _local_sticky(deps):  # Claude's own pick is capped at GROUND_TIMEOUT_S: only local waits this long
+                    async for ev in _switch_events(deps):
+                        yield ev
+                    async for ev in _speak(LOCAL_HOLD_LINE, deps):
+                        yield ev
+                    continue
+            yield {"type": "keepalive"}
     finally:
         if not task.done():
             task.cancel()
@@ -3515,12 +3556,14 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield event
             else:
                 gt = asyncio.ensure_future(_ground(body, deps))
-                async for ev in _keepalive_while(gt):
+                async for ev in _keepalive_while(gt, deps):
                     yield ev
                 g = gt.result()
                 if g["via"] == "local" and g["pick"] is not None:
                     async for ev in _switch_events(deps):
                         yield ev
+                async for ev in _back_events(deps):
+                    yield ev
                 if g["pick"] is None:
                     before = len(said)
                     async for event in _answer_turn(body, intent.arg, deps, metrics, said, start,
@@ -3553,12 +3596,14 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                     yield {"type": "card", "card": card}
             else:
                 gt = asyncio.ensure_future(_ground(body, deps))
-                async for ev in _keepalive_while(gt):
+                async for ev in _keepalive_while(gt, deps):
                     yield ev
                 g = gt.result()
                 if g["via"] == "local" and g["pick"] is not None:
                     async for ev in _switch_events(deps):
                         yield ev
+                async for ev in _back_events(deps):
+                    yield ev
                 if g["pick"] is None and g["reason"] in _LOCAL_FAILS:
                     async for ev in _fail_events(g["reason"], deps, said):
                         yield ev
@@ -3958,6 +4003,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 async for ev in _line("companion_about", deps):
                     yield ev
                 said.append(acks.PHRASES["companion_about"])
+            elif escalate and _local_sticky(deps):
+                # The local model answered and asked for the agent: the agent tier is Claude, at its limit.
+                if on_step:
+                    on_step("intent", kind="agent", arg="refused: usage limit window")
+                async for ev in _speak(LOCAL_NO_AGENT_LINE, deps):
+                    yield ev
+                said.append(LOCAL_NO_AGENT_LINE)
             elif escalate:  # the fast brain judged it needs the owner's files/git/GitHub/notes/mail
                 if on_step:
                     on_step("intent", kind="agent", arg="handed over by the fast brain")
@@ -4649,6 +4701,7 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
     local_last_ev = t0  # keepalive cadence: the app must not see silence for KEEPALIVE_S
     local_text = False  # the local model produced at least one chunk this turn
     local_hold_done = False  # the still-working line is spoken once per wait
+    local_hold2_done = False  # the slow-first-question line, once per wait
     try:
         while True:
             if local_mode:
@@ -4658,6 +4711,8 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                 wake = local_last_ev + KEEPALIVE_S
                 if not local_text and not local_hold_done:
                     wake = min(wake, local_t0 + LOCAL_HOLD_S)
+                elif not local_text and not local_hold2_done:
+                    wake = min(wake, local_t0 + LOCAL_HOLD2_S)
                 left = min(deadline, wake) - time.monotonic()
             else:
                 left = wall - (time.monotonic() - t0)
@@ -4676,6 +4731,12 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                         async for ev in _switch_events(deps):
                             yield ev
                         async for ev in _speak(LOCAL_HOLD_LINE, deps):
+                            yield ev
+                        local_last_ev = time.monotonic()
+                        continue
+                    if not local_text and local_hold_done and not local_hold2_done and now >= local_t0 + LOCAL_HOLD2_S:
+                        local_hold2_done = True
+                        async for ev in _speak(LOCAL_HOLD2_LINE, deps):
                             yield ev
                         local_last_ev = time.monotonic()
                         continue
@@ -4763,6 +4824,9 @@ async def _answer_turn(body: TurnBody, text: str, deps: OverlayDeps,
                         yield ev
             elif _local_until is not None:  # Claude answered fine: the fallback window closes
                 _clear_local()
+            if not local_mode:
+                async for ev in _back_events(deps):
+                    yield ev
             async for event in picture_events(wait=True):
                 yield event
     except Exception:
