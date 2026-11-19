@@ -275,7 +275,7 @@ ASKS = [
     ("sudo ls", "sudo"),
     ("python3 -c 1", "runs_code"), ("bash x.sh", "runs_code"), ("env X=1 ls", "runs_code"),
     ("xargs rm", "runs_code"), ("find . -delete", "runs_code"), ("osascript -e 1", "runs_code"),
-    ("open https://example.com", "runs_code"),
+    ("open file:///etc/hosts", "runs_code"),
     ("rm ~/x.txt", "delete"), ("/bin/rm ~/x.txt", "delete"), ("mv a b", "outside"), ("cp a ~/b", "outside"),
     ("tee f", "delete"),
     # jfollow11a: a delete asks even in the scratch dir; an unknown program asks

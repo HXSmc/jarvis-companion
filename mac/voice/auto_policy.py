@@ -16,6 +16,7 @@ import re
 import shlex
 import stat
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 from mac.voice import agent, agent_policy
@@ -29,7 +30,7 @@ SUDO = frozenset({"sudo", "doas", "su", "pkexec", "login"})
 RUNS_CODE = frozenset(agent_policy._WRAPPERS) | frozenset({
     "pip", "pipx", "uv", "uvx", "node", "npm", "npx", "pnpm", "yarn", "bun", "deno", "ruby", "gem",
     "perl", "php", "lua", "swift", "osascript", "awk", "gawk", "sed", "vim", "vi", "nvim", "nano", "emacs",
-    "ed", "ex", "make", "cargo", "go", "brew", "docker", "open",
+    "ed", "ex", "make", "cargo", "go", "brew", "docker",
     # builder additions: other runners that execute their arguments or a script
     "tclsh", "expect", "jshell", "irb", "julia", "R", "Rscript", "java", "dotnet", "powershell", "pwsh",
     "watch", "parallel", "script", "tmux", "screen", "automator", "git-shell", "sqlite3",
@@ -116,7 +117,20 @@ QUIET = frozenset({"date", "uptime", "df", "memory_pressure", "vm_stat", "sw_ver
 LOOKUP = READ_ONLY | RECURSIVE_READERS | frozenset({
     "find", "sort", "uniq", "xxd", "base64", "say", "diff", "cmp", "comm", "cut", "nl", "md5", "shasum",
     "mdls", "mdfind", "tree", "ps", "id", "groups", "cal"})
-KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | {"git"}
+# jauto: plain built-ins and path printers that run auto (still mark the conversation: not QUIET).
+PLAIN = frozenset({"true", "false", ":", "printf", "test", "[", "basename", "dirname", "realpath", "readlink"})
+# jauto: commands that hand no text back to the model: running one leaves the mark unset.
+NO_OUTPUT = frozenset({"open", "true", "false", ":"})
+# jauto: `open` runs auto only in allowlisted forms (_open_code). Apps for -a (case-folded, no .app):
+OPEN_APPS = frozenset({"finder", "preview", "textedit", "safari", "google chrome", "firefox", "arc", "obsidian",
+                       "quicktime player", "music", "photos", "pages", "numbers", "keynote", "microsoft word",
+                       "microsoft excel", "microsoft powerpoint"})
+# Document types (case-folded extension) LaunchServices hands to a viewer, never to a script runner.
+OPEN_DOCS = frozenset({"md", "markdown", "txt", "rtf", "pdf", "csv", "tsv", "png", "jpg", "jpeg", "gif", "heic",
+                       "heif", "webp", "tif", "tiff", "bmp", "mov", "mp4", "m4v", "mp3", "m4a", "wav", "aif", "aiff",
+                       "aac", "flac", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "epub"})
+OPEN_FLAGS = frozenset({"-R", "-g", "-e"})  # reveal in Finder, keep in background, open in TextEdit
+KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | PLAIN | {"git", "open"}
 # A program named by path counts as known only from the system's own bin folders (a copy into home
 # named ls is not ls).
 # The running checkout (launchd runs `python -m mac.voice.service` from it): never a write area.
@@ -407,6 +421,93 @@ def _git_sub(argv: list[str]) -> tuple[str, list[str]]:
     return "", []
 
 
+def _open_args(args: list[str]) -> tuple[str | None, list[str]] | None:
+    """(the -a app, the operands) of an `open` argv; None for any option outside -a/-R/-g/-e, a second
+    -a, or an -a with no value (fail closed)."""
+    app, ops, it = None, [], iter(args)
+    for a in it:
+        if a == "-a":
+            if app is not None or (app := next(it, None)) is None:
+                return None
+        elif a.startswith("-"):
+            if a not in OPEN_FLAGS:
+                return None
+        else:
+            ops.append(a)
+    return app, ops
+
+
+def _is_url(tok: str) -> bool:
+    """A colon before any slash, and not an absolute path: open reads it as a URL."""
+    return not tok.startswith("/") and ":" in tok.split("/", 1)[0]
+
+
+def _open_area(tok: str, ctx: agent_policy.Ctx) -> bool:
+    """An absolute path (as typed) that exists and lands, by every _places reading, in the owner's own
+    folders: under home, not ~/Library, no dot component, nothing the read policy closes. Unlike
+    _write_area a checkout is fine (the notes vault is one): opening a document runs nothing."""
+    if not os.path.isabs(tok):
+        return False
+    home = os.path.realpath(ctx.home)
+    for p in _places(tok, ctx):
+        parts = agent_policy._home_parts(p, home)
+        if (not parts or parts[0] == "library" or any(c.startswith(".") for c in parts)
+                or agent_policy._path_problem(tok, p, ctx, search=False) or not os.path.exists(p)):
+            return False
+    return True
+
+
+def _open_code(argv: list[str], ctx: agent_policy.Ctx) -> str:
+    """jauto: "ok" when `open` only shows documents, plain folders or web pages in an allowlisted app;
+    else the never-auto code. Allowlists only: anything not listed asks."""
+    parsed = _open_args(argv[1:])
+    if parsed is None:
+        return "runs_code"
+    app, ops = parsed
+    if app is not None:
+        name = app.casefold().removesuffix(".app")
+        if "/" in app or name not in OPEN_APPS:
+            return "runs_code"
+    if (not ops and app is None) or len(ops) > 4:
+        return "runs_code"
+    home = os.path.realpath(ctx.home)
+    for tok in ops:
+        if _is_url(tok):
+            try:
+                url = urllib.parse.urlsplit(tok)
+            except ValueError:  # a bad [IPv6] host
+                return "runs_code"
+            if url.scheme not in ("http", "https") or not url.netloc:  # urlsplit folds the scheme
+                return "runs_code"
+            continue
+        if not _open_area(tok, ctx):
+            return "outside"
+        p = _resolve(tok, ctx)
+        names = [os.path.basename(tok.rstrip("/")), os.path.basename(p)]
+        if any(c.endswith(".app") for c in tok.casefold().split("/") + agent_policy._home_parts(p, home)):
+            return "runs_code"
+        if os.path.isdir(p):  # a bundle (.app .pkg .workflow ...) has an extension or a Contents folder
+            if any(os.path.splitext(n)[1] for n in names) or os.path.lexists(os.path.join(p, "Contents")):
+                return "runs_code"
+        else:
+            try:
+                st = os.stat(p)
+            except OSError:
+                return "runs_code"
+            if (not stat.S_ISREG(st.st_mode) or st.st_mode & 0o111
+                    or any(os.path.splitext(n)[1][1:].casefold() not in OPEN_DOCS for n in names)):
+                return "runs_code"
+    return "ok"
+
+
+def _open_local(argv: list[str]) -> bool:
+    """jauto (hub Q4): `open` of local paths only, in the default app (no -a or -e, no URL, >= 1 operand).
+    Form only: verdict calls it after classify checked every file."""
+    parsed = _open_args(argv[1:]) if _base(argv) == "open" else None
+    return (parsed is not None and parsed[0] is None and "-e" not in argv[1:] and bool(parsed[1])
+            and not any(map(_is_url, parsed[1])))
+
+
 def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
     """The first never-auto code for one argv, or "ok"."""
     name = _base(argv)
@@ -416,6 +517,14 @@ def _one(argv: list[str], ctx: agent_policy.Ctx) -> str:
         return "network"
     if name in SUDO:
         return "sudo"
+    if name == "open":
+        code = _open_code(argv, ctx)
+        if code != "ok":
+            return code
+    # jauto: `command -v|-V name...` only looks names up; any other `command` runs its arguments
+    if (argv[0] == "command" and len(argv) in range(3, 7) and argv[1] in ("-v", "-V")
+            and all(_NAME_RE.fullmatch(a) and not a.startswith("-") for a in argv[2:])):
+        return "ok"
     if (name in RUNS_CODE or name.startswith(RUNS_CODE_PREFIXES)
             or (name == "find" and any(a in FIND_RUNS for a in args))
             or any(a.startswith(RUNS_OPTS.get(name, ()) + ("--pag",)) for a in args)):
@@ -511,9 +620,11 @@ def classify(command, ctx: agent_policy.Ctx) -> tuple[str, str]:
 
 
 def read_only(command) -> bool:
-    """Every part is a plain look-up (READ_ONLY): may run auto after untrusted text."""
+    """Every part is a plain look-up (READ_ONLY) or (jauto, hub Q4) an `open` of local files in the default
+    app: may run auto after untrusted text. Only after classify said auto (it checks the open's files)."""
     argvs = _parts(command)
-    return argvs is not None and all(_base(a) in READ_ONLY and not _file_reads_list(a) for a in argvs)
+    return argvs is not None and all((_base(a) in READ_ONLY and not _file_reads_list(a)) or _open_local(a)
+                                     for a in argvs)
 
 
 def _file_reads_list(argv: list[str]) -> bool:
@@ -528,7 +639,7 @@ def _file_reads_list(argv: list[str]) -> bool:
 def marks(command) -> bool:
     """Running this command lets untrusted text in (its output may carry file names or text)."""
     argvs = _parts(command)
-    return argvs is None or not all(_base(a) in QUIET for a in argvs)
+    return argvs is None or not all(_base(a) in QUIET | NO_OUTPUT for a in argvs)
 
 
 def verdict(command, ctx: agent_policy.Ctx, *, tainted: bool, barge: bool, gate_ok: bool) -> tuple[str, str]:
