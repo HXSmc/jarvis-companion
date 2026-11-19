@@ -1,9 +1,9 @@
-"""jauto2: "open X" of notes and documents routes to the agent, viewer `open -a` runs, URLs stay sites.
+"""jauto2: "open the note X" / "open https://..." really open, without a go-ahead.
 
-Covers the model-driven cases: open-a-note / open-a-document phrases with no matching installed app go to
-the agent (sub "notes" for note-like words), scheme-less and scheme'd URLs still go to open_site with the
-scheme stripped, and `open -a <viewer>` / `open -e` of a regular file runs auto even tainted (viewer set:
-Obsidian, Preview, TextEdit, QuickTime Player). Other apps, folders, URLs and code-ish files still ask.
+From the owner's transcript only: a note, document, path or URL nothing installed answers to goes to the agent
+(sub "notes" for note words), a URL with a scheme goes to the fixed site opener (always https), and
+`open -a <viewer>` / `open -e` of a regular file runs auto even after untrusted text (viewers: Obsidian,
+Preview, TextEdit, QuickTime Player). Browsers, other apps, folders with -a, URLs and code-ish files still ask.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from test_overlay_agent import Clock, FakeAgent, client, result, setup  # noqa: 
 from test_overlay_jauto import (  # noqa: F401,E402
     H, OK, OUT, OWNER_NOTE, RC, ctx, fill, v, _deep, _switch_off)
 from test_overlay_jfollow10a import _steps, auto_on  # noqa: F401,E402
-from test_overlay_openapp import APPS, run_turn
+from test_overlay_openapp import APPS, run_turn  # noqa: E402
 from test_overlay_service import says, turn  # noqa: F401,E402
 
 
@@ -82,14 +82,14 @@ PIN_ROWS = [
 
 
 @pytest.mark.parametrize("text,apps", PIN_ROWS)
-def test_pinned_intents_unchanged(text, apps):
+def test_open_app_rows_unchanged(text, apps):
     kind = "vault_secrets" if "Secrets" in text else ("open_site" if text.endswith(".app") else "open_app")
     assert intents.parse(text, apps=apps).kind == kind  # jauto2: doc routing never steals these
 
 
 # --- criterion 4: the gateway routes an open-note turn to the agent -------------------------
 
-def test_open_note_reaches_agent(client, auto_on, monkeypatch):
+def test_gateway_open_note_reaches_agent(client, auto_on, monkeypatch):
     vault = Path.home() / "Desktop" / "Vault"
     vault.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OVERLAY_VAULT", str(vault))
@@ -106,7 +106,7 @@ def test_open_note_reaches_agent(client, auto_on, monkeypatch):
 
 # --- criterion 5: gateway open-site and unknown-app turns unchanged -------------------------
 
-def test_gateway_open_turns_unchanged(client):
+def test_gateway_open_url_opens(client):
     ran, events = run_turn(client, "open https://example.com", [])
     assert ran == [["open", "https://example.com"]]  # jauto2: scheme stripped, https added, open_site runs
     assert says(events) == ["Opening https://example.com."]  # B4: no ack before the line
@@ -118,7 +118,7 @@ def test_gateway_open_turns_unchanged(client):
 
 # --- criterion 6: viewer `open -a` of files runs even tainted --------------------------------
 
-def test_viewer_open_a_file_tainted_runs(H, ctx, auto_on):
+def test_open_a_obsidian_file_tainted_runs(H, ctx, auto_on):
     (H / "Documents" / "x.mov").write_text("x")
     rows = [("Obsidian", H / OWNER_NOTE),  # jauto2: the owner's own note opens in Obsidian, tainted too
             ("Preview", H / "Documents" / "a.pdf"),
@@ -133,7 +133,7 @@ def test_viewer_open_a_file_tainted_runs(H, ctx, auto_on):
 
 # --- criterion 7: long viewer open still Confirm, not refused -------------------------------
 
-def test_long_viewer_open_not_refused(H, ctx, auto_on):
+def test_long_open_a_obsidian_not_refused(H, ctx, auto_on):
     note = _deep(H, "n.md")
     command = f"open -a Obsidian {note}"
     assert len(f"run {command}") > 120
@@ -166,7 +166,7 @@ ASK_VIEWER_ROWS = [
 
 
 @pytest.mark.parametrize("command", ASK_VIEWER_ROWS)
-def test_viewer_open_other_apps_still_ask(command, H, ctx, auto_on):
+def test_open_a_tainted_still_asks(command, H, ctx, auto_on):
     for ext in ("md", "pdf", "txt", "pages", "docx", "mp3", "png"):
         (H / "Documents" / f"doc.{ext}").write_text("x")
     (H / "Documents" / "Folder").mkdir()
@@ -179,8 +179,9 @@ def test_viewer_open_other_apps_still_ask(command, H, ctx, auto_on):
 def test_open_local_apps_pinned(H, ctx, auto_on):
     assert auto_policy.OPEN_LOCAL_APPS == frozenset({"obsidian", "preview", "textedit", "quicktime player"})
     assert auto_policy.OPEN_LOCAL_APPS <= auto_policy.OPEN_APPS
-    assert auto_policy.OPEN_LOCAL_APPS & {"safari", "chrome", "firefox", "arc", "finder", "pages",
-                                          "word", "music", "photos", "terminal"} == set()
+    assert auto_policy.OPEN_LOCAL_APPS & {"safari", "google chrome", "firefox", "arc", "finder", "music", "photos",
+                                          "pages", "numbers", "keynote", "microsoft word", "microsoft excel",
+                                          "microsoft powerpoint"} == set()
     (H / "Documents" / "doc.md").write_text("x")
     for app in ("ſafari", "OBSİDİAN"):  # jauto2: non-ascii lookalikes are not viewer names
         assert v(fill(f"open -a {app} H/Documents/doc.md", H), ctx, tainted=True)[0] == "asked", app
@@ -216,8 +217,8 @@ def test_form_shapes(H, ctx, auto_on):
     got = agent_policy.decide("Bash", {"command": f"open {H}/Documents/a\\ b.md"}, ctx)
     assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"  # backslash form
     got = agent_policy.decide("Bash", {"command": 'open "obsidian://open?vault=V&file=x"'}, ctx)
-    assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"  # bad host
-    assert v("open obsidian://open?vault=V", ctx) == RC  # quoted form is fine and runs code
+    assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"  # & is a shell metachar
+    assert v("open obsidian://open?vault=V", ctx) == RC  # obsidian:// actions write notes: never auto
     assert v("open '~/Documents/a.md'", ctx) == OUT  # ~ does not expand: outside
 
 
