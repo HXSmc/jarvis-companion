@@ -82,7 +82,7 @@ def test_take_me_home_without_home_says_the_saved_line(client, vault):
     f = vault / "Secrets" / "jarvis-places.json"
     f.write_text(json.dumps({"places": {"gym": PLACES["places"]["gym"]}}))
     fake = FakePick(reply("place", 0.99))
-    _deps_with(fake, chunks=['{"say": "Here."}\n'])
+    _deps_with(fake, chunks=['{"say": "Here."}\n'], apps={})  # a Mac with Home.app parses it as an app ask
     events = turn(client, "take me home", conv_id="h1")
     assert fake.calls == []
     assert says(events) == [acks.PHRASES["place_missing"].format(name="home")]
