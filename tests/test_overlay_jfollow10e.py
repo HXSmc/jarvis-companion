@@ -259,6 +259,8 @@ def test_owner_rows_replay(text):
     got, _, rows = _pick(text, _deps_with(fake))
     if OWNER_ROWS[text] in ("stop",) or OWNER_ROWS[text] in intent_pick.WORD_ONLY:
         assert fake.calls == [] and "path=fast" in rows[-1]
+    elif OWNER_ROWS[text] in intent_pick.WORD_SURE:  # jfollow11z R2: a sure word hit skips the model
+        assert fake.calls == [] and got.kind == OWNER_ROWS[text] and rows[-1].endswith("reason=word_sure")
     else:
         assert len(fake.calls) == 1 and "path=model" in rows[-1]
         if kind:

@@ -349,8 +349,8 @@ def _write_targets(name: str, args: list[str]) -> list[str] | None:
     (operands may then look like options) and for ditto with any option (-x/-c/-k unpack or pack archives)."""
     if "--" in args or (name == "ditto" and any(a.startswith("-") for a in args)):
         return None
-    if name in ("cp", "mv") and any(a.startswith("-") and not a.startswith("--") and "t" in a[1:] for a in args):
-        return None  # jfollow11z: GNU -t DIR names the target first, so the last operand is not it
+    if name in ("cp", "mv") and any(a.startswith("-") and not a.startswith("--") and a.endswith("t") for a in args):
+        return None  # jfollow11z: GNU -t DIR (or -vt DIR) names the target first: the last operand is not it
     ops = [a for a in args if not a.startswith("-")]
     out = ops + [v for a in args if (v := _attached(a)) is not None]
     if name in ("cp", "mv") and len(ops) > 1 and os.path.isdir(ops[-1]):

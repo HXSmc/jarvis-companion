@@ -53,9 +53,10 @@ def test_sure_word_hit_skips_the_model(text):
 
 @pytest.mark.parametrize("text", ["delete the file notes.txt", "clear my calendar", "move this file to Documents",
                                   "close Safari", "remove the background from this photo",
-                                  "what roads could I take", "how many sessions are running"])
+                                  "what roads could I take", "how many sessions are running", "delete the shopping list"])
 def test_near_misses_still_ask_the_model(text):
-    assert intents.parse(text, apps=APPS).kind not in intent_pick.WORD_SURE
+    """None of these is a sure hit: "delete the shopping list" parses as card_remove, but no card is
+    named, pointed at or shown, so the model still picks (it may be a list in the owner's notes)."""
     fake = FakePick(reply("answer", 0.99))
     _pick(text, _deps_with(fake))
     assert len(fake.calls) == 1
@@ -220,10 +221,15 @@ def test_pick_budget():
 
 # --- Z-LIST 11: the spoken sessions number is the running ones --------------------------------------
 
-def test_sessions_count_line_says_running_now():
-    rows = ([{"needs_owner": False, "state": "idle"}] * 1050 + [{"needs_owner": True, "state": "idle"}] * 3
-            + [{"needs_owner": False, "state": "running"}])
-    assert overlay._sessions_count_line(rows) == "1 session running, sir; 3 waiting on you."
+def test_sessions_count_line_counts_open_sessions():
+    """Mac run b-4: 1054 stored rows were spoken as "1054 sessions"; the number is now the open ones."""
+    done = {"needs_owner": False, "state": "done", "phase": "done"}
+    rows = ([done] * 1046 + [{"needs_owner": True, "state": "needs_input", "phase": "in_progress"}] * 3
+            + [{"needs_owner": False, "state": "running", "phase": "in_progress"}] * 5)
+    assert overlay._sessions_count_line(rows) == "8 sessions, sir: 3 waiting on you, 5 running."
+    old_gateway = [{"needs_owner": False, "state": "stopped", "phase": ""}, {"needs_owner": False, "state": "running",
+                                                                           "phase": ""}]
+    assert overlay._sessions_count_line(old_gateway) == "1 session, sir: 0 waiting on you, 1 running."
 
 
 # --- Z-LIST 14/15: answer prompt wording ---------------------------------------------------------

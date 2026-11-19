@@ -1255,10 +1255,16 @@ def _short_time(stamp: str) -> str:
 
 def _sessions_count_line(rows: list[dict]) -> str:
     """The fixed-code sessions answer: counts only, no title or other row text."""
+    n = sum(1 for r in rows if _open_row(r))  # jfollow11z: the open sessions (the app board), not every stored row
     waiting = sum(1 for r in rows if r["needs_owner"])
     running = sum(1 for r in rows if r["state"] == "running")
-    # jfollow11z: the spoken number is the sessions running now, not every stored row
-    return f"{running} session{'' if running == 1 else 's'} running, sir; {waiting} waiting on you."
+    return (f"{n} session{'' if n == 1 else 's'}, sir: "
+            f"{waiting} waiting on you, {running} running.")
+
+
+def _open_row(row: dict) -> bool:
+    """A fetched row on the app board's open side (_row_open's rule; an empty phase = older gateway)."""
+    return row["phase"] != "done" if row["phase"] else row["state"] not in ("done", "stopped", "failed")
 
 
 def _device_label(raw: str) -> str:
@@ -1290,9 +1296,8 @@ def _sessions_totals(rows: list[dict]) -> str:
     calm = [r for r in rows if r["health"] != "attention"]
     cols = (sum(1 for r in calm if r["phase"] == "in_progress"), sum(1 for r in calm if r["phase"] == "in_review"),
             sum(1 for r in rows if r["health"] == "attention"), sum(1 for r in rows if r["phase"] == "done"))
-    running = sum(1 for r in rows if r["state"] == "running")
-    return (f"Totals from the Companion app: {running} running now, of {len(rows)} stored sessions; "
-            f"{cols[0]} in progress, {cols[1]} in review, "
+    return (f"Totals from the Companion app: {sum(1 for r in rows if _open_row(r))} open sessions, {len(rows)} listed;"
+            f" {cols[0]} in progress, {cols[1]} in review, "
             f"{cols[2]} attention, {cols[3]} done; " + ", ".join(_device_counts(rows)) + ".")
 
 
@@ -2471,6 +2476,17 @@ async def _session_action_turn(body: TurnBody, ask, deps: OverlayDeps,
     said.append(question)
 
 
+_CARD_WORD_RE = re.compile(r"\bcards?\b", re.I)
+
+
+def _sure_card_remove(raw_text: str, conv_id: str, deps: OverlayDeps) -> bool:
+    """jfollow11z R2: a card-remove ask that points, says "card" or names a card this conv shows.
+    "delete the shopping list" is none of these (it may be a list in his notes): the model picks."""
+    ask = intents.first_form(raw_text, intents.card_remove_request)
+    return ask is not None and (ask.pointer or _CARD_WORD_RE.search(raw_text) is not None
+                                or intents.card_matches(ask.target, _shown_cards(conv_id, deps)) is not None)
+
+
 def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, conv_id: str,
                       deps: OverlayDeps) -> tuple[intents.Intent | None, object, int]:
     """(handler intent, the owner-words ask it carries, model slots used); None intent = slots fail the caps.
@@ -2590,7 +2606,9 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
         reason = "pick_open"
     elif joined:
         reason = "joined"
-    elif word.kind in intent_pick.WORD_SURE or (word.kind == "geo_map" and intents.place_name(word.arg) == "home"):
+    elif ((word.kind in intent_pick.WORD_SURE
+           and (word.kind != "card_remove" or _sure_card_remove(raw_text, body.conv_id, deps)))
+          or (word.kind == "geo_map" and intents.place_name(word.arg) == "home")):
         # jfollow11z R2: a sure word hit needs no model call; Z-LIST 1: "take me home" is the map's
         # fixed parse (no home saved -> the existing "No home saved yet" line), never the place search
         reason = "word_sure"
