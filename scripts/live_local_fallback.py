@@ -9,7 +9,7 @@ through the real `_answer_turn` with real lean/local pools; only the macOS-only 
     python3 scripts/live_local_fallback.py [--url http://127.0.0.1:8410] [--out result.json]
 
 The local timeouts are 420 s / 600 s (the defaults) so a cold mini PC prompt (about 6 minutes) is
-part of the evidence. Prints one table row per turn; exit 0 when every turn ended with a done event.
+part of the evidence. Prints one table row per turn; exit 0 only when every turn ended with a done event and none failed.
 """
 
 from __future__ import annotations
@@ -100,11 +100,13 @@ def main() -> int:
         shutil.rmtree(scratch, ignore_errors=True)
     says = [e["text"] for r in rows for e in r["events"] if e["type"] == "say"]
     summary = {"switch_line": says.count(overlay.LOCAL_SWITCH[0]), "slow_line": says.count(overlay.LOCAL_SLOW_LINE),
-               "launched": launched, "all_done": all(r["events"][-1]["type"] == "done" for r in rows)}
+               "launched": launched,
+               "all_done": len(rows) == len(QUESTIONS) and all(r["events"][-1]["type"] == "done" for r in rows),
+               "failed": [r["events"][-1].get("error") for r in rows if r["events"][-1].get("error")]}
     print(json.dumps(summary))
     if args.out:
         Path(args.out).write_text(json.dumps({"rows": rows, "summary": summary}, indent=1))
-    return 0 if summary["all_done"] else 1
+    return 0 if summary["all_done"] and not summary["failed"] else 1  # a local failure is a failed run
 
 
 if __name__ == "__main__":
