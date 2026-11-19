@@ -128,7 +128,7 @@ JAUTO_POLICY_LINES = frozenset({
 
 # jauto2 (hub-sanctioned): the one open-shape line in AGENT_PROMPT
 JAUTO2_AGENT_LINES = frozenset({
-    "+  To open a note, document or folder for the owner: open '<absolute path>' (a note opens in Obsidian by default; open -a Obsidian '<absolute path to the .md>' also works). A web page: open https://... . Quote a path with spaces in single quotes; never use ~, $HOME, backslash escapes or obsidian:// links.",
+    "+  To open a note (a .md in the notes vault) for the owner: open -a Obsidian '<absolute path>.md'. A document or folder: open '<absolute path>' (its default app; this also works for a note). A web page: open https://... . Quote a path with spaces in single quotes; never use ~, $HOME, backslash escapes or obsidian:// links.",
 })
 
 

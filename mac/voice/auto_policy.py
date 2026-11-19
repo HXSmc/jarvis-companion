@@ -132,8 +132,11 @@ OPEN_DOCS = frozenset({"md", "markdown", "txt", "rtf", "pdf", "csv", "tsv", "png
 # review r1: legacy Office types may hold macros: auto only on untainted turns (not in _open_local).
 OPEN_MACRO = frozenset({"doc", "xls", "ppt"})
 OPEN_FLAGS = frozenset({"-R", "-g", "-e"})  # reveal in Finder, keep in background, open in TextEdit
-# jauto2: -a apps that may show a local regular file after untrusted text (read_only): plain viewers that
-# neither fetch what the file names (browsers), import it into a library (Music, Photos) nor run its macros.
+# jauto2: -a apps that may show a local regular file after untrusted text (read_only): viewers that neither
+# browse (a browser runs the page's scripts), import the file into a library (Music, Photos) nor run its macros.
+# Obsidian may load remote images or embeds a note names and QuickTime may follow URL references in a movie:
+# accepted because those URLs are fixed in a file the owner already has, so no text read this turn rides along.
+# Obsidian only for files under the notes vault (round 1): elsewhere a .obsidian/ folder could load plugins.
 # Its own allowlist, never "OPEN_APPS minus browsers".
 OPEN_LOCAL_APPS = frozenset({"obsidian", "preview", "textedit", "quicktime player"})
 KNOWN = LOOKUP | WRITE_HOME | DELETE | OUTPUT_OPT | OUTPUT_OPERAND | PLAIN | {"git", "open"}
@@ -519,7 +522,7 @@ def _alias(path: str) -> bool:
     return head == b"book\0\0\0\0" or head.startswith(b"alis")
 
 
-def _open_local(argv: list[str]) -> bool:
+def _open_local(argv: list[str], vault: str | None = None) -> bool:
     """jauto (hub Q4): `open` of local paths only (no URL, >= 1 operand, no legacy macro document), in the
     default app or (jauto2) an OPEN_LOCAL_APPS app or -e on regular files only: a folder given to -a can
     become a vault (Obsidian writes .obsidian/ in it). Verdict calls it after classify checked every file."""
@@ -532,6 +535,10 @@ def _open_local(argv: list[str]) -> bool:
         return False
     if (app is not None or "-e" in argv[1:]) and not all(os.path.isfile(os.path.realpath(o)) for o in parsed[1]):
         return False
+    if app is not None and app.casefold().removesuffix(".app") == "obsidian":
+        root = os.path.realpath(os.path.expanduser(vault)) if vault else None
+        if root is None or not all(_under(os.path.realpath(o), root) for o in parsed[1]):
+            return False
     return (bool(parsed[1])
             and not any(map(_is_url, parsed[1]))
             and not any(os.path.splitext(n)[1][1:].casefold() in OPEN_MACRO
@@ -649,11 +656,13 @@ def classify(command, ctx: agent_policy.Ctx) -> tuple[str, str]:
     return "auto", "ok"
 
 
-def read_only(command) -> bool:
+def read_only(command, ctx: agent_policy.Ctx | None = None) -> bool:
     """Every part is a plain look-up (READ_ONLY) or (jauto, hub Q4) an `open` of local files in the default
-    app: may run auto after untrusted text. Only after classify said auto (it checks the open's files)."""
+    app or (jauto2) a viewer (_open_local): may run auto after untrusted text. Only after classify said auto (it checks the open's files)."""
     argvs = _parts(command)
-    return argvs is not None and all((_base(a) in READ_ONLY and not _file_reads_list(a)) or _open_local(a)
+    # No ctx (agent_policy's long-summary rule passes none): OVERLAY_VAULT is Ctx.vault's default, so the two agree live.
+    vault = ctx.vault if ctx is not None else os.environ.get("OVERLAY_VAULT") or None
+    return argvs is not None and all((_base(a) in READ_ONLY and not _file_reads_list(a)) or _open_local(a, vault)
                                      for a in argvs)
 
 
@@ -682,7 +691,7 @@ def verdict(command, ctx: agent_policy.Ctx, *, tainted: bool, barge: bool, gate_
     decision, code = classify(command, ctx)
     if decision != "auto":
         return decision, code
-    if tainted and not read_only(command):
+    if tainted and not read_only(command, ctx):
         return "asked", "untrusted"
     return gate(barge=barge, gate_ok=gate_ok)
 

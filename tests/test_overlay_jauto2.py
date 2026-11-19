@@ -135,8 +135,11 @@ def test_open_a_obsidian_file_tainted_runs(H, ctx, auto_on):
 
 # --- criterion 7: long viewer open still Confirm, not refused -------------------------------
 
-def test_long_open_a_obsidian_not_refused(H, ctx, auto_on):
-    note = _deep(H, "n.md")
+def test_long_open_a_obsidian_not_refused(H, ctx, auto_on, monkeypatch):
+    monkeypatch.setenv("OVERLAY_VAULT", ctx.vault)  # round 1: the long-summary rule reads the vault Ctx defaults to
+    note = H / "Desktop" / "ObsidianVault" / ("folder-with-a-long-name/" * 4) / "n.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("x")
     command = f"open -a Obsidian {note}"
     assert len(f"run {command}") > 120
     got = agent_policy.decide("Bash", {"command": command}, ctx)
@@ -190,7 +193,40 @@ def test_open_local_apps_pinned(H, ctx, auto_on):
         assert auto_policy._open_local(["open", "-a", app, str(H / "Documents" / "doc.md")]) is False, app
     for app in ("obſidian", "OBSİDİAN", "/Applications/Obsidian.app"):  # the new guard itself, past classify
         assert auto_policy._open_local(["open", "-a", app, str(H / "Documents" / "doc.md")]) is False, app
-    assert auto_policy._open_local(["open", "-a", "Obsidian", str(H / "Documents" / "doc.md")]) is True
+    assert auto_policy._open_local(["open", "-a", "Obsidian", str(H / OWNER_NOTE)], ctx.vault) is True
+
+
+# --- round 1 (security LOW 1): -a Obsidian is taint-exempt only for files under the notes vault ------------
+
+def test_obsidian_exempt_only_under_vault(H, ctx, auto_on, tmp_path, monkeypatch):
+    ev = H / "Downloads" / "ev"
+    (ev / ".obsidian" / "plugins").mkdir(parents=True)  # a folder that would load its own plugins
+    (ev / "n.md").write_text("x")
+    outside = f"open -a Obsidian {ev / 'n.md'}"
+    assert v(outside, ctx, tainted=True) == ("asked", "untrusted")
+    assert v(outside, ctx) == OK  # untainted path not tightened
+    assert v(f"open -a Obsidian {H / OWNER_NOTE}", ctx, tainted=True) == OK
+    assert v(f"open -a OBSIDIAN.app {H / OWNER_NOTE}", ctx, tainted=True) == OK
+    assert v(f"open -a Obsidian {H / OWNER_NOTE} {ev / 'n.md'}", ctx, tainted=True) == ("asked", "untrusted")
+    assert v(f"open -a Preview {ev / 'n.md'}", ctx, tainted=True) == OK  # viewers other than Obsidian: unchanged
+    assert v(f"open {ev / 'n.md'}", ctx, tainted=True) == OK  # path form (jauto): unchanged
+    link = H / "Desktop" / "ObsidianVault" / "link.md"
+    link.symlink_to(ev / "n.md")  # inside the vault by name, outside by realpath
+    assert v(f"open -a Obsidian {link}", ctx, tainted=True) == ("asked", "untrusted")
+    no_vault = agent_policy.Ctx(home=ctx.home, vault=None, cwd=ctx.cwd)
+    assert v(f"open -a Obsidian {H / OWNER_NOTE}", no_vault, tainted=True) == ("asked", "untrusted")
+    # the ctx-less reading (agent_policy's long-summary rule) uses OVERLAY_VAULT, failing closed when unset
+    monkeypatch.delenv("OVERLAY_VAULT", raising=False)
+    assert auto_policy.read_only(f"open -a Obsidian {H / OWNER_NOTE}") is False
+    monkeypatch.setenv("OVERLAY_VAULT", ctx.vault)
+    assert auto_policy.read_only(f"open -a Obsidian {H / OWNER_NOTE}") is True
+    assert auto_policy.read_only(outside) is False
+    deep = ev / ("folder-with-a-long-name/" * 4) / "m.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("x")
+    assert len(f"run open -a Obsidian {deep}") > 120
+    got = agent_policy.decide("Bash", {"command": f"open -a Obsidian {deep}"}, ctx)  # long, outside: refused
+    assert isinstance(got, agent_policy.Deny) and agent_policy.reason_code(got.reason) == "form"
 
 
 # --- criterion 10: states, code files, secrets unchanged ------------------------------------
