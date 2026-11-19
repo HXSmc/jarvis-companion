@@ -2581,6 +2581,8 @@ def _intent_from_pick(p: intent_pick.Pick, word: intents.Intent, raw_text: str, 
     return intents.Intent("answer", clean), None, 0
 
 
+# LIVE-2: only these place forms skip the pick ("nearest neighbour algorithm" also parses as a place)
+_TAKE_ME_PLACE_RE = re.compile(r"\b(?:best way to|take me)\b", re.IGNORECASE)
 _DRAW_WORDS = re.compile(r"\b(?:draw|drawing|sketch|diagram|illustrat\w*)\b", re.IGNORECASE)  # R3-CAT: these keep a draw pick
 
 
@@ -2607,10 +2609,10 @@ async def _pick_intent(body: TurnBody, raw_text: str, word: intents.Intent, *, j
     elif ((word.kind in intent_pick.WORD_SURE
            and (word.kind != "card_remove" or _sure_card_remove(raw_text, body.conv_id, deps)))
           or (word.kind == "geo_map" and intents.place_name(word.arg) == "home")
-          or (word.kind == "place" and intents.PLACE_CUE_RE.search(raw_text))):
+          or (word.kind == "place" and _TAKE_ME_PLACE_RE.search(raw_text))):
         # jfollow11z R2: a sure word hit needs no model call; Z-LIST 1: "take me home" is the map's
         # fixed parse (no home saved -> the existing "No home saved yet" line), never the place search;
-        # LIVE-2: "take me to / best way to / nearest <name>" (a place form never holds to/from) is the place parse
+        # LIVE-2: "take me to / best way to <name>" (a place form never holds to/from) is the place parse
         reason = "word_sure"
     elif deps.intent_pick is None or not auto_policy.pick_on():
         path, reason = "fallback", "off"

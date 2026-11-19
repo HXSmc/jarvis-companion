@@ -100,7 +100,8 @@ def test_take_me_to_a_name_is_the_place_parse(text):
 
 
 @pytest.mark.parametrize("text", ["take me from King's Cross to Tower Bridge",
-                                  "show me a map from King's Cross to Tower Bridge"])
+                                  "show me a map from King's Cross to Tower Bridge",
+                                  "what is the nearest neighbour algorithm", "what's the closest match"])
 def test_a_route_with_an_origin_still_asks_the_model(text):
     fake = FakePick(reply("map", 0.95))
     _pick(text, _deps_with(fake))
