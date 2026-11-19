@@ -69,6 +69,7 @@ public enum ScatterLayout {
         let layered = prefersLayer(key: key, existingCount: existing.count)
         var best: (frame: CGRect, score: CGFloat)?
         var clearOfKeepOut = false
+        var titleLayer: CGRect?
         for zone in zones {
             let zoneOrigin = CGPoint(x: area.minX + CGFloat(zone % 3) * zoneSize.width,
                                      y: area.minY + CGFloat(zone / 3) * zoneSize.height)
@@ -78,12 +79,14 @@ public enum ScatterLayout {
                                        y: zoneOrigin.y + rng.unit() * zoneSize.height - size.height / 2))
             }
             if layered {
-                for other in existing {
-                    for origin in layerOrigins(size: size, over: other)
-                    where self.zone(of: CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2), in: area) == zone {
-                        origins.insert(origin, at: 0)
-                    }
+                // Trailing-bottom, trailing-top, leading-bottom over every card (newest first),
+                // then the random spots, then the title corner (leading-top) last.
+                let corners = existing.reversed().map { layerOrigins(size: size, over: $0) }
+                let inZone = { (origin: CGPoint) in
+                    self.zone(of: CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2), in: area) == zone
                 }
+                let first = (0..<3).flatMap { group in corners.map { $0[group] } }.filter(inZone)
+                origins = first + origins + corners.map { $0[3] }.filter(inZone)
             }
             var layer: CGRect?
             for origin in origins {
@@ -91,12 +94,20 @@ public enum ScatterLayout {
                 if keepOut.contains(where: { $0.intersects(frame) }) { continue }
                 clearOfKeepOut = true
                 guard let fit = fitness(frame, existing: existing, covered: covered) else { continue }
-                if layered, layer == nil, fit.layers { layer = frame }
+                if layered, layer == nil, fit.layers {
+                    if existing.contains(where: { coversTitle(frame, of: $0) }) {
+                        if titleLayer == nil { titleLayer = frame }
+                    } else {
+                        layer = frame
+                    }
+                }
                 if fit.overlap < (best?.score ?? .infinity) { best = (frame, fit.overlap) }
             }
             if let layer { return .at(layer) }
             if !layered, let best, best.score == 0 { return .at(best.frame) }
         }
+        // A layered spot on a title strip only when no zone has a clear one.
+        if let titleLayer { return .at(titleLayer) }
         if let best { return .at(best.frame) }
         return clearOfKeepOut && !existing.isEmpty && allowRetire ? .retireOldest : .noRoom
     }
@@ -106,14 +117,35 @@ public enum ScatterLayout {
         existingCount >= 6 && (seed(key) >> 7) % 3 == 0
     }
 
+    /// The side where text starts: a layered card prefers the far side of the card under it. True in
+    /// the left-to-right layout; a right-to-left layout flips this one value.
+    static let titleOnLeft = true
+    /// Share of a card's width, from its title side, that the title strip covers.
+    static let titleStripShare: CGFloat = 0.6
+
+    /// The top strip of `card` where its title sits: `titleStripShare` of the width from the title
+    /// side, `minStrip` tall.
+    static func titleStrip(of card: CGRect) -> CGRect {
+        let width = card.width * titleStripShare
+        return CGRect(x: titleOnLeft ? card.minX : card.maxX - width, y: card.minY, width: width, height: minStrip)
+    }
+
+    /// `frame` lies on the title strip of `card` (a shared edge or a sliver of 0.5 pt does not count).
+    static func coversTitle(_ frame: CGRect, of card: CGRect) -> Bool {
+        let shared = frame.intersection(titleStrip(of: card))
+        return !shared.isNull && shared.width > 0.5 && shared.height > 0.5
+    }
+
     /// Four origins that put a card of `size` over one corner of `other`, overlapping about 15 %
-    /// of the smaller of the two.
+    /// of the smaller of the two. Order: far-side bottom, far-side top, title-side bottom, and the
+    /// title-side top corner (under the title) last.
     static func layerOrigins(size: CGSize, over other: CGRect) -> [CGPoint] {
         let overlapWidth = min(size.width, other.width) * 0.4
         let overlapHeight = min(size.height, other.height,
                                 0.15 * min(size.width * size.height, area(other)) / overlapWidth)
         var origins: [CGPoint] = []
-        for x in [other.maxX - overlapWidth, other.minX - size.width + overlapWidth] {
+        let rightX = other.maxX - overlapWidth, leftX = other.minX - size.width + overlapWidth
+        for x in titleOnLeft ? [rightX, leftX] : [leftX, rightX] {
             for y in [other.maxY - overlapHeight, other.minY - size.height + overlapHeight] {
                 origins.append(CGPoint(x: x, y: y))
             }
