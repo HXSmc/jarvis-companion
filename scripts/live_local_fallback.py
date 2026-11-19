@@ -18,8 +18,9 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sys
-import time
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,8 @@ def main() -> int:
     os.environ.setdefault("OVERLAY_LOCAL_TTFT_S", "400")
     os.environ.setdefault("OVERLAY_LOCAL_WALL_S", "600")
     sys.path.insert(0, str(ROOT))
+    scratch = tempfile.mkdtemp(prefix="live-local-")
+    tempfile.tempdir = scratch  # every claude scratch cwd lands here and goes with it at the end
     import httpx
 
     from gateway import overlay
@@ -93,6 +96,8 @@ def main() -> int:
             for s in [*pool._sessions.values(), pool._spare]:
                 if s is not None:
                     s.close()
+        tempfile.tempdir = None
+        shutil.rmtree(scratch, ignore_errors=True)
     says = [e["text"] for r in rows for e in r["events"] if e["type"] == "say"]
     summary = {"switch_line": says.count(overlay.LOCAL_SWITCH[0]), "slow_line": says.count(overlay.LOCAL_SLOW_LINE),
                "launched": launched, "all_done": all(r["events"][-1]["type"] == "done" for r in rows)}

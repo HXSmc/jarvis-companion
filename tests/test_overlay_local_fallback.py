@@ -400,3 +400,53 @@ def test_ground_pick_local(client, monkeypatch, local_pools):
     assert SWITCH_LINE in lines(events) and any(c["title"] == SWITCH_TITLE for c in cards(events))
     assert "via=local" in steps("ground")[-1]["detail"]
     assert len(completions(srv)) == 1
+
+
+def test_look_turn_local_503(client, monkeypatch, local_pools):
+    """A look turn whose screen pick and answer both fall to a dead local front: one failure line."""
+    with FakeLocalLLM(mode="503") as srv:
+        set_local(monkeypatch, srv)
+        make_local_deps(local_pools, local_pool(local_pools), vlm=lambda prompt, jpeg: (_ for _ in ()).throw(limit_error()))
+        events = turn(client, "highlight the invoice total", conv_id="l1",
+                      screen={"scale": 1.0, "ocr": [{"text": "Invoice total 42", "box": [1, 2, 3, 4]}]})
+    assert steps("intent")[-1]["kind"] == "look"
+    assert [s for s in lines(events) if s != "Having a look."] == [UNAVAILABLE]  # one line, no miss line on top
+    assert done(events)["error"] == "answer_local_unavailable"
+    assert "via=local" in steps("ground")[-1]["detail"]
+
+
+def test_keepalive_while_cancels_step_on_close():
+    """A barge-in closes the stream: the step under the keepalive is cancelled, not orphaned."""
+    import asyncio
+
+    async def scenario():
+        step = asyncio.ensure_future(asyncio.sleep(60))
+        gen = overlay._keepalive_while(step)
+        overlay_ka = overlay.KEEPALIVE_S
+        overlay.KEEPALIVE_S = 0.05
+        try:
+            assert await gen.__anext__() == {"type": "keepalive"}
+            await gen.aclose()
+            await asyncio.sleep(0)
+            return step.cancelled()
+        finally:
+            overlay.KEEPALIVE_S = overlay_ka
+
+    assert asyncio.run(scenario())
+
+
+def test_get_deps_wires_local_pool(monkeypatch):
+    """Production deps: the local pool exists with a URL and the switch on; None otherwise."""
+    monkeypatch.setattr(overlay, "_voice_present", lambda: False)
+    monkeypatch.setattr(overlay.intent_pick, "Picker", lambda: type("P", (), {"ask": lambda self, m: ""})())
+    monkeypatch.delenv("OVERLAY_COMPANION_URL", raising=False)
+    monkeypatch.setenv("OVERLAY_LOCAL_URL", "http://127.0.0.1:9")
+    for flag, armed in (("1", True), ("0", False), ("off", False)):
+        monkeypatch.setenv("OVERLAY_LOCAL_FALLBACK", flag)
+        overlay.set_deps(None)
+        assert (overlay.get_deps().local_conversations is not None) is armed, flag
+    monkeypatch.delenv("OVERLAY_LOCAL_FALLBACK")
+    monkeypatch.delenv("OVERLAY_LOCAL_URL")
+    overlay.set_deps(None)
+    assert overlay.get_deps().local_conversations is None  # no URL known: today's behaviour
+    overlay.set_deps(None)

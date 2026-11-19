@@ -1152,11 +1152,16 @@ async def _switch_events(deps: OverlayDeps) -> AsyncIterator[dict]:
 
 
 async def _keepalive_while(task: asyncio.Future) -> AsyncIterator[dict]:
-    """Keep the app's stream alive while a long step runs: a keepalive event every KEEPALIVE_S."""
-    while not task.done():
-        await asyncio.wait({task}, timeout=KEEPALIVE_S)
+    """Keep the app's stream alive while a long step runs: a keepalive event every KEEPALIVE_S.
+    A barge-in or disconnect closes this generator: the step is cancelled with it, as a plain await was."""
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=KEEPALIVE_S)
+            if not task.done():
+                yield {"type": "keepalive"}
+    finally:
         if not task.done():
-            yield {"type": "keepalive"}
+            task.cancel()
 
 
 # The wake word said aloud on speakers wakes the Mac's own listener (Mac live run: a "Which one"
