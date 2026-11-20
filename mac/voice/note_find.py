@@ -155,6 +155,21 @@ def _day_at(ws: list[str], i: int) -> int:
     return v
 
 
+def _misses(left_a: set[str], left_b: set[str], notes: tuple[frozenset[str], ...]) \
+        -> tuple[int, int]:
+    """For each day reading, the fewest leftover words that one note still misses: only
+    notes sharing an exact word with the leftovers are checked (find() matches fuzzily, so
+    each leftover word counts as covered by the finder's loose _match)."""
+    cand = [n for n in notes if n & (left_a | left_b)]
+    local = frozenset().union(*cand) if cand else frozenset()
+    near = {w: {t for t in local if _match(w, t)} for w in left_a | left_b}
+    out = []
+    for left in (left_a, left_b):
+        out.append(min((sum(1 for w in left if not near[w] & n) for n in cand),
+                       default=len(left)))
+    return out[0], out[1]
+
+
 def _spoken_date(ws: list[str], notes: tuple[frozenset[str], ...] = ()) \
         -> tuple[str, frozenset[int]]:
     """MMDD for a month plus a day said anywhere in the words (before or after the month,
@@ -162,9 +177,9 @@ def _spoken_date(ws: list[str], notes: tuple[frozenset[str], ...] = ()) \
     ("", frozenset()) when no month+day was said. jauto3c r1: only these words leave the
     query — a lone "march" or "second" is a name token, as on ci-ipa. r3c: a bare unit word
     ("one".."nine") after the month is only a fallback; a day said before the month wins.
-    r3f: with bare units on both sides of the month, each reading's leftover ask words are
-    checked against one whole note — only a reading whose leftover fits inside a single
-    note's words wins, else the day said before the month wins."""
+    r3g: with bare units on both sides of the month, each reading's leftover ask words are
+    counted loosely against one note — the reading with fewer uncovered words wins, else the
+    day said before the month wins."""
     year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
     fallback: tuple[str, frozenset[int]] = ("", frozenset())
     for i, w in enumerate(ws):
@@ -191,15 +206,16 @@ def _spoken_date(ws: list[str], notes: tuple[frozenset[str], ...] = ()) \
                             fb_w = ws[j]
                             continue
                         if step == -1 and fb_w and ws[j] in _BARE_UNIT:
-                            # r3f: bare units on both sides — the reading whose leftover ask
-                            # words fit inside one note wins (the other's do not), else the
-                            # day said before the month wins
+                            # r3g: bare units on both sides — the reading whose leftover ask
+                            # words one note misses least wins; a tie keeps the day said
+                            # before the month
                             left_a = set(tokens(" ".join(x for k, x in enumerate(ws)
                                                          if k not in drop)))
                             left_b = set(tokens(" ".join(x for k, x in enumerate(ws)
                                                          if k not in fallback[1])))
-                            if any(n >= left_b for n in notes) \
-                                    and not any(n >= left_a for n in notes):
+                            miss_a, miss_b = _misses(left_a, left_b, notes) \
+                                if len(left_a) <= 12 else (0, 0)
+                            if miss_b < miss_a:
                                 continue
                         return found
     return fallback

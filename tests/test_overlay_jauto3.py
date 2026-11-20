@@ -845,7 +845,7 @@ def test_jauto3c_r3c_bare_unit_after_the_month_is_only_a_fallback(tmp_path):
 
 
 def test_jauto3c_date_table(tmp_path):
-    """Every probe from the jauto3c round 0..3f reviews on one vault: dates before and after
+    """Every probe from the jauto3c round 0..3g reviews on one vault: dates before and after
     the name, digits, ordinals, word days, twenty/thirty forms, wrong dates keep the tie,
     and the name-word notes (march budget, second draft, january, first principles, second
     brain) stay unchanged."""
@@ -940,6 +940,12 @@ def test_jauto3c_date_table(tmp_path):
         # round 3f: the rows above now run with weekly-review-five-questions.md and
         # one-on-one-2026-11-03.md in the vault — the day reading whose leftover words fit
         # one note wins, so a note sharing the meeting word cannot steal the said day
+        # round 3g: the fit test is the finder's loose match, so a misheard or extra name
+        # word still lets the said day win
+        ("weakly one on one november three", W("11-03")),
+        ("meeting weekly one on one december five", W("12-05")),
+        ("team weekly one on one november three", W("11-03")),
+        ("sara weekly one on one november five", W("11-05")),
         # rounds 0/1: name words alone stay name tokens
         ("march budget", "Plans/march-budget.md"),
         ("first principles", "first-principles.md"),
@@ -962,8 +968,9 @@ def test_jauto3c_date_table(tmp_path):
 
 def test_jauto3c_r3f_fuzz_said_day_never_opens_another_day(tmp_path):
     """Deterministic fuzz: dated weekly-one-on-one notes plus number-word distractors; the
-    ask is the name and a said unit day in either word order. A single result is only ever
-    the note of the day said — a tie or the right note, never a different date."""
+    ask is the name and a said unit day in either word order, with r3g misheard name words
+    and extra words before or after the name. A single result is only ever the note of the
+    day said — a tie or the right note, never a different date."""
     rng = random.Random(20261120)
     days = (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5),
             ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9))
@@ -977,6 +984,11 @@ def test_jauto3c_r3f_fuzz_said_day_never_opens_another_day(tmp_path):
         dw, dn = rng.choice(days)
         mw, mn = rng.choice(months)
         name = rng.choice(("weekly one on one", "one on one weekly"))
+        if rng.random() < 0.3:  # r3g: a misheard name word fits no note exactly
+            name = name.replace("weekly", rng.choice(("weakly", "weakest", "wicked")))
+        if rng.random() < 0.3:  # r3g: an extra word before or after the name
+            name = rng.choice((rng.choice(("team", "meeting", "sara")) + " " + name,
+                               name + " " + rng.choice(("team", "sara", "review"))))
         ask = rng.choice((f"{name} {mw} {dw}", f"{dw} {mw} {name}"))
         got = note_find.find(names, ask)
         if len(got) == 1:
