@@ -838,3 +838,106 @@ def test_jauto3c_r3c_bare_unit_after_the_month_is_only_a_fallback(tmp_path):
         ("two pager november 19th", "Notes/two-pager-2026-11-19.md"),
     ):
         assert note_find.find(names, ask) == [want], ask
+
+
+# --- jauto3c date table ---
+
+
+def test_jauto3c_date_table(tmp_path):
+    """Every probe from the jauto3c round 0..3d reviews on one vault: dates before and after
+    the name, digits, ordinals, word days, twenty/thirty forms, wrong dates keep the tie,
+    and the name-word notes (march budget, second draft, january, first principles, second
+    brain) stay unchanged."""
+    vault = tmp_path / "vault"
+    rels = [f"Meetings/weekly-one-on-one-2026-{md}.md" for md in
+            ("11-01", "11-03", "11-05", "11-09", "11-20", "11-21",
+             "12-01", "12-02", "12-05", "12-30", "12-31")] + [
+        "Notes/two-pager-2026-11-18.md", "Notes/two-pager-2026-11-19.md",
+        "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md",
+        "Plans/march-budget.md", "Plans/april-budget.md", "Drafts/first-draft.md",
+        "january.md", "first-principles.md", "second-brain.md", "may-ideas.md"]
+    for rel in rels:
+        p = vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    names = note_find.scan(str(vault))
+    W = lambda md: f"Meetings/weekly-one-on-one-2026-{md}.md"  # noqa: E731
+    T = lambda md: f"Notes/two-pager-2026-{md}.md"  # noqa: E731
+    S7, S18 = "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md"
+    TIE = [S7, S18]
+    rows = [
+        # round 0: the 11-18 family and the 11-07 family
+        ("saudi whale ideas november 18th", S18),
+        ("saudi whale ideas the 18th of november", S18),
+        ("saudi whale ideas nov 18", S18),
+        ("saudi whale ideas november the eighteenth", S18),
+        ("saudi whale ideas 18 november", S18),
+        ("saudi whale ideas november eighteen", S18),
+        ("saudi whale ideas november 18 2026", S18),
+        ("saudi whale ideas on november 18th please", S18),
+        ("saudi whale ideas 2026 11 18", S18),
+        ("saudi whale ideas 1118", S18),
+        ("saudi whale ideas 7th november", S7),
+        ("saudi whale ideas november 7", S7),
+        ("saudi whale ideas nov 07", S7),
+        ("saudi whale ideas the seventh of november", S7),
+        # round 0: a wrong or partial date keeps the tie (also the bogus days of round 2/3c)
+        ("saudi whale ideas december 3rd", TIE),
+        ("saudi whale ideas november 1st", TIE),
+        ("saudi whale ideas november twenty first", TIE),
+        ("saudi whale ideas november", TIE),
+        ("saudi whale ideas february 30", TIE),
+        ("saudi whale ideas the thirty second of december", TIE),
+        # round 2: a tens+unit day before or after the month
+        ("weekly one on one the twenty first of november", W("11-21")),
+        ("weekly one on one twenty-first of november", W("11-21")),
+        ("weekly one on one the thirty first of december", W("12-31")),
+        ("weekly one on one november twenty first", W("11-21")),
+        ("weekly one on one the first of november", W("11-01")),
+        ("weekly one on one twenty one november", W("11-21")),
+        ("weekly one on one december first", W("12-01")),
+        ("weekly one on one december thirty first", W("12-31")),
+        ("weekly one on one the thirty-first december", W("12-31")),
+        ("weekly one on one 2026 the twenty first of november", W("11-21")),
+        # round 3: digits never join a unit word; the words twenty/thirty keep the said day
+        ("weekly one on one 20th of november", W("11-20")),
+        ("weekly one on one 20 november", W("11-20")),
+        ("november 20 one on one weekly", W("11-20")),
+        ("weekly one on one november 20th", W("11-20")),
+        ("weekly one on one the twenty first of november", W("11-21")),
+        ("weekly one on one 30th of december", W("12-30")),
+        # round 3b: a name's "one" never joins the tens word
+        ("weekly one on one twenty november", W("11-20")),
+        ("weekly one on one twenty of november", W("11-20")),
+        ("one on one twenty november weekly", W("11-20")),
+        ("weekly one on one thirty december", W("12-30")),
+        # round 3c: a bare unit after the month is only a fallback; a day before the month wins
+        ("20th of november one on one weekly", W("11-20")),
+        ("20 november one on one weekly", W("11-20")),
+        ("twenty november one on one weekly", W("11-20")),
+        ("twenty first of november one on one weekly", W("11-21")),
+        ("thirty december one on one weekly", W("12-30")),
+        ("weekly one on one november", W("11-01")),
+        ("18 november two pager", T("11-18")),
+        ("two pager november 19th", T("11-19")),
+        # round 3d: a unit word that is part of a note name is not the day
+        ("weekly one on one november three", W("11-03")),
+        ("weekly one on one november five", W("11-05")),
+        ("weekly one on one november nine", W("11-09")),
+        ("weekly one on one december five", W("12-05")),
+        ("three november one on one weekly", W("11-03")),
+        ("five december one on one weekly", W("12-05")),
+        # rounds 0/1: name words alone stay name tokens
+        ("march budget", "Plans/march-budget.md"),
+        ("first principles", "first-principles.md"),
+        ("second brain", "second-brain.md"),
+        ("may ideas", "may-ideas.md"),
+        ("second draft", []),
+    ]
+    for ask, want in rows:
+        assert note_find.find(names, ask) == ([want] if isinstance(want, str) else want), ask
+    assert note_find.find(names, "january", literal=True) == ["january.md"]
+    for text in ("open the march budget notes", "open the january note",
+                 "open the note weekly one on one november three",
+                 "open the second brain notes"):
+        assert intents.parse(text, apps=A, note_names=names).kind == "note_open", text

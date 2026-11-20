@@ -155,16 +155,19 @@ def _day_at(ws: list[str], i: int) -> int:
     return v
 
 
-def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
+def _spoken_date(ws: list[str], vocab: frozenset[str] = frozenset()) -> tuple[str, frozenset[int]]:
     """MMDD for a month plus a day said anywhere in the words (before or after the month,
     "of"/"the" allowed; a said 4-digit year in front), with the indices that formed it;
     ("", frozenset()) when no month+day was said. jauto3c r1: only these words leave the
     query — a lone "march" or "second" is a name token, as on ci-ipa. r3c: a bare unit word
-    ("one".."nine") after the month is only a fallback; a day said before the month wins."""
+    ("one".."nine") after the month is only a fallback; a day said before the month wins.
+    r3d: with bare units on both sides of the month, the one that is a note-name word
+    (in vocab) is not the day when the other is not."""
     year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
     fallback: tuple[str, frozenset[int]] = ("", frozenset())
     for i, w in enumerate(ws):
         if w in _MONTHS:
+            fb_w = ""
             for step in (1, -1):
                 j = i + step
                 while 0 <= j < len(ws) and ws[j] in ("of", "the"):
@@ -183,6 +186,11 @@ def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
                             # r3c: a bare "one".."nine" after the month may be the name, not the
                             # day — keep it only when no day is said before the month
                             fallback = found
+                            fb_w = ws[j]
+                            continue
+                        if step == -1 and fb_w and ws[j] in _BARE_UNIT \
+                                and ws[j] in vocab and fb_w not in vocab:
+                            # r3d: bare units on both sides — the note-name word is not the day
                             continue
                         return found
     return fallback
@@ -192,16 +200,16 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     """Note paths a spoken name means: query tokens must hit the stem (or the folder words);
     the best hit count wins, all ties are kept. [] = no note matches."""
     ws = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w]
+    index = _prepared(names)
     # jauto3c r1: date words leave the query only when they formed a spoken date; with no
     # month+day the tokens are exactly tokens(words), as on ci-ipa.
-    spoken, drop = _spoken_date(ws)
+    spoken, drop = _spoken_date(ws, index["vocab"])
     q = tokens(" ".join(w for i, w in enumerate(ws) if i not in drop))
     if not q:
         return []
     # jauto3 round 2 (R2-3a): the cost is |q| x |vocab|; cap the ask so it cannot tie a pool worker
     seen: set[str] = set()
     q = [w for w in q if not (w in seen or seen.add(w))][:12]
-    index = _prepared(names)
     # jauto3 round 3 (R3-1) + jauto3c: a spoken month+day is the tie-break, else the raw digits
     digits = spoken or "".join(c for c in words if c.isdigit())
     key = (tuple(q), literal, digits)
