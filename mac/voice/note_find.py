@@ -124,10 +124,14 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     q = tokens(words)
     if not q:
         return []
+    # jauto3 round 2 (R2-3a): the cost is |q| x |vocab|; cap the ask so it cannot tie a pool worker
+    seen: set[str] = set()
+    q = [w for w in q if not (w in seen or seen.add(w))][:12]
     index = _prepared(names)
     key = (tuple(q), literal)
-    if key in index["found"]:
-        return list(index["found"][key])
+    hit = index["found"].get(key)  # jauto3 round 2 (R2-3b): one read, no check-then-index race with clear()
+    if hit is not None:
+        return list(hit)
     near = [frozenset(t for t in index["vocab"] if _match(w, t)) for w in q]  # |Q| x |vocab| ratios, once
     scored: list[tuple[int, str]] = []
     for rel, stem, every in index["notes"]:
@@ -146,9 +150,10 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     return out
 
 
-def speak_name(rel: str) -> str:
+def speak_name(rel: str, keep_digits: bool = False) -> str:
     """What the overlay says for a found note: the stem's words, dashes and underscores as spaces, dates
-    and other digit-only words dropped (round 1 U3) unless nothing else is left."""
+    and other digit-only words dropped (round 1 U3) unless nothing else is left. keep_digits (round 2
+    R2-1): spoken with the digit words, for ties that only a date or folder can tell apart."""
     stem = os.path.splitext(rel.rsplit("/", 1)[-1])[0]
     words = stem.replace("-", " ").replace("_", " ").split()
-    return " ".join([w for w in words if not w.isdigit()] or words)
+    return " ".join(words if keep_digits else ([w for w in words if not w.isdigit()] or words))

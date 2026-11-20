@@ -3151,7 +3151,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         try:  # jauto3: the vault walk is bounded like a policy check; stuck or failing = today's routing
             note_names = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
                 _POLICY_POOL, _note_names, body.text), POLICY_CHECK_S)
-        except (asyncio.TimeoutError, OSError):
+        except Exception:  # jauto3 round 2 (R2-3c): any failure, not only a timeout, = today's routing
             note_names = ()
         word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names,
                              model_names=model_names, note_names=note_names)
@@ -3561,7 +3561,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                 link_turn = True  # jauto3 round 1 (S3): a query string may carry a token
                 if on_step:
                     on_step("private", tag="[open link]")
-            shown = (opened or intent.arg)[:60]
+            # jauto3 round 2 (R2-2): a refused typed query/long link never speaks or stores its URL
+            shown = (opened or (intents.site_row_arg(intent.arg) if link_turn else intent.arg))[:60]
             line = f"Opening {shown}." if opened else f"I couldn't find {shown}."
             if not opened and intent.kind == "open_app":
                 tie = intents.app_candidates(intent.arg, apps)
@@ -6685,7 +6686,19 @@ async def _note_open(hits: list[str], name: str, deps: OverlayDeps) -> tuple[str
     """jauto3 (owner 3A): the owner named a note; vault names stay on this Mac. `hits` is never empty
     (round 1 U1: no match goes to the agent route before this)."""
     if len(hits) > 1:  # round 1 (U2): no pending choice, so a hint, not a question
-        names = sorted(note_find.speak_name(r) for r in hits)
+        rels = sorted(hits)
+        names = [note_find.speak_name(r) for r in rels]
+        if len(set(names)) < len(names):  # jauto3 round 2 (R2-1): a name heard twice picks nothing
+            names = [note_find.speak_name(r, keep_digits=True) if names.count(n) > 1 else n
+                     for r, n in zip(rels, names)]
+        collide = [names.count(n) > 1 for n in names]
+        for i, n in enumerate(names):  # still colliding: same stem, different folder
+            if collide[i]:
+                parent = rels[i].rsplit("/", 1)[0] if "/" in rels[i] else ""
+                folder = " ".join(parent.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").split()) \
+                    or "the vault top folder"
+                names[i] = f"{n} in {folder}"
+        names = sorted(names)
         count = _COUNT_WORDS.get(len(names), str(len(names)))
         shown = (f"{', '.join(names[:-1])} and {names[-1]}" if len(names) <= 3
                  else f"{', '.join(names[:3])} and {len(names) - 3} more")

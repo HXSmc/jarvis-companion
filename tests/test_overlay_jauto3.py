@@ -209,6 +209,7 @@ def test_word_only_has_note_open():
 
 # --- gateway wiring: the hunks above through the real utterance pipeline ------------------
 
+import asyncio  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
@@ -540,3 +541,47 @@ def test_scan_dirs_bound(tmp_path, monkeypatch):
     assert note_find.DIRS_MAX == 4000
     monkeypatch.setattr(note_find, "DIRS_MAX", 3)  # stands for the 4000 bound: root + 2 folders
     assert len(note_find.scan(str(root))) == 2
+
+
+# --- round 2 ---
+
+
+def _tie_line(hits):
+    return asyncio.run(overlay._note_open(list(hits), "x", None))[0]
+
+
+def test_round2_dated_tie_keeps_the_date_words():
+    hits = ["Research/llm-switch-benchmark-2026-11-18.md", "Research/llm-switch-benchmark-2026-11-19.md"]
+    assert note_find.find(tuple(hits), "open the llm switch benchmark note") == hits  # a real tie
+    line = _tie_line(hits)
+    assert line == "Two notes match: llm switch benchmark 2026 11 18 and llm switch benchmark 2026 11 19." \
+                   " Say more of the name."
+
+
+def test_round2_folder_tie_names_the_folder():
+    assert _tie_line(["A/Meeting.md", "B/Meeting.md"]) == \
+        "Two notes match: Meeting in A and Meeting in B. Say more of the name."
+    assert _tie_line(["Meeting.md", "Projects/Meeting.md"]) == \
+        "Two notes match: Meeting in Projects and Meeting in the vault top folder. Say more of the name."
+
+
+def test_round2_distinct_tie_line_unchanged():
+    assert _tie_line(["Notes/llm-local-models.md", "Notes/llm-switch-bench.md"]) == \
+        "Two notes match: llm local models and llm switch bench. Say more of the name."
+
+
+def test_round2_refused_typed_link_never_spoken(client, monkeypatch):
+    monkeypatch.setattr(intents, "open_site", lambda arg, **k: None)  # refused after parse accepted it
+    ran, events = run_turn(client, "open https://example.com/search?q=secret-token", [], conv_id="j3r2")
+    assert ran == []
+    assert says(events) == ["I couldn't find example.com."]
+    assert not any("secret-token" in json.dumps(t) for t in overlay.debug_log.snapshot()["turns"])
+
+
+def test_round2_long_ask_capped_at_12_words():
+    names = ("Research/llm-switch-benchmark.md", "Research/llm-local.md")
+    filler = " ".join(f"word{i}" for i in range(90))
+    assert note_find.find(names, f"open the note {filler}") == []  # returns, never ties a worker for long
+    keys = list(note_find._index["found"])
+    assert keys and all(len(k[0]) <= 12 for k in keys)  # at most 12 unique words scored, order kept
+    assert note_find.find(names, "open the llm switch benchmark note") == [names[0]]  # normal asks match
