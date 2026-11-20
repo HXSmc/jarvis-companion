@@ -11,6 +11,7 @@ shortcuts/build/
 *.md
 !/README.md
 !/docs/jarvis-facts.md
+!/skills/blender-object/SKILL.md
 !/skills/svg-drawing/SKILL.md
 .env
 .env.*

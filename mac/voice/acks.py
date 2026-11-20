@@ -71,6 +71,16 @@ PHRASES = {
     "sessions": "Checking your sessions.",
     "no_sessions": "No sessions to report.",
     "no_session_named": "I don't see a session called that.",
+    # jfollow11c: read-only repo answers, sessions that say what they did, and a fresh start.
+    "repo": "Checking the repo.",
+    "repo_refused": "I won't read that file, sir. It looks private.",
+    "repo_unreadable": "I can't read that one, sir.",
+    "repo_busy": "I'm busy with another search, sir. Ask again in a moment.",
+    "repo_unreachable": "I can't reach the mini PC right now, sir.",
+    # A template ({repo} = a listed repo name only): spoken through the synth, never prerendered.
+    "repo_no_hits": "I didn't find that in {repo}, sir.",
+    "session_title_only": "I only have its title, sir. It's on the card.",
+    "new_topic": "Okay, new topic, sir.",
     # jfollow4: session/memory/workspace helpers and the vault/cut-off guards.
     "session_none_named": "I don't see that session.",
     "session_device": "Mini PC only.",
@@ -126,13 +136,40 @@ PHRASES = {
     "video_not_found": "The video doesn't say. Say: watch it.",
     "video_no_captions": "That video has no captions I can read. Say: watch it.",
     "job_started": "On it, I'll tell you when it's ready.",
+    # jfollow10d: 3D objects ({name} lines are templates: spoken through the synth, never prerendered).
+    "model_what": "Tell me what to make, like: create a 3D mug.",
+    "model_unset": "Notes vault not set, so I can't keep 3D objects.",
+    "model_missing": "I don't have a 3D object called that.",
+    "model_none": "You don't have any 3D objects yet.",
+    "model_ready": "Your {name} is ready, sir.",
+    "model_not_synced": "Your {name} is made, not here yet. Say: pull up {name} later.",
+    "model_failed": "I couldn't make your {name}. Try again.",
+    "model_bad_file": "That 3D file looks broken, so I won't open it.",
+    "model_shown": "Here's your {name}. Drag to turn it, scroll or pinch to zoom.",
+    "model_limit": "That's three background jobs this hour. Try again later.",
     "watch_ready": "The video summary is ready, sir.",
     "watch_failed": "I couldn't start that on the mini PC.",
     "watch_timeout": "The video summary took too long, so I gave up.",
     "watch_no_summary": "The mini PC finished without a summary.",
     "watch_limit": "That's three videos this hour. Try again later.",
     "web_no_enlarge": "The map stays this size. Zoom inside it instead.",
+    "drawing_no_enlarge": "The drawing stays this size. Zoom inside it instead.",  # jfollow11f
     "geo_barge": "Say that again once I've finished, sir.",
+    # jfollow10f: general places near home (nearest Dishoom, the best way to the cinema, is a film on).
+    "place_best": "{name} is closest, {mins} {how}. It's on the card.",
+    "place_best_km": "{name} is closest, {km} kilometres away. It's on the card.",
+    "place_best_closed": "{name} is closest, {mins} {how}, but closed now. It's on the card.",
+    "place_best_km_closed": "{name} is closest, {km} kilometres, but closed now. It's on the card.",
+    "cinema_best": "{name} is your best bet, {mins} {how}, next showing {time}.",
+    "cinema_none_left": "Nothing left to catch {when}. {name} is closest, {mins} {how}.",
+    "film_best": "{film} is on at {name} at {time}, {mins} {how}.",
+    "film_none": "I can't see {film} at any cinema near you {when}.",
+    "shows_down": "I can't see showtimes right now. {name} is closest, {mins} {how}.",
+    "place_none": "I can't find {query} near you.",
+    "place_offer": "Did you mean {name}",  # jfollow11f: unsure sound-alike name; the service adds the "?"
+    "place_offer_no": "OK. Try the name again.",
+    "place_down": "I can't search places just now.",
+    "place_outside": "I can only search places in London for now.",
     # jfollow10c: drawings
     "draw_started": "Drawing it now, sir.",
     "draw_failed": "I couldn't draw that cleanly, sir.",
@@ -167,6 +204,13 @@ THINKING_POOL: tuple[tuple[str, str, str], ...] = tuple(
 PHRASES.update({key: text for key, text, _tag in THINKING_POOL})
 
 
+# jfollow11c B8: two repo lines are longer than the 12-word ack rule (PHRASES): kept apart, synthesized per use.
+LONG_LINES = {
+    "repo_off": "I can't read your repos yet, sir. They're not set up on the mini PC.",
+    "repo_unknown": "I don't see a repo by that name, sir. The closest ones are on the card.",
+}
+
+
 def sir_rate() -> float:
     """Chance a thinking ack carries ", sir"; OVERLAY_SIR_RATE overrides at call time."""
     try:
@@ -188,6 +232,8 @@ ACK_POLICY: dict[str, str | None] = {
     "sessions": "sessions",
     "session": None, "memory": None, "workspace": None, "vault_secrets": None,
     "card_remove": None, "card_help": None,
+    "repo": "repo",  # jfollow11c R1: the slow mini PC path; a refusal by name skips it (overlay)
+    "new_topic": None,  # jfollow11c: its own fixed line is the speech
     "answer": "answer",
 }
 

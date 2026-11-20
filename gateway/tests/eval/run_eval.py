@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import sys
 import time
@@ -43,10 +44,29 @@ class _NoAgent:  # the tool-using agent tier never runs in the eval
         pass
 
 
-def _wait_warm(deps, limit_s: float = 10.0) -> None:
+class _FailPool:
+    """jfollow11b: a row's answer step fails with its `fake_failure` class (e.g. the usage limit)."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def get(self, conv_id):
+        return self
+
+    def drop(self, conv_id):
+        pass
+
+    def ask(self, text, jpeg=None, on_text=None):
+        raise lean.LeanError(self.reason, "eval fake")
+
+    def close(self):
+        pass
+
+
+def _wait_warm(deps) -> None:
     """Before a turn, give a rebuilding picker the seconds a spoken pause gives it on a running gateway."""
     picker = getattr(getattr(deps, "intent_pick", None), "__self__", None)
-    end = time.monotonic() + limit_s
+    end = time.monotonic() + 10.0
     while picker is not None and picker._session is None and time.monotonic() < end:
         time.sleep(0.1)
 
@@ -92,6 +112,9 @@ async def _once(q: dict, n: int, deps, model: bool) -> dict:
                 cut = True
                 raise _Cut
 
+    fake = q.get("fake_failure")
+    if fake:  # the answer pools fail as the row says; runs with and without the model
+        deps = dataclasses.replace(deps, conversations=_FailPool(fake), quiet_conversations=_FailPool(fake))
     body = overlay.TurnBody(text=q["text"], conv_id=f"eval-{q['id']}-{n}")
     try:
         async with asyncio.timeout(90):
@@ -111,7 +134,7 @@ async def _once(q: dict, n: int, deps, model: bool) -> dict:
     if not any(k in want for k in got):
         why.append(f"intent {got or 'none'} not in {want}")
     # Answer checks need an answer: intents cut after the pick, or a no-model run, are NOT RUN.
-    ran = model and not cut and bool(answer) and "[error" not in answer
+    ran = (model or bool(fake)) and not cut and bool(answer) and "[error" not in answer
     need = bool(q["expect_answer_contains"] or q["expect_answer_not_contains"])
     low = answer.lower()
     if need and ran:

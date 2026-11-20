@@ -12,11 +12,14 @@ public struct OutageGate {
     public private(set) var last: Date?
     public private(set) var announced = false
 
-    /// The gate the app uses. A service restart refuses connections for ~37-45 s (the voice
-    /// model loads before the port opens; measured on the Mac), so the grace must outlast it.
-    /// A stop of 45 s plus that start-up is ~80 s and is still said. maxGap: retries are
-    /// ~1-3 s apart; a bigger gap is a Mac sleep, not retrying.
-    public static var service: OutageGate { OutageGate(grace: 60, maxGap: 10) }
+    /// The gate the app uses. Round 10: a restart refused connections for 37-45 s because the
+    /// voice and its 137 ack clips rendered before the port opened. jfollow11b moved that work
+    /// after the port opens (mini PC split: imports 0.9 s, voice check 0.5 s, model + clips 115 s
+    /// of 116.5 s), so a restart now refuses for an estimated 45 x 1.2 % < 1 s plus Python start.
+    /// grace = clamp(ceil(estimate + 15), 30, 60) = 30. The Mac live run checks it against
+    /// max(5 cold starts) + 10..20 s. maxGap: retries are ~1-3 s apart; a bigger gap is a Mac
+    /// sleep, not retrying.
+    public static var service: OutageGate { OutageGate(grace: 30, maxGap: 10) }
 
     public init(grace: TimeInterval = 30, maxGap: TimeInterval? = nil) {
         self.grace = grace

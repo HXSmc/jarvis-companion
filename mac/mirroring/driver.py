@@ -91,6 +91,8 @@ CF.CFRelease.argtypes = [ctypes.c_void_p]
 
 kCGHIDEventTap = 0
 kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp = 5, 1, 2
+# A move with the button held must be a drag event, or apps see a hover (CGEventTypes.h).
+kCGEventLeftMouseDragged = 6
 # CGWindowListCreateImage listOption: composite ONLY the window with the given
 # id — with 0 the whole screen region behind it gets composited (CGWindow.h).
 kCGWindowListOptionIncludingWindow = 1 << 3
@@ -266,9 +268,9 @@ def swipe(x1: float, y1: float, x2: float, y2: float) -> None:
     AX.CGEventPost(kCGHIDEventTap, AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, p1, 0))
     for frac in (0.25, 0.5, 0.75):
         p = CGPoint(x1 + (x2 - x1) * frac, y1 + (y2 - y1) * frac)
-        AX.CGEventPost(kCGHIDEventTap, AX.CGEventCreateMouseEvent(None, kCGEventMouseMoved, p, 0))
+        AX.CGEventPost(kCGHIDEventTap, AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDragged, p, 0))
         time.sleep(0.05)
-    AX.CGEventPost(kCGHIDEventTap, AX.CGEventCreateMouseEvent(None, kCGEventMouseMoved, p2, 0))
+    AX.CGEventPost(kCGHIDEventTap, AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseDragged, p2, 0))
     time.sleep(0.05)
     AX.CGEventPost(kCGHIDEventTap, AX.CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, p2, 0))
     time.sleep(0.1)

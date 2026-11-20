@@ -543,3 +543,93 @@ def test_update_lock_keeps_every_thread_write():
     for t in threads:
         t.join()
     assert sorted(cards.load()["s-lock"]["vals"]) == list(range(20))
+
+
+# --- mac ask: fixed Free / Message buttons, stored without the router -----------
+
+def _mac_ask(sid="s-done"):
+    resp = _event({"session": sid, "action": "ask", "kind": "mac", "text": "Mac is needed for tests, free it"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["need_id"]
+
+
+def _tap(need_id, answer, note="", msg_id="m-mac"):
+    return _call("POST", "/central/cards/s-done/answer", headers=IOS,
+                 json={"msg_id": msg_id, "need_id": need_id, "answer": answer, "note": note})
+
+
+def _router_messages():
+    return [r for r in router_stub.seen if r["path"].endswith("/message")]
+
+
+def test_mac_ask_posts_with_fixed_buttons():
+    _mac_ask()
+    need = cards.load()["s-done"]["need"]
+    assert need["kind"] == "mac" and need["options"] == []
+    bad = _event({"session": "s-done", "action": "ask", "kind": "mac", "text": "x", "options": ["x"]})
+    assert bad.status_code == 422 and "mac takes no options" in bad.text
+    assert cards.valid_answer(need, "Free") and cards.valid_answer(need, "Message")
+    assert not cards.valid_answer(need, "OK") and not cards.valid_answer(need, "Not yet")
+
+
+def test_mac_free_tap_is_recorded_without_router():
+    need_id = _mac_ask()
+    router_stub.seen.clear()
+    resp = _tap(need_id, "Free")
+    assert resp.status_code == 200 and resp.json() == {"ok": True, "action": "recorded"}
+    assert _router_messages() == []
+    assert _sessions()["s-done"]["card"]["need"]["answered"]["answer"] == "Free"
+    assert _tap(need_id, "Free", msg_id="m-mac2").status_code == 409
+
+
+def test_mac_message_needs_text_and_is_cleaned():
+    need_id = _mac_ask()
+    router_stub.seen.clear()
+    assert _tap(need_id, "Message", note="   ").status_code == 422
+    assert _tap(need_id, "Message", note="go\x07 ahead‮ now" + "x" * 400).status_code == 200
+    text = cards.load()["s-done"]["need"]["answered"]["text"]
+    assert text.startswith("go ahead now") and len(text) <= 300
+    assert not any(ord(c) < 0x20 or 0x202A <= ord(c) <= 0x202E for c in text)
+    assert _router_messages() == []
+
+
+def test_need_route_auth_and_states(router_db):
+    need_id = _mac_ask()
+    url = f"/cards/need?session=s-done&need_id={need_id}"
+    assert _call("GET", url).status_code == 401
+    assert _call("GET", url, headers=IOS).status_code == 401
+    waiting = _call("GET", url, headers=SHARED).json()
+    assert set(waiting) == {"state", "kind", "answer", "text", "at"}
+    assert waiting["state"] == "waiting" and waiting["kind"] == "mac"
+    _tap(need_id, "Message", note="give me 10 minutes")
+    done = _call("GET", url, headers=SHARED).json()
+    assert set(done) == {"state", "kind", "answer", "text", "at"}
+    assert done["state"] == "answered" and done["answer"] == "Message"
+    assert done["text"] == "give me 10 minutes" and done["at"]
+    assert _call("GET", f"/cards/need?session=s-done&need_id={'b' * 12}", headers=SHARED).json()["state"] == "gone"
+    _event({"session": "s-done", "action": "clear"})
+    gone = _call("GET", url, headers=SHARED).json()
+    assert set(gone) == {"state", "kind", "answer", "text", "at"} and gone["state"] == "gone"
+    assert _call("GET", f"/cards/need?session=nope&need_id={need_id}", headers=SHARED).status_code == 404
+    assert _call("GET", "/cards/need?session=s-done&need_id=zz", headers=SHARED).status_code == 422
+
+
+def test_choice_answer_still_goes_through_router(monkeypatch):
+    order = []
+    real_mark = cards.mark_answered
+    monkeypatch.setattr(cards, "mark_answered", lambda *a, **k: (order.append("mark"), real_mark(*a, **k)))
+    need_id = _event({"session": "s-done", "action": "ask", "kind": "choice", "text": "Mac is needed",
+                      "options": ["Free", "Not yet"]}).json()["need_id"]
+
+    class Seen(list):
+        def append(self, item):
+            if item["path"].endswith("/message"):
+                order.append("router")
+            super().append(item)
+    monkeypatch.setattr(router_stub, "seen", Seen())
+    resp = _call("POST", "/central/cards/s-done/answer", headers=IOS,
+                 json={"msg_id": "m-ch", "need_id": need_id, "answer": "Free"})
+    assert resp.status_code == 200, resp.text
+    sent = [r for r in router_stub.seen if r["path"] == "/sessions/s-done/message"]
+    assert len(sent) == 1 and order == ["router", "mark"]
+    assert cards.load()["s-done"]["need"]["answered"]["answer"] == "Free"

@@ -10,6 +10,9 @@ usage:
   jarvis-card ask preview "New header" --file shot.png    Looks good + Change it
   jarvis-card ask info "Merged, nothing to do"           no buttons, just a note
   jarvis-card ask hardware "Reseat the SATA cable"   Open in Hardware Mode button
+  jarvis-card ask mac "Mac is needed for tests, free it"  Free + Message buttons; the tap is stored, not sent
+  jarvis-card answer NEED_ID                             read an ask: waiting (exit 2) | free | message: TEXT |
+                                                         reply: TEXT | answered: ANSWER (exit 0) | gone (exit 3)
   jarvis-card file report.md ["title"]                   a .md/.txt/.pdf/.png/.jpg on the card
   jarvis-card link https://claude.ai/artifact/... ["title"]
   jarvis-card delegate CHILD_SESSION_ID "handed notifications"
@@ -39,11 +42,11 @@ TYPES = {".md": "text/markdown", ".markdown": "text/markdown", ".txt": "text/pla
          ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
-def call(path, data, content_type="application/json"):
+def call(path, data, content_type="application/json", method="POST"):
     token = config.get_token()
     if not token:
         sys.exit("no gateway token in the vault")
-    req = urllib.request.Request(GATEWAY + path, method="POST", data=data,
+    req = urllib.request.Request(GATEWAY + path, method=method, data=data,
                                  headers={"Authorization": f"Bearer {token}", "Content-Type": content_type})
     try:
         return json.loads(urllib.request.urlopen(req, timeout=30).read() or b"{}")
@@ -51,6 +54,27 @@ def call(path, data, content_type="application/json"):
         sys.exit(f"gateway answered {e.code}: {e.read()[:200].decode(errors='replace')}")
     except urllib.error.URLError as e:
         sys.exit(f"gateway unreachable: {e.reason}")
+
+
+def get(path):
+    return call(path, None, method="GET")
+
+
+def answer_line(need):
+    """One line for `jarvis-card answer` plus its exit code. Text is untrusted
+    data, already cleaned to one line by the gateway."""
+    state, kind, answer, text = need.get("state"), need.get("kind"), need.get("answer"), need.get("text")
+    if state == "waiting":
+        return "waiting", 2
+    if state != "answered":
+        return "gone", 3
+    if answer == "Free":
+        return "free", 0
+    if kind == "mac" and answer == "Message":
+        return f"message: {text or ''}", 0
+    if answer == "reply":
+        return f"reply: {text or ''}", 0
+    return f"answered: {answer}", 0
 
 
 def upload(session, path, title=""):
@@ -98,7 +122,16 @@ def main(argv):
         file_id = upload(session, files[-1]) if files else ""
         out = event(session=session, action="ask", kind=kind, text=text, options=options, items=items,
                     file_id=file_id)
-        print(f"card: ask posted ({kind}, id {out.get('need_id')}). The owner's answer arrives as a message.")
+        if kind == "mac":
+            print(f"card: ask posted (mac, id {out.get('need_id')}). Read the tap with: jarvis-card answer "
+                  f"{out.get('need_id')}")
+        else:
+            print(f"card: ask posted ({kind}, id {out.get('need_id')}). The owner's answer arrives as a message.")
+    elif cmd == "answer" and len(args) == 1:
+        q = urllib.parse.urlencode({"session": session, "need_id": args[0]})
+        line, code = answer_line(get(f"/cards/need?{q}"))
+        print(line)
+        sys.exit(code)
     elif cmd == "file" and args:
         upload(session, args[0], " ".join(args[1:]))
         print("card: file attached")

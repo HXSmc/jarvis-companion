@@ -298,3 +298,42 @@ def test_chart_card():
     assert len(hud.validate_card({**line, "labels": ["x" * 40] + line["labels"][1:]})["labels"][0]) == 24
     assert hud.validate_card({**line, "chart": "radar"}) is None
     assert "chart" in json.dumps(hud.schema_json()["$defs"]["card"])
+
+
+def test_web_model_page():
+    """jfollow10d criterion 21: the model page's data is {slug, view} only; service-only like every web card."""
+    msg = json.loads((FIXTURES / "web-model.json").read_text())
+    (card,) = msg["cards"]
+    assert hud.validate_card(card, allow_web=True) == card
+    assert hud.validate_card(card) is None
+    extra = {**card, "data": {**card["data"], "path": "../../x", "html": "<b>"}}
+    assert hud.validate_card(extra, allow_web=True)["data"] == {"slug": "test-mug", "view": "model"}
+    for bad in ({"slug": "../x", "view": "model"}, {"slug": "Test", "view": "model"}, {"slug": "a" * 49, "view": "model"},
+                {"slug": "test-mug", "view": "edit"}, {"slug": "test-mug"}, "test-mug"):
+        assert hud.validate_card({**card, "data": bad}, allow_web=True) is None, bad
+    assert '"model"' in json.dumps(hud.schema_json()["$defs"]["card"])
+
+
+def test_map_rows():
+    """jfollow10f: the map card's ranked rows, credit keys and as-of time; caps and drops, service-only."""
+    card = json.loads((FIXTURES / "web-places.json").read_text())["cards"][0]
+    assert hud.validate_card(card, allow_web=True) == card
+    assert hud.validate_card(card) is None
+    data = card["data"]
+    row = data["rows"][0]
+
+    def rows_of(**changes):
+        out = hud.validate_card({**card, "data": {**data, **changes}}, allow_web=True)
+        return out["data"]
+
+    assert len(rows_of(rows=data["rows"] + [row])["rows"]) == 5
+    assert rows_of(rows=[{**row, "name": "N" * 60}])["rows"][0]["name"] == "N" * 40
+    assert rows_of(rows=[{**row, "mode": "car"}, row])["rows"] == [row]
+    times = [{"at": "25:00", "film": "x"}] + [{"at": f"1{i}:00", "film": "x"} for i in range(4)]
+    assert [t["at"] for t in rows_of(rows=[{**row, "times": times}])["rows"][0]["times"]] == ["10:00", "11:00", "12:00"]
+    assert rows_of(credits=["osm", "evil"])["credits"] == ["osm"]
+    assert "asof" not in rows_of(asof="<b>")
+    assert rows_of(rows=[{**row, "name": "A\u202eB\u200bC"}])["rows"][0]["name"] == "ABC"
+    assert rows_of(rows=[{**row, "hours": "open now"}])["rows"][0].get("hours") is None
+    assert "rows" not in rows_of(rows=[{**row, "min": 601}])
+

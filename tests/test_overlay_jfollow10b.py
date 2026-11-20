@@ -250,7 +250,8 @@ def test_prompt_show_dont_link():
 
 def test_hosts_allow_list(net):
     assert geo.HOSTS == {"valhalla1.openstreetmap.de", "routing.openstreetmap.de", "nominatim.openstreetmap.org",
-                         "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org"}
+                         "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org",
+                         "photon.komoot.io", "clusterflick.com", "overpass-api.de"}  # jfollow10f, 11f
     for url in (geo.VALHALLA, geo.OSRM_CAR, geo.NOMINATIM, geo.POSTCODES, geo.TFL, geo.TILE_URL.format(z=1, x=0, y=0)):
         parts = httpx.URL(url)
         assert parts.scheme == "https" and parts.host in geo.HOSTS, url
@@ -428,6 +429,29 @@ def test_model_cannot_emit_web_card(client):
     assert src.count("allow_web=True") == geo_fn.count("allow_web=True") == 2
 
 
+# jfollow11f: leaflet.css is restyled to the map.css tokens; these upstream layout rules must survive it.
+LEAFLET_LAYOUT = [
+    (".leaflet-pane", "position: absolute"),
+    (".leaflet-tile", "position: absolute"),
+    (".leaflet-map-pane canvas", "z-index: 100"),
+    (".leaflet-tile-pane", "z-index: 200"),
+    (".leaflet-overlay-pane", "z-index: 400"),
+    (".leaflet-marker-pane", "z-index: 600"),
+    (".leaflet-zoom-animated", "transform-origin: 0 0"),
+    (".leaflet-top", "position: absolute"),
+    (".leaflet-bottom", "position: absolute"),
+    (".leaflet-top", "top: 0"),
+    (".leaflet-right", "right: 0"),
+    (".leaflet-bottom", "bottom: 0"),
+    (".leaflet-left", "left: 0"),
+    (".leaflet-control", "position: relative"),
+    (".leaflet-container", "overflow: hidden"),
+    (".leaflet-popup", "position: absolute"),
+    (".leaflet-tooltip", "position: absolute"),
+    (".leaflet-bar a", "display: block"),
+]
+
+
 def test_vendored_leaflet():
     notices = (ROOT / "mac" / "overlay" / "THIRD_PARTY_NOTICES.txt").read_text()
     assert "Leaflet 1.9.4" in notices and "BSD 2-Clause License" in notices
@@ -435,9 +459,23 @@ def test_vendored_leaflet():
     web = ROOT / "mac" / "overlay" / "Resources" / "web"
     files = sorted(p for p in (web / "vendor" / "leaflet").rglob("*") if p.is_file())
     assert len(files) == 6
-    for p in files:
+    for p in files:  # 5 byte-exact upstream files + the restyled css, each with its sha256 line
         rel = p.relative_to(web).as_posix()
         assert f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {rel}" in notices, rel
+    assert "leaflet.css is modified" in notices
+    assert "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6  (upstream leaflet.css)" in notices
+    css = (web / "vendor" / "leaflet" / "leaflet.css").read_text()
+    # upstream's two bug-tracker links live in comments; no rule may load anything from the network
+    code = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    low = code.lower()
+    assert "@import" not in low and "http" not in low and "expression(" not in low
+    urls = re.findall(r"url\(([^)]*)\)", css)
+    assert urls and all(re.fullmatch(r"images/[a-z0-9-]+\.png", u) for u in urls), urls
+    blocks = [([x.strip() for x in sel.split(",")], body)
+              for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", code)]
+    for sel, decl in LEAFLET_LAYOUT:
+        assert any(sel in sels and re.search(rf"(^|[;\s]){re.escape(decl)}\s*;", body)
+                   for sels, body in blocks), (sel, decl)
 
 
 # --- ruling 4: roads ---------------------------------------------------------------------------
@@ -948,7 +986,7 @@ def _run(coro):
 def test_watch_returns_at_once(monkeypatch, tmp_path):
     def slow(request):
         if request.method == "POST":
-            time.sleep(5)
+            time.sleep(1.5)
             return httpx.Response(200, json={"session_id": "sess-1"})
         return httpx.Response(200, json=[])
     _companion(monkeypatch, tmp_path, slow)

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from mac.voice import lean
 
 PICK_MODEL = "haiku"
-PICK_TIMEOUT_S = 1.5
+PICK_TIMEOUT_S = 2.5  # jfollow11z: 18 Nov picks ran at a ~1.5 s median and timed out at 1.5 s
 PICK_CONF = 0.6
 JOB_CONF = 0.85
 REBUILD_AFTER = 25
@@ -37,6 +37,7 @@ PICKS: dict[str, tuple[frozenset, frozenset]] = {
     "youtube": (frozenset(), frozenset({"query"})),
     "watch": (frozenset(), frozenset()),
     "sessions": (frozenset(), frozenset()),
+    "repo": (frozenset({"read", "search"}), frozenset({"repo", "query"})),
     "agent": (frozenset(), frozenset()),
     "answer": (frozenset(), frozenset()),
 }
@@ -51,14 +52,20 @@ ENUM_SLOTS = {
 WORD_ONLY = frozenset({
     "auto_mode", "session", "memory", "workspace", "vault_secrets", "open_app", "open_site", "card_size",
     "card_help", "hide", "show", "aside", "restore", "clock", "hunk", "git_diff", "ground", "look",
-    "place_save", "place_forget", "media",
+    "place_save", "place_forget", "media", "model_show", "model_list", "new_topic", "note_open",  # jauto3
 })
+# jfollow11z R2: word kinds whose rule is an anchored whole-request form (every eval and owner row checked):
+# the turn skips the pick model for them.
+WORD_SURE = frozenset({"clear", "card_remove", "move"})
 KIND_TO_PICK = {
     "stop": "stop", "clear": "clear", "card_remove": "card_remove", "move": "move",
     "geo_map": "map", "geo_roads": "map",
     "transit_next": "tfl", "transit_status": "tfl", "transit_journey": "tfl",
     "draw": "draw", "video_ask": "youtube", "video_watch": "watch",
     "sessions": "sessions", "agent": "agent", "answer": "answer",
+    "model_create": "3d", "model_list": "3d", "model_show": "3d",
+    "place": "place",  # jfollow11f
+    "repo": "repo",  # jfollow11c
 }
 
 PICK_PROMPT = """You sort one spoken request for a voice assistant into exactly one command type. Speech-to-text often mishears: "so me" is "show me", "Java's companion" is "Jarvis Companion", "three D" is "3D", "over, overlay" is "overlay".
@@ -77,6 +84,7 @@ Types:
 - youtube: find a YouTube video, or a question about a video. Slot query.
 - watch: watch a video and sum it up.
 - sessions: what the owner's Claude Code sessions are doing, how many run, which failed; done or finished sessions; sessions by device or date; "router sessions" and "sessions on the Companion app" (router sessions means every session on the app).
+- repo: a question about one of the owner's code repositories named by its name: what its README says (sub read) or where something is in it (sub search). Slots repo: the repo's name, query: the words to look for.
 - agent: a task on the owner's files, code, repository, GitHub, mail, calendar or notes.
 - answer: anything else: a question, a fact, small talk, or a question about Jarvis Companion itself.
 
@@ -160,6 +168,7 @@ class Picker:
         self._session = None
         self._asks = 0
         self._warming = False
+        self._failure = None  # the LeanError of the last failed build, when it was a usage limit
         self._rewarm()  # prewarm off the turn's path
 
     def _rewarm(self) -> None:
@@ -175,12 +184,16 @@ class Picker:
             fresh = self._factory()
             for _ in range(WARM_ASKS):
                 fresh.ask(message("hello", 0, False, False))
-        except Exception:
+        except Exception as exc:
             if fresh is not None:
                 _close(fresh)
             fresh = None
+            failure = exc if getattr(exc, "reason", None) == "usage_limit" else None
+        else:
+            failure = None
         with self._lock:
             self._warming = False
+            self._failure = failure
             old = None
             if fresh is not None:
                 old, self._session, self._asks = self._session, fresh, 0
@@ -192,7 +205,8 @@ class Picker:
             session = self._session
             if session is None:  # still warming (or the build failed): word rules this turn, never a cold ask
                 self._rewarm()
-                raise RuntimeError("picker not warm")
+                # the last build hit the usage limit: say so (the pick row names it), else "not warm"
+                raise self._failure or RuntimeError("picker not warm")
             self._asks += 1
             try:
                 raw = session.ask(msg).raw

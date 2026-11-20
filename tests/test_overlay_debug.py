@@ -204,3 +204,22 @@ def test_debug_page_intent_pick_row():
     assert got == {"d": [detail], "l": ["intent pick"]}
     page = (Path(__file__).resolve().parent.parent / "gateway" / "overlay_debug.html").read_text()
     assert "Command pick: word rules only" in page and "Fact sheet: ${ok.facts}" in page
+
+
+def test_debug_page_place_row():
+    """jfollow10f: the debug page labels a place row "place search" and shows its detail as is."""
+    import json
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.fail("node not installed: criterion 29 needs it")
+    page = (Path(__file__).resolve().parent.parent / "gateway" / "overlay_debug.html").read_text()
+    label = re.search(r"const LABEL = \{.*?\};", page, re.S).group(0)
+    describe = re.search(r"function describe\(s\) \{.*?\n\}\n", page, re.S).group(0)
+    detail = "kind=cinema src=clusterflick n=5 calls=7 ms=640 tfl=3 matrix=1 shows=1 reason=ok"
+    script = (f"{label}\n{describe}\nconst r = {json.dumps({'step': 'place', 'detail': detail})};"
+              "console.log(JSON.stringify([LABEL[r.step], describe(r)]));")
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                                    check=True, timeout=30).stdout)
+    assert out == ["place search", detail]
+

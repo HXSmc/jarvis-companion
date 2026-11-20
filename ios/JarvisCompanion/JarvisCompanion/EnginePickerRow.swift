@@ -11,22 +11,86 @@ struct EngineOption: Codable, Identifiable, Equatable {
     let isDefault: Bool
     /// Why `available` is false (nil when available).
     let reason: String?
+    /// A local-only engine: its chats never reach any other model.
+    var localOnly = false
+    /// The gateway sent `local_only` at all (false for an older gateway). When it did,
+    /// that value alone decides what the picker CLAIMS; see `claimsLocalOnly`.
+    var hasLocalOnlyKey = true
 
     enum CodingKeys: String, CodingKey {
         case id, label, kind, available, reason
         case isDefault = "default"
+        case localOnly = "local_only"
     }
 
     /// Fallback when the gateway is unreachable or an id no longer exists.
     static let hub = EngineOption(
         id: "hub", label: "Hub", kind: "hub", available: true, isDefault: true, reason: nil
     )
+
+    /// The label without the gateway's own "· Local only" suffix.
+    var baseLabel: String {
+        label.replacingOccurrences(of: #"\s*·\s*local only"#, with: "", options: [.regularExpression, .caseInsensitive])
+    }
+
+    private var looksLocal: Bool {
+        kind == "local" || label.range(of: "local only", options: .caseInsensitive) != nil
+    }
+
+    /// The SEND test (engine id on every message, no quick-ask). Fails closed: any hint
+    /// of local counts, even against an explicit `local_only: false`.
+    var isLocalOption: Bool { localOnly || looksLocal }
+
+    /// The DISPLAY test ("Local only, nothing leaves your devices"): only claimed when
+    /// the gateway says so; kind and label stand in only when it sent no `local_only`.
+    var claimsLocalOnly: Bool { hasLocalOnlyKey ? localOnly : looksLocal }
+
+    /// What the picker shows (desktop optionLabel): a usable local engine always says
+    /// "Local only", once; a down one drops it (the menu subtitle gives the reason).
+    var displayLabel: String {
+        if !available { return baseLabel }
+        if claimsLocalOnly && label.range(of: "local only", options: .caseInsensitive) == nil { return label + " · Local only" }
+        return label
+    }
+
+    /// VoiceOver value for a local engine; plain label otherwise.
+    var spokenLabel: String {
+        claimsLocalOnly ? "\(baseLabel), local only, nothing leaves your devices" : label
+    }
+}
+
+extension EngineOption {
+    /// In an extension so the memberwise init stays; an older gateway sends no
+    /// `local_only`, which decodes as false.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        kind = try c.decode(String.self, forKey: .kind)
+        available = try c.decode(Bool.self, forKey: .available)
+        isDefault = try c.decode(Bool.self, forKey: .isDefault)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        localOnly = try c.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
+        hasLocalOnlyKey = c.contains(.localOnly)
+    }
+
+    /// Written by hand so the cache keeps "no key" apart from `local_only: false`.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(label, forKey: .label)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(available, forKey: .available)
+        try c.encode(isDefault, forKey: .isDefault)
+        try c.encodeIfPresent(reason, forKey: .reason)
+        if hasLocalOnlyKey { try c.encode(localOnly, forKey: .localOnly) }
+    }
 }
 
 @MainActor
 final class EngineStore: ObservableObject {
     static let shared = EngineStore()
-    nonisolated private static let cacheKey = "engineListCache"
+    nonisolated static let cacheKey = "engineListCache"
 
     @Published private(set) var engines: [EngineOption]
 
@@ -77,9 +141,26 @@ final class EngineStore: ObservableObject {
     }
 
     /// Owner 2026-11-07: every successful send puts the picker back on Hub
-    /// (the default), like the one-shot "New session" toggle.
-    nonisolated static func resetToDefault() {
+    /// (the default), like the one-shot "New session" toggle. Only when the pick is
+    /// still the one that send used: a newer pick is the owner's, never undone.
+    nonisolated static func resetToDefault(ifStill id: String?) {
+        guard let id = id, storedPick() == id else { return }
         UserDefaults.standard.set(EngineOption.hub.id, forKey: "engineID")
+    }
+
+    /// Pure decision behind the one-shot reset. A LOCAL pick resets only after a real
+    /// routed answer (the reply carries a session_id). The gateway's HTTP 200 "busy" and
+    /// "Still thinking" replies carry none and are failures: the local pick must stay.
+    /// Non-local picks reset after any successful reply, as before.
+    nonisolated static func shouldResetAfterReply(pickIsLocal: Bool, hasSessionID: Bool) -> Bool {
+        !pickIsLocal || hasSessionID
+    }
+
+    /// Reset the one-shot pick after a 200 reply, applying shouldResetAfterReply.
+    nonisolated static func resetAfterReply(ifStill id: String?, reply: [String: Any]) {
+        let sid = (reply["session_id"] as? String) ?? ""
+        guard shouldResetAfterReply(pickIsLocal: isLocal(id), hasSessionID: !sid.isEmpty) else { return }
+        resetToDefault(ifStill: id)
     }
 
     /// What a send carries: the engine id (nil = Hub, field omitted), or the
@@ -87,14 +168,63 @@ final class EngineStore: ObservableObject {
     /// cached list straight from UserDefaults, so non-main callers
     /// (AppModel.ask) need no actor hop.
     nonisolated static func sendChoice() -> (engine: String?, blocked: String?) {
-        let id = UserDefaults.standard.string(forKey: "engineID") ?? EngineOption.hub.id
+        let id = storedPick()
         guard id != EngineOption.hub.id else { return (nil, nil) }
-        let list = UserDefaults.standard.data(forKey: cacheKey)
-            .flatMap { try? JSONDecoder().decode([EngineOption].self, from: $0) } ?? []
-        if let note = unavailableNote(id, in: list) {
+        if let note = unavailableNote(id, in: cachedList()) {
             return (nil, note + ". Pick another engine.")
         }
         return (id, nil)
+    }
+
+    nonisolated private static func storedPick() -> String {
+        UserDefaults.standard.string(forKey: "engineID") ?? EngineOption.hub.id
+    }
+
+    nonisolated private static func cachedList() -> [EngineOption] {
+        UserDefaults.standard.data(forKey: cacheKey)
+            .flatMap { try? JSONDecoder().decode([EngineOption].self, from: $0) } ?? []
+    }
+
+    /// True when `id` is a local-only engine in the cached list.
+    nonisolated static func isLocal(_ id: String?) -> Bool {
+        guard let id = id else { return false }
+        return cachedList().contains { $0.id == id && $0.isLocalOption }
+    }
+
+    /// True when `id` is surely NOT local: a built-in cloud engine, or listed as non-local.
+    nonisolated static func isKnownCloud(_ id: String?) -> Bool {
+        guard let id = id else { return false }
+        if ["hub", "claude", "glm", "agy"].contains(id) { return true }
+        return cachedList().contains { $0.id == id && !$0.isLocalOption }
+    }
+
+    /// Desktop usesQuickAsk: /ask is a cloud pipeline, so "?" text takes it only for
+    /// Hub or a listed engine that is not local-only. An unlisted pick never does.
+    nonisolated static func usesQuickAsk(_ text: String) -> Bool {
+        guard text.hasPrefix("?") else { return false }
+        let id = storedPick()
+        if id == EngineOption.hub.id { return true }
+        guard let option = cachedList().first(where: { $0.id == id }) else { return false }
+        return !option.isLocalOption
+    }
+
+    /// Router-worded local-model errors (desktop RAW_ERR).
+    nonisolated static func isLocalModelError(_ message: String) -> Bool {
+        ["Local model unavailable:", "This chat belongs to", "Local model failed:"].contains { message.hasPrefix($0) }
+    }
+
+    /// A local-model error shows verbatim; anything else keeps the caller's prefix.
+    nonisolated static func errorText(_ message: String, prefix: String) -> String {
+        isLocalModelError(message) ? message : prefix + message
+    }
+
+    /// Which machine answered a local chat (desktop upstreamNote); nil for anything else.
+    nonisolated static func upstreamNote(_ upstream: String?) -> String? {
+        switch upstream {
+        case "gaming-pc": return "Gaming PC"
+        case "mini-pc": return "Mini PC · Slower: running on the mini PC"
+        default: return nil
+        }
     }
 
     /// Session rows carry raw engine ids ("claude" means the Hub).
@@ -130,6 +260,11 @@ struct EnginePickerRow: View {
     @Binding var newSession: Bool
     /// Non-nil (a bound chat session): the engine is that session's, no menu.
     var lockedEngine: String? = nil
+    /// The locked chat is known to be local-only (its session row says so), even
+    /// when the cached engine list does not list its engine.
+    var lockedLocalOnly = false
+    /// Shown instead of an engine name while the chat's engine is not known yet.
+    var lockedLabel: String? = nil
     /// Tests seed the shared store and skip the network refresh.
     var refreshOnAppear = true
     @ObservedObject var store = EngineStore.shared
@@ -163,10 +298,23 @@ struct EnginePickerRow: View {
         lockedEngine == nil ? store.unavailableNote(engineID) : nil
     }
 
+    /// The usable local option the row shows (locked session engine or the pick), if any.
+    private var localOption: EngineOption? {
+        if warning != nil || lockedLabel != nil { return nil }
+        let id = lockedEngine ?? engineID
+        if let option = store.engines.first(where: { $0.id == id && $0.claimsLocalOnly && $0.available }) { return option }
+        // never a local chip for a cloud engine, whatever the caller says
+        guard lockedLocalOnly, let locked = lockedEngine, !EngineStore.isKnownCloud(locked) else { return nil }
+        return EngineOption(id: locked, label: EngineStore.label(forSession: locked), kind: "local",
+                            available: true, isDefault: false, reason: nil, localOnly: true)
+    }
+
     private var currentLabel: String {
+        if let pending = lockedLabel { return pending }
+        if let local = localOption { return local.displayLabel }
         if let locked = lockedEngine { return EngineStore.label(forSession: locked) }
         if warning != nil {
-            let name = store.engines.first { $0.id == engineID }?.label ?? engineID
+            let name = store.engines.first { $0.id == engineID }?.baseLabel ?? engineID
             return "\(name) unavailable"
         }
         return store.resolved(engineID).label
@@ -175,50 +323,76 @@ struct EnginePickerRow: View {
     private var engineMenu: some View {
         Menu {
             ForEach(store.engines) { option in
-                Button {
-                    engineID = option.id
-                } label: {
-                    // A menu item shows its first Text as the title, the second as the subtitle.
-                    if option.id == engineID {
-                        Label(option.label, systemImage: "checkmark")
-                    } else {
-                        Text(option.label)
-                    }
-                    if let subtitle = subtitle(for: option) {
-                        Text(subtitle)
-                    }
-                }
-                .disabled(!option.available)
+                menuItem(option)
             }
         } label: {
-            HStack(spacing: 6) {
-                if lockedEngine != nil {
-                    Image(systemName: "lock.fill").font(.caption)
-                } else if warning != nil {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.caption)
-                }
-                Text(currentLabel).lineLimit(labelLines)
-                if lockedEngine == nil {
-                    Image(systemName: "chevron.down").font(.caption.weight(.semibold))
-                }
-            }
-            .fixedSize(horizontal: keepsLabelWidth, vertical: false)
-            .font(.subheadline)
-            .foregroundColor(lockedEngine != nil ? Color.jarvisMuted : (warning != nil ? Color.jarvisDanger : Color.jarvisText))
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .background {
-                // locked = a muted chip (fixed, not a control); otherwise the house chip
-                RoundedRectangle(cornerRadius: jarvisRadius)
-                    .fill(lockedEngine != nil ? Color.jarvisSurface.opacity(0.5) : Color.jarvisSurface)
-            }
-            .contentShape(Rectangle())
+            menuLabel
         }
         .frame(maxWidth: .infinity)
         .disabled(lockedEngine != nil)
         .accessibilityLabel("Engine")
-        .accessibilityValue(warning.map { "\($0). Pick another engine." } ?? currentLabel)
+        .accessibilityValue(lockedLabel ?? warning.map { "\($0). Pick another engine." } ?? localOption?.spokenLabel ?? currentLabel)
         .accessibilityHint(lockedEngine == nil ? "" : "Set by this session")
+    }
+
+    /// Local options get a spoken label (with the selected and down cues it replaces);
+    /// every other option keeps the automatic one (title, subtitle, checkmark).
+    @ViewBuilder
+    private func menuItem(_ option: EngineOption) -> some View {
+        if option.claimsLocalOnly {
+            let selected = option.id == engineID ? ", selected" : ""
+            let down = option.available ? "" : ", unavailable" + (subtitle(for: option).map { ": \($0)" } ?? "")
+            menuButton(option).accessibilityLabel(option.spokenLabel + selected + down)
+        } else {
+            menuButton(option)
+        }
+    }
+
+    private func menuButton(_ option: EngineOption) -> some View {
+        Button {
+            engineID = option.id
+        } label: {
+            // A menu item shows its first Text as the title, the second as the subtitle.
+            if option.id == engineID {
+                Label(option.displayLabel, systemImage: "checkmark")
+            } else if option.claimsLocalOnly && option.available {
+                Label(option.displayLabel, systemImage: "lock.shield")
+            } else {
+                Text(option.displayLabel)
+            }
+            if let subtitle = subtitle(for: option) {
+                Text(subtitle)
+            }
+        }
+        .disabled(!option.available)
+    }
+
+    private var menuLabel: some View {
+        HStack(spacing: 6) {
+            if localOption != nil {
+                // local only: the shield says "nothing leaves your devices", locked or not
+                Image(systemName: "lock.shield").font(.caption)
+            } else if lockedEngine != nil {
+                Image(systemName: "lock.fill").font(.caption)
+            } else if warning != nil {
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption)
+            }
+            Text(currentLabel).lineLimit(labelLines)
+            if lockedEngine == nil {
+                Image(systemName: "chevron.down").font(.caption.weight(.semibold))
+            }
+        }
+        .fixedSize(horizontal: keepsLabelWidth, vertical: false)
+        .font(.subheadline)
+        .foregroundColor(lockedEngine != nil ? Color.jarvisMuted : (warning != nil ? Color.jarvisDanger : Color.jarvisText))
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .background {
+            // locked = a muted chip (fixed, not a control); otherwise the house chip
+            RoundedRectangle(cornerRadius: jarvisRadius)
+                .fill(lockedEngine != nil ? Color.jarvisSurface.opacity(0.5) : Color.jarvisSurface)
+        }
+        .contentShape(Rectangle())
     }
 
     /// Second text of a menu item: menus render it as the subtitle line.

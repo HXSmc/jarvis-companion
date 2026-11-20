@@ -106,6 +106,32 @@ def test_secret_scan(tmp_path):
 
 # --- criterion 20 ----------------------------------------------------------------------------------
 
+# jauto (hub amendment round 2, sanctioned): the exact agent_policy.py lines jauto changed (Confirm.spoken_ok and
+# the long-summary rule in _confirm_bash). Whole lines, compared exactly; agent.py has no allowance.
+JAUTO_POLICY_LINES = frozenset({
+    '+    # jauto: False = a summary over 120 characters, kept only because the command would run auto',
+    '+    spoken_ok: bool = True',
+    '-    return _confirm_bash(f"run {exact}", inp, exact)',
+    '+    return _confirm_bash(f"run {exact}", inp, exact, ctx)',
+    '-def _confirm_bash(summary: str, inp: dict, command: str) -> Confirm | Deny:',
+    '+def _confirm_bash(summary: str, inp: dict, command: str, ctx: Ctx | None = None) -> Confirm | Deny:',
+    '+    """ctx given (plain commands only, jauto): a long summary is kept when the command would run auto',
+    '+    even after untrusted text (auto_policy.read_only) and the summary was not cut."""',
+    '+        if ctx is not None:',
+    '+            from mac.voice import auto_policy  # lazy: auto_policy imports this module at its top',
+    '+            # review r1: only taint-exempt commands (look-ups, path-form open), and never a cut summary',
+    '+            if (auto_policy.auto_on() and auto_policy.classify(command, ctx) == ("auto", "ok")',
+    '+                    and auto_policy.read_only(command) and not clean.endswith("…")):',
+    '+                return Confirm(clean, {**inp, "command": command}, spoken_ok=False)',
+})
+
+
+# jauto2 (hub-sanctioned): the one open-shape line in AGENT_PROMPT
+JAUTO2_AGENT_LINES = frozenset({
+    "+  To open a note (a .md in the notes vault) for the owner: open -a Obsidian '<absolute path>.md'. A document or folder: open '<absolute path>' (its default app; this also works for a note). A web page: open https://... . Quote a path with spaces in single quotes; never use ~, $HOME, backslash escapes or obsidian:// links.",
+})
+
+
 def test_facts_are_data(tmp_path, monkeypatch, client):
     from gateway import overlay
     from mac.voice import agent, auto_policy, intent_pick
@@ -135,9 +161,14 @@ def test_facts_are_data(tmp_path, monkeypatch, client):
                           text=True).stdout.strip()
     if base:
         # gateway/central.py left this list: router-local-model needs central.py changes.
-        diff = subprocess.run(["git", "diff", base, "--", "mac/voice/agent.py", "mac/voice/agent_policy.py"],
-                              cwd=ROOT, capture_output=True, text=True).stdout
-        assert diff == ""
+        # jfollow11z Z-LIST 9 (hub-sanctioned): the TOOLS line gained Write; jauto: only its own policy lines
+        allowed = {"mac/voice/agent.py": JAUTO2_AGENT_LINES, "mac/voice/agent_policy.py": JAUTO_POLICY_LINES}
+        for path, ok in allowed.items():
+            diff = subprocess.run(["git", "diff", base, "--", path], cwd=ROOT, capture_output=True, text=True).stdout
+            changed = [ln for ln in diff.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))
+                       and not ln.startswith(('-TOOLS = "Read,Grep,Glob,Bash"', '+TOOLS = "Read,Grep,Glob,Bash,Write"'))
+                       and ln not in ok]
+            assert changed == [], path
 
 
 # --- criterion 21 ----------------------------------------------------------------------------------

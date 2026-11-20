@@ -104,6 +104,20 @@ final class CardSnapshotTests: XCTestCase {
               "files": [], "links": [], "children": [], "parent": null, "receipt": null, "doing": null}}
     """
 
+    static func macAsk(answered: String = "null") -> String {
+        """
+        {"session_id": "a1b2c3d4-0020", "title": "Live test of the overlay", "state": "idle",
+         "phase": "in_progress", "health": "waiting", "device": "Mini PC", "project": "jarvis-companion",
+         "doing": "Waiting for the Mac",
+         "recap": ["Needs you: Mac is needed for tests, free it"],
+         "last_activity_at": "\(now)", "role": "VERIFIER",
+         "card": {"need": {"id": "0123456789ab", "kind": "mac",
+                           "question": "Mac is needed for tests, free it",
+                           "options": [], "items": [], "file_id": null, "at": "\(now)", "answered": \(answered)},
+                  "files": [], "links": [], "children": [], "parent": null, "receipt": null, "doing": null}}
+        """
+    }
+
     static let steps3of4 = """
     {"session_id": "a1b2c3d4-0011", "title": "Hook video for the launch", "state": "running",
      "phase": "in_progress", "health": "working", "device": "Mini PC", "project": "jarvis-companion",
@@ -271,6 +285,37 @@ final class CardSnapshotTests: XCTestCase {
                        ["A", "B", "C", "Something else"])
         XCTAssertEqual(CardInfo.buttons(for: need("preview")).map { $0.label }, ["Looks good", "Change it"])
         XCTAssertEqual(CardInfo.buttons(for: need("checklist")).map { $0.label }, ["Send results", "Add a note"])
+        XCTAssertEqual(CardInfo.buttons(for: need("mac")).map { $0.label }, ["Free", "Message"])
+        XCTAssertEqual(CardInfo.buttons(for: need("mac")).map { $0.sends }, [true, false])  // Message opens the field
+    }
+
+    func testMacAnsweredMessageDecodes() throws {
+        let s = try Self.session(Self.macAsk(answered: #"{"answer": "Message", "text": "give me 10 minutes", "at": "2026-11-18T12:00:00Z"}"#))
+        XCTAssertEqual(s.card?.need?.kind, "mac")
+        XCTAssertEqual(s.card?.need?.answered?.answer, "Message")
+        XCTAssertEqual(s.card?.need?.answered?.text, "give me 10 minutes")
+    }
+
+    /// Round 1 design finding: a re-posted `mac` ask must not open with the old
+    /// field open or the old text in it; a sent message is cleared.
+    func testMacMessageDraftBelongsToOneAsk() {
+        var draft = MacMessageDraft()
+        XCTAssertFalse(draft.isOpen(for: "aaaaaaaaaaaa"))
+        draft.open(for: "aaaaaaaaaaaa")
+        draft.text = "give me 10 minutes"
+        XCTAssertTrue(draft.isOpen(for: "aaaaaaaaaaaa"))
+        XCTAssertFalse(draft.isOpen(for: "bbbbbbbbbbbb"))  // the new ask starts closed
+        draft.cancel()
+        draft.open(for: "aaaaaaaaaaaa")
+        XCTAssertEqual(draft.text, "give me 10 minutes")  // Cancel keeps the text for the same ask
+        draft.open(for: "bbbbbbbbbbbb")
+        XCTAssertEqual(draft.text, "")  // a new ask never shows the old text
+        draft.text = "wait"
+        draft.sent()
+        XCTAssertFalse(draft.isOpen(for: "bbbbbbbbbbbb"))
+        XCTAssertEqual(draft.text, "")
+        draft.text = String(repeating: "x", count: 400)
+        XCTAssertEqual(draft.text.count, MacMessageDraft.maxLength)  // same cap as the gateway
     }
 
     func testHardwareAskOpensHardwareMode() throws {
@@ -346,14 +391,15 @@ final class CardSnapshotTests: XCTestCase {
 
     // MARK: screenshots
 
-    private func boardCard(_ json: String) throws -> some View {
+    private func boardCard(_ json: String, messageOpen: Bool = false) throws -> some View {
         let session = try Self.session(json)
         let model = SessionsModel()
         return VStack(spacing: 8) {
             SessionCard(session: session)
             if let card = session.card, card.hasContent {
                 CardExtras(session: session, card: card, model: model, compact: true,
-                           openChat: { _ in }, openFile: { _ in }, openSession: { _ in })
+                           openChat: { _ in }, openFile: { _ in }, openSession: { _ in },
+                           messageOpen: messageOpen)
             }
         }
     }
@@ -402,6 +448,11 @@ final class CardSnapshotTests: XCTestCase {
         try shot("21-steps-long-name-expanded", fit: try expandedSteps(Self.stepsLong))
         try shot("22-steps-done-session-greyed", fit: try boardCard(Self.stepsDoneSession))
         try shot("23-steps-rtl-expanded", fit: try expandedSteps(Self.stepsArabic, rtl: true))
+        // Mac-needed ask (kind mac): Free + Message, the open Message field, then the answered line.
+        try shot("20-mac-free-message", fit: try boardCard(Self.macAsk()))
+        try shot("21-mac-message-open", fit: try boardCard(Self.macAsk(), messageOpen: true))
+        try shot("22-mac-answered-message", fit: try boardCard(Self.macAsk(
+            answered: #"{"answer": "Message", "text": "give me 10 minutes", "at": "\#(Self.now)"}"#)))
 
         // Open-session sheet: the step list starts expanded with every step (list cards stay folded).
         let recapModel = SessionsModel()

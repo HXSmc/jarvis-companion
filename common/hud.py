@@ -19,9 +19,9 @@ text, and reject any URL that is not https. Swift models in mac/overlay decode t
       video: youtube_id, or url that is a YouTube watch/shorts/embed/youtu.be link or ends
              .mp4/.mov/.m4v (no HLS), thumbnail_url? (file urls only), source_page?;
              no usable media -> link card on source_page/url, else dropped
-      web:   page: one of WEB_PAGES ("map", "drawing"), data: that page's validated JSON. Service-only:
+      web:   page: one of WEB_PAGES ("map", "drawing", "model"), data: that page's validated JSON. Service-only:
              dropped unless the caller passes allow_web=True (model, agent, workspace and fast-tier cards
-             never do); drawing data = {svg: svgsafe output, legend: [str<=80] <= 12}
+             never do); drawing data = {svg: svgsafe output, legend: [str<=80] <= 12}; model data = {slug, view: model|preview}
       chart: chart: one of CHART_KINDS, labels: [str<=24] <= 12, series: [{name, values}] 1-4,
              unit?: str<=12, caption?: str<=120, min?/max?: gauge only (rules in _chart)
     hud   = {shapes: [shape], cards: [card]}
@@ -359,7 +359,66 @@ def _map_data(raw) -> dict | None:
             break
     if not routes and not pins:
         return None
-    return {"routes": routes, "pins": pins, "attribution": MAP_ATTRIBUTION}
+    out = {"routes": routes, "pins": pins, "attribution": MAP_ATTRIBUTION}
+    # jfollow10f: the ranked places under the map; each field optional, absent stays absent.
+    rows = [r for r in map(_place_row, raw["rows"] if isinstance(raw.get("rows"), list) else []) if r][:MAX_ROWS]
+    if rows:
+        out["rows"] = rows
+    credits = [k for k in PLACE_CREDITS if isinstance(raw.get("credits"), list) and k in raw["credits"]]
+    if credits:
+        out["credits"] = credits
+    if isinstance(raw.get("asof"), str) and _CLOCK.fullmatch(raw["asof"]):
+        out["asof"] = raw["asof"]
+    return out
+
+
+MAX_ROWS = 5
+PLACE_MODES = ("walk", "bus", "tube", "train")
+PLACE_NOTES = ("times_not_listed", "none", "none_tomorrow")
+PLACE_CREDITS = ("osm", "tfl", "clusterflick")  # the page maps each key to its fixed credit line
+_CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+_HOURS = re.compile(r"open 24 hours|closed now|hours not listed|open until (?:midnight|(?:[01]\d|2[0-3]):[0-5]\d)")
+# Bidi controls, zero-width marks and the BOM: web place names must not reorder or hide text.
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def place_text(value, limit: int) -> str:
+    """Untrusted web text (a place name, road, film title) -> plain single-line text within `limit`."""
+    return _text(_INVISIBLE.sub("", value) if isinstance(value, str) else value, limit)
+
+
+def _place_row(raw) -> dict | None:
+    """One ranked place: name, road, minutes, mode, straight km, hours, <= 3 showings, a note.
+    A row with no name, no km, or a mode/minutes outside the fixed set is dropped."""
+    if not isinstance(raw, dict):
+        return None
+    name, km, mins = place_text(raw.get("name"), MAX_LABEL), raw.get("km"), raw.get("min")
+    if not name or not (isinstance(km, (int, float)) and not isinstance(km, bool) and math.isfinite(km)
+                        and 0 <= km <= 50):
+        return None
+    if "mode" in raw and raw["mode"] not in PLACE_MODES:
+        return None
+    if mins is not None and not (type(mins) is int and 0 <= mins <= 600):
+        return None
+    row = {"name": name, "km": round(float(km), 1)}
+    road = place_text(raw.get("road"), MAX_LABEL)
+    if road:
+        row["road"] = road
+    if mins is not None:
+        row["min"] = mins
+    if "mode" in raw:
+        row["mode"] = raw["mode"]
+    if isinstance(raw.get("hours"), str) and _HOURS.fullmatch(raw["hours"]):
+        row["hours"] = raw["hours"]
+    times = []
+    for t in raw["times"] if isinstance(raw.get("times"), list) else []:
+        if isinstance(t, dict) and isinstance(t.get("at"), str) and _CLOCK.fullmatch(t["at"]):
+            times.append({"at": t["at"], "film": place_text(t.get("film"), MAX_LABEL)})
+    if times:
+        row["times"] = times[:3]
+    if raw.get("note") in PLACE_NOTES:
+        row["note"] = raw["note"]
+    return row
 
 
 # The bundled pages a web card may name -> their data validator. Adding a page: the files under
@@ -381,7 +440,21 @@ def _drawing_data(raw) -> dict | None:
     return {"svg": res.svg, "legend": items[:MAX_LEGEND]}
 
 
-WEB_PAGES = {"map": _map_data, "drawing": _drawing_data}
+_MODEL_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
+
+
+def _model_data(raw) -> dict | None:
+    """The model page's data (jfollow10d): a vault object's slug and the view ("model" = the 3D
+    object, "preview" = the ready card's picture). Other keys are dropped; the app fetches the files."""
+    if not isinstance(raw, dict) or raw.get("view") not in ("model", "preview"):
+        return None
+    slug = raw.get("slug")
+    if not isinstance(slug, str) or not _MODEL_SLUG.fullmatch(slug):
+        return None
+    return {"slug": slug, "view": raw["view"]}
+
+
+WEB_PAGES = {"map": _map_data, "drawing": _drawing_data, "model": _model_data}
 
 
 def drawing_card(title: str, svg: str, legend: list) -> dict | None:
@@ -587,13 +660,35 @@ def schema_json() -> dict:
                                                "lon": {"type": "number", "minimum": -180, "maximum": 180},
                                                "label": _str(MAX_LABEL)},
                                 "required": ["lat", "lon", "label"], "additionalProperties": False}},
-                            "attribution": {"const": MAP_ATTRIBUTION}},
+                            "attribution": {"const": MAP_ATTRIBUTION},
+                            "rows": {"type": "array", "minItems": 1, "maxItems": MAX_ROWS, "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {**_str(MAX_LABEL), "minLength": 1}, "road": _str(MAX_LABEL),
+                                    "min": {"type": "integer", "minimum": 0, "maximum": 600},
+                                    "mode": {"enum": list(PLACE_MODES)},
+                                    "km": {"type": "number", "minimum": 0, "maximum": 50},
+                                    "hours": {"type": "string", "pattern": f"^(?:{_HOURS.pattern})$"},
+                                    "times": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
+                                        "type": "object",
+                                        "properties": {"at": {"type": "string", "pattern": f"^{_CLOCK.pattern}$"},
+                                                       "film": _str(MAX_LABEL)},
+                                        "required": ["at", "film"], "additionalProperties": False}},
+                                    "note": {"enum": list(PLACE_NOTES)}},
+                                "required": ["name", "km"], "additionalProperties": False}},
+                            "credits": {"type": "array", "minItems": 1, "maxItems": len(PLACE_CREDITS),
+                                        "items": {"enum": list(PLACE_CREDITS)}},
+                            "asof": {"type": "string", "pattern": f"^{_CLOCK.pattern}$"}},
                         "required": ["routes", "pins", "attribution"], "additionalProperties": False},
                         {"type": "object",
                          "properties": {"svg": {"type": "string", "maxLength": svgsafe.MAX_BYTES},
                                         "legend": {"type": "array", "maxItems": MAX_LEGEND,
                                                    "items": _str(MAX_LEGEND_ITEM)}},
-                         "required": ["svg", "legend"], "additionalProperties": False}]}},
+                         "required": ["svg", "legend"], "additionalProperties": False},
+                        {"type": "object",
+                         "properties": {"slug": {"type": "string", "pattern": "^" + _MODEL_SLUG.pattern + "$"},
+                                        "view": {"enum": ["model", "preview"]}},
+                         "required": ["slug", "view"], "additionalProperties": False}]}},
                         ["page", "data"]),
                     card("chart", {
                         "chart": {"enum": list(CHART_KINDS)},

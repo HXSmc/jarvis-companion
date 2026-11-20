@@ -27,6 +27,7 @@ from test_overlay_agent import Clock, FakeAgentPool, client, reset  # noqa: F401
 from test_overlay_jfollow2 import lines  # noqa: E402
 from test_overlay_jfollow4 import _cards, _deps, _steps, fresh_session_state  # noqa: F401,E402
 from test_overlay_jfollow10a import bash, run_agent, _rows  # noqa: E402
+from test_overlay_jfollow10a import _home_write  # noqa: E402
 from test_overlay_service import FakeConversations, says, turn  # noqa: E402
 
 TOKEN = "not-a-real-token"
@@ -149,7 +150,7 @@ def test_counts_match_the_board(client, monkeypatch, tmp_path):
     # (i) an empty quiet reply forces the fixed fallback line, counted over all 30
     deps, _ = deps_for(quiet=Counter([]))
     events = turn(client, "how many sessions are running", conv_id="c5a")
-    assert says(events)[-1] == "30 sessions, sir: 2 waiting on you, 4 running."
+    assert says(events)[-1] == "7 sessions, sir: 2 waiting on you, 4 running."  # jfollow11z: open ones, not all 30
     assert _steps("sessions")[0]["detail"] == "result=ok rows=30"
     assert detail().startswith("summary=host reason=")
     # (ii) the quiet prompt's untrusted block opens with the fixed totals line, then 20 rows
@@ -161,7 +162,8 @@ def test_counts_match_the_board(client, monkeypatch, tmp_path):
     first = note.splitlines()[0]
     done = sum(1 for r in rows if r["phase"] == "done")
     assert done == 23  # done/idle + done/done; in_review/done is not done
-    assert first == ("Totals from the Companion app: 30 sessions; 3 in progress, 3 in review, 1 attention, "
+    assert first == ("Totals from the Companion app: 7 open sessions, 30 listed; 3 in progress, "
+                     "3 in review, 1 attention, "
                      "23 done; 27 on the Mini PC, 2 on the Mac, 1 on the Windows PC.")
     assert sum(1 for ln in note.splitlines() if ln.startswith("- device ")) == 20
     assert _steps("sessions")[-1]["detail"] == "result=ok rows=30"
@@ -338,8 +340,8 @@ def test_list_marks_like_stage_a(client, monkeypatch, tmp_path, auto_on):
     turn(client, "list my done sessions", conv_id="L2")
     assert "L2" in overlay._tainted and "L2" not in overlay._auto_tainted
     overlay.debug_log.clear()
-    run_agent(client, bash("tool-x"), conv_id="L")
-    assert _rows() == ["cmd=tool-x decision=asked reason=untrusted"]
+    run_agent(client, bash(_home_write()), conv_id="L")
+    assert _rows() == ["cmd=touch decision=asked reason=untrusted"]
 
 
 @pytest.fixture

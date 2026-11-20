@@ -299,12 +299,24 @@
   "note": "NOT BUILT YET: drawings"
  },
  {
+  "id": "draw-2",
+  "text": "show me a picture of a cat",
+  "expect_intent": [
+   "answer",
+   "media"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "a picture ask with no draw verb is a real picture, never a drawing",
+  "model_only": false
+ },
+ {
   "id": "3d-1",
   "text": "show me a 3D model of a cube I can rotate",
   "expect_intent": "3d",
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
-  "note": "NOT BUILT YET: 3D",
+  "note": "3D show or make",
   "model_only": true
  },
  {
@@ -472,5 +484,265 @@
   "expect_answer_contains": [],
   "expect_answer_not_contains": [],
   "note": "router sessions = the app's sessions"
+ },
+ {
+  "id": "3d-2",
+  "text": "can you pull up my test mug 3D model",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite show, says 3D",
+  "model_only": false
+ },
+ {
+  "id": "3d-3",
+  "text": "please pull up the chess pawn 3D object",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite show, says 3D",
+  "model_only": false
+ },
+ {
+  "id": "3d-4",
+  "text": "could you make me a 3D model of a coffee mug",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite create",
+  "model_only": false
+ },
+ {
+  "id": "3d-5",
+  "text": "show my 3D models please",
+  "expect_intent": [
+   "3d"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "list",
+  "model_only": false
+ },
+ {
+  "id": "3d-6",
+  "text": "can you pull up the weather",
+  "expect_intent": [
+   "answer"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "polite pull-up that is not a 3D object",
+  "model_only": false
+ },
+ {
+  "id": "place-4",
+  "text": "take me to Dishoom",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "take me to a chain: nearest branch",
+  "model_only": false
+ },
+ {
+  "id": "place-5",
+  "text": "what's the best way to get to Decim",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "misheard chain name, Overpass sound-alike",
+  "model_only": false
+ },
+ {
+  "id": "place-6",
+  "text": "nearest Dishoom",
+  "expect_intent": [
+   "place"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "nearest form",
+  "model_only": false
+ },
+ {
+  "id": "place-7",
+  "text": "take me home",
+  "expect_intent": [
+   "geo_map"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "saved place goes to the stage b map",
+  "model_only": false
+ },
+ {
+  "id": "place-8",
+  "text": "take me to the top of the page",
+  "expect_intent": [
+   "answer"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "page spot, not a place",
+  "model_only": false
+ },
+ {
+  "id": "cmd-1",
+  "text": "copy the file report.txt in my Documents folder to my Desktop",
+  "expect_intent": [
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11a: a file command goes to the agent (routing only)",
+  "model_only": true
+ },
+ {
+  "id": "cmd-2",
+  "text": "make a new folder called invoices in my Documents folder",
+  "expect_intent": [
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11a: a file command goes to the agent (routing only)",
+  "model_only": true
+ },
+ {
+  "id": "cmd-3",
+  "text": "delete the file old-notes.txt from my Desktop",
+  "expect_intent": [
+   "agent"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11a: a file command goes to the agent (routing only)",
+  "model_only": true
+ },
+ {
+  "id": "lim-1",
+  "text": "what is the capital of France",
+  "fake_failure": "usage_limit",
+  "expect_intent": [
+   "answer"
+  ],
+  "expect_answer_contains": [
+   "usage limit"
+  ],
+  "expect_answer_not_contains": [
+   "not running",
+   "Paris"
+  ],
+  "note": "jfollow11b: at a usage limit the answer says so, never 'not running' (the answer step is faked)",
+  "model_only": false
+ },
+ {
+  "id": "repo-1",
+  "text": "what does the README of jarvis companion public say",
+  "expect_intent": [
+   "repo"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c B: README read by name"
+ },
+ {
+  "id": "repo-2",
+  "text": "where is the wake word handled in the jarvis companion public repo",
+  "expect_intent": [
+   "repo"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c B: repo search by name"
+ },
+ {
+  "id": "sess-8",
+  "text": "what is the hub session doing",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c C1: one named session"
+ },
+ {
+  "id": "sess-9",
+  "text": "what did my last session do",
+  "expect_intent": [
+   "sessions"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c C1: the newest session"
+ },
+ {
+  "id": "ctx-1",
+  "text": "new topic",
+  "expect_intent": [
+   "new_topic"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c D4: start the conversation over"
+ },
+ {
+  "id": "ctx-2",
+  "text": "start over",
+  "expect_intent": [
+   "new_topic"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11c D4: start the conversation over"
+ },
+ {
+  "id": "z11-move-1",
+  "text": "move the cards to the left",
+  "expect_intent": [
+   "move"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
+ },
+ {
+  "id": "z11-move-2",
+  "text": "could you move them to the top right please",
+  "expect_intent": [
+   "move"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
+ },
+ {
+  "id": "z11-clear-1",
+  "text": "could you clear everything for me",
+  "expect_intent": [
+   "clear"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
+ },
+ {
+  "id": "z11-card-1",
+  "text": "close the map card",
+  "expect_intent": [
+   "card_remove"
+  ],
+  "expect_answer_contains": [],
+  "expect_answer_not_contains": [],
+  "note": "jfollow11z R2: a sure word hit skips the pick model"
  }
 ]

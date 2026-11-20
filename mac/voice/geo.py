@@ -15,21 +15,29 @@ import tempfile
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import httpx
 
+from common import hud
 from mac.voice import media_lookup
 
 logger = logging.getLogger(__name__)
 
 HOSTS = frozenset({"valhalla1.openstreetmap.de", "routing.openstreetmap.de", "nominatim.openstreetmap.org",
-                   "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org"})
+                   "api.postcodes.io", "api.tfl.gov.uk", "tile.openstreetmap.org",
+                   "photon.komoot.io", "clusterflick.com",  # jfollow10f: place search fallback, showtimes
+                   "overpass-api.de"})  # jfollow11f: names near the rounded point, for a misheard name
 USER_AGENT = media_lookup.USER_AGENT  # client name/version + the public repo; no personal data
 CONNECT_S, TOTAL_S = 5.0, 8.0
 CAPS = {"tile": 256 * 1024, "route": 512 * 1024, "tfl": 512 * 1024, "nominatim": 64 * 1024,
-        "postcodes": 16 * 1024}
+        "postcodes": 16 * 1024,
+        # jfollow10f (nearby.py): place search, the walk-time matrix, the cinema index and one venue file
+        "nominatim_search": 128 * 1024, "photon": 64 * 1024, "matrix": 32 * 1024,
+        "cf_index": 512 * 1024, "cf_venue": 400 * 1024,
+        "overpass": 128 * 1024}  # jfollow11f: <= 1000 names, ~13 bytes each
 VALHALLA = "https://valhalla1.openstreetmap.de/route"
 OSRM_CAR = "https://routing.openstreetmap.de/routed-car/route/v1/driving/"
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
@@ -96,13 +104,13 @@ def _check(url: str) -> None:
 
 
 def _request(method: str, url: str, kind: str, params: dict | None = None,
-             json_body: dict | None = None) -> bytes:
+             json_body: dict | None = None, total_s: float = TOTAL_S) -> bytes:
     """One allow-listed request -> body bytes, or GeoError(reason). Checked before anything is sent."""
     _check(url)
     cap = CAPS[kind]
-    deadline = clock() + TOTAL_S
+    deadline = clock() + total_s
     try:
-        with httpx.Client(timeout=httpx.Timeout(TOTAL_S, connect=CONNECT_S), follow_redirects=False,
+        with httpx.Client(timeout=httpx.Timeout(total_s, connect=CONNECT_S), follow_redirects=False,
                           transport=_transport,
                           headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}) as client:
             with client.stream(method, url, params=params, json=json_body) as resp:
@@ -124,8 +132,8 @@ def _request(method: str, url: str, kind: str, params: dict | None = None,
     return bytes(body)
 
 
-def _get(url: str, kind: str = "route", params: dict | None = None) -> bytes:
-    return _request("GET", url, kind, params=params)
+def _get(url: str, kind: str = "route", params: dict | None = None, total_s: float = TOTAL_S) -> bytes:
+    return _request("GET", url, kind, params=params, total_s=total_s)
 
 
 def _post(url: str, body: dict, kind: str = "route") -> bytes:
@@ -215,6 +223,16 @@ def _valhalla_body(a: tuple, b: tuple, costing: str, alternates: int) -> dict:
             "directions_options": {"units": "kilometers", "language": "en-GB"}}
 
 
+MATRIX = "https://valhalla1.openstreetmap.de/sources_to_targets"
+
+
+def valhalla_matrix_body(src: tuple, targets: list[tuple]) -> dict:
+    """jfollow10f: one walking-time matrix call, home to <= 5 places; numbers only go out."""
+    return {"sources": [{"lat": float(src[0]), "lon": float(src[1])}],
+            "targets": [{"lat": float(t[0]), "lon": float(t[1])} for t in targets[:5]],
+            "costing": "pedestrian", "units": "kilometers"}
+
+
 def _valhalla_trip(trip: dict) -> dict:
     legs = trip.get("legs") or []
     points, steps = [], []
@@ -277,14 +295,18 @@ def walk_cycle(a: tuple, b: tuple, budget: Budget) -> dict:
     hit = _cached("other", key, ROUTE_TTL_S)
     if hit is not None:
         return hit
-    out = {}
-    for costing, name in (("pedestrian", "walk"), ("bicycle", "cycle")):
+
+    def one(costing: str) -> float | None:
         try:
-            trips = _valhalla(a, b, costing, 0, budget)
+            trips = _valhalla(a, b, costing, 0, Budget())  # its post is counted below, in this thread
         except GeoError:
-            continue
-        if trips:
-            out[name] = trips[0]["min"]
+            return None
+        return trips[0]["min"] if trips else None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:  # jfollow11z R6b: both posts at once, one wait
+        mins = list(pool.map(one, ("pedestrian", "bicycle")))
+    budget.calls += 2
+    out = {name: m for name, m in zip(("walk", "cycle"), mins) if m is not None}
     _store("other", key, out)
     return out
 
@@ -547,8 +569,8 @@ def journey_lines(found: list[dict]) -> tuple[list[str], str]:
 # --- answers -----------------------------------------------------------------------------------
 
 def map_data(routes: list[dict], pins: list[dict]) -> dict:
-    return {"routes": [{"points": r["points"], "km": r["km"], "min": r["min"]} for r in routes[:3]],
-            "pins": pins[:2]}
+    return {"routes": [{"points": r["points"], "km": r["km"], "min": r["min"]} for r in routes[:hud.MAX_ROUTES]],
+            "pins": pins[:hud.MAX_PINS]}
 
 
 def map_line(routes: list[dict]) -> str:
@@ -651,9 +673,13 @@ def tile(root: Path, z: int, x: int, y: int) -> bytes:
         if d.is_symlink():
             raise GeoError("bad_tile")
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)  # a failed write (disk full) leaves no .tmp behind
+        raise
     with _lock:
         _since_prune[0] += len(data)
         walk = _since_prune[0] >= TILE_PRUNE_EVERY

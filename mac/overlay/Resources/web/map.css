@@ -13,6 +13,8 @@
   --glass: rgba(18, 20, 24, 0.84);
   --best: #3d8bfd;
   --alt: #8b97a8;
+  --font: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
 
 html, body {
@@ -21,7 +23,7 @@ html, body {
   overflow: clip;
   background: var(--page);
   color: var(--ink);
-  font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  font: 12px/1.35 var(--font);
 }
 
 #map {
@@ -134,10 +136,88 @@ html, body {
   outline-offset: 1px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .leaflet-zoom-anim .leaflet-zoom-animated,
-  .leaflet-fade-anim .leaflet-tile,
-  .leaflet-fade-anim .leaflet-popup {
-    transition: none;
-  }
+/* Route lines: Leaflet's SVG paths take their colour and weight from the tokens, not from map.js. */
+.route-best {
+  stroke: var(--best);
+  stroke-width: 6;
+  stroke-opacity: 0.95;
+}
+
+.route-alt {
+  stroke: var(--alt);
+  stroke-width: 4;
+  stroke-opacity: 0.75;
+}
+
+/* jfollow10f: ranked places. The map keeps the top half; the numbered list scrolls under it. */
+.places #map {
+  bottom: 54%;
+}
+
+.places #panel {
+  top: 6px;
+  right: 6px;
+  bottom: auto;
+  left: auto;
+  padding: 0;
+  background: none;
+}
+
+.places #reset {
+  background: var(--glass);
+}
+
+.places #attribution {
+  display: none;
+}
+
+#places {
+  position: absolute;
+  top: 46%;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: var(--page);
+  border-top: 1px solid var(--line);
+}
+
+#places ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#places li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+#places li:last-child {
+  border-bottom: 0;
+}
+
+#places p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#places .name {
+  font-weight: 600;
+}
+
+#places .facts,
+#places .times {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+#places .credit {
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  white-space: normal;
 }

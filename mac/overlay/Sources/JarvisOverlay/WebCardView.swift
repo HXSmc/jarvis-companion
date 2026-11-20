@@ -81,18 +81,26 @@ extension WebCardView {
 
         private let page: String
 
+        private var pageLoaded = false
+
         init(card: WebCard) {
             handler = WebCardSchemeHandler(card: card)
             page = card.page  // a WebCardPolicy.pages key (decoding refuses any other)
+            super.init()
+            handler.onModelStatus = { [weak self] error, refused, bytes in
+                self?.report(rules: true, loaded: self?.pageLoaded ?? false,
+                             extra: " bytes=\(bytes) refused=\(refused) error=\(error)")
+            }
         }
 
         /// One `web_card` row per card: page, rules compiled, page loaded, ms, blocked navigations.
-        func report(rules: Bool, loaded: Bool) {
+        /// A model page's row waits for its status ping (bytes, refused URLs, error word).
+        func report(rules: Bool, loaded: Bool, extra: String = "") {
             guard !reported else { return }
             reported = true
             let ms = Int(Date().timeIntervalSince(opened) * 1000)
             ServiceClient().debugNote(step: "web_card",
-                                      detail: "page=\(page) rules=\(rules ? 1 : 0) loaded=\(loaded ? 1 : 0) ms=\(ms) blocked=\(blocked)")
+                                      detail: "page=\(page) rules=\(rules ? 1 : 0) loaded=\(loaded ? 1 : 0) ms=\(ms) blocked=\(blocked)\(extra)")
         }
 
         func tearDown() {
@@ -130,7 +138,8 @@ extension WebCardView {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            report(rules: true, loaded: true)
+            pageLoaded = true
+            if page != "model" { report(rules: true, loaded: true) }  // model: the status ping reports
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -163,18 +172,27 @@ extension WebCardView {
 
 /// Serves `jarvisweb://app/...`: the fixed resource table from Resources/web, `data.json` from the
 /// decoded card, `tiles/z/x/y.png` through ServiceClient (map page only) and `drawing.svg`, the
-/// drawing card's sanitised SVG as an image (drawing page only). Anything else fails unanswered.
+/// drawing card's sanitised SVG as an image (drawing page only), and for a model card its own
+/// `object.glb` / `preview.png` through ServiceClient, re-checked (acceptGLB/acceptPNG), plus the
+/// page's one `model-status/<error>/<refused>` ping. Anything else fails unanswered.
 @MainActor
 final class WebCardSchemeHandler: NSObject, WKURLSchemeHandler {
     private let data: Data
     private let svg: Data?  // drawing page only
     private let isMap: Bool
+    private let modelSlug: String?  // model page only: the card's own slug, never the page's words
+    private var modelBytes = 0
+    var onModelStatus: ((String, Int, Int) -> Void)?
     private let client = ServiceClient()
     private var live = Set<ObjectIdentifier>()
 
     init(card: WebCard) {
         isMap = card.page == "map"
-        if let drawing = card.drawing {  // the page reads only the legend; the SVG goes as an image
+        modelSlug = card.model?.slug
+        if let model = card.model {
+            data = (try? JSONEncoder().encode(model)) ?? Data("{}".utf8)
+            svg = nil
+        } else if let drawing = card.drawing {  // the page reads only the legend; the SVG goes as an image
             data = (try? JSONEncoder().encode(["legend": drawing.legend])) ?? Data("{}".utf8)
             svg = Data(drawing.svg.utf8)
         } else {
@@ -197,6 +215,23 @@ final class WebCardSchemeHandler: NSObject, WKURLSchemeHandler {
         if WebCardPolicy.resourcePath(for: url) == WebCardPolicy.drawingImagePath {
             guard let svg else { return fail(urlSchemeTask) }  // never a bundle read under this name
             return respond(urlSchemeTask, url: url, body: svg, mime: "image/svg+xml")
+        }
+        if let slug = modelSlug, let kind = WebCardPolicy.modelFileKind(for: url) {
+            Task { @MainActor in
+                let body = try? await client.modelFile(slug: slug, kind: kind)
+                guard live.contains(key) else { return }
+                if let body, kind == "glb" ? WebCardPolicy.acceptGLB(body) : WebCardPolicy.acceptPNG(body) {
+                    if kind == "glb" { modelBytes = body.count }
+                    respond(urlSchemeTask, url: url, body: body, mime: kind == "glb" ? "model/gltf-binary" : "image/png")
+                } else {
+                    fail(urlSchemeTask)
+                }
+            }
+            return
+        }
+        if modelSlug != nil, let status = WebCardPolicy.modelStatus(for: url) {
+            onModelStatus?(status.error, status.refused, modelBytes)
+            return respond(urlSchemeTask, url: url, body: Data(), mime: "text/plain")
         }
         if isMap, let tile = WebCardPolicy.tilePath(for: url) {
             Task { @MainActor in

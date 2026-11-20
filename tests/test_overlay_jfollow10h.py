@@ -463,11 +463,13 @@ def test_job_runner_carries_3d_result(https_upstream, monkeypatch):
     files = [{"id": "a" * 32, "name": "jarvis-watch-summary.md"}, {"id": "b" * 32, "name": "jarvis-3d-result.md"}]
     seen, pushed = _job(use, monkeypatch, files, {"a" * 32: "- wrong file\n", "b" * 32: "- Model saved.\n"})
     asyncio.run(overlay._job_runner("blender", "Started by voice: fixed 3D job.", "jarvis-3d-result.md",
-                                    "h2", make_deps(apps={})))
+                                    "h2", make_deps(apps={}), slug="test-mug"))
     gets = [r.url.path for r in seen if r.method == "GET" and "/files/" in r.url.path]
     assert gets == [f"/central/cards/sess-9/files/{'b' * 32}"]
-    card = next(ev["card"] for _k, ev in pushed if ev.get("type") == "card")
-    assert card["body"] == ["Model saved."]
+    # jfollow10d: the 3D result file is read for its status/slug lines only (no summary card); this
+    # one has neither, so the job counts as failed
+    assert not [ev for _k, ev in pushed if ev.get("type") == "card"]
+    assert [ev.get("text") for _k, ev in pushed] == [acks.PHRASES["model_failed"].format(name="test mug")]
     assert _rows()[-1].startswith("state=done id=sess-9")
 
 

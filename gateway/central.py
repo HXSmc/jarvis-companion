@@ -862,6 +862,14 @@ async def card_answer(body: AnswerBody, session_id: str = Path(pattern=ID_PATTER
         raise HTTPException(status_code=409, detail="already answered")
     if not cards.valid_answer(need, body.answer):
         raise HTTPException(status_code=422, detail="not one of the buttons")
+    if need.get("kind") == "mac":
+        # Stored only, no router message: the waiting tester polls GET /cards/need.
+        # No await before mark_answered, so two taps cannot both pass the 409 check.
+        note = cards._line(body.note, 300) if body.answer == "Message" else None
+        if note == "":
+            raise HTTPException(status_code=422, detail="write a message first")
+        cards.mark_answered(session_id, body.need_id, body.answer, text=note)
+        return {"ok": True, "action": "recorded"}
     text = cards.answer_text(need, body.answer, body.note, body.checked)
     data = await _send_to_session(session_id, body.msg_id, text, body.answer)
     cards.mark_answered(session_id, body.need_id, body.answer)

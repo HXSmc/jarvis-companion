@@ -117,6 +117,17 @@ final class ServiceClient {
         return data
     }
 
+    /// A model card's own GLB or preview PNG (jfollow10d), through the service's checked vault route;
+    /// nil path (bad slug/kind) throws before any request.
+    func modelFile(slug: String, kind: String) async throws -> Data {
+        guard let path = WebCardPolicy.modelFilePath(slug: slug, kind: kind) else { throw URLError(.badURL) }
+        var request = try authorizedRequest(path: path, method: "GET")
+        request.timeoutInterval = 30
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.check(response)
+        return data
+    }
+
     // MARK: - Internals
 
     private func authorizedRequest(path: String, method: String) throws -> URLRequest {

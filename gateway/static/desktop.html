@@ -892,6 +892,7 @@ function needButtons(need) {
     case "yesno": return [["Yes", true], ["No", true]];
     case "choice": return (need.options || []).map(o => [o, true]).concat([["Something else", false]]);
     case "checklist": return [["Send results", true], ["Add a note", false]];
+    case "mac": return [["Free", true], ["Message", false]];
     default: return [["OK", true], ["Reply", false]];
   }
 }

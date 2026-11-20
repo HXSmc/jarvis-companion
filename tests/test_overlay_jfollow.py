@@ -437,10 +437,11 @@ def test_preflight_answered_turn_cannot_be_reset_under_it(client):
     assert _until(lambda: "p1" in overlay._agent_busy)
     assert overlay._inflight.get("p1") == 1
     resets = overlay._resets.get("p1", 0)
-    clock.now += overlay.FRESH_AFTER_S + 1
+    overlay._tainted.add("p1")  # jfollow11c: only a tainted conversation starts fresh on a wake
+    clock.now += overlay.TAINTED_FRESH_AFTER_S + 1
     turn(client, "what time is it", conv_id="p1", audio_ms=500)
     assert overlay._resets.get("p1", 0) == resets
-    assert not any(s.get("detail") == "fresh: wake" for s in _steps("conversation"))
+    assert not any(s.get("detail") == "fresh: tainted_idle" for s in _steps("conversation"))
     turn(client, "stop", conv_id="p1")
     t.join(5)
 

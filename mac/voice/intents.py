@@ -10,15 +10,20 @@ work, plain questions) comes back as an Intent for the turn pipeline.
 
 from __future__ import annotations
 
+import difflib
 import re
 import subprocess
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
+
+from mac.voice import note_find  # jauto3: spoken note names (no cycle: agent_policy imports none of this)
+from mac.voice.auto_policy import OPEN_DOCS
 
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic | note_open | device  # jauto3; sshd: allowlisted device action
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -72,6 +77,8 @@ APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utili
 # charset — nothing that could turn into a scheme or a second argument.
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _PATH_RE = re.compile(r"^[/A-Za-z0-9._~%-]*$")
+URL_MAX = 2000  # jauto3
+_URL_REST_RE = re.compile(r"^[/A-Za-z0-9._~%!$&'()*+,;=:@?#-]*$")  # jauto3: RFC 3986 characters only
 _WAKE_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
 # STT often turns the wake phrase into other words: "Hey, John Pierce. What time is it".
 _MISHEARD_WAKE_RE = re.compile(r"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+", re.I)
@@ -93,6 +100,12 @@ _GROUND_LEAD_RE = re.compile(r"\b(" + "|".join(_GROUND_LEADS) + r")\b")
 _UI_NOUN_RE = re.compile(r"\b(" + "|".join(UI_NOUNS) + r")\b")
 # "open the clock app" -> "clock"; "notes.app" is a bundle, not a domain.
 _APP_NOISE_RE = re.compile(r"^the\s+|(?:\.app|\s+app)$", re.I)
+# jauto2: "open https://..." is the site ask without its scheme (open_site always opens https).
+_SCHEME_RE = re.compile(r"^https?://", re.I)
+# jauto2: "open the note X" / "open my file X": a named document for the agent, never an app launch.
+_DOC_TARGET_RE = re.compile(r"^(?:the|my|this|that|a)\s+(?:note|file|document|doc|pdf|folder|page|web\s?page"
+                            r"|link|url|website)\s+\S", re.I)
+_NOTE_WORD_RE = re.compile(r"\b(?:notes?|obsidian|vault)\b|\.(?:md|markdown)\b")
 # Whole-utterance clock questions only: "what time is it in Tokyo" still goes to the brain.
 _TIME_RE = re.compile(r"^(?:what(?:'s| is) the time|what time is it|tell me the time)(?: now| right now| please)?$")
 # "highlight the last debugging session": a visual verb about something on screen but no UI
@@ -256,12 +269,18 @@ _CARD_REMOVE_BLOCKED = frozenset(
     # A place or topic after the target ("the picture from my notes", "the diagram in
     # Preview") is owner-data or app work for the agent, never a card on screen.
     "from in on about into inside onto at to off within under".split())
+_SESS_NAME = r"(?!(?:it|that|this|my|your|a|an)\b)[a-z0-9][\w'.-]*(?: [\w'.-]+){0,3}"
 # Sessions read-only question; "what went wrong with X" carries the session name.
 _SESSIONS_RE = re.compile(_WRAP_LEAD + r"(?:what are my sessions doing|is anything stuck"
                           r"|are any sessions waiting(?: for me| on me)?"
                           r"|what went wrong with (?P<name>.+)|how are my sessions(?: doing)?"
                           r"|session status"
-                          r"|(?P<itref>what is it doing|how is it going|what's it doing))"
+                          r"|(?P<itref>what is it doing|how is it going|what's it doing)"
+                          # jfollow11c C1: what one session is doing or did (the name filters by title)
+                          r"|(?P<last>what did my last session do)"
+                          r"|what(?: is|'s|s) (?:the )?session (?P<sname>" + _SESS_NAME + r") doing"
+                          r"|what(?: is|'s|s) the (?P<sname2>" + _SESS_NAME + r") session doing"
+                          r"|what did (?:the )?(?P<sname3>" + _SESS_NAME + r") session do)"
                           + _WRAP_TRAIL)
 # jfollow6 D: a wider net of read-only sessions questions/asks ("what's running on my
 # companion"); matched after session/memory/workspace, before the hide/clear verbs, so
@@ -375,6 +394,79 @@ def fast_forms(text: str) -> list[str]:
     return forms
 
 
+# jfollow11c D4: start the conversation over (whole short utterance only).
+_NEW_TOPIC_RE = re.compile(_WRAP_LEAD + r"(?:(?:let's |lets |ok |okay )?(?:new topic|start over|start again"
+                           r"|(?:start )?(?:a )?new conversation|change (?:the )?topic))" + _WRAP_TRAIL)
+
+
+@dataclass
+class RepoAsk:
+    action: str  # "read" (the README) | "search"
+    name: str    # the owner's words for the repo; fixed code maps them to a listed name
+    query: str   # search words from the owner's words ("" for read)
+
+
+_README = r"\b(?:readme(?:\.md)?|read me)\b"
+_REPO_README_RE = re.compile(_README + r"(?: file)? (?:of|for|in|from) (?:the |my )?"
+                             r"(?P<name>[a-z0-9][\w.-]*(?: [\w.-]+){0,4}?)"
+                             r"(?: (?:repo|repository))?(?: (?:say|says|said|file|contain|contains))?$")
+_REPO_LEAD = re.compile(r"\b(?:where|which file|what file|find|search|look|grep|read|in which)\b")
+# A change, a run or a session ask is never a read-only repo question.
+_REPO_CHANGE = re.compile(r"\b(?:fix|edit|update|change|changed|write|rewrite|add|remove|delete|create|commit"
+                          r"|push|pull|merge|refactor|rename|move|start|stop|run|install|deploy|open|diff"
+                          r"|session|sessions|clone|build|test)\b")
+_REPO_STOP = frozenset("the a an this that my our your in of for from on at to is it its which what where and or "
+                       "with whole same current local code git github".split())
+_REPO_NOT_NAME = _REPO_STOP | frozenset("repo repository repos project projects codebase app here these those".split())
+_QUERY_STOP = _REPO_STOP | frozenset(
+    "is are was be handled handle handles defined define implemented implement done located lives live kept set up "
+    "used use found does do did how show me find search look grep read please jarvis hey can you could would tell "
+    "about whats where's wheres file files line lines repo repository repos part place thing get gets readme "
+    "say says there any all".split())
+_QUERY_WORD = re.compile(r"[A-Za-z0-9_.-]{2,40}")
+
+
+def repo_query(low: str) -> str:
+    """Up to 6 search words from the owner's words: stop words off, each [A-Za-z0-9_.-]{2,40}."""
+    out: list[str] = []
+    for w in re.findall(r"[a-z0-9_.-]+", low):
+        w = w.rstrip(".")
+        if w and w not in _QUERY_STOP and _QUERY_WORD.fullmatch(w) and w not in out:
+            out.append(w)
+    return " ".join(out[:6])
+
+
+def repo_request(text: str) -> RepoAsk | None:
+    """jfollow11c B6: "what does the README of X say" (read) or "where is Y in the X repo" (search)."""
+    low = _clean(text).lower().replace(",", "")
+    # R3 O1: Apple STT writes "jarvis's companion public", and (live run 3) "jarvis' companion public"
+    low = re.sub(r"(?<=\w)['\u2019](?:s\b|(?=\s|$))", "", low)
+    if _REPO_CHANGE.search(low):
+        return None
+    m = _REPO_README_RE.search(low)
+    if m:
+        name = m["name"].strip()
+        # R3: "the readme of this repo / it / my project" names no listed repo (README reads skip the pick)
+        return None if set(name.split()) <= _REPO_NOT_NAME else RepoAsk("read", name, "")
+    words = low.split()
+    for i in range(len(words) - 1, -1, -1):
+        if words[i] in ("repo", "repository", "repo's"):
+            j = i
+            while j > 0 and i - j < 4 and words[j - 1] not in _REPO_STOP:
+                j -= 1
+            if j == i:
+                return None
+            if not _REPO_LEAD.search(low):
+                return None
+            rest = " ".join(words[:j] + words[i + 1:])
+            if re.search(_README, rest):
+                return RepoAsk("read", " ".join(words[j:i]), "")
+            query = repo_query(rest)
+            # "where is the X repo": nothing to search for, so not a repo search (BASE kinds keep it)
+            return RepoAsk("search", " ".join(words[j:i]), query) if query else None
+    return None
+
+
 def first_form(text: str, fn):
     """fn(form) for the first form in fast_forms(text) that returns non-None, else None.
     The service re-parses raw speech per kind; this keeps it agreeing with parse."""
@@ -422,9 +514,120 @@ def draw_request(text: str) -> str | None:
     return subject
 
 
+# jfollow10d: 3D objects. Whole utterance only; "show me the cards" / "open notes" keep their kinds.
+_3D = r"(?:3d|3-d|3 d|three d|three-d)"
+_MODEL_CREATE_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
+                              r"(?:create|make|model|build|design|generate|render) (?:me )?(?:a |an )?" + _3D
+                              + r"(?: (?:object|model|thing))?(?P<rest>(?:[:, ].*)?)")
+_MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?:(?:^| ?,? )(?:and )?(?:call(?:ed)? it|called|named) (?P<name>.+))?")
+_MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
+                            r"|(?:list|show)(?: me)? (?:my |the )?" + _3D + r" (?:objects|models))")
+_MODEL_SHOW_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
+                            r"(?:pull up|show(?: me)?|bring up|open|display|load) (?:the |my )?(?P<name>.+?)"
+                            r"(?P<three> " + _3D + r" (?:object|model))?")
+
+
+def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None:
+    """A 3D object ask: model_create (arg = description, sub = name, or sub "ask" when no
+    description), model_list, or model_show (arg = the name words) when the name is a known object
+    (slug or alias) or the words say "3D". None = not a 3D ask."""
+    low = re.sub(r",? please$", "", _clean(text).lower())  # "... a mug please" never names a "mug please"
+    m = _MODEL_CREATE_RE.fullmatch(low)
+    if m:
+        rest = re.sub(r"^[\s:,]+(?:of )?", "", m["rest"]).strip()
+        parts = _MODEL_NAME_RE.fullmatch(rest)
+        desc = (parts["desc"] if parts else rest).strip(" ,:")
+        name = ((parts["name"] or "") if parts else "").strip(" ,:")
+        desc = desc or name  # "create a 3D object called test mug": the name is all we have
+        return Intent("model_create", desc, name) if desc else Intent("model_create", "", "ask")
+    if _MODEL_LIST_RE.fullmatch(low.replace(",", "")):
+        return Intent("model_list")
+    m = _MODEL_SHOW_RE.fullmatch(low)
+    if m and (m["three"] or re.search(_3D, m["name"]) is None and _model_key(m["name"]) in model_names):
+        return Intent("model_show", m["name"].strip())
+    return None
+
+
+def model_near(text: str, model_names: tuple[str, ...]) -> Intent | None:
+    """A show ask whose name is a speech-to-text near miss of a known object ("bring up the test
+    cue" for test-cube; Mac live run). Only for an utterance that would otherwise be a free answer,
+    a name of two or more words where exactly one word was misheard (one-word asks like "pull up the
+    weather" stay answers whatever the vault holds), at the service's close-match cutoff (0.8)."""
+    m = _MODEL_SHOW_RE.fullmatch(re.sub(r",? please$", "", _clean(text).lower()))
+    if not m or m["three"] or re.search(_3D, m["name"]):
+        return None
+    key = _model_key(m["name"])
+    words = key.split("-")
+    near = [n for n in model_names if len(n.split("-")) == len(words) > 1
+            and sum(a != b for a, b in zip(n.split("-"), words)) == 1]
+    if not difflib.get_close_matches(key, near, n=1, cutoff=0.8):
+        return None
+    return Intent("model_show", m["name"].strip())
+
+
+def _model_key(words: str) -> str:
+    """models3d.slugify without the import (same rule): the key model_names holds."""
+    out = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w and w not in ("a", "an", "the", "my")]
+    return "-".join(out)[:40].strip("-") or "object"
+
+
+# jauto3: spoken note names, front ("open the no llm switch ...") and tail ("open the llm
+# switch note") forms. Both run on the punctuation-stripped whole utterance: "Open the node.
+# LLM Switch ..." is one spoken name split by the sentence detector, so no last-sentence try.
+_NOTE_FRONT_RE = re.compile(r"^open (?:(?:the|my) )?(?P<w>notes?|nodes?|no|not) (?P<name>.+)$")
+_NOTE_TAIL_RE = re.compile(r"^open (?:(?:the|my) )?(?P<name>.+?) (?P<w>note|notes|node)$")
+
+
+def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
+    """A spoken "open the note <name>" that matches a real vault note; else None."""
+    if not note_names:
+        return None
+    n = re.sub(r"\s+", " ", re.sub(r"[.?!,;:]+", " ", strip_lead(_clean(text)).lower())).strip()
+    if not n.startswith("open "):
+        return None
+    if re.search(r"\bsecrets?\b", n):  # jauto3: the Secrets refusal keeps priority
+        return None
+    m = _NOTE_FRONT_RE.match(n) or _NOTE_TAIL_RE.match(n)
+    if not m:
+        return None
+    name = m["name"].strip()
+    if set(note_find.tokens(name)) <= {"app", "apps", "application"}:  # "open my notes folder", "open note app"
+        return None
+    literal = m["w"] == "note"  # the exact singular: a one-word name may match on its own
+    # round 1 (U1): no matching note -> None, so today's rules run ("open the note about pricing" reaches the agent)
+    if note_find.find(note_names, name, literal=literal):
+        return Intent("note_open", name, "literal" if literal else "")
+    return None
+
+
+# sshd: fixed device-control phrases ("turn on gaming mode on the PC"). The
+# intent arg is only a constant action id from gateway.devices.ACTIONS — the
+# utterance itself never reaches the ssh command (see gateway/devices.py).
+_DEVICE_GAMING_RE = re.compile(
+    r"\b(?:turn\s+)?(?P<v>on|off)\s+gam(?:e|ing)[-\s]?mode\b"          # "turn on gaming mode"
+    r"|\b(?:turn\s+)?gam(?:e|ing)[-\s]?mode\s+(?P<v2>on|off)\b"        # "gaming mode on"
+    r"|\bgam(?:e|ing)[-\s]?mode\s+(?:status|state|on\s+or\s+off)\b"    # "gaming mode status"
+    r"|\bis\s+gam(?:e|ing)[-\s]?mode\s+(?:on|off)\b"                   # "is gaming mode on?"
+)
+
+
+def device_request(text: str) -> Intent | None:
+    """A fixed device-control phrase -> Intent("device", "<action id>"); None = not one.
+
+    Only ever returns one of the constant winpc.gaming_mode_* ids — never
+    utterance text, so nothing spoken can shape a command (gateway/devices.py)."""
+    low = _clean(text).lower()
+    m = _DEVICE_GAMING_RE.search(low)
+    if not m:
+        return None
+    v = m.group("v") or m.group("v2")
+    return Intent("device", "winpc.gaming_mode_status" if not v else f"winpc.gaming_mode_{v}")
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
-                 place_names: tuple[str, ...] = ()) -> Intent | None:
+                 place_names: tuple[str, ...] = (),
+                 note_names: tuple[str, ...] = ()) -> Intent | None:
     """Every fixed fast-path kind for one utterance form; None = this form matches none.
     `last` (the last-sentence pass) skips clock and hunk: those stay whole-utterance
     ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
@@ -433,9 +636,16 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     # First after stop: "can you remove one card" is a how-to question, not a remove.
     if _CARD_HELP_RE.fullmatch(_clean(text).lower().replace(",", "")):
         return Intent("card_help")
+    dev = device_request(text)  # sshd: fixed device phrases beat every guessier kind
+    if dev is not None:
+        return dev
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)
+    if not last:
+        model = model_request(text)  # no names here: a bare vault name is tried in parse, after fixed kinds
+        if model is not None:
+            return model
     t = _clean(text)
     low = t.lower()
     subject = draw_request(text)
@@ -443,7 +653,10 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         return Intent("draw", subject)
     m = _form_hit(_SESSIONS_RE, low.replace(",", ""))
     if m:
-        return Intent("sessions", (m["name"] or "").strip(), "ref" if m.group("itref") else "")
+        name = m["name"] or m["sname"] or m["sname2"] or m["sname3"] or ""
+        return Intent("sessions", name.strip(), "ref" if m.group("itref") else "last" if m.group("last") else "")
+    if _form_hit(_NEW_TOPIC_RE, low.replace(",", "")):
+        return Intent("new_topic")
     ask = session_request(text)
     if ask:
         return Intent("session", ask.action)
@@ -457,6 +670,11 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     if _form_hit(_VAULT_SECRETS_RE, low):
         return Intent("vault_secrets")
     if not last:  # jfollow10b: whole-utterance kinds, before workspace and open
+        hit = _place_match(text, place_names, apps, take_me=False)  # jfollow10f: before the map check
+        if hit and hit[0] == "place":
+            return Intent("place", hit[1]["mode"])
+        if hit:
+            return Intent("geo_map", hit[1])
         geo = geo_request(text, place_names)
         if geo:
             return Intent(geo.kind, geo.b or geo.a, geo.mode)
@@ -464,6 +682,15 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         if vid:
             return Intent(vid.kind, vid.question, vid.video_id)
     ask = workspace_request(text, ws_names)
+    # jauto3: a spoken note name ("open the no llm switch benchmark") beats the workspace
+    # suffix guess, but never a saved workspace name whose own words it repeats.
+    if not last and note_names and not (
+            ask and ask.action in ("open", "delete")
+            and any((set(ask.name.split()) - _WORKSPACE_FILLERS) <= set(_ws_name(n).split())
+                    for n in ws_names)):
+        hit = _note_intent(text, note_names)
+        if hit is not None:
+            return hit
     # An installed app or a site wins over a saved name sharing a word ("open notes").
     # "delete the cat card" is a card ask even when a saved name shares the words; a saved
     # "shopping list" or "meeting notes" (kind words) stays a workspace delete.
@@ -471,6 +698,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         ask = None
     if ask and not (ask.action == "open" and _open_intent(t, apps) is not None):
         return Intent("workspace", ask.action)
+    repo = repo_request(t)
+    if repo is not None:
+        return Intent("repo", repo.name, repo.action)
     if _form_hit(_SESSIONS_TOPIC_RE, low.replace(",", "")):
         return Intent("sessions", "", "")
     # Hide first: "get rid of it for now" is temporary, not the final clear.
@@ -505,18 +735,24 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
 
 def parse(text: str, apps: dict[str, str] | None = None,
           workspace_names: tuple[str, ...] | None = None,
-          place_names: tuple[str, ...] | None = None) -> Intent:
+          place_names: tuple[str, ...] | None = None,
+          model_names: tuple[str, ...] | None = None,
+          note_names: tuple[str, ...] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
     Fast-path kinds run on the whole text, then once more on its last sentence
     (fast_forms); the model kinds always see the whole cleaned transcript.
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
     to a real installed app before the domain check. `workspace_names` (saved
-    workspace names) lets "open <name>" resolve to a workspace ask.
+    workspace names) lets "open <name>" resolve to a workspace ask; `model_names` (3D
+    object slugs + aliases) lets "pull up <name>" resolve to a 3D object;
+    `note_names` (vault-relative note paths from note_find.scan) lets a spoken
+    "open the note <name>" resolve to a note open.
     """
     forms = fast_forms(text)
     for i, form in enumerate(forms):
-        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or ())
+        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or (),
+                              note_names=note_names or ())
         if intent is not None:
             return intent
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
@@ -547,24 +783,91 @@ def parse(text: str, apps: dict[str, str] | None = None,
     if look and _LOOK_REF_RE.search(low, look.end()):
         return Intent("look", t)
     if low.startswith("open "):
-        arg = t[5:].strip()
-        return _open_intent(t, apps) or Intent("open_app", arg)
+        hit = _open_intent(t, apps)
+        if hit:
+            return hit
+    # A bare 3D name ("pull up the test mug") comes from the vault (folders, mini PC-written
+    # aliases), so it is tried only after every fixed kind and a real app or site, and never
+    # for a stop phrase: a name like "stop" must not swallow a spoken stop ("load stop").
+    model = model_request(text, model_names) if model_names and not is_stop_family(text) else None
+    if model is not None:
+        return model
+    if low.startswith("open "):
+        target = t[5:].strip()
+        # jauto2: a note, document, path or URL nothing installed answers to goes to the agent (a tie still asks)
+        if _doc_target(target) and not app_candidates(target, apps if apps is not None else list_apps()):
+            if re.search(r"\bsecrets\b", low):  # "open Secrets/x.md": the Secrets refusal, never an agent hunt
+                return Intent("vault_secrets")
+            return Intent("agent", t, "notes" if _NOTE_WORD_RE.search(low) else _agent_sub(low))
+        return Intent("open_app", target)
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
+    near = model_near(text, model_names) if model_names else None  # a misheard name, before a free answer
+    if near:
+        return near
+    hit = _place_match(text, place_names or (), apps, take_me=True)  # "take me to <x>": last, never steals a kind
+    if hit:
+        return Intent("place", hit[1]["mode"]) if hit[0] == "place" else Intent("geo_map", hit[1])
     return Intent("answer", t)
 
 
+def _safe_url(url: str) -> str | None:
+    """A full typed http(s) URL re-checked part by part and normalized to https; None = refuse.
+
+    The rest after the bare host (no userinfo, no port, no spaces) may only hold RFC 3986
+    characters, so a query or hash is fine but quotes, control bytes and shell text are not.
+    """
+    if len(url) > URL_MAX or not url.isascii():
+        return None
+    m = _SCHEME_RE.match(url)
+    if not m:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    netloc = parts.netloc
+    if parts.scheme.lower() not in ("http", "https"):
+        return None
+    if not _HOST_RE.match(netloc.lower()):
+        return None
+    rest = url[m.end() + len(netloc):]
+    if rest and rest[0] not in "/?#":
+        return None
+    if not _URL_REST_RE.match(rest):
+        return None
+    out = "https://" + netloc + rest  # jauto3: http upgrades to https like every site open
+    return out if len(out) <= URL_MAX else None
+
+
 def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
-    """"open <x>" resolved to an installed app or a site host, else None."""
+    """"open <x>" resolved to an installed app or a site, else None."""
     if not t.lower().startswith("open "):
         return None
     arg = t[5:].strip()
     name = _APP_NOISE_RE.sub("", arg).strip()
     if _match_app(name, apps if apps is not None else list_apps()):
         return Intent("open_app", name)
-    if _HOST_RE.match(arg.lower().partition("/")[0]):
-        return Intent("open_site", arg)
+    site = _SCHEME_RE.sub("", arg)  # jauto2: a URL with a scheme is the same site ask
+    host, sep, path = site.partition("/")
+    if (_HOST_RE.match(host.lower()) and (not sep or _PATH_RE.match(path))  # jauto2: ?&=# -> agent
+            and (sep or site != arg or not _doc_name(site))  # jauto2: "report.pdf" is a file, not a host
+            and len("https://" + site) <= URL_MAX):  # jauto3: same cap for both URL forms
+        return Intent("open_site", site)
+    url = _safe_url(arg)
+    if url is not None:  # jauto3: a typed query/hash URL, already upgraded to https
+        return Intent("open_site", url)
     return None
+
+
+def _doc_name(name: str) -> bool:
+    """jauto2: the name ends in a document extension the open policy knows (report.pdf, x.md)."""
+    return "." in name and name.rpartition(".")[2].casefold() in OPEN_DOCS
+
+
+def _doc_target(target: str) -> bool:
+    """jauto2: "open <target>" names a document, a path or a URL rather than an app."""
+    return bool(_SCHEME_RE.match(target) or "/" in target or _doc_name(target) or _DOC_TARGET_RE.match(target))
 
 
 def _agent_sub(low: str) -> str:
@@ -1458,17 +1761,37 @@ def open_app(name: str, *, run=subprocess.run, apps: dict[str, str] | None = Non
     return real
 
 
+def link_label(url: str) -> str:
+    """What the overlay says for a site open: the URL when short and plain, else just the host."""
+    if "?" not in url and "#" not in url and len(url) <= 60:
+        return url
+    return f"the link on {urllib.parse.urlsplit(url).netloc}"  # jauto3: query URLs stay private
+
+
+def site_row_arg(arg: str) -> str:
+    """What the debug row keeps: the arg as-is when it is said aloud, else only the host."""
+    url = arg if _SCHEME_RE.match(arg) else "https://" + arg  # jauto3
+    return arg if link_label(url) == url else urllib.parse.urlsplit(url).netloc
+
+
 def open_site(target: str, *, run=subprocess.run) -> str | None:
     """Open an https URL built from a validated host + safe path; None = refused."""
     target = target.strip()
-    host, sep, path = target.partition("/")
-    if not _HOST_RE.match(host.lower()):
-        return None
-    if sep and not _PATH_RE.match(path):
-        return None
-    url = "https://" + target
+    if _SCHEME_RE.match(target):  # jauto3: the full https form (parse upgrades http) re-validates whole
+        url = _safe_url(target) if target[:8].lower() == "https://" else None
+        if url is None:
+            return None
+    else:
+        host, sep, path = target.partition("/")
+        if not _HOST_RE.match(host.lower()):
+            return None
+        if sep and not _PATH_RE.match(path):
+            return None
+        if len("https://" + target) > URL_MAX:  # jauto3
+            return None
+        url = "https://" + target
     run(["open", url], check=False)
-    return url
+    return link_label(url)
 
 
 # jfollow7 S2: the follow-up rule's words (only after a sessions answer, one turn, 30 s): the
@@ -1636,6 +1959,146 @@ def geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
             g = m.groupdict()
             return GeoAsk("geo_map", (g.get("a") or "").strip(), (g.get("b") or "").strip())
     return None
+
+
+# --- jfollow10f: general places ("best way to the cinema", "nearest Dishoom", "is Ebenezer on near me") ---
+
+CATEGORY = {"pharmacy": "pharmacy", "chemist": "pharmacy", "supermarket": "supermarket", "cafe": "cafe",
+            "coffee shop": "cafe", "restaurant": "restaurant", "pub": "pub", "bank": "bank", "cash machine": "atm",
+            "cash point": "atm", "cashpoint": "atm",
+            "atm": "atm", "post office": "post office", "hospital": "hospital", "petrol station": "petrol station",
+            "library": "library", "park": "park", "gym": "gym", "bakery": "bakery", "bookshop": "bookshop"}
+_CINEMA_WORDS = frozenset({"cinema", "cinemas", "pictures", "movies", "movie theatre", "movie theater"})
+_NOT_A_PLACE = r"(?!(?:grips|know|sleep|be|terms|the bottom|the point|work|school|it|that)\b)"
+_PLACE_BEST_RES = (
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?:go to|get to) " + _NOT_A_PLACE + r"(?P<x>.+)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?:go|get) (?P<x>home)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?P<x>(?:the|a|an) .+)"),
+    re.compile(r"(?:what'?s |what is )?(?:the )?best way to (?P<bare>.+)"),
+    re.compile(r"how (?:do|can|should) i get to (?:the )?(?:nearest|closest) (?P<x>.+)"),
+    re.compile(r"(?:what'?s |what is |where'?s |where is |find(?: me)? )?(?:the |a )?(?:nearest|closest) (?P<x>.+)"),
+)
+_PLACE_FIND_RE = re.compile(r"find(?: me)? (?:a|an) (?P<x>.+)", re.I)  # case kept: a name is capitalised
+_FIND_MEDIA_RE = re.compile(r"\b(?:picture|photo|image|video|youtube|song|clip|gif|map|recipe|film|movie|book)s?\b", re.I)
+_FILM_RE = re.compile(r"is (?P<film>.+?) (?P<verb>on|showing|playing)"
+                      r"(?P<place> near me| nearby| at the cinema| in cinemas| at the pictures)?"
+                      r"(?P<when> tonight| today| tomorrow)?")
+_FILM_STOP = frozenset({"tv", "telly", "light", "lights", "heating", "oven", "wifi", "bluetooth", "camera", "mic",
+                        "screen", "overlay", "alarm", "music", "it", "that", "this", "they", "he", "she", "there"})
+_WHATS_ON_RES = (
+    re.compile(r"what'?s on at the (?:cinema|pictures|movies)(?P<when> tonight| today| tomorrow)?"),
+    re.compile(r"what is on at the (?:cinema|pictures|movies)(?P<when> tonight| today| tomorrow)?"),
+    re.compile(r"what films are on(?P<when> tonight| today)?(?: near me)?"),
+)
+_PLACE_WORDS_RE = re.compile(r"^[a-z0-9 '&-]{1,60}$")
+_PLACE_POSTCODE_RE = re.compile(r"^[a-z]{1,2}\d[a-z\d]? ?\d[a-z]{2}$")  # = geo.POSTCODE_RE (intents stays light)
+PLACE_CUE_RE = re.compile(r"\b(?:best way to|nearest|closest|take me)\b", re.I)  # the service loads saved names then
+# jfollow11f: "take me to Dishoom" / "take me home"; "take me back", "take me through ..." never match.
+_TAKE_ME_RE = re.compile(r"take me (?:to (?P<x>.+)|(?P<home>home))")
+_TAKE_ME_NOT_RE = re.compile(
+    r"^(?:the )?(?:top|bottom|end|start|beginning|next|previous|last|first)\b|^(?:it|that|this|there)$"
+    r"|\b(?:pages?|tabs?|settings|websites?|sites?|links?|lines?|changes?|chapters?|slides?|steps?)\b"
+    # round 1: screen, dev and day words are never a place ("take me to the repo", "take me to bed")
+    r"|\b(?:dashboards?|files?|folders?|repos?|repository|videos?|windows?|workspaces?|overlay|cards?|maps?"
+    r"|code|inbox|notes|main|minutes?|seconds?|youtube|github|bed|lunch|dinner|breakfast)\b")
+
+
+def _place_target(x: str, place_names: tuple[str, ...]):
+    """Target words -> ("geo", words) for a saved name / home / postcode, ("place", mode, query), or None."""
+    x = " ".join(x.replace("’", "'").split()).strip(" .,?!")
+    # "best way to get to the nearest Dishoom": the target is "dishoom" (a saved name then still wins)
+    x = re.sub(r"^(?:(?:the|a|an) )?(?:nearest|closest) ", "", x)
+    if not x or "://" in x or "www." in x or len(x) > 60:
+        return None
+    if x.startswith("my ") or place_name(x) == "home" or place_name(x) in place_names or _PLACE_POSTCODE_RE.fullmatch(x):
+        return ("geo", x)
+    bare = re.sub(r"^(?:the|a|an) ", "", x)
+    if not _PLACE_WORDS_RE.fullmatch(bare) or bare in ("nearest", "closest"):
+        return None
+    if bare in _CINEMA_WORDS:
+        return ("place", "cinema", "cinema")
+    if bare in CATEGORY:
+        return ("place", "category", CATEGORY[bare])
+    return ("place", "name", bare)
+
+
+def _take_me_target(x: str, apps: dict[str, str]) -> bool:
+    """A "take me to <x>" target that may be a place: not a page spot, a screen thing, an app or a site."""
+    bare = re.sub(r"^(?:the )?(?:(?:nearest|closest) )?", "", x).strip()
+    return not (_TAKE_ME_NOT_RE.search(x) or re.search(r"\b(?:to|from|than)\b", x) or "://" in x
+                or "www." in x or _HOST_RE.match(bare) or (apps and _match_app(bare, apps)))
+
+
+def _place_match(text: str, place_names: tuple[str, ...], apps: dict[str, str] | None = None,
+                 take_me: bool = True):
+    """The whole place form of one utterance: ("place", dict) | ("geo", target words) | None.
+    `take_me=False` skips "take me to <x>": parse tries it only after every other kind (round 1)."""
+    if len(text) > 200:
+        return None
+    t = destutter(_strip_tail(strip_lead(_clean(text)))).strip().rstrip(".?!,").strip()
+    low = t.lower().replace("’", "'").replace(",", "")
+    for rx in _WHATS_ON_RES:
+        m = rx.fullmatch(low)
+        if m:
+            return ("place", {"mode": "whats_on", "query": "cinema", "film": "", "when": (m["when"] or " today")[1:]})
+    m = _FILM_RE.fullmatch(low)
+    if m and (m["place"] or m["when"] or m["verb"] != "on"):
+        film = " ".join(m["film"].split())
+        bare = re.sub(r"^(?:the|a|an) ", "", film)
+        if (film and len(film) <= 60 and _PLACE_WORDS_RE.fullmatch(film) and bare not in _FILM_STOP
+                and film not in _FILM_STOP and not re.search(r"\b(?:line|tube|bus|train)$", film)):
+            return ("place", {"mode": "film", "query": "cinema", "film": film, "when": (m["when"] or " today")[1:]})
+        return None
+    m = _TAKE_ME_RE.fullmatch(low) if take_me else None
+    if m:
+        x = m["home"] or m["x"].strip()
+        if x.startswith("my ") and place_name(x) != "home" and place_name(x) not in place_names:
+            return None  # "take me to my notes": only a saved "my" name maps
+        hit = _place_target(x, place_names) if _take_me_target(x, apps or {}) else None
+        if hit is None:
+            return None
+        return hit if hit[0] == "geo" else ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    for rx in _PLACE_BEST_RES:
+        m = rx.fullmatch(low)
+        if not m:
+            continue
+        if "bare" in m.groupdict() and m["bare"] is not None:
+            word = m["bare"].strip()
+            if word not in _CINEMA_WORDS and word not in CATEGORY:
+                return None  # "best way to cook rice": not a place
+            x = word
+        else:
+            x = m["x"]
+            if re.search(r"\b(?:to|from|than)\b", x):  # "the closest planet to the sun": a question, not a place
+                return None
+        hit = _place_target(x, place_names)
+        if hit is None:
+            return None
+        return hit if hit[0] == "geo" else ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    m = _PLACE_FIND_RE.fullmatch(t)
+    if m and not _FIND_MEDIA_RE.search(m["x"]):
+        x = m["x"].strip()
+        # "find me a Pret" (a capitalised name, <= 3 words) or a category word; "find me a picture of a cat"
+        # and other lower-case asks stay with the media and answer kinds.
+        if x.lower() in CATEGORY or (x[:1].isupper() and len(x.split()) <= 3):
+            hit = _place_target(x.lower(), place_names)
+            if hit and hit[0] == "place":
+                return ("place", {"mode": hit[1], "query": hit[2], "film": "", "when": "today"})
+    return None
+
+
+def place_request(text: str, place_names: tuple[str, ...] = (), apps: dict[str, str] | None = None) -> dict | None:
+    """{"mode": name|category|cinema|film|whats_on, "query", "film", "when": today|tonight|tomorrow} or None.
+    Fixed code, owner words only; a saved name, home or a postcode is stage B's route (place_geo_request).
+    `apps`: installed apps, so "take me to Safari" is never a place."""
+    hit = _place_match(text, place_names, apps)
+    return hit[1] if hit and hit[0] == "place" else None
+
+
+def place_geo_request(text: str, place_names: tuple[str, ...] = ()) -> GeoAsk | None:
+    """"best way to go to the gym / home / SW1A 2AA" -> stage B's map route from home."""
+    hit = _place_match(text, place_names)
+    return GeoAsk("geo_map", "", hit[1]) if hit and hit[0] == "geo" else None
 
 
 @dataclass
