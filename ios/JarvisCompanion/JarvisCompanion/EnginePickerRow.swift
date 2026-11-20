@@ -156,10 +156,14 @@ final class EngineStore: ObservableObject {
         return !option.localOnly
     }
 
-    /// Router-worded local-model errors (desktop RAW_ERR): shown verbatim, no prefix.
+    /// Router-worded local-model errors (desktop RAW_ERR).
+    nonisolated static func isLocalModelError(_ message: String) -> Bool {
+        ["Local model unavailable:", "This chat belongs to", "Local model failed:"].contains { message.hasPrefix($0) }
+    }
+
+    /// A local-model error shows verbatim; anything else keeps the caller's prefix.
     nonisolated static func errorText(_ message: String, prefix: String) -> String {
-        let raw = ["Local model unavailable:", "This chat belongs to", "Local model failed:"]
-        return raw.contains { message.hasPrefix($0) } ? message : prefix + message
+        isLocalModelError(message) ? message : prefix + message
     }
 
     /// Which machine answered a local chat (desktop upstreamNote); nil for anything else.

@@ -56,18 +56,18 @@ final class EnginePickerSnapshotTests: XCTestCase {
 
     func testLocalOnlyRow() throws {
         EngineStore.shared.seed([.hub, Self.glm, Self.local])
-        try shot("17-engine-row-local",
+        try shot("21-engine-row-local",
                  EnginePickerRow(engineID: .constant("qwen-local"), newSession: .constant(false), refreshOnAppear: false))
-        try shot("18-engine-row-local-locked",
+        try shot("22-engine-row-local-locked",
                  EnginePickerRow(engineID: .constant("hub"), newSession: .constant(false),
                                  lockedEngine: "qwen-local", refreshOnAppear: false))
         // a local session whose engine the cached list no longer has: still says local only
         EngineStore.shared.seed([.hub, Self.glm])
-        try shot("19-engine-row-local-locked-unlisted",
+        try shot("23-engine-row-local-locked-unlisted",
                  EnginePickerRow(engineID: .constant("hub"), newSession: .constant(false),
                                  lockedEngine: "qwen-local", lockedLocalOnly: true, refreshOnAppear: false))
         EngineStore.shared.seed([.hub, Self.glm, Self.localDown])
-        try shot("20-engine-row-local-unavailable",
+        try shot("24-engine-row-local-unavailable",
                  EnginePickerRow(engineID: .constant("qwen-local"), newSession: .constant(false), refreshOnAppear: false))
         // "Local only" once, whether or not the label already has it
         XCTAssertEqual(Self.local.displayLabel, "Qwen 27B · Local only")
@@ -299,7 +299,7 @@ final class EnginePickerSnapshotTests: XCTestCase {
 final class StubGateway: URLProtocol {
     static let host = "gw.example.invalid"
     private static let lock = NSLock()
-    private static var requests: [(path: String, body: [String: Any])] = []
+    private static var requests: [(method: String, path: String, body: [String: Any])] = []
     /// (path, how many requests that path has had) -> status + JSON body, or a transport error.
     static var respond: (String, Int) -> (Int, [String: Any]?, URLError?) = { _, _ in (404, nil, nil) }
 
@@ -309,10 +309,10 @@ final class StubGateway: URLProtocol {
         respond = { _, _ in (404, nil, nil) }
     }
 
-    /// Requests that carried a body (the sends); SSE GETs are left out.
+    /// The POSTs (sends) only: SSE and any app poll (engines, sessions, notes) are GETs.
     static func recorded() -> [(path: String, body: [String: Any])] {
         lock.lock(); defer { lock.unlock() }
-        return requests.filter { !$0.path.hasSuffix("/events") }
+        return requests.filter { $0.method == "POST" }.map { ($0.path, $0.body) }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == host }
@@ -324,7 +324,7 @@ final class StubGateway: URLProtocol {
         let data = request.httpBody ?? request.httpBodyStream.map(Self.read)
         let body = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         Self.lock.lock()
-        Self.requests.append((path, body))
+        Self.requests.append((request.httpMethod ?? "GET", path, body))
         let count = Self.requests.filter { $0.path == path }.count
         let respond = Self.respond
         Self.lock.unlock()

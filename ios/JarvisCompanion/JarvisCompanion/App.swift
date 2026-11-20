@@ -547,7 +547,7 @@ final class AppModel: ObservableObject {
                         self.fail("unauthorized, check the token in Settings")
                     } else if let data = data,
                               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                              let detail = obj["detail"] as? String, !detail.isEmpty {
+                              let detail = obj["detail"] as? String, EngineStore.isLocalModelError(detail) {
                         // the local model's 503/409 wording reaches the owner verbatim
                         self.fail(detail)
                     } else {
