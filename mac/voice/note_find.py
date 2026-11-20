@@ -128,7 +128,8 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     seen: set[str] = set()
     q = [w for w in q if not (w in seen or seen.add(w))][:12]
     index = _prepared(names)
-    key = (tuple(q), literal)
+    digits = "".join(c for c in words if c.isdigit())  # jauto3 round 3 (R3-1): date words tie-break
+    key = (tuple(q), literal, digits)
     hit = index["found"].get(key)  # jauto3 round 2 (R2-3b): one read, no check-then-index race with clear()
     if hit is not None:
         return list(hit)
@@ -144,6 +145,11 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
         scored.append((hits, rel))
     best = max((h for h, _ in scored), default=0)
     out = sorted(rel for h, rel in scored if h == best)
+    if len(out) > 1 and digits:
+        # jauto3 round 3 (R3-1): tokens() drops digits, so a tie the tie line spoke as dates
+        # comes straight back; the query's digits narrow it, but never to nothing.
+        narrowed = [r for r in out if digits in "".join(c for c in r.rsplit("/", 1)[-1] if c.isdigit())]
+        out = narrowed or out
     if len(index["found"]) >= 64:
         index["found"].clear()
     index["found"][key] = tuple(out)

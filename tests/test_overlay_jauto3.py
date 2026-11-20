@@ -585,3 +585,26 @@ def test_round2_long_ask_capped_at_12_words():
     keys = list(note_find._index["found"])
     assert keys and all(len(k[0]) <= 12 for k in keys)  # at most 12 unique words scored, order kept
     assert note_find.find(names, "open the llm switch benchmark note") == [names[0]]  # normal asks match
+
+
+# --- round 3 ---
+
+
+def test_round3_digits_narrow_a_dated_tie():
+    names = ("Research/llm-switch-benchmark-2026-11-18.md", "Research/llm-switch-benchmark-2026-11-19.md")
+    assert note_find.find(names, "open the note llm switch benchmark 2026 11 18") == [names[0]]
+    assert note_find.find(names, "llm switch benchmark 2026-11-19") == [names[1]]
+    assert note_find.find(names, "llm switch benchmark 20261118") == [names[0]]
+    assert note_find.find(names, "open the llm switch benchmark note") == list(names)  # no digits: tie stands
+    assert note_find.find(names, "llm switch benchmark 2025") == list(names)  # digits match neither: tie kept
+
+
+def test_round3_digit_tie_cached_apart():
+    names = ("Research/llm-switch-benchmark-2026-11-18.md", "Research/llm-switch-benchmark-2026-11-19.md")
+    assert note_find.find(names, "llm switch benchmark 2026 11 18") == [names[0]]
+    assert note_find.find(names, "llm switch benchmark 2026 11 19") == [names[1]]  # same words, other digits
+
+
+def test_round3_folder_tie_names_two_folders():
+    assert _tie_line(["X/B/Meeting.md", "Y/B/Meeting.md"]) == \
+        "Two notes match: Meeting in X B and Meeting in Y B. Say more of the name."

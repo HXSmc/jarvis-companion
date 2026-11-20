@@ -6698,6 +6698,12 @@ async def _note_open(hits: list[str], name: str, deps: OverlayDeps) -> tuple[str
                 folder = " ".join(parent.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").split()) \
                     or "the vault top folder"
                 names[i] = f"{n} in {folder}"
+        collide = [names.count(n) > 1 for n in names]  # jauto3 round 3 (R3-2): X/B/N and Y/B/N still both say "in B"
+        for i, n in enumerate(names):
+            if collide[i] and "/" in rels[i]:
+                two = " ".join(" ".join(p.replace("-", " ").replace("_", " ") for p in
+                                        rels[i].rsplit("/", 1)[0].split("/")[-2:]).split())
+                names[i] = f"{n.rsplit(' in ', 1)[0]} in {two}"
         names = sorted(names)
         count = _COUNT_WORDS.get(len(names), str(len(names)))
         shown = (f"{', '.join(names[:-1])} and {names[-1]}" if len(names) <= 3
