@@ -138,8 +138,8 @@ _DAY_NUM_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?")  # "18", "3rd"
 
 
 def _day_at(ws: list[str], i: int) -> int:
-    """The day spoken at ws[i] (digits, "18th", a number/ordinal word; a tens word takes a
-    unit word beside it), 0 when ws[i] is no day."""
+    """The day spoken at ws[i] (digits, "18th", a number/ordinal word; a tens word and a
+    unit word combine either way round), 0 when ws[i] is no day."""
     m = _DAY_NUM_RE.fullmatch(ws[i])
     v = int(m[1]) if m else _DAY_WORDS.get(ws[i], 0)
     if not 1 <= v <= 31:
@@ -148,6 +148,9 @@ def _day_at(ws: list[str], i: int) -> int:
         for j in (i - 1, i + 1):
             if 0 <= j < len(ws) and _UNIT.get(ws[j], 0):
                 return v + _UNIT[ws[j]]
+    u = _UNIT.get(ws[i], 0)  # r2: "twenty first" said with the unit word next to the month
+    if u and i and ws[i - 1] in ("twenty", "thirty"):
+        return _DAY_WORDS[ws[i - 1]] + u
     return v
 
 
@@ -170,6 +173,8 @@ def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
                         if ws[j] in ("twenty", "thirty"):  # the unit word of "twenty first"
                             drop |= {k for k in (j - 1, j + 1)
                                      if 0 <= k < len(ws) and _UNIT.get(ws[k], 0)}
+                        elif _UNIT.get(ws[j], 0) and j and ws[j - 1] in ("twenty", "thirty"):
+                            drop.add(j - 1)  # r2: the tens word of "twenty first of november"
                         return f"{year}{_MONTHS[w]:02d}{day:02d}", frozenset(drop)
     return "", frozenset()
 

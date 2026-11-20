@@ -758,3 +758,20 @@ def test_jauto3c_r1_number_word_names_still_match(tmp_path):
     got = intents.parse("open the second brain notes", apps=A, note_names=names)
     assert got.kind == "note_open"
     assert note_find.find(names, got.arg) == ["second-brain.md"]
+
+
+# --- jauto3c round 2 ---
+
+
+def test_jauto3c_r2_tens_before_the_month(tmp_path):
+    names = _vault(tmp_path, *[f"Meetings/team-standup-2026-{md}.md"
+                               for md in ("11-01", "11-21", "12-01", "12-31")])
+    for ask, want in (
+        ("team standup the twenty first of november", "Meetings/team-standup-2026-11-21.md"),
+        ("team standup twenty-first of november", "Meetings/team-standup-2026-11-21.md"),
+        ("team standup the thirty first of december", "Meetings/team-standup-2026-12-31.md"),
+        ("team standup november twenty first", "Meetings/team-standup-2026-11-21.md"),
+        ("team standup the first of november", "Meetings/team-standup-2026-11-01.md"),
+        ("team standup twenty one november", "Meetings/team-standup-2026-11-21.md"),
+    ):
+        assert note_find.find(names, ask) == [want], ask
