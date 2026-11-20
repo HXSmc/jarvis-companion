@@ -594,7 +594,7 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     if set(note_find.tokens(name)) <= {"app", "apps", "application"}:  # "open my notes folder", "open note app"
         return None
     literal = m["w"] == "note"  # the exact singular: a one-word name may match on its own
-    # round 1 (U1): no matching note -> None, so today's rules run ("open the latest note" reaches the agent)
+    # round 1 (U1): no matching note -> None, so today's rules run ("open the note about pricing" reaches the agent)
     if note_find.find(note_names, name, literal=literal):
         return Intent("note_open", name, "literal" if literal else "")
     return None
