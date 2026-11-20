@@ -591,7 +591,7 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     if not m:
         return None
     name = m["name"].strip()
-    if not note_find.tokens(name):  # "open my notes folder": nothing left to match
+    if set(note_find.tokens(name)) <= {"app", "apps", "application"}:  # "open my notes folder", "open note app"
         return None
     if m["w"] == "note":  # the owner typed/said the exact singular: honor the stem as written
         return Intent("note_open", name, "literal")

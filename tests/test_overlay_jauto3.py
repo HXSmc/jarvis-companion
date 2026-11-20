@@ -147,6 +147,8 @@ KEEP_ROWS = [
     ("open sessions on the Mac", A),
     ("open notes.app", {}),
     ("open notes app", {}),
+    ("open note app", A),  # jauto3 builder: the Notes app ask, never "a note called app"
+    ("open the note app", A),
     ("no", A),
     ("stop", A),
     ("No.", A),
