@@ -545,6 +545,11 @@ final class AppModel: ObservableObject {
                    !(200...299).contains(http.statusCode) {
                     if http.statusCode == 401 || http.statusCode == 403 {
                         self.fail("unauthorized, check the token in Settings")
+                    } else if let data = data,
+                              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                              let detail = obj["detail"] as? String, !detail.isEmpty {
+                        // the local model's 503/409 wording reaches the owner verbatim
+                        self.fail(detail)
                     } else {
                         self.fail("HTTP \(http.statusCode)")
                     }
@@ -561,7 +566,9 @@ final class AppModel: ObservableObject {
                 }
                 self.replyText = reply
                 if let sid = obj["session_id"] as? String, !sid.isEmpty {
-                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                    // "Open chat" on a local answer stays local: it names the engine on every message
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat",
+                                                  engine: choice.engine, localOnly: EngineStore.isLocal(choice.engine))
                 }
                 self.replyIsError = false
                 self.typedText = ""
@@ -603,7 +610,7 @@ final class AppModel: ObservableObject {
         let text = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !attachments.isEmpty {
             sendWithFiles(text)
-        } else if text.hasPrefix("?") {
+        } else if EngineStore.usesQuickAsk(text) {
             quickAsk(text)
         } else {
             ask(text)
@@ -658,7 +665,8 @@ final class AppModel: ObservableObject {
                 let reply = obj["reply"] as? String ?? ""
                 self.replyText = reply.isEmpty ? "sent" : reply
                 if let sid = obj["session_id"] as? String, !sid.isEmpty {
-                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat",
+                                                  engine: choice.engine, localOnly: EngineStore.isLocal(choice.engine))
                 }
                 self.attachments = []
                 self.typedText = ""
@@ -684,6 +692,8 @@ final class AppModel: ObservableObject {
         // F1: a bare `?` (question empty after strip) never sends, mirroring
         // ask()'s `!text.isEmpty` guard.
         guard text.hasPrefix("?"), !question.isEmpty, !isSending, askReady else { return }
+        // /ask is a cloud pipeline: a local-only (or unlisted) pick goes through the router instead
+        guard EngineStore.usesQuickAsk(text) else { return ask(text) }
         ownerText = text
         replyText = nil
         routeTag = nil
@@ -816,7 +826,7 @@ final class AppModel: ObservableObject {
     }
 
     private func fail(_ message: String) {
-        setFailure("ask failed: \(message)")
+        setFailure(EngineStore.errorText(message, prefix: "ask failed: "))
     }
 
     private func fail(_ error: Error) {
