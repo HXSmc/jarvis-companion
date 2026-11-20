@@ -286,6 +286,8 @@ def test_gateway_long_url_denied_when_unsafe(mode, client, auto_on, monkeypatch)
     if mode in ("barge", "followup"):
         extra["text"] = "what is in my notes about the deadline"
     pool, events = run_agent(client, make, conv_id=conv, **extra)
+    if mode == "marked":  # jauto3 builder: the cat really ran (a long CI home could deny it for length)
+        assert _rows()[0] == "cmd=cat decision=auto reason=ok"
     responses = pool.made[0].responses
     assert any(r["behavior"] == "deny"
                and r["message"] == "too long to confirm out loud; split it into smaller steps"
@@ -325,6 +327,7 @@ def test_long_rules_unchanged(client, auto_on, monkeypatch):
     assert _rows()[-1] == "cmd=open decision=asked reason=barge"
     _, events = run_agent(client, bash(f"cat {docs / 'private-file-number-00.txt'}",
                                        "open https://example.com"), conv_id="j4c")
+    assert _rows()[-2] == "cmd=cat decision=auto reason=ok"  # jauto3 builder: the cat marked the session
     assert _rows()[-1] == "cmd=open decision=asked reason=untrusted"
 
 
@@ -452,3 +455,12 @@ def test_note_names_stay_local(client, monkeypatch):
     hist = list(overlay._history["j3p"])
     assert hist[-1] == ("open the llm switch note", "I opened a note.")
     assert hist[-2][1] == "I listed matching notes."
+    # jauto3 builder: every top-level turn field too, and the next agent prompt sees the fixed line, no stem
+    for t in turns:
+        dumped = json.dumps({k: val for k, val in t.items() if k != "steps"})
+        assert not any(leak in dumped for leak in leaks), dumped
+    turn(client, "what is in my notes about the deadline", conv_id="j3p")
+    assert len(pool.made) == 1 and pool.made[0].prompts
+    prompt = pool.made[0].prompts[0]
+    assert "I opened a note." in prompt and "I listed matching notes." in prompt
+    assert not any(leak in prompt for leak in leaks), prompt
