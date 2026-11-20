@@ -426,14 +426,17 @@ def test_no_anthropic_contact(client, fake_limit, monkeypatch, local_pools):
         d.agent_conversations = AgentGuard()
         overlay.set_deps(d)
         events = turn(client, QUESTION)
-        popen = []
+        popen = []  # every program started: macOS also runs lsappinfo/pmset helpers, which are not model calls
         monkeypatch.setattr(lean.subprocess, "Popen", lambda *a, **k: popen.append(a) or 1 / 0)
         sticky = turn(client, QUESTION + " again")  # inside the window: no claude process may start
         srv.reply = '{"agent": true}'  # the local model hands a question to the agent tier
         handed = turn(client, "tell me about rust lifetimes")
     assert "Paris." in lines(events) and "Paris." in lines(sticky)
     assert lines(handed) == [overlay.LOCAL_NO_AGENT_LINE]  # honest line, no agent run, no limit card dance
-    assert popen == [] and agent_gets == []
+    cli = lean.cli_bin()  # the stand-in CLI path here; plain "claude" in production
+    claude_starts = [a for a in popen
+                     if a and a[0] and (a[0][0] == cli or Path(str(a[0][0])).name == "claude")]
+    assert claude_starts == [] and agent_gets == []
     assert len(completions(srv)) == 3
     for req in srv.requests:
         assert not any(h in req["headers"] for h in ("authorization", "x-api-key", "cookie"))
