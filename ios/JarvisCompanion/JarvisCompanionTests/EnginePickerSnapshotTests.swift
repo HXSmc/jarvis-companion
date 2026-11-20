@@ -379,10 +379,12 @@ final class EnginePickerSnapshotTests: XCTestCase {
     /// on /chat and on the bound session, Retry), whatever the picker says afterwards.
     func testLocalChatNamesEngineOnEveryMessage() async throws {
         try useStubGateway(list: [.hub, Self.glm, Self.local], pick: "qwen-local")
-        // reply 1 makes no session (follow-up stays on /chat); reply 2 binds one
-        StubGateway.respond = { path, count in
-            if path == "/chat" && count == 1 { return (200, ["action": "answered", "reply": "one", "upstream": "mini-pc"], nil) }
-            if path == "/chat" { return (200, ["action": "started", "session_id": "s1", "reply": "two"], nil) }
+        // reply 1 is a real routed answer (it binds session s1, so the owner rule resets the pick);
+        // the follow-ups then go to the bound session
+        StubGateway.respond = { path, _ in
+            if path == "/chat" {
+                return (200, ["action": "answered", "reply": "one", "session_id": "s1", "upstream": "mini-pc"], nil)
+            }
             if path.hasSuffix("/message") { return (200, ["action": "delivered"], nil) }
             return (404, nil, nil)
         }
@@ -400,7 +402,7 @@ final class EnginePickerSnapshotTests: XCTestCase {
         model.send("third")
         try await settle(model)
         let sent = StubGateway.recorded()
-        XCTAssertEqual(sent.map(\.path), ["/chat", "/chat", "/central/sessions/s1/message"])
+        XCTAssertEqual(sent.map(\.path), ["/chat", "/central/sessions/s1/message", "/central/sessions/s1/message"])
         XCTAssertEqual(sent.map { $0.body["engine"] as? String }, ["qwen-local", "qwen-local", "qwen-local"])
         model.close()
 
@@ -413,6 +415,28 @@ final class EnginePickerSnapshotTests: XCTestCase {
         XCTAssertEqual(StubGateway.recorded().map(\.path), ["/central/sessions/s2/message"])
         XCTAssertEqual(StubGateway.recorded().first?.body["engine"] as? String, "qwen-local")
         opened.close()
+    }
+
+    /// BINDING 1, session-less leg: a reply with no session_id binds nothing, so the follow-up
+    /// goes to /chat again and still names the local engine; the pick is kept (not a routed answer).
+    func testLocalChatNamesEngineOnSessionlessFollowUp() async throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "qwen-local")
+        StubGateway.respond = { path, _ in
+            path == "/chat" ? (200, ["action": "answered", "reply": "Still thinking, ask again in a moment."], nil)
+                : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: nil, title: "New chat")
+        model.send("first")
+        try await settle(model)
+        model.send("second")
+        try await settle(model)
+        XCTAssertNil(model.sessionID)
+        XCTAssertEqual(model.localEngine, "qwen-local")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), "qwen-local")
+        let sent = StubGateway.recorded()
+        XCTAssertEqual(sent.map(\.path), ["/chat", "/chat"])
+        XCTAssertEqual(sent.map { $0.body["engine"] as? String }, ["qwen-local", "qwen-local"])
+        model.close()
     }
 
     /// BINDING 2 + requirement 6: after a 400, 409, 503 or timeout the picker keeps the local
