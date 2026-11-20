@@ -593,11 +593,10 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     name = m["name"].strip()
     if set(note_find.tokens(name)) <= {"app", "apps", "application"}:  # "open my notes folder", "open note app"
         return None
-    if m["w"] == "note":  # the owner typed/said the exact singular: honor the stem as written
-        return Intent("note_open", name, "literal")
-    # a misheard plural ("no", "node", "notes") opens the note only on a real token match
-    if note_find.find(note_names, name, literal=False):
-        return Intent("note_open", name)
+    literal = m["w"] == "note"  # the exact singular: a one-word name may match on its own
+    # round 1 (U1): no matching note -> None, so today's rules run ("open the latest note" reaches the agent)
+    if note_find.find(note_names, name, literal=literal):
+        return Intent("note_open", name, "literal" if literal else "")
     return None
 
 

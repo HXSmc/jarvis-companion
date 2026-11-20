@@ -26,8 +26,10 @@ _cache: dict[str, tuple[float, tuple[str, ...]]] = {}
 
 
 def clear_cache() -> None:
-    """Test hook: drop the cached scans."""
+    """Test hook: drop the cached scans and the prepared index."""
+    global _index
     _cache.clear()
+    _index = {"names": None, "notes": (), "vocab": frozenset(), "found": {}}
 
 
 def scan(vault: str | None) -> tuple[str, ...]:
@@ -67,6 +69,7 @@ def scan(vault: str | None) -> tuple[str, ...]:
             except OSError:  # a stat that fails skips the entry, never the walk
                 continue
     out = tuple(sorted(found))
+    _prepared(out)  # round 1: tokenise here (the caller's thread), not in find() on the event loop
     _cache[vault] = (time.monotonic(), out)
     return out
 
@@ -86,8 +89,33 @@ def tokens(s: str) -> list[str]:
 
 
 def _match(q: str, t: str) -> bool:
-    return q == t or (len(q) >= 4 and len(t) >= 4
-                      and difflib.SequenceMatcher(None, q, t).ratio() >= 0.8)
+    if q == t:
+        return True
+    if len(q) < 4 or len(t) < 4 or 2 * min(len(q), len(t)) < 0.8 * (len(q) + len(t)):
+        return False  # round 1: the ratio can never reach 0.8 at this length gap
+    m = difflib.SequenceMatcher(None, q, t)
+    return m.quick_ratio() >= 0.8 and m.ratio() >= 0.8
+
+
+# round 1 (perf): one prepared index for the newest names tuple (scan builds it in the policy pool), and
+# find() results for it, so a turn's parse and the overlay share one computation.
+_index: dict = {"names": None, "notes": (), "vocab": frozenset(), "found": {}}
+
+
+def _prepared(names: tuple[str, ...]) -> dict:
+    global _index
+    index = _index  # one read: scan (pool thread) swaps in a whole new dict, never edits this one
+    if index["names"] is names or index["names"] == names:
+        return index
+    notes, vocab = [], set()
+    for rel in names:
+        parts = rel.split("/")
+        stem = frozenset(tokens(os.path.splitext(parts[-1])[0]))
+        folder = frozenset(tokens(" ".join(parts[:-1])))
+        notes.append((rel, stem, stem | folder))
+        vocab |= stem | folder
+    _index = {"names": names, "notes": tuple(notes), "vocab": frozenset(vocab), "found": {}}
+    return _index
 
 
 def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[str]:
@@ -96,26 +124,31 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     q = tokens(words)
     if not q:
         return []
+    index = _prepared(names)
+    key = (tuple(q), literal)
+    if key in index["found"]:
+        return list(index["found"][key])
+    near = [frozenset(t for t in index["vocab"] if _match(w, t)) for w in q]  # |Q| x |vocab| ratios, once
     scored: list[tuple[int, str]] = []
-    for rel in names:
-        parts = rel.split("/")
-        stem = os.path.splitext(parts[-1])[0]
-        s_tokens = tokens(stem)
-        f_tokens = tokens(" ".join(parts[:-1]))
-        hits = sum(1 for t in q if any(_match(t, x) for x in s_tokens + f_tokens))
-        stem_hits = sum(1 for t in q if any(_match(t, x) for x in s_tokens))
+    for rel, stem, every in index["notes"]:
+        stem_hits = sum(1 for m in near if m & stem)
         if stem_hits < 1:
             continue
+        hits = sum(1 for m in near if m & every)
         if not ((hits >= 2 and hits >= 0.6 * len(q)) or (literal and len(q) == 1 and stem_hits == 1)):
             continue
         scored.append((hits, rel))
-    if not scored:
-        return []
-    best = max(h for h, _ in scored)
-    return sorted(rel for h, rel in scored if h == best)
+    best = max((h for h, _ in scored), default=0)
+    out = sorted(rel for h, rel in scored if h == best)
+    if len(index["found"]) >= 64:
+        index["found"].clear()
+    index["found"][key] = tuple(out)
+    return out
 
 
 def speak_name(rel: str) -> str:
-    """What the overlay says for a found note: the stem, dashes and underscores as spaces."""
+    """What the overlay says for a found note: the stem's words, dashes and underscores as spaces, dates
+    and other digit-only words dropped (round 1 U3) unless nothing else is left."""
     stem = os.path.splitext(rel.rsplit("/", 1)[-1])[0]
-    return re.sub(r" {2,}", " ", stem.replace("-", " ").replace("_", " ")).strip()
+    words = stem.replace("-", " ").replace("_", " ").split()
+    return " ".join([w for w in words if not w.isdigit()] or words)

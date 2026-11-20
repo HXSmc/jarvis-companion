@@ -23,6 +23,8 @@ def _fresh_scan():
     note_find.clear_cache()
     yield
     note_find.clear_cache()
+    from gateway import overlay as _ov
+    _ov._titles_seen.clear()  # round 1 (S1): the flag is per conv, tests reuse conv ids
 
 
 @pytest.fixture
@@ -116,9 +118,11 @@ def test_note_ties_and_misses(vault):
         "Brain/Research/llm-local-models.md", BENCH]  # the tie keeps both
     got = intents.parse("open the note made in china", apps=A, note_names=names)
     assert note_find.find(names, got.arg, literal=got.sub == "literal") == ["Misc/made-in-china.md"]
-    got = intents.parse("open the note banana bread", apps=A, note_names=names)
-    assert got.kind == "note_open"
-    assert note_find.find(names, got.arg, literal=got.sub == "literal") == []  # no match: opener says nothing
+    for text in ("open the note banana bread", "open the latest note", "open my last note",
+                 "open the note about pricing"):  # round 1 (U1): no match -> today's route (the agent)
+        got = intents.parse(text, apps=A, note_names=names)
+        assert got == intents.parse(text, apps=A) and got.kind != "note_open", text
+    assert intents.parse("open the note banana bread", apps=A, note_names=names).kind == "agent"
     for text in ("open the node modules folder", "open the no thanks"):
         assert intents.parse(text, apps=A, note_names=names).kind == intents.parse(text, apps=A).kind
     got = intents.parse("open the note projects", apps=A, note_names=names)
@@ -188,7 +192,8 @@ def test_note_scan_bounds(vault, tmp_path, monkeypatch):
     monkeypatch.setattr(note_find, "FILES_MAX", 5)
     assert len(note_find.scan(str(many))) == 5  # stands for the 20000 bound
     assert note_find.tokens("Agents' Benchmark 2026 versus v") == ["agents", "benchmark", "vs", "vs"]
-    assert note_find.speak_name(BENCH) == "llm switch local vs agents benchmark 2026 11 18"
+    assert note_find.speak_name(BENCH) == "llm switch local vs agents benchmark"  # round 1 (U3): no date words
+    assert note_find.speak_name("x/2026-11-18.md") == "2026 11 18"  # only digits: kept
 
 
 # --- criterion 16: note_open is word-only and both modules import clean -----------------------------
@@ -207,6 +212,7 @@ def test_word_only_has_note_open():
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 
 from gateway import overlay  # noqa: E402
@@ -262,7 +268,7 @@ def test_gateway_long_url_auto_on_clean_turn(client, auto_on):
 # --- criterion 3: the same open is denied on every unsafe turn ---------------------------
 
 
-@pytest.mark.parametrize("mode", ["marked", "auto_tainted", "barge", "followup", "off", "timeout"])
+@pytest.mark.parametrize("mode", ["marked", "auto_tainted", "titles", "barge", "followup", "off", "timeout"])
 def test_gateway_long_url_denied_when_unsafe(mode, client, auto_on, monkeypatch):
     doc = Path.home() / "Documents" / "a.md"
     doc.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +276,9 @@ def test_gateway_long_url_denied_when_unsafe(mode, client, auto_on, monkeypatch)
     conv, extra = "j3d", {}
     if mode == "auto_tainted":
         overlay._auto_tainted.add(conv)
+    elif mode == "titles":  # round 1 (S1): session titles (no doing text) reached this conv: not auto-tainted
+        overlay._mark_session_rows(conv, [{"title": "Jarvis: open a long link", "doing": "", "recap": []}])
+        assert conv in overlay._titles_seen and conv not in overlay._auto_tainted
     elif mode == "barge":
         extra = dict(followup=True, barge_in=True, levels=LOUD, conf=0.9)
     elif mode == "followup":
@@ -386,7 +395,7 @@ def test_gateway_note_open(client, monkeypatch):
     vault, ran, pool = _note_client(client, monkeypatch)
     events = turn(client, "Open the No LLM Switch localal versus agents", conv_id="j3n")
     assert ran == [["open", "-a", "Obsidian", os.path.realpath(vault / BENCH)]]
-    assert says(events) == ["Opening llm switch local vs agents benchmark 2026 11 18."]
+    assert says(events) == ["Opening llm switch local vs agents benchmark."]
     assert not _confirm_card(events)
     assert pool.made == []  # the note never reaches the agent
     assert _steps("intent")[-1]["kind"] == "note_open"
@@ -398,13 +407,13 @@ def test_gateway_note_open(client, monkeypatch):
 
 def test_gateway_note_lines(client, monkeypatch):
     vault, ran, pool = _note_client(client, monkeypatch)
-    events = turn(client, "open the note banana bread", conv_id="j3m1")
-    assert says(events) == ["I couldn't find a note called banana bread."]
-    assert ran == []
+    events = turn(client, "open the note banana bread", conv_id="j3m1")  # round 1 (U1): the agent searches
+    assert not any("couldn't find" in t for t in says(events)) and ran == []
+    assert _steps("intent")[-1]["kind"] == "agent" and len(pool.made) == 1
+    assert "banana bread" in pool.made[0].prompts[0]
     events = turn(client, "open the llm note", conv_id="j3m2")
-    lines = says(events)
-    assert len(lines) == 1 and lines[0].startswith("Which note: ")
-    assert "llm local models" in lines[0] and "llm switch local vs agents benchmark 2026 11 18" in lines[0]
+    assert says(events) == ["Two notes match: llm local models and llm switch local vs agents benchmark."
+                            " Say more of the name."]  # round 1 (U2/U3): a hint, no question, no date words
     assert ran == []
     recipes = Path.home() / "Desktop" / "J3Recipes"
     recipes.mkdir(parents=True)
@@ -412,7 +421,7 @@ def test_gateway_note_lines(client, monkeypatch):
         (recipes / f"recipe-{name}.md").write_text("x")
     monkeypatch.setenv("OVERLAY_VAULT", str(recipes))
     events = turn(client, "open the note recipe", conv_id="j3r")
-    assert says(events) == ["Which note: recipe bread, recipe cake, recipe pie or one of 2 more?"]
+    assert says(events) == ["Five notes match: recipe bread, recipe cake, recipe pie and 2 more. Say more of the name."]
     assert ran == []
     bad = Path.home() / "Desktop" / "J3Bad"
     bad.mkdir(parents=True)
@@ -435,7 +444,7 @@ def test_note_names_stay_local(client, monkeypatch):
     events = turn(client, "open the llm switch note", conv_id="j3p")
     assert ran == [["open", "-a", "Obsidian", os.path.realpath(vault / BENCH)]]
     assert pool.made == []
-    assert says(events) == ["Opening llm switch local vs agents benchmark 2026 11 18."]
+    assert says(events) == ["Opening llm switch local vs agents benchmark."]
     turns = overlay.debug_log.snapshot()["turns"][:2]  # newest first; these are the only two
     leaks = ("benchmark", "local-models", "llm-switch", "Brain/Research", "llm local models")
     for t in turns:
@@ -464,3 +473,70 @@ def test_note_names_stay_local(client, monkeypatch):
     prompt = pool.made[0].prompts[0]
     assert "I opened a note." in prompt and "I listed matching notes." in prompt
     assert not any(leak in prompt for leak in leaks), prompt
+
+
+# --- round 1 (S3): a typed query or long link stays out of the transcribed row and the history ----
+
+
+def test_typed_link_private_in_rows_and_history(client):
+    ran, events = run_turn(client, "open https://example.com/search?q=secret-token", [], conv_id="j3l")
+    assert ran == [["open", "https://example.com/search?q=secret-token"]]
+    assert _steps("transcribed")[-1]["text"] == "[open link]"
+    assert not any("secret-token" in json.dumps(t) for t in overlay.debug_log.snapshot()["turns"])
+    assert list(overlay._history["j3l"])[-1] == ("(link opened)", "the link on example.com")
+    ran, events = run_turn(client, "open https://example.com", [], conv_id="j3s")  # short plain link: as before
+    assert _steps("transcribed")[-1]["text"] == "open https://example.com"
+    assert list(overlay._history["j3s"])[-1][0] == "open https://example.com"
+
+
+# --- round 1 (C1/C2): find() is cheap on a full vault and runs once per turn, off the loop ----------
+
+
+def test_find_fast_on_20000_notes():
+    words = [f"w{i:04d}x{chr(97 + i % 26)}" for i in range(4000)]
+    names = tuple(f"F{i % 40}/S{i % 7}/" + "-".join(words[(i * 7 + k * 13) % 4000] for k in range(7)) + ".md"
+                  for i in range(note_find.FILES_MAX))
+    note_find._prepared(names)  # scan() does this in the policy pool
+    start = time.monotonic()
+    note_find.find(names, "open the no alpha bravo charlie delta echo")
+    note_find.find(names, " ".join(words[:5]))
+    assert time.monotonic() - start < 1.0
+    start = time.monotonic()
+    note_find.find(names, " ".join(words[:5]))  # the overlay's second ask: the cached answer
+    assert time.monotonic() - start < 0.01
+
+
+def test_find_runs_once_per_note_turn(client, monkeypatch):
+    vault, ran, pool = _note_client(client, monkeypatch)
+    calls = []
+    real = note_find._match
+    monkeypatch.setattr(note_find, "_match", lambda q, t: calls.append(q) or real(q, t))
+    turn(client, "Open the No LLM Switch localal versus agents", conv_id="j3o")
+    assert ran and calls  # one scoring pass (warm-up in the pool), parse and the overlay reuse it
+    n = len(calls)
+    turn(client, "Open the No LLM Switch localal versus agents", conv_id="j3o2")
+    assert len(calls) == n  # same words, same vault: no rescoring
+
+
+def test_note_find_timeout_takes_agent_route(client, monkeypatch):
+    vault, ran, pool = _note_client(client, monkeypatch)
+    real = note_find.find
+    monkeypatch.setattr(overlay, "POLICY_CHECK_S", 0.2)
+    monkeypatch.setattr(overlay, "_note_names", lambda text: note_find.scan(overlay._vault()))  # no warm-up
+    def slow(*a, **k):
+        if threading.current_thread() is not threading.main_thread() and "policy" in threading.current_thread().name:
+            time.sleep(0.5)
+        return real(*a, **k)
+    monkeypatch.setattr(note_find, "find", slow)
+    events = turn(client, "open the llm switch note", conv_id="j3to")
+    assert ran == [] and _steps("intent")[-1]["kind"] == "agent" and len(pool.made) == 1
+
+
+def test_scan_dirs_bound(tmp_path, monkeypatch):
+    root = tmp_path / "dirs"
+    for i in range(10):
+        (root / f"d{i}").mkdir(parents=True)
+        (root / f"d{i}" / f"n{i}.md").write_text("x")
+    assert note_find.DIRS_MAX == 4000
+    monkeypatch.setattr(note_find, "DIRS_MAX", 3)  # stands for the 4000 bound: root + 2 folders
+    assert len(note_find.scan(str(root))) == 2
