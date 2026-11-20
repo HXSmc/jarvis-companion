@@ -23,7 +23,7 @@ from mac.voice.auto_policy import OPEN_DOCS
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic | note_open  # jauto3
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic | note_open | device  # jauto3; sshd: allowlisted device action
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -600,6 +600,30 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     return None
 
 
+# sshd: fixed device-control phrases ("turn on gaming mode on the PC"). The
+# intent arg is only a constant action id from gateway.devices.ACTIONS — the
+# utterance itself never reaches the ssh command (see gateway/devices.py).
+_DEVICE_GAMING_RE = re.compile(
+    r"\b(?:turn\s+)?(?P<v>on|off)\s+gam(?:e|ing)[-\s]?mode\b"          # "turn on gaming mode"
+    r"|\b(?:turn\s+)?gam(?:e|ing)[-\s]?mode\s+(?P<v2>on|off)\b"        # "gaming mode on"
+    r"|\bgam(?:e|ing)[-\s]?mode\s+(?:status|state|on\s+or\s+off)\b"    # "gaming mode status"
+    r"|\bis\s+gam(?:e|ing)[-\s]?mode\s+(?:on|off)\b"                   # "is gaming mode on?"
+)
+
+
+def device_request(text: str) -> Intent | None:
+    """A fixed device-control phrase -> Intent("device", "<action id>"); None = not one.
+
+    Only ever returns one of the constant winpc.gaming_mode_* ids — never
+    utterance text, so nothing spoken can shape a command (gateway/devices.py)."""
+    low = _clean(text).lower()
+    m = _DEVICE_GAMING_RE.search(low)
+    if not m:
+        return None
+    v = m.group("v") or m.group("v2")
+    return Intent("device", "winpc.gaming_mode_status" if not v else f"winpc.gaming_mode_{v}")
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
                  place_names: tuple[str, ...] = (),
@@ -612,6 +636,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     # First after stop: "can you remove one card" is a how-to question, not a remove.
     if _CARD_HELP_RE.fullmatch(_clean(text).lower().replace(",", "")):
         return Intent("card_help")
+    dev = device_request(text)  # sshd: fixed device phrases beat every guessier kind
+    if dev is not None:
+        return dev
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)

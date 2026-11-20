@@ -62,7 +62,7 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-from gateway import agents, cards, central, desktop, hwmode, inbox, notify, overlay, overlay_log, quick, repos, screen, vnc, wake
+from gateway import agents, cards, central, desktop, devices, hwmode, inbox, notify, overlay, overlay_log, quick, repos, screen, vnc, wake
 from gateway.flows import flight, signin
 from gateway.siri import router as siri_router
 from gateway.ws import router as ws_router
@@ -74,6 +74,7 @@ app.include_router(signin.router)
 app.include_router(agents.router)
 app.include_router(quick.router, prefix="")
 app.include_router(wake.router, prefix="")
+app.include_router(devices.router, prefix="")  # /device/action: allowlisted ssh device actions (voice)
 app.include_router(inbox.router, prefix="")
 app.include_router(notify.router)  # /notify/notes: app catch-up on missed owner notes (ios_token only)
 app.include_router(central.router)  # /chat + /central/* -> mini PC router (ios_token only)
