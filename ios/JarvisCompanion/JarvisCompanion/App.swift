@@ -575,7 +575,7 @@ final class AppModel: ObservableObject {
                 self.typedText = ""
                 // "New session" and the engine pick are one-shot: both reset after one successful send so they never silently stick; a failed send keeps them for Retry.
                 self.newSession = false
-                EngineStore.resetToDefault(ifStill: choice.engine)
+                EngineStore.resetAfterReply(ifStill: choice.engine, reply: obj)
                 Haptics.success()
             }
         }.resume()
@@ -675,7 +675,7 @@ final class AppModel: ObservableObject {
                 self.typedText = ""
                 // "New session" and the engine pick are one-shot: both reset after one successful send so they never silently stick; a failed send keeps them for Retry.
                 self.newSession = false
-                EngineStore.resetToDefault(ifStill: choice.engine)
+                EngineStore.resetAfterReply(ifStill: choice.engine, reply: obj)
                 Haptics.success()
             } catch {
                 self.attachments = files

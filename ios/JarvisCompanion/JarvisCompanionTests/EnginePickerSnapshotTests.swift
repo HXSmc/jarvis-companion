@@ -119,6 +119,46 @@ final class EnginePickerSnapshotTests: XCTestCase {
         XCTAssertTrue(EngineStore.isKnownCloud("claude"))
     }
 
+    /// I-1. Helper level: Home ask() needs the Keychain token (askReady) before it sends, so
+    /// it cannot be driven here. ask() and sendWithFiles() both call EngineStore.resetAfterReply
+    /// with the decoded 200 body; these tests run that exact call on the real gateway bodies.
+    private func decode(_ json: String) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    }
+
+    func testLocalPickKeptAfterBusyReply() throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "qwen-local")
+        StubGateway.reset()
+        let busy = try decode(#"{"reply":"Jarvis is busy, try again in a moment."}"#)
+        EngineStore.resetAfterReply(ifStill: "qwen-local", reply: busy)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), "qwen-local")
+    }
+
+    func testLocalPickKeptAfterStillThinkingReply() throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "qwen-local")
+        StubGateway.reset()
+        let slow = try decode(#"{"reply":"Still thinking, I will message you when it is done."}"#)
+        EngineStore.resetAfterReply(ifStill: "qwen-local", reply: slow)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), "qwen-local")
+        // an empty session_id is not a routed answer either
+        EngineStore.resetAfterReply(ifStill: "qwen-local", reply: try decode(#"{"reply":"x","session_id":""}"#))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), "qwen-local")
+    }
+
+    func testRoutedAnswerResetsPickToDefault() throws {
+        try useStubGateway(list: [.hub, Self.glm, Self.local], pick: "qwen-local")
+        StubGateway.reset()
+        EngineStore.resetAfterReply(ifStill: "qwen-local", reply: try decode(#"{"reply":"hi","session_id":"s1"}"#))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), EngineOption.hub.id)
+        // non-local picks behave as before: reset even without a session_id
+        UserDefaults.standard.set("glm", forKey: "engineID")
+        EngineStore.resetAfterReply(ifStill: "glm", reply: try decode(#"{"reply":"ok"}"#))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), EngineOption.hub.id)
+        XCTAssertFalse(EngineStore.shouldResetAfterReply(pickIsLocal: true, hasSessionID: false))
+        XCTAssertTrue(EngineStore.shouldResetAfterReply(pickIsLocal: true, hasSessionID: true))
+        XCTAssertTrue(EngineStore.shouldResetAfterReply(pickIsLocal: false, hasSessionID: false))
+    }
+
     func testRawLocalErrorsShownVerbatim() {
         XCTAssertEqual(EngineStore.errorText(Self.busy, prefix: "send failed: "), Self.busy)
         XCTAssertEqual(EngineStore.errorText(Self.wrongChat, prefix: "ask failed: "), Self.wrongChat)

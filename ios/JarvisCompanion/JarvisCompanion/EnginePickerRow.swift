@@ -148,6 +148,21 @@ final class EngineStore: ObservableObject {
         UserDefaults.standard.set(EngineOption.hub.id, forKey: "engineID")
     }
 
+    /// Pure decision behind the one-shot reset. A LOCAL pick resets only after a real
+    /// routed answer (the reply carries a session_id). The gateway's HTTP 200 "busy" and
+    /// "Still thinking" replies carry none and are failures: the local pick must stay.
+    /// Non-local picks reset after any successful reply, as before.
+    nonisolated static func shouldResetAfterReply(pickIsLocal: Bool, hasSessionID: Bool) -> Bool {
+        !pickIsLocal || hasSessionID
+    }
+
+    /// Reset the one-shot pick after a 200 reply, applying shouldResetAfterReply.
+    nonisolated static func resetAfterReply(ifStill id: String?, reply: [String: Any]) {
+        let sid = (reply["session_id"] as? String) ?? ""
+        guard shouldResetAfterReply(pickIsLocal: isLocal(id), hasSessionID: !sid.isEmpty) else { return }
+        resetToDefault(ifStill: id)
+    }
+
     /// What a send carries: the engine id (nil = Hub, field omitted), or the
     /// reason the send must wait for another pick. Reads the stored pick and the
     /// cached list straight from UserDefaults, so non-main callers
