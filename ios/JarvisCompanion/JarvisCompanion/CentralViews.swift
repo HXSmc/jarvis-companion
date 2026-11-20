@@ -1084,7 +1084,7 @@ final class ChatModel: ObservableObject {
                     apply(route: obj, ownerIndex: ownerIndex)
                     newSession = false
                     // engine pick is one-shot too (also when the sheet closed mid-send)
-                    EngineStore.resetToDefault(ifStill: route.pick)
+                    EngineStore.resetAfterReply(ifStill: route.pick, reply: obj)
                 }
                 pendingMsgID = nil
                 Haptics.success()

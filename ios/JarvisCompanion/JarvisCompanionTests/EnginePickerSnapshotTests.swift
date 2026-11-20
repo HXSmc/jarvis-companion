@@ -187,6 +187,23 @@ final class EnginePickerSnapshotTests: XCTestCase {
         hub.close()
     }
 
+    /// ChatModel /chat path: a 200 reply with no session_id (gateway busy / still thinking)
+    /// must keep the local pick; the same model call site that used to reset it.
+    func testChatModelKeepsLocalPickOnSessionlessReply() async throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "qwen-local")
+        StubGateway.reset()
+        StubGateway.respond = { path, _ in
+            path == "/chat" ? (200, ["action": "answered", "reply": "Still thinking, ask again in a moment."], nil)
+                : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: nil, title: "New chat")
+        model.send("hello")
+        try await settle(model)
+        XCTAssertEqual(StubGateway.recorded().map(\.path), ["/chat"])
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), "qwen-local")
+        model.close()
+    }
+
     /// S1: the engine is fixed when the owner sends. A pick reset during the upload (another
     /// send succeeding) and a Retry after a failed upload both still name the local engine.
     func testLocalEngineFixedBeforeUpload() async throws {
