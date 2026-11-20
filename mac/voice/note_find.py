@@ -135,7 +135,6 @@ _DAY_WORDS = {**_UNIT, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
               "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17,
               "eighteenth": 18, "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
 _DAY_NUM_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?")  # "18", "3rd"
-_ORD_NUM_RE = re.compile(r"\d{1,2}(?:st|nd|rd|th)")  # "3rd" alone: never a name word
 
 
 def _day_at(ws: list[str], i: int) -> int:
@@ -152,9 +151,11 @@ def _day_at(ws: list[str], i: int) -> int:
     return v
 
 
-def _spoken_date(ws: list[str]) -> str:
+def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
     """MMDD for a month plus a day said anywhere in the words (before or after the month,
-    "of"/"the" allowed; a said 4-digit year in front); "" when no month+day was said."""
+    "of"/"the" allowed; a said 4-digit year in front), with the indices that formed it;
+    ("", frozenset()) when no month+day was said. jauto3c r1: only these words leave the
+    query — a lone "march" or "second" is a name token, as on ci-ipa."""
     year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
     for i, w in enumerate(ws):
         if w in _MONTHS:
@@ -165,24 +166,22 @@ def _spoken_date(ws: list[str]) -> str:
                 if 0 <= j < len(ws):
                     day = _day_at(ws, j)
                     if day:
-                        return f"{year}{_MONTHS[w]:02d}{day:02d}"
-    return ""
-
-
-def _is_date_word(ws: list[str], i: int) -> bool:
-    """jauto3c: date words never count as name tokens in the QUERY (note names keep theirs);
-    "may" only beside a day number. "of" is STOP already."""
-    w = ws[i]
-    if w in _MONTHS:
-        return w != "may" or any(_day_at(ws, i + s) for s in (1, -1) if 0 <= i + s < len(ws))
-    return bool(_ORD_NUM_RE.fullmatch(w)) or w in _DAY_WORDS
+                        drop = {i, j}
+                        if ws[j] in ("twenty", "thirty"):  # the unit word of "twenty first"
+                            drop |= {k for k in (j - 1, j + 1)
+                                     if 0 <= k < len(ws) and _UNIT.get(ws[k], 0)}
+                        return f"{year}{_MONTHS[w]:02d}{day:02d}", frozenset(drop)
+    return "", frozenset()
 
 
 def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[str]:
     """Note paths a spoken name means: query tokens must hit the stem (or the folder words);
     the best hit count wins, all ties are kept. [] = no note matches."""
     ws = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w]
-    q = tokens(" ".join(w for i, w in enumerate(ws) if not _is_date_word(ws, i)))
+    # jauto3c r1: date words leave the query only when they formed a spoken date; with no
+    # month+day the tokens are exactly tokens(words), as on ci-ipa.
+    spoken, drop = _spoken_date(ws)
+    q = tokens(" ".join(w for i, w in enumerate(ws) if i not in drop))
     if not q:
         return []
     # jauto3 round 2 (R2-3a): the cost is |q| x |vocab|; cap the ask so it cannot tie a pool worker
@@ -190,7 +189,7 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     q = [w for w in q if not (w in seen or seen.add(w))][:12]
     index = _prepared(names)
     # jauto3 round 3 (R3-1) + jauto3c: a spoken month+day is the tie-break, else the raw digits
-    digits = _spoken_date(ws) or "".join(c for c in words if c.isdigit())
+    digits = spoken or "".join(c for c in words if c.isdigit())
     key = (tuple(q), literal, digits)
     hit = index["found"].get(key)  # jauto3 round 2 (R2-3b): one read, no check-then-index race with clear()
     if hit is not None:

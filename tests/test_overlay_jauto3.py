@@ -719,3 +719,42 @@ def test_jauto3c_may_alone_stays_a_name_word(tmp_path):
     (vault / "may-ideas.md").write_text("x")
     names = note_find.scan(str(vault))
     assert note_find.find(names, "may ideas") == ["may-ideas.md"]  # no day beside "may"
+
+
+# --- jauto3c round 1: date words leave the query only when they form a spoken date ---
+
+
+def _vault(tmp_path, *rels):
+    v = tmp_path / "vault"
+    for rel in rels:
+        p = v / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    return note_find.scan(str(v))
+
+
+def test_jauto3c_r1_month_word_is_a_name_without_a_day(tmp_path):
+    names = _vault(tmp_path, "Plans/march-budget.md", "Plans/april-budget.md")
+    assert note_find.find(names, "march budget") == ["Plans/march-budget.md"]
+    got = intents.parse("open the march budget notes", apps=A, note_names=names)
+    assert got.kind == "note_open"  # base behavior, not open_app
+
+
+def test_jauto3c_r1_ordinal_word_is_not_a_mishear_match(tmp_path):
+    names = _vault(tmp_path, "Drafts/first-draft.md")
+    assert note_find.find(names, "second draft") == []  # base behavior: no fuzzy cross-match
+
+
+def test_jauto3c_r1_month_named_note_opens(tmp_path):
+    names = _vault(tmp_path, "january.md")
+    got = intents.parse("open the january note", apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg, literal=got.sub == "literal") == ["january.md"]
+
+
+def test_jauto3c_r1_number_word_names_still_match(tmp_path):
+    names = _vault(tmp_path, "first-principles.md", "second-brain.md")
+    assert note_find.find(names, "first principles") == ["first-principles.md"]
+    got = intents.parse("open the second brain notes", apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg) == ["second-brain.md"]
