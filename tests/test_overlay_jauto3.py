@@ -813,3 +813,28 @@ def test_jauto3c_r3b_a_name_one_never_joins_thirty(tmp_path):
                    "Meetings/weekly-one-on-one-2026-12-31.md")
     assert note_find.find(names, "weekly one on one thirty december") \
         == ["Meetings/weekly-one-on-one-2026-12-30.md"]
+
+
+# --- jauto3c round 3c ---
+
+
+def test_jauto3c_r3c_bare_unit_after_the_month_is_only_a_fallback(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-11-01.md",
+                   "Meetings/weekly-one-on-one-2026-11-20.md",
+                   "Meetings/weekly-one-on-one-2026-11-21.md",
+                   "Meetings/weekly-one-on-one-2026-12-01.md",
+                   "Meetings/weekly-one-on-one-2026-12-30.md",
+                   "Notes/two-pager-2026-11-18.md",
+                   "Notes/two-pager-2026-11-19.md")
+    for ask, want in (
+        ("20th of november one on one weekly", "Meetings/weekly-one-on-one-2026-11-20.md"),
+        ("20 november one on one weekly", "Meetings/weekly-one-on-one-2026-11-20.md"),
+        ("twenty november one on one weekly", "Meetings/weekly-one-on-one-2026-11-20.md"),
+        ("twenty first of november one on one weekly",
+         "Meetings/weekly-one-on-one-2026-11-21.md"),
+        ("thirty december one on one weekly", "Meetings/weekly-one-on-one-2026-12-30.md"),
+        ("weekly one on one november", "Meetings/weekly-one-on-one-2026-11-01.md"),
+        ("18 november two pager", "Notes/two-pager-2026-11-18.md"),
+        ("two pager november 19th", "Notes/two-pager-2026-11-19.md"),
+    ):
+        assert note_find.find(names, ask) == [want], ask

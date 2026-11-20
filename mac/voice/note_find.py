@@ -135,6 +135,7 @@ _DAY_WORDS = {**_UNIT, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
               "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17,
               "eighteenth": 18, "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
 _DAY_NUM_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?")  # "18", "3rd"
+_BARE_UNIT = frozenset(("one", "two", "three", "four", "five", "six", "seven", "eight", "nine"))
 
 
 def _day_at(ws: list[str], i: int) -> int:
@@ -158,8 +159,10 @@ def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
     """MMDD for a month plus a day said anywhere in the words (before or after the month,
     "of"/"the" allowed; a said 4-digit year in front), with the indices that formed it;
     ("", frozenset()) when no month+day was said. jauto3c r1: only these words leave the
-    query — a lone "march" or "second" is a name token, as on ci-ipa."""
+    query — a lone "march" or "second" is a name token, as on ci-ipa. r3c: a bare unit word
+    ("one".."nine") after the month is only a fallback; a day said before the month wins."""
     year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
+    fallback: tuple[str, frozenset[int]] = ("", frozenset())
     for i, w in enumerate(ws):
         if w in _MONTHS:
             for step in (1, -1):
@@ -175,8 +178,14 @@ def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
                                      if 0 <= k < len(ws) and _UNIT.get(ws[k], 0)}
                         elif _UNIT.get(ws[j], 0) and j and ws[j - 1] in ("twenty", "thirty"):
                             drop.add(j - 1)  # r2: the tens word of "twenty first of november"
-                        return f"{year}{_MONTHS[w]:02d}{day:02d}", frozenset(drop)
-    return "", frozenset()
+                        found = f"{year}{_MONTHS[w]:02d}{day:02d}", frozenset(drop)
+                        if step == 1 and ws[j] in _BARE_UNIT:
+                            # r3c: a bare "one".."nine" after the month may be the name, not the
+                            # day — keep it only when no day is said before the month
+                            fallback = found
+                            continue
+                        return found
+    return fallback
 
 
 def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[str]:
