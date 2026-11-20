@@ -45,6 +45,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from common import facts, hud, svgsafe
+from gateway import devices  # sshd: allowlisted ssh device actions (gaming mode)
 from gateway import repos as repo_rules  # jfollow11c: the same secret-name rule as the repo routes
 from mac.voice import (acks, agent, agent_policy, auto_policy, geo, gitdiff, ground, intents, lean,
                        intent_pick, local_llm, media_lookup, memory, models3d, nearby, note_find,
@@ -3377,6 +3378,25 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             async for ev in _line("vault_off_limits", deps):
                 yield ev
             said.append(acks.PHRASES["vault_off_limits"])
+
+        elif intent.kind == "device":
+            # sshd: allowlisted ssh action (gateway/devices.py). The intent arg is a
+            # constant action id — never utterance text — so the command is fixed.
+            label = devices.ACTIONS.get(intent.arg, {}).get("label", intent.arg)
+            try:
+                result = await devices.run_action(intent.arg)
+            except HTTPException as exc:
+                line = f"PC {label} failed: {exc.detail}"
+            else:
+                if result["ok"] and result["output"]:
+                    line = f"PC {result['output']}"  # game-mode.cmd's own line is spoken as-is
+                elif result["ok"]:
+                    line = f"PC {label}."
+                else:
+                    line = f"PC {label} failed." + (f" {result['output']}" if result["output"] else "")
+            async for ev in _speak(line, deps):
+                yield ev
+            said.append(line)
 
         elif intent.kind == "clock":
             line = _clock_line(intent.arg, deps.now())

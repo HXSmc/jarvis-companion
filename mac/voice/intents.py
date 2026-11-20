@@ -600,6 +600,29 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     return None
 
 
+# sshd: fixed device-control phrases ("turn on gaming mode on the PC"). The
+# intent arg is only a constant action id from gateway.devices.ACTIONS — the
+# utterance itself never reaches the ssh command (see gateway/devices.py).
+_DEVICE_GAMING_RE = re.compile(
+    r"\b(?:turn\s+)?(?P<v>on|off)\s+gaming[-\s]?mode\b"
+    r"|\bgaming[-\s]?mode\s+(?:status|state|on\s+or\s+off)\b"
+    r"|\bis\s+gaming[-\s]?mode\s+(?:on|off)\b"
+)
+
+
+def device_request(text: str) -> Intent | None:
+    """A fixed device-control phrase -> Intent("device", "<action id>"); None = not one.
+
+    Only ever returns one of the constant winpc.gaming_mode_* ids — never
+    utterance text, so nothing spoken can shape a command (gateway/devices.py)."""
+    low = _clean(text).lower()
+    m = _DEVICE_GAMING_RE.search(low)
+    if not m:
+        return None
+    v = m.group("v")
+    return Intent("device", "winpc.gaming_mode_status" if not v else f"winpc.gaming_mode_{v}")
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
                  place_names: tuple[str, ...] = (),
@@ -612,6 +635,9 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
     # First after stop: "can you remove one card" is a how-to question, not a remove.
     if _CARD_HELP_RE.fullmatch(_clean(text).lower().replace(",", "")):
         return Intent("card_help")
+    dev = device_request(text)  # sshd: fixed device phrases beat every guessier kind
+    if dev is not None:
+        return dev
     ask = card_size_request(text)
     if ask:
         return Intent("card_size", ask.action, ask.target)
