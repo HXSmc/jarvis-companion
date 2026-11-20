@@ -854,6 +854,9 @@ def test_jauto3c_date_table(tmp_path):
             ("11-01", "11-03", "11-05", "11-09", "11-20", "11-21",
              "12-01", "12-02", "12-05", "12-30", "12-31")] + [
         "Notes/two-pager-2026-11-18.md", "Notes/two-pager-2026-11-19.md",
+        "Notes/second-brain-dump-2026-11-02.md", "Notes/second-brain-dump-2026-11-09.md",
+        "Reviews/third-quarter-review-2026-10-03.md", "Reviews/third-quarter-review-2026-10-07.md",
+        "Drafts/first-draft-review-2026-12-01.md", "Drafts/first-draft-review-2026-12-08.md",
         "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md",
         "Plans/march-budget.md", "Plans/april-budget.md", "Drafts/first-draft.md",
         "january.md", "first-principles.md", "second-brain.md", "may-ideas.md",
@@ -866,6 +869,9 @@ def test_jauto3c_date_table(tmp_path):
     names = note_find.scan(str(vault))
     W = lambda md: f"Meetings/weekly-one-on-one-2026-{md}.md"  # noqa: E731
     T = lambda md: f"Notes/two-pager-2026-{md}.md"  # noqa: E731
+    SB = lambda md: f"Notes/second-brain-dump-2026-{md}.md"  # noqa: E731
+    TQ = lambda md: f"Reviews/third-quarter-review-2026-{md}.md"  # noqa: E731
+    FD = lambda md: f"Drafts/first-draft-review-2026-{md}.md"  # noqa: E731
     S7, S18 = "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md"
     TIE = [S7, S18]
     ALL_W = [W(md) for md in ("11-01", "11-03", "11-05", "11-09", "11-20", "11-21",
@@ -946,10 +952,19 @@ def test_jauto3c_date_table(tmp_path):
         ("meeting weekly one on one december five", W("12-05")),
         ("team weekly one on one november three", W("11-03")),
         ("sara weekly one on one november five", W("11-05")),
+        # round 4: an ordinal unit word right after the month is only a fallback day too, so
+        # a day said before the month beats an ordinal-led name ("second brain dump", ...)
+        ("9 november second brain dump", SB("11-09")),
+        ("7th october third quarter review", TQ("10-07")),
+        ("8th december first draft review", FD("12-08")),
+        ("the ninth of november second brain dump", SB("11-09")),
+        ("second brain dump november second", SB("11-02")),
+        ("november ninth second brain dump", SB("11-09")),
+        ("december first draft review", FD("12-01")),  # no day said: the ordinal stays the day
         # rounds 0/1: name words alone stay name tokens
         ("march budget", "Plans/march-budget.md"),
         ("first principles", "first-principles.md"),
-        ("second brain", "second-brain.md"),
+        ("second brain", [SB("11-02"), SB("11-09"), "second-brain.md"]),  # r4: dump notes tie
         ("may ideas", "may-ideas.md"),
         ("second draft", []),
     ]
@@ -968,22 +983,29 @@ def test_jauto3c_date_table(tmp_path):
 
 def test_jauto3c_r3f_fuzz_said_day_never_opens_another_day(tmp_path):
     """Deterministic fuzz: dated weekly-one-on-one notes plus number-word distractors; the
-    ask is the name and a said unit day in either word order, with r3g misheard name words
-    and extra words before or after the name. A single result is only ever the note of the
-    day said — a tie or the right note, never a different date."""
+    ask is the name and a said unit/ordinal day in either word order, with r3g misheard name
+    words and extra words before or after the name. r4 adds ordinal-led names ("second brain
+    dump", ...). A single result is only ever the note of the day said — a tie or the right
+    note, never a different date."""
     rng = random.Random(20261120)
     days = (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5),
-            ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9))
+            ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9),
+            ("first", 1), ("second", 2), ("third", 3), ("fourth", 4), ("fifth", 5),
+            ("sixth", 6), ("seventh", 7), ("eighth", 8), ("ninth", 9))
     months = (("november", 11), ("december", 12))
     rels = [f"Meetings/weekly-one-on-one-2026-{m:02d}-{d:02d}.md"  # 11-04 and 12-07 missing
             for m in (11, 12) for d in range(1, 10) if (m, d) not in ((11, 4), (12, 7))] + [
+        f"Notes/{stem}-2026-{m:02d}-{d:02d}.md"  # r4: ordinal-led names, same missing days
+        for stem in ("second-brain-dump", "first-draft-review", "third-quarter-review")
+        for m in (11, 12) for d in range(1, 10) if (m, d) not in ((11, 4), (12, 7))] + [
         "top-three.md", "five-whys.md", "Notes/two-pager-2026-11-18.md",
         "one-on-one-2026-11-03.md", "weekly-review-five-questions.md"]
     names = _vault(tmp_path, *rels)
     for _ in range(300):
         dw, dn = rng.choice(days)
         mw, mn = rng.choice(months)
-        name = rng.choice(("weekly one on one", "one on one weekly"))
+        name = rng.choice(("weekly one on one", "one on one weekly", "second brain dump",
+                           "first draft review", "third quarter review"))
         if rng.random() < 0.3:  # r3g: a misheard name word fits no note exactly
             name = name.replace("weekly", rng.choice(("weakly", "weakest", "wicked")))
         if rng.random() < 0.3:  # r3g: an extra word before or after the name
