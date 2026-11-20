@@ -1128,15 +1128,21 @@ def _fetch_sessions(url: str, token: str, cap: int | None = 20) -> tuple[list[di
             started = _voice_started_words.get(sid)
             if started and started[0] and _echoes_prompt(title, started[1]):
                 title = _cut40(started[0])  # the owner's own words, never the cut prompt
+            # C11/C12 (local-only chats): no title, doing line or card ask of a local-only chat
+            # ever reaches the overlay's cloud model, its cards or its spoken lines.
+            local = item.get("local_only") is True
+            if local:
+                title = "Local chat"
             rows.append({"id": sid,
                          "device": str(item.get("device", ""))[:24],
                          "state": str(item.get("state", ""))[:24],
                          "phase": str(item.get("phase") or "")[:24],
                          "title": title,
-                         "doing": str(item.get("doing", ""))[:120],
+                         "doing": "" if local else str(item.get("doing", ""))[:120],
                          "health": str(item.get("health") or "")[:16],
                          "needs_owner": item.get("state") == "needs_input",
-                         "need": _session_need(item),
+                         "need": None if local else _session_need(item),
+                         "local": local,
                          "updated": str(item.get("last_activity_at")
                                         or item.get("updated_at") or "")[:40]})
     return rows, 200
@@ -1366,7 +1372,7 @@ ASK_AGAIN = "Ask again with its name."  # the way on after a "which one" line (o
 def session_prompt(words: str, ref_row: dict | None = None) -> str:
     """The new session's first message: owner words plus, with a ref, a fixed fix-it line."""
     prompt = f'Started by voice from the Mac overlay. The owner said: "{words}"'
-    if ref_row:
+    if ref_row and not ref_row.get("local"):  # C11: a cloud session is never pointed at a local-only chat
         title = " ".join(str(ref_row.get("title") or "").split())[:60]
         prompt += (f" Investigate why session {title} ({ref_row['id']}) went quiet and fix it;"
                    " read its transcript and state first.")

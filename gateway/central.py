@@ -77,7 +77,8 @@ ROUTER_UNCONFIGURED = "router not configured"
 # Keys passed back to the phone; anything else the router adds is dropped.
 # `seq` (when the router sends it) is the event seq of the reply, so the phone
 # resumes the session stream after it instead of rendering the reply twice.
-_ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq", "engine")
+_ROUTE_KEYS = ("action", "session_id", "kind", "title", "reply", "prompt", "options", "seq",
+               "engine", "upstream")
 _SESSION_KEYS = (
     "session_id", "kind", "title", "state", "cwd", "updated_at", "device",
     "project", "task", "summary", "phase", "last_activity_at", "health",
@@ -94,6 +95,9 @@ _SESSION_KEYS = (
     # The session's own pending question/permission prompt (router), the
     # only text a "Needs you:" recap line may show.
     "needs_prompt",
+    # Local-only chats (router): which machine answers and that no cloud AI
+    # may ever touch them (C11-C14).
+    "local_only", "upstream",
 )
 _PHASES = ("in_progress", "in_review", "done")
 # New lifecycle health enum (contract): working | quiet | waiting | idle |
@@ -150,7 +154,7 @@ FLOOR_CSP = (
 AGENTIC_OS_URL_DEFAULT = "http://127.0.0.1:8787"
 AGENTIC_OS_TOKEN_PATH = FilePath.home() / ".config" / "agentic-os" / "token"
 AGENTIC_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
-_ENGINE_KEYS = ("id", "label", "kind", "available", "default", "reason")
+_ENGINE_KEYS = ("id", "label", "kind", "available", "default", "reason", "local_only")
 _HUB_KEYS = ("key", "dirLabel", "engine", "active", "lastTs")
 _AGENT_KEYS = ("id", "persona", "engine", "label", "active", "status")
 
@@ -249,7 +253,15 @@ async def _router_json(method: str, path: str, body: dict | None = None):
         raise RouterError(ROUTER_UNAVAILABLE) from None
     if resp.status_code // 100 != 2:
         logger.warning("router %s %s -> %d", method, path, resp.status_code)
-        raise RouterError(f"router error {resp.status_code}")
+        err = RouterError(f"router error {resp.status_code}")
+        err.status = resp.status_code  # _detail_reply branches on it (C12 pass-through)
+        try:  # C12: the router's own wording for a local-model error reaches the client verbatim
+            detail = resp.json().get("detail")
+        except ValueError:
+            detail = None
+        if isinstance(detail, str) and detail and len(detail) <= 300:
+            err.detail = detail
+        raise err
     try:
         return resp.json()
     except ValueError:
@@ -282,8 +294,65 @@ async def route(thread_id: str, msg_id: str, text: str, source: str,
     return _pick(data, _ROUTE_KEYS)
 
 
+# --- local-only engines (C11-C14): no cloud seam may ever touch them ------------
+
+ENGINES_CACHE_S = 60.0
+_CLOUD_ENGINES = frozenset({"hub", "claude", "glm", "agy"})
+_engines_cache: dict = {"at": 0.0, "ids": frozenset(), "local": frozenset()}
+
+
+def _cache_engines(data) -> None:
+    items = data.get("engines") if isinstance(data, dict) else None
+    rows = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+    _engines_cache.update(
+        at=time.monotonic(),
+        ids=frozenset(i["id"] for i in rows if isinstance(i.get("id"), str)),
+        local=frozenset(i["id"] for i in rows
+                        if isinstance(i.get("id"), str) and i.get("local_only") is True),
+    )
+
+
+async def is_local_engine(engine: str | None) -> bool:
+    """True when `engine` must never reach a cloud model or a content-bearing note.
+
+    Fails closed: an engine we cannot look up (list un-fetchable, or an unknown
+    id in a fetched list) counts as local, so the error is "too careful", never
+    a leaked chat.
+    """
+    if not engine or engine in _CLOUD_ENGINES:
+        return False
+    if time.monotonic() - _engines_cache["at"] > ENGINES_CACHE_S:
+        try:
+            data = await _router_json("GET", "/engines")
+        except RouterError:
+            return True
+        _cache_engines(data)
+    return engine not in _engines_cache["ids"] or engine in _engines_cache["local"]
+
+
+# Router error details passed through verbatim with the router's own status
+# (C12: local-model errors the router words for the owner). Anything else
+# stays a generic 502: no upstream text ever reaches the client unlisted.
+_DETAIL_PASSTHROUGH = (
+    (503, "Local model unavailable:"),
+    (409, "This chat belongs to "),
+    (422, "The gym coach chat cannot use the local model"),
+)
+
+
+def _detail_reply(exc: RouterError) -> HTTPException | None:
+    """The verbatim HTTPException when the router error is one of the pass-through cases."""
+    detail = getattr(exc, "detail", None)
+    status = getattr(exc, "status", None)
+    if isinstance(detail, str):
+        for code, prefix in _DETAIL_PASSTHROUGH:
+            if status == code and detail.startswith(prefix):
+                return HTTPException(status_code=code, detail=detail)
+    return None
+
+
 def _bad_gateway(exc: RouterError) -> HTTPException:
-    return HTTPException(status_code=502, detail=str(exc))
+    return _detail_reply(exc) or HTTPException(status_code=502, detail=str(exc))
 
 
 def _now() -> datetime:
@@ -364,7 +433,8 @@ def _session(item: dict, plain: dict | None = None, now: datetime | None = None,
     if not out.get("health"):
         out["health"] = _HEALTH_FALLBACK.get(out["phase"])
     # A cached line for an older summary still beats the raw title while the new one is made.
-    hit = (plain or {}).get(out.get("session_id"))
+    # C11: a local-only chat shows the router title; no model-made line ever.
+    hit = None if out.get("local_only") is True else (plain or {}).get(out.get("session_id"))
     if isinstance(hit, dict) and isinstance(hit.get("doing"), str):
         out["doing"] = hit["doing"]
         # Model "Needs you" lines are dropped (old cache entries still hold them).
@@ -504,6 +574,8 @@ def _run_claude_plain(prompt: str, timeout_s: float) -> str | None:
 
 def _generate_plain(session: dict) -> dict | None:
     """Blocking: one `claude -p` call -> {"doing", "recap"}; None when unusable."""
+    if session.get("local_only") is True:  # C11: never a cloud model for a local-only chat
+        return None
     facts = "\n".join(
         f"{label}: {session[k]}" for label, k in (("Title", "title"), ("State", "state"))
         if isinstance(session.get(k), str) and session[k]
@@ -531,6 +603,8 @@ def _generate_plain(session: dict) -> dict | None:
 async def _plain_worker(sid: str, digest: str, session: dict) -> None:
     key = f"{sid}:{digest}"
     try:
+        if session.get("local_only") is True:  # C11: defence in depth
+            return
         result = await asyncio.get_running_loop().run_in_executor(_plain_executor, _generate_plain, session)
         if result is None:
             _failed[key] = time.monotonic()
@@ -559,6 +633,8 @@ def _schedule_plain(sessions: list[dict], plain: dict) -> None:
         digest = _plain_digest(s) if isinstance(sid, str) else None
         if digest is None:
             continue
+        if s.get("local_only") is True:  # C11: never a cloud model for a local-only chat
+            continue
         hit = plain.get(sid)
         key = f"{sid}:{digest}"
         if isinstance(hit, dict) and hit.get("hash") == digest:
@@ -580,6 +656,8 @@ class MessageBody(BaseModel):
     # Empty text is fine when files are attached (a photo with no words).
     text: str = Field(default="", max_length=4000)
     attachments: list[str] = Field(default_factory=list, max_length=attachments.MAX_PER_MESSAGE)
+    # G1: the engine the client believes the chat runs on; the router checks it (409 on a mismatch)
+    engine: str | None = Field(default=None, pattern=ENGINE_PATTERN)
 
     @model_validator(mode="after")
     def _not_empty(self):
@@ -590,7 +668,6 @@ class MessageBody(BaseModel):
 
 class ChatBody(MessageBody):
     thread_id: str = Field(pattern=ID_PATTERN)
-    engine: str | None = Field(default=None, pattern=ENGINE_PATTERN)
     new_session: bool = False
 
 
@@ -652,6 +729,7 @@ async def engines() -> dict:
     items = data.get("engines") if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise HTTPException(status_code=502, detail="router sent invalid json")
+    _cache_engines(data)  # /central/engines calls keep is_local_engine's cache warm
     return {"engines": [_pick(item, _ENGINE_KEYS) for item in items if isinstance(item, dict)]}
 
 
@@ -743,14 +821,18 @@ async def clear_done() -> dict:
 @router.post("/central/sessions/{session_id}/message")
 async def session_message(body: MessageBody, session_id: str = Path(pattern=ID_PATTERN)) -> dict:
     text = _with_files(body)
-    return await _send_to_session(session_id, body.msg_id, text, body.text or "(files)")
+    # forwarded only when sent: an explicit null still reaches the router (a local chat 409s on it)
+    extra = {"engine": body.engine} if "engine" in body.model_fields_set else {}
+    return await _send_to_session(session_id, body.msg_id, text, body.text or "(files)", extra)
 
 
-async def _send_to_session(session_id: str, msg_id: str, text: str, shown: str) -> dict:
+async def _send_to_session(session_id: str, msg_id: str, text: str, shown: str,
+                           extra: dict | None = None) -> dict:
     """Router message + the card's receipt (sent -> received/queued, or failed)."""
     cards.record_message(session_id, shown, msg_id, "sent")
     try:
-        data = await _router_json("POST", f"/sessions/{session_id}/message", {"msg_id": msg_id, "text": text})
+        data = await _router_json("POST", f"/sessions/{session_id}/message",
+                                  {"msg_id": msg_id, "text": text, **(extra or {})})
     except RouterError as exc:
         cards.record_message(session_id, shown, msg_id, "failed")
         raise _bad_gateway(exc)
