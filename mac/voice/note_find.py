@@ -161,8 +161,9 @@ def _spoken_date(ws: list[str], vocab: frozenset[str] = frozenset()) -> tuple[st
     ("", frozenset()) when no month+day was said. jauto3c r1: only these words leave the
     query — a lone "march" or "second" is a name token, as on ci-ipa. r3c: a bare unit word
     ("one".."nine") after the month is only a fallback; a day said before the month wins.
-    r3d: with bare units on both sides of the month, the one that is a note-name word
-    (in vocab) is not the day when the other is not."""
+    r3d: with bare units on both sides of the month, the one that is a note-name word (in
+    the passed vocab — r3e: the ask's matching notes' words, not the whole vault) is not
+    the day when the other is not."""
     year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
     fallback: tuple[str, frozenset[int]] = ("", frozenset())
     for i, w in enumerate(ws):
@@ -203,7 +204,12 @@ def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[s
     index = _prepared(names)
     # jauto3c r1: date words leave the query only when they formed a spoken date; with no
     # month+day the tokens are exactly tokens(words), as on ci-ipa.
-    spoken, drop = _spoken_date(ws, index["vocab"])
+    # jauto3c r3e: name words come from the notes sharing a non-date word with the ask, so an
+    # unrelated two-pager note cannot make "two" a name word and steal the said day.
+    ctx = {w for w in tokens(words) if w not in _MONTHS and w not in _DAY_WORDS}
+    local = frozenset().union(*(stem for _, stem, _ in index["notes"] if stem & ctx)) \
+        or index["vocab"]
+    spoken, drop = _spoken_date(ws, local)
     q = tokens(" ".join(w for i, w in enumerate(ws) if i not in drop))
     if not q:
         return []

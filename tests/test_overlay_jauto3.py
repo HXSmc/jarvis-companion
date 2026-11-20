@@ -855,7 +855,8 @@ def test_jauto3c_date_table(tmp_path):
         "Notes/two-pager-2026-11-18.md", "Notes/two-pager-2026-11-19.md",
         "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md",
         "Plans/march-budget.md", "Plans/april-budget.md", "Drafts/first-draft.md",
-        "january.md", "first-principles.md", "second-brain.md", "may-ideas.md"]
+        "january.md", "first-principles.md", "second-brain.md", "may-ideas.md",
+        "top-three.md", "five-whys.md"]
     for rel in rels:
         p = vault / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -865,6 +866,8 @@ def test_jauto3c_date_table(tmp_path):
     T = lambda md: f"Notes/two-pager-2026-{md}.md"  # noqa: E731
     S7, S18 = "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md"
     TIE = [S7, S18]
+    ALL_W = [W(md) for md in ("11-01", "11-03", "11-05", "11-09", "11-20", "11-21",
+                              "12-01", "12-02", "12-05", "12-30", "12-31")]
     rows = [
         # round 0: the 11-18 family and the 11-07 family
         ("saudi whale ideas november 18th", S18),
@@ -927,6 +930,11 @@ def test_jauto3c_date_table(tmp_path):
         ("weekly one on one december five", W("12-05")),
         ("three november one on one weekly", W("11-03")),
         ("five december one on one weekly", W("12-05")),
+        # round 3e: name words come only from notes sharing a non-date word with the ask, so
+        # top-three/five-whys/two-pager never turn the said day into a name word
+        ("weekly one on one december two", W("12-02")),
+        ("two december one on one weekly", W("12-02")),
+        ("weekly one on one november two", ALL_W),  # no 11-02 note: the full tie is kept
         # rounds 0/1: name words alone stay name tokens
         ("march budget", "Plans/march-budget.md"),
         ("first principles", "first-principles.md"),
