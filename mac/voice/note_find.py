@@ -120,17 +120,77 @@ def _prepared(names: tuple[str, ...]) -> dict:
     return _index
 
 
+# jauto3c: a date said in words ("november 18th", "the eighteenth of november", "nov 18")
+_MONTHS = {"january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+           "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+           "august": 8, "aug": 8, "september": 9, "sep": 9, "october": 10, "oct": 10,
+           "november": 11, "nov": 11, "december": 12, "dec": 12}
+_UNIT = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+         "eight": 8, "nine": 9, "first": 1, "second": 2, "third": 3, "fourth": 4,
+         "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9}
+_DAY_WORDS = {**_UNIT, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+              "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+              "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+              "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
+              "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17,
+              "eighteenth": 18, "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
+_DAY_NUM_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?")  # "18", "3rd"
+_ORD_NUM_RE = re.compile(r"\d{1,2}(?:st|nd|rd|th)")  # "3rd" alone: never a name word
+
+
+def _day_at(ws: list[str], i: int) -> int:
+    """The day spoken at ws[i] (digits, "18th", a number/ordinal word; a tens word takes a
+    unit word beside it), 0 when ws[i] is no day."""
+    m = _DAY_NUM_RE.fullmatch(ws[i])
+    v = int(m[1]) if m else _DAY_WORDS.get(ws[i], 0)
+    if not 1 <= v <= 31:
+        return 0
+    if v in (20, 30):  # "twenty first", "twenty-first"
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(ws) and _UNIT.get(ws[j], 0):
+                return v + _UNIT[ws[j]]
+    return v
+
+
+def _spoken_date(ws: list[str]) -> str:
+    """MMDD for a month plus a day said anywhere in the words (before or after the month,
+    "of"/"the" allowed; a said 4-digit year in front); "" when no month+day was said."""
+    year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
+    for i, w in enumerate(ws):
+        if w in _MONTHS:
+            for step in (1, -1):
+                j = i + step
+                while 0 <= j < len(ws) and ws[j] in ("of", "the"):
+                    j += step
+                if 0 <= j < len(ws):
+                    day = _day_at(ws, j)
+                    if day:
+                        return f"{year}{_MONTHS[w]:02d}{day:02d}"
+    return ""
+
+
+def _is_date_word(ws: list[str], i: int) -> bool:
+    """jauto3c: date words never count as name tokens in the QUERY (note names keep theirs);
+    "may" only beside a day number. "of" is STOP already."""
+    w = ws[i]
+    if w in _MONTHS:
+        return w != "may" or any(_day_at(ws, i + s) for s in (1, -1) if 0 <= i + s < len(ws))
+    return bool(_ORD_NUM_RE.fullmatch(w)) or w in _DAY_WORDS
+
+
 def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[str]:
     """Note paths a spoken name means: query tokens must hit the stem (or the folder words);
     the best hit count wins, all ties are kept. [] = no note matches."""
-    q = tokens(words)
+    ws = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w]
+    q = tokens(" ".join(w for i, w in enumerate(ws) if not _is_date_word(ws, i)))
     if not q:
         return []
     # jauto3 round 2 (R2-3a): the cost is |q| x |vocab|; cap the ask so it cannot tie a pool worker
     seen: set[str] = set()
     q = [w for w in q if not (w in seen or seen.add(w))][:12]
     index = _prepared(names)
-    digits = "".join(c for c in words if c.isdigit())  # jauto3 round 3 (R3-1): date words tie-break
+    # jauto3 round 3 (R3-1) + jauto3c: a spoken month+day is the tie-break, else the raw digits
+    digits = _spoken_date(ws) or "".join(c for c in words if c.isdigit())
     key = (tuple(q), literal, digits)
     hit = index["found"].get(key)  # jauto3 round 2 (R2-3b): one read, no check-then-index race with clear()
     if hit is not None:

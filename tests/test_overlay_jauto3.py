@@ -657,3 +657,65 @@ def test_round3_digit_tie_cached_apart():
 def test_round3_folder_tie_names_two_folders():
     assert _tie_line(["X/B/Meeting.md", "Y/B/Meeting.md"]) == \
         "Two notes match: Meeting in X B and Meeting in Y B. Say more of the name."
+
+
+# --- jauto3c: a date said in words picks the note ---------------------------------------------------
+
+
+N7 = "Ideas/saudi-whale-ideas-2026-11-07.md"
+N18 = "Ideas/saudi-whale-ideas-2026-11-18.md"
+
+
+@pytest.fixture
+def whale_vault(tmp_path):
+    v = tmp_path / "vault"
+    (v / "Ideas").mkdir(parents=True)
+    (v / "Ideas" / "saudi-whale-ideas-2026-11-07.md").write_text("x")
+    (v / "Ideas" / "saudi-whale-ideas-2026-11-18.md").write_text("x")
+    return v
+
+
+@pytest.mark.parametrize("ask", [
+    "saudi whale ideas november 18th",
+    "saudi whale ideas 18th of november",
+    "saudi whale ideas the eighteenth of november",
+    "saudi whale ideas nov 18",
+    "saudi whale ideas november eighteen",
+    "saudi whale ideas november 18 2026",
+])
+def test_jauto3c_spoken_date_picks_the_note(ask, whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, ask) == [N18], ask
+
+
+def test_jauto3c_day_first_spoken_date_picks_the_other_note(whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, "saudi whale ideas 7th november") == [N7]
+
+
+def test_jauto3c_no_such_date_keeps_the_tie(whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, "saudi whale ideas december 3rd") == [N7, N18]
+    assert note_find.find(names, "saudi whale ideas") == [N7, N18]
+
+
+def test_jauto3c_parse_and_find_pick_one(whale_vault):
+    text = "open the note saudi whale ideas november 18th"
+    names = note_find.scan(str(whale_vault))
+    got = intents.parse(text, apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg, literal=got.sub == "literal") == [N18]
+
+
+def test_jauto3c_digits_still_narrow(whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, "saudi whale ideas 2026 11 18") == [N18]
+    assert note_find.find(names, "saudi whale ideas 1118") == [N18]
+
+
+def test_jauto3c_may_alone_stays_a_name_word(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "may-ideas.md").write_text("x")
+    names = note_find.scan(str(vault))
+    assert note_find.find(names, "may ideas") == ["may-ideas.md"]  # no day beside "may"
