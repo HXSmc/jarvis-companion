@@ -205,8 +205,8 @@ def test_open_url_tainted_asks(H, ctx, auto_on):
     assert v("open https://example.com", ctx, tainted=True) == untrusted
     assert v(fill("open H/Documents/a.md https://example.com", H), ctx, tainted=True) == untrusted
     assert v("open -a Safari", ctx, tainted=True) == untrusted  # no operand: not the path form
-    assert v(fill("open -a Preview H/Documents/a.pdf", H), ctx, tainted=True) == untrusted  # -a: not exempt
-    assert v(fill("open -e H/Documents/a.txt", H), ctx, tainted=True) == untrusted  # -e is -a TextEdit
+    assert v(fill("open -a Preview H/Documents/a.pdf", H), ctx, tainted=True) == OK  # jauto2: viewer -a, a file
+    assert v(fill("open -e H/Documents/a.txt", H), ctx, tainted=True) == OK  # jauto2: -e (TextEdit), a file
     assert v(fill("printf hi && open H/Documents/b.md", H), ctx, tainted=True) == untrusted
     assert v(fill("curl https://x && open H/Documents/b.md", H), ctx, tainted=True) == ("asked", "network")
 

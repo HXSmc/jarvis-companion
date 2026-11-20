@@ -126,6 +126,12 @@ JAUTO_POLICY_LINES = frozenset({
 })
 
 
+# jauto2 (hub-sanctioned): the one open-shape line in AGENT_PROMPT
+JAUTO2_AGENT_LINES = frozenset({
+    "+  To open a note (a .md in the notes vault) for the owner: open -a Obsidian '<absolute path>.md'. A document or folder: open '<absolute path>' (its default app; this also works for a note). A web page: open https://... . Quote a path with spaces in single quotes; never use ~, $HOME, backslash escapes or obsidian:// links.",
+})
+
+
 def test_facts_are_data(tmp_path, monkeypatch, client):
     from gateway import overlay
     from mac.voice import agent, auto_policy, intent_pick
@@ -155,7 +161,7 @@ def test_facts_are_data(tmp_path, monkeypatch, client):
                           text=True).stdout.strip()
     if base:
         # jfollow11z Z-LIST 9 (hub-sanctioned): the TOOLS line gained Write; jauto: only its own policy lines
-        allowed = {"mac/voice/agent.py": frozenset(), "mac/voice/agent_policy.py": JAUTO_POLICY_LINES}
+        allowed = {"mac/voice/agent.py": JAUTO2_AGENT_LINES, "mac/voice/agent_policy.py": JAUTO_POLICY_LINES}
         for path, ok in allowed.items():
             diff = subprocess.run(["git", "diff", base, "--", path], cwd=ROOT, capture_output=True, text=True).stdout
             changed = [ln for ln in diff.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))
