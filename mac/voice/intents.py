@@ -13,15 +13,17 @@ from __future__ import annotations
 import difflib
 import re
 import subprocess
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+from mac.voice import note_find  # jauto3: spoken note names (no cycle: agent_policy imports none of this)
 from mac.voice.auto_policy import OPEN_DOCS
 
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic | note_open  # jauto3
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -75,6 +77,8 @@ APP_DIRS = ("/Applications", "/System/Applications", "/System/Applications/Utili
 # charset — nothing that could turn into a scheme or a second argument.
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _PATH_RE = re.compile(r"^[/A-Za-z0-9._~%-]*$")
+URL_MAX = 2000  # jauto3
+_URL_REST_RE = re.compile(r"^[/A-Za-z0-9._~%!$&'()*+,;=:@?#-]*$")  # jauto3: RFC 3986 characters only
 _WAKE_RE = re.compile(r"^(?:hey\s+)?jarvis[,:!\s]+", re.I)
 # STT often turns the wake phrase into other words: "Hey, John Pierce. What time is it".
 _MISHEARD_WAKE_RE = re.compile(r"^(?:hey|hi|ok(?:ay)?)(?:[\s,]+\w+){1,3}[.!?]\s+", re.I)
@@ -567,9 +571,40 @@ def _model_key(words: str) -> str:
     return "-".join(out)[:40].strip("-") or "object"
 
 
+# jauto3: spoken note names, front ("open the no llm switch ...") and tail ("open the llm
+# switch note") forms. Both run on the punctuation-stripped whole utterance: "Open the node.
+# LLM Switch ..." is one spoken name split by the sentence detector, so no last-sentence try.
+_NOTE_FRONT_RE = re.compile(r"^open (?:(?:the|my) )?(?P<w>notes?|nodes?|no|not) (?P<name>.+)$")
+_NOTE_TAIL_RE = re.compile(r"^open (?:(?:the|my) )?(?P<name>.+?) (?P<w>note|notes|node)$")
+
+
+def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
+    """A spoken "open the note <name>" that matches a real vault note; else None."""
+    if not note_names:
+        return None
+    n = re.sub(r"\s+", " ", re.sub(r"[.?!,;:]+", " ", strip_lead(_clean(text)).lower())).strip()
+    if not n.startswith("open "):
+        return None
+    if re.search(r"\bsecrets?\b", n):  # jauto3: the Secrets refusal keeps priority
+        return None
+    m = _NOTE_FRONT_RE.match(n) or _NOTE_TAIL_RE.match(n)
+    if not m:
+        return None
+    name = m["name"].strip()
+    if not note_find.tokens(name):  # "open my notes folder": nothing left to match
+        return None
+    if m["w"] == "note":  # the owner typed/said the exact singular: honor the stem as written
+        return Intent("note_open", name, "literal")
+    # a misheard plural ("no", "node", "notes") opens the note only on a real token match
+    if note_find.find(note_names, name, literal=False):
+        return Intent("note_open", name)
+    return None
+
+
 def _fast_intent(text: str, apps: dict[str, str] | None,
                  ws_names: tuple[str, ...], last: bool = False,
-                 place_names: tuple[str, ...] = ()) -> Intent | None:
+                 place_names: tuple[str, ...] = (),
+                 note_names: tuple[str, ...] = ()) -> Intent | None:
     """Every fixed fast-path kind for one utterance form; None = this form matches none.
     `last` (the last-sentence pass) skips clock and hunk: those stay whole-utterance
     ("Hi, I'm stuck. What time is it" is a question; hunk tails belong to tail_hunk)."""
@@ -621,6 +656,15 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
         if vid:
             return Intent(vid.kind, vid.question, vid.video_id)
     ask = workspace_request(text, ws_names)
+    # jauto3: a spoken note name ("open the no llm switch benchmark") beats the workspace
+    # suffix guess, but never a saved workspace name whose own words it repeats.
+    if not last and note_names and not (
+            ask and ask.action in ("open", "delete")
+            and any((set(ask.name.split()) - _WORKSPACE_FILLERS) <= set(_ws_name(n).split())
+                    for n in ws_names)):
+        hit = _note_intent(text, note_names)
+        if hit is not None:
+            return hit
     # An installed app or a site wins over a saved name sharing a word ("open notes").
     # "delete the cat card" is a card ask even when a saved name shares the words; a saved
     # "shopping list" or "meeting notes" (kind words) stays a workspace delete.
@@ -666,7 +710,8 @@ def _fast_intent(text: str, apps: dict[str, str] | None,
 def parse(text: str, apps: dict[str, str] | None = None,
           workspace_names: tuple[str, ...] | None = None,
           place_names: tuple[str, ...] | None = None,
-          model_names: tuple[str, ...] | None = None) -> Intent:
+          model_names: tuple[str, ...] | None = None,
+          note_names: tuple[str, ...] | None = None) -> Intent:
     """Transcript -> Intent; the cleaned transcript is the arg for the model kinds.
 
     Fast-path kinds run on the whole text, then once more on its last sentence
@@ -674,11 +719,14 @@ def parse(text: str, apps: dict[str, str] | None = None,
     `apps` (None -> list_apps()) is only consulted to resolve "open <name>.app"
     to a real installed app before the domain check. `workspace_names` (saved
     workspace names) lets "open <name>" resolve to a workspace ask; `model_names` (3D
-    object slugs + aliases) lets "pull up <name>" resolve to a 3D object.
+    object slugs + aliases) lets "pull up <name>" resolve to a 3D object;
+    `note_names` (vault-relative note paths from note_find.scan) lets a spoken
+    "open the note <name>" resolve to a note open.
     """
     forms = fast_forms(text)
     for i, form in enumerate(forms):
-        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or ())
+        intent = _fast_intent(form, apps, workspace_names or (), last=i > 0, place_names=place_names or (),
+                              note_names=note_names or ())
         if intent is not None:
             return intent
     t = _WAKE_RE.sub("", text.strip(), count=1).strip()
@@ -737,8 +785,37 @@ def parse(text: str, apps: dict[str, str] | None = None,
     return Intent("answer", t)
 
 
+def _safe_url(url: str) -> str | None:
+    """A full typed http(s) URL re-checked part by part and normalized to https; None = refuse.
+
+    The rest after the bare host (no userinfo, no port, no spaces) may only hold RFC 3986
+    characters, so a query or hash is fine but quotes, control bytes and shell text are not.
+    """
+    if len(url) > URL_MAX or not url.isascii():
+        return None
+    m = _SCHEME_RE.match(url)
+    if not m:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    netloc = parts.netloc
+    if parts.scheme.lower() not in ("http", "https"):
+        return None
+    if not _HOST_RE.match(netloc.lower()):
+        return None
+    rest = url[m.end() + len(netloc):]
+    if rest and rest[0] not in "/?#":
+        return None
+    if not _URL_REST_RE.match(rest):
+        return None
+    out = "https://" + netloc + rest  # jauto3: http upgrades to https like every site open
+    return out if len(out) <= URL_MAX else None
+
+
 def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
-    """"open <x>" resolved to an installed app or a site host, else None."""
+    """"open <x>" resolved to an installed app or a site, else None."""
     if not t.lower().startswith("open "):
         return None
     arg = t[5:].strip()
@@ -748,8 +825,12 @@ def _open_intent(t: str, apps: dict[str, str] | None) -> Intent | None:
     site = _SCHEME_RE.sub("", arg)  # jauto2: a URL with a scheme is the same site ask
     host, sep, path = site.partition("/")
     if (_HOST_RE.match(host.lower()) and (not sep or _PATH_RE.match(path))  # jauto2: ?&=# -> agent
-            and (sep or site != arg or not _doc_name(site))):  # jauto2: "report.pdf" is a file, not a host
+            and (sep or site != arg or not _doc_name(site))  # jauto2: "report.pdf" is a file, not a host
+            and len("https://" + site) <= URL_MAX):  # jauto3: same cap for both URL forms
         return Intent("open_site", site)
+    url = _safe_url(arg)
+    if url is not None:  # jauto3: a typed query/hash URL, already upgraded to https
+        return Intent("open_site", url)
     return None
 
 
@@ -1654,17 +1735,37 @@ def open_app(name: str, *, run=subprocess.run, apps: dict[str, str] | None = Non
     return real
 
 
+def link_label(url: str) -> str:
+    """What the overlay says for a site open: the URL when short and plain, else just the host."""
+    if "?" not in url and "#" not in url and len(url) <= 60:
+        return url
+    return f"the link on {urllib.parse.urlsplit(url).netloc}"  # jauto3: query URLs stay private
+
+
+def site_row_arg(arg: str) -> str:
+    """What the debug row keeps: the arg as-is when it is said aloud, else only the host."""
+    url = arg if _SCHEME_RE.match(arg) else "https://" + arg  # jauto3
+    return arg if link_label(url) == url else urllib.parse.urlsplit(url).netloc
+
+
 def open_site(target: str, *, run=subprocess.run) -> str | None:
     """Open an https URL built from a validated host + safe path; None = refused."""
     target = target.strip()
-    host, sep, path = target.partition("/")
-    if not _HOST_RE.match(host.lower()):
-        return None
-    if sep and not _PATH_RE.match(path):
-        return None
-    url = "https://" + target
+    if _SCHEME_RE.match(target):  # jauto3: the full https form (parse upgrades http) re-validates whole
+        url = _safe_url(target) if target[:8].lower() == "https://" else None
+        if url is None:
+            return None
+    else:
+        host, sep, path = target.partition("/")
+        if not _HOST_RE.match(host.lower()):
+            return None
+        if sep and not _PATH_RE.match(path):
+            return None
+        if len("https://" + target) > URL_MAX:  # jauto3
+            return None
+        url = "https://" + target
     run(["open", url], check=False)
-    return url
+    return link_label(url)
 
 
 # jfollow7 S2: the follow-up rule's words (only after a sessions answer, one turn, 30 s): the

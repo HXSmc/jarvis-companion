@@ -58,8 +58,9 @@ def test_open_url_goes_to_site():
     ran = []
     assert intents.open_site("example.com", run=lambda argv, **k: ran.append(list(argv))) == "https://example.com"
     assert ran == [["open", "https://example.com"]]
-    for text in ("open https://example.com/search?q=a&b=c", "open https://evil.example; rm -rf ~"):
+    for text in ("open https://evil.example; rm -rf ~",):
         assert intents.parse(text, apps=A).kind == "agent"  # jauto2: query string / shell char -> agent
+    assert intents.parse("open https://example.com/search?q=a&b=c", apps=A).kind == "open_site"  # jauto3: typed query URL is the site opener
     assert intents.open_site("evil.example; rm -rf ~", run=lambda argv, **k: pytest.fail("must not run")) is None
 
 
