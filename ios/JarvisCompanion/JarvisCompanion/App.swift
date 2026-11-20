@@ -545,6 +545,11 @@ final class AppModel: ObservableObject {
                    !(200...299).contains(http.statusCode) {
                     if http.statusCode == 401 || http.statusCode == 403 {
                         self.fail("unauthorized, check the token in Settings")
+                    } else if let data = data,
+                              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                              let detail = obj["detail"] as? String, EngineStore.isLocalModelError(detail) {
+                        // the local model's 503/409 wording reaches the owner verbatim
+                        self.fail(detail)
                     } else {
                         self.fail("HTTP \(http.statusCode)")
                     }
@@ -561,13 +566,16 @@ final class AppModel: ObservableObject {
                 }
                 self.replyText = reply
                 if let sid = obj["session_id"] as? String, !sid.isEmpty {
-                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                    // "Open chat" on a local answer stays local: it names the engine on every message
+                    let local = EngineStore.isLocal(choice.engine)
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat",
+                                                  engine: local ? choice.engine : nil, localOnly: local)
                 }
                 self.replyIsError = false
                 self.typedText = ""
                 // "New session" and the engine pick are one-shot: both reset after one successful send so they never silently stick; a failed send keeps them for Retry.
                 self.newSession = false
-                EngineStore.resetToDefault()
+                EngineStore.resetAfterReply(ifStill: choice.engine, reply: obj)
                 Haptics.success()
             }
         }.resume()
@@ -603,7 +611,7 @@ final class AppModel: ObservableObject {
         let text = typedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !attachments.isEmpty {
             sendWithFiles(text)
-        } else if text.hasPrefix("?") {
+        } else if EngineStore.usesQuickAsk(text) {
             quickAsk(text)
         } else {
             ask(text)
@@ -636,6 +644,9 @@ final class AppModel: ObservableObject {
         routeTag = nil
         lastSession = nil
         replyIsError = false
+        // the engine is fixed now, before any upload: a pick change or reset meanwhile cannot move it
+        let choice = EngineStore.sendChoice()
+        if let blocked = choice.blocked { return fail(blocked) }
         isSending = true
         let thread = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
         Task { @MainActor [weak self] in
@@ -650,21 +661,21 @@ final class AppModel: ObservableObject {
                     "msg_id": UUID().uuidString, "thread_id": thread, "text": text,
                     "attachments": files.compactMap(\.uploadedID),
                 ]
-                let choice = EngineStore.sendChoice()
-                if let blocked = choice.blocked { throw CentralError(blocked) }
                 if let engine = choice.engine { body["engine"] = engine }
                 if self.newSession { body["new_session"] = true }
                 let obj = try await Central.json(Central.request("/chat", method: "POST", json: body, timeout: 45))
                 let reply = obj["reply"] as? String ?? ""
                 self.replyText = reply.isEmpty ? "sent" : reply
                 if let sid = obj["session_id"] as? String, !sid.isEmpty {
-                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat")
+                    let local = EngineStore.isLocal(choice.engine)
+                    self.lastSession = ChatTarget(sessionID: sid, title: obj["title"] as? String ?? "Chat",
+                                                  engine: local ? choice.engine : nil, localOnly: local)
                 }
                 self.attachments = []
                 self.typedText = ""
                 // "New session" and the engine pick are one-shot: both reset after one successful send so they never silently stick; a failed send keeps them for Retry.
                 self.newSession = false
-                EngineStore.resetToDefault()
+                EngineStore.resetAfterReply(ifStill: choice.engine, reply: obj)
                 Haptics.success()
             } catch {
                 self.attachments = files
@@ -684,6 +695,8 @@ final class AppModel: ObservableObject {
         // F1: a bare `?` (question empty after strip) never sends, mirroring
         // ask()'s `!text.isEmpty` guard.
         guard text.hasPrefix("?"), !question.isEmpty, !isSending, askReady else { return }
+        // /ask is a cloud pipeline: a local-only (or unlisted) pick goes through the router instead
+        guard EngineStore.usesQuickAsk(text) else { return ask(text) }
         ownerText = text
         replyText = nil
         routeTag = nil
@@ -816,7 +829,7 @@ final class AppModel: ObservableObject {
     }
 
     private func fail(_ message: String) {
-        setFailure("ask failed: \(message)")
+        setFailure(EngineStore.errorText(message, prefix: "ask failed: "))
     }
 
     private func fail(_ error: Error) {
@@ -1012,6 +1025,7 @@ struct ContentView: View {
                     }
                     typedRow
                     EnginePickerRow(engineID: $engineID, newSession: $model.newSession)
+                        .disabled(model.isSending)  // no pick changes while a send is on its way
                 case .sessions:
                     SessionsBoard()
                 case .floor:
