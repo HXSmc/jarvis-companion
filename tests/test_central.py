@@ -398,6 +398,17 @@ def test_siri_shared_token_never_reaches_router(monkeypatch):
     monkeypatch.setattr(central, "route", must_not_route)
     monkeypatch.setattr(quick, "ask", fake_ask)
     monkeypatch.setattr(siri, "roles", lambda: [])
+
+    def empty_router_db():  # readable router DB, thread not local (an unreadable one fails closed: 403)
+        import sqlite3
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript("CREATE TABLE sessions (id TEXT, local_only INTEGER);"
+                        "CREATE TABLE thread_map (thread_id TEXT, session_id TEXT);")
+        return c
+
+    monkeypatch.setattr(siri.cards, "_db", empty_router_db)
+    monkeypatch.setattr(siri, "_LOCAL_THREADS", {})  # earlier tests may have marked app-xyz
     shared = {"Authorization": f"Bearer {TOKEN}"}
     for text in ("tell me the time", "build me a thing", "ask me something"):
         resp = _call("POST", "/siri/hey", headers=shared, json={"text": text, "thread_id": "app-xyz"})

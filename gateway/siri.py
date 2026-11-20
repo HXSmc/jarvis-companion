@@ -25,7 +25,7 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from common import config
-from gateway import central, notify, quick, screen, wake
+from gateway import cards, central, notify, quick, screen, wake
 from gateway.auth import _bearer_matches, ios_token_is_shared, require_bearer_any
 from gateway.registry import roles
 from mac.voice import router as voice_router
@@ -126,8 +126,100 @@ _WAKE_RE = re.compile(
 )
 
 
+# Threads known to carry a local-only chat (round 1, S2): the picker resets to Hub after
+# each send, so a follow-up on a local thread may name no engine at all.
+# thread_id -> its local engine (R4-1; None when only the router DB knows it), in
+# insertion order and capped (R3): oldest marks drop first.
+_LOCAL_THREADS: dict[str, str | None] = {}
+LOCAL_THREADS_MAX = 1000
+# R4-1: a late "Local model unavailable" 503 gets this fixed note, never the owner's text.
+_LOCAL_FAILED_NOTE = "The local model could not answer. Nothing was sent anywhere else."
+
+
+def _mark_local(thread_id: str, engine: str | None = None) -> None:
+    # shortcut: an evicted unmapped thread loses its mark after 1000 newer local threads; the router DB still holds mapped ones
+    _LOCAL_THREADS.pop(thread_id, None)
+    _LOCAL_THREADS[thread_id] = engine
+    while len(_LOCAL_THREADS) > LOCAL_THREADS_MAX:
+        del _LOCAL_THREADS[next(iter(_LOCAL_THREADS))]
+
+
+def _thread_local_state(thread_id: str) -> bool | None:
+    """True when this thread is a local-only chat (seen here, or mapped to a local_only
+    row in the router DB), False when the DB says it is not, None when the DB cannot
+    answer (absent on a Mac-only deploy, unreadable, older schema). G3: callers treat
+    None as local (fail closed), so the request skips every cloud fast path."""
+    if thread_id in _LOCAL_THREADS:
+        return True
+    try:  # any failure (the Mac copy may have no cards._db at all) is "cannot tell", never a 500
+        conn = cards._db()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute("SELECT COALESCE(s.local_only, 0) AS l FROM thread_map t "
+                               "JOIN sessions s ON s.id=t.session_id WHERE t.thread_id=?",
+                               (thread_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    return bool(row and row["l"])
+
+
+def _thread_is_local(thread_id: str) -> bool:
+    """True when this thread is (or may be) a local-only chat; "cannot tell" counts as local."""
+    return _thread_local_state(thread_id) is not False
+
+
+# R3-1: one threaded request at a time per thread, from the local decision through
+# the router call, so a follow-up never overtakes message 1 (thread_id -> [lock, users]).
+_THREAD_GATES: dict[str, list] = {}
+
+
+async def _hey_in_thread_order(thread_id: str, call):
+    gate = _THREAD_GATES.setdefault(thread_id, [asyncio.Lock(), 0])
+    gate[1] += 1
+    try:
+        async with gate[0]:
+            return await call()
+    finally:
+        gate[1] -= 1
+        if not gate[1]:
+            del _THREAD_GATES[thread_id]
+
+
+async def _reply_is_local(data: dict) -> bool:
+    """The router marks local rows with `upstream`; a local-only kind says it too."""
+    kind = data.get("kind")
+    return "upstream" in data or (isinstance(kind, str) and await central.is_local_engine(kind))
+
+
+async def _mark_from_reply(thread_id: str, data: dict, engine: str | None,
+                           local: bool, unsure: bool, may_clear: bool = True) -> None:
+    """Keep the thread's local mark (and its engine) in step with the router's reply.
+
+    A late reply runs outside the thread gate and may be older than a newer local
+    request's mark, so `_deliver_late` passes may_clear=False: it only ever adds a mark."""
+    kind = data.get("kind")
+    kind_local = isinstance(kind, str) and await central.is_local_engine(kind)
+    if may_clear and isinstance(kind, str) and not kind_local and "upstream" not in data:
+        _LOCAL_THREADS.pop(thread_id, None)  # the router put it on a cloud engine: the early mark was wrong
+    elif (local and not unsure) or kind_local or "upstream" in data:
+        value = kind if kind_local else engine
+        if not kind_local and engine in (None, "", "hub"):  # R5 sweep: a no-engine reply keeps the stored engine
+            value = _LOCAL_THREADS.get(thread_id) or value
+        _mark_local(thread_id, value)
+
+
+def _is_local_unavailable(exc: BaseException | None) -> bool:
+    """The router's own "Local model unavailable:" 503 (no row was made)."""
+    reply = central._detail_reply(exc) if isinstance(exc, central.RouterError) else None
+    return reply is not None and reply.status_code == 503
+
+
 async def _router_reply(text: str, thread_id: str, msg_id: str,
-                        engine: str | None = None, new_session: bool = False) -> dict:
+                        engine: str | None = None, new_session: bool = False,
+                        local: bool = False, unsure: bool = False) -> dict:
     """central.route (source "voice"), hard-bounded; failure → canned reply, never a 500.
 
     `reply` always holds something speakable: the router's reply, else its
@@ -141,12 +233,18 @@ async def _router_reply(text: str, thread_id: str, msg_id: str,
     except asyncio.TimeoutError:
         # The router keeps going; hand its answer to the owner when it lands.
         late = asyncio.ensure_future(
-            _deliver_late(task, text, thread_id, msg_id, engine, new_session))
+            _deliver_late(task, text, thread_id, msg_id, engine, new_session, local, unsure))
         _late_tasks.add(late)
         late.add_done_callback(_late_tasks.discard)
         return {"reply": _TIMEOUT_REPLY}
+    except central.RouterError as exc:
+        passthrough = central._detail_reply(exc)  # C12: a local-model error in the router's own words
+        if passthrough is not None:
+            raise passthrough from None
+        return {"reply": _ROUTER_DOWN_REPLY}
     except Exception:
         return {"reply": _ROUTER_DOWN_REPLY}
+    await _mark_from_reply(thread_id, data, engine, local, unsure)
     out = {k: data[k] for k in ("action", "session_id", "kind", "title", "prompt", "options") if k in data}
     out["reply"] = _speakable(data)
     return out
@@ -165,26 +263,45 @@ LATE_RETRY_SECONDS = 5
 
 
 async def _deliver_late(task: asyncio.Future, text: str, thread_id: str, msg_id: str,
-                        engine: str | None = None, new_session: bool = False) -> None:
-    """Wait out a router call that missed the request deadline, then send its answer to the app + WhatsApp."""
+                        engine: str | None = None, new_session: bool = False,
+                        local: bool = False, unsure: bool = False) -> None:
+    """Wait out a router call that missed the request deadline, then send its answer to the app + WhatsApp.
+
+    `unsure`: local only because the router DB cannot tell (R3): a neutral app notice, no WhatsApp, no mark."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + LATE_ANSWER_MAX_SECONDS
+    failure: BaseException | None = None
     try:
         data = await task
-    except Exception:  # the gateway's own read timeout fired; the router still finishes
-        data = None
-    while data is None and loop.time() < deadline:
+    except Exception as exc:  # the gateway's own read timeout fired; the router still finishes
+        data, failure = None, exc
+    # A local 503 is final (the router made no row): stop retrying and say so below.
+    while data is None and not _is_local_unavailable(failure) and loop.time() < deadline:
         await asyncio.sleep(LATE_RETRY_SECONDS)
         try:
             data = await central.route(thread_id, msg_id, text, "voice",
                                        **central.route_opts(engine, new_session))
-        except Exception:
-            data = None
+        except Exception as exc:
+            data, failure = None, exc
     if data is None:
+        if _is_local_unavailable(failure):  # R4-1: the owner was told "Still thinking"; fixed text only
+            await notify.push_app("answer", "Local chat", _LOCAL_FAILED_NOTE, None)
+            await notify.whatsapp_owner(_LOCAL_FAILED_NOTE, "[jarvis] Local chat")
+        return
+    sid = data.get("session_id") if isinstance(data.get("session_id"), str) else None
+    # G2: later follow-ups on this thread stay local — no question, no router title, no reply
+    await _mark_from_reply(thread_id, data, engine, local, unsure, may_clear=False)
+    if (local and not unsure) or await _reply_is_local(data):  # C12: content-free
+        await notify.push_app("answer", "Local chat",
+                              "The local model answered. Open the Jarvis app to read it.", sid)
+        await notify.whatsapp_owner("The local model answered. Open the Jarvis app to read it.",
+                                    "[jarvis] Local chat")
+        return
+    if local:  # "cannot tell": content-free, and the WhatsApp copy stays dropped (fail closed)
+        await notify.push_app("answer", "Answer ready", "Your answer is ready. Open the Jarvis app.", sid)
         return
     question = " ".join(text.split())[:80]
     reply = _speakable(data)
-    sid = data.get("session_id") if isinstance(data.get("session_id"), str) else None
     if data.get("action") == "answered":
         title, body = f"Answer: {question}", reply
     else:
@@ -203,17 +320,51 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
 
     The body is read off the Request (not a Pydantic param) so the Shortcut's
     POST works without a Content-Type header. Beyond 2 in-flight or 20/60 s
-    router calls the answer is an immediate busy reply — never a queue.
+    router calls the answer is an immediate busy reply — never a queue. Requests
+    on one client thread do wait for each other (R3-1).
     """
     try:
         body = await request.json()
         text = str(body.get("text") or "")
-        thread_id = str(body.get("thread_id") or f"voice-{uuid.uuid4().hex}")
+        client_thread = body.get("thread_id")
+        thread_id = str(client_thread or f"voice-{uuid.uuid4().hex}")
         msg_id = str(body.get("msg_id") or uuid.uuid4().hex)
         engine = body.get("engine")
         new_session = body.get("new_session") is True
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail='expected JSON body {"text": "..."}')
+    if not client_thread:
+        return await _hey(request, authorization, text, client_thread, thread_id, msg_id, engine, new_session)
+    # R3-1: a request naming a non-cloud engine marks its thread before any await (a
+    # wrong mark only fails closed); the thread gate keeps later requests behind it.
+    # R5-1: it never replaces a stored engine; requests already queued read that one.
+    if (isinstance(engine, str) and central._ENGINE_RE.fullmatch(engine)
+            and engine not in central._CLOUD_ENGINES and thread_id not in _LOCAL_THREADS):
+        _mark_local(thread_id, engine)
+    return await _hey_in_thread_order(thread_id, lambda: _hey(
+        request, authorization, text, client_thread, thread_id, msg_id, engine, new_session))
+
+
+async def _hey(request: Request, authorization: str | None, text: str, client_thread,
+               thread_id: str, msg_id: str, engine, new_session: bool) -> dict:
+    # C13/C14: a local-only engine — no cloud seam (quick.ask, the shared-token
+    # quick.ask answer) may ever touch its text, and only the phone app may use it.
+    # S2: a follow-up on a local thread is local too, whatever engine the request names.
+    # R4-1: one that names no engine goes out on the thread's local engine, so the router
+    # answers locally, 503s or 409s, and never classifies it (message 1 may have made no row).
+    stored = _LOCAL_THREADS.get(thread_id) if client_thread else None
+    if (engine in (None, "", "hub") and stored and central._ENGINE_RE.fullmatch(stored)
+            and await central.is_local_engine(stored)):
+        engine = stored
+    named_local = await central.is_local_engine(engine if isinstance(engine, str) else None)
+    thread_state = _thread_local_state(thread_id) if client_thread else False
+    local = named_local or thread_state is not False
+    unsure = not named_local and thread_state is None  # R3: local only because the DB cannot tell
+    # R6-1: inside the gate the latest well-formed local pick always becomes the stored
+    # engine, before any early return (status phrase, 403, length 400).
+    if client_thread and named_local and central._ENGINE_RE.fullmatch(engine):
+        _mark_local(thread_id, engine)
+    # R6-2: checked after that mark, so an over-long first local message still marks its thread.
     if len(text) > MAX_TEXT_CHARS:
         raise HTTPException(status_code=400, detail=f"text longer than {MAX_TEXT_CHARS} characters")
     if text.strip().lower() in _STATUS_PHRASES:
@@ -221,7 +372,7 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
     # Quick-ask prefixes: delegate to the terse /ask pipeline (never a brain slot).
     stripped = text.strip()
     quick_match = _QUICK_PREFIX_RE.match(stripped)
-    if quick_match:
+    if quick_match and not local:
         try:
             answer = (await quick.ask(stripped[quick_match.end():])).answer
         except Exception:
@@ -232,6 +383,15 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
     is_phone = not ios_token_is_shared() and _bearer_matches(
         authorization, config.get_token(name="ios_token")
     )
+    # C13: the local model works only from the phone app, never the shared-token Shortcut.
+    if local and not is_phone:
+        raise HTTPException(status_code=403, detail="The local model works only from the Jarvis app.")
+    if local and client_thread and not unsure:
+        # G2: mark it now, before routing: a `?` follow-up sent while this message is
+        # still in flight (no thread_map row, no reply yet) must not reach quick.ask
+        # R5 sweep: a malformed id (fails closed as local, then 400s) never replaces the stored engine
+        _mark_local(thread_id, engine if named_local and central._ENGINE_RE.fullmatch(engine)
+                    else _LOCAL_THREADS.get(thread_id))
     # Screen intents (SC7): launch the control page instead of a brain call —
     # the same launch_screen POST /screen/launch uses, never an HTTP self-call.
     # Phone callers only match an exact button payload (see _PHONE_SCREEN_CMDS);
@@ -274,4 +434,4 @@ async def siri_hey(request: Request, authorization: str | None = Header(default=
     if _brain_semaphore.locked() or not _brain_slot_available():
         return {"reply": _BUSY_REPLY}
     async with _brain_semaphore:
-        return await _router_reply(text, thread_id, msg_id, engine, new_session)
+        return await _router_reply(text, thread_id, msg_id, engine, new_session, local=local, unsure=unsure)

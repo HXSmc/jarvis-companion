@@ -76,6 +76,7 @@
   .sel-wrap svg { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; pointer-events: none; color: var(--muted); }
   .engine-lock { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; min-height: 44px; border-radius: var(--radius); background: var(--surface-muted); color: var(--muted); white-space: nowrap; overflow: hidden; }
   .engine-lock svg { width: 13px; height: 13px; flex: none; }
+  .engine-row > .engine-note { grid-column: 1 / -1; min-height: 0; }
   .new-session { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 16px; min-height: 44px; white-space: nowrap; }
   .new-session:hover { background: var(--surface2); }
   .new-session:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
@@ -404,6 +405,30 @@ function engineFields(pick, list, newSession) {
   if (!newSession) return choice;
   return choice.engine ? { engine: choice.engine, new_session: true } : { new_session: true };
 }
+function optionLabel(o) {
+  const label = (o && o.label) || "";
+  // a short closed control: the reason goes in the tooltip and the blocked note
+  if (o && o.available === false) return label.replace(/\s*·\s*local only/i, "") + " (unavailable)";
+  if (o && o.local_only && !/local only/i.test(label)) return label + " · Local only";
+  return label;
+}
+function isLocal(pick, list) {
+  const opt = (list || []).find(o => o && o.id === (pick || "hub"));
+  return !!(opt && opt.local_only);
+}
+// /ask is a cloud pipeline: a local-only pick must take ask() even for "?" text
+function usesQuickAsk(text, pick, list) {
+  if (!text || !text.startsWith("?")) return false;
+  const id = pick || "hub";
+  if (id === "hub") return true;
+  const opt = (list || []).find(o => o && o.id === id);
+  return !!opt && !opt.local_only;  // unlisted pick (e.g. a disabled local engine): never /ask
+}
+function upstreamNote(upstream) {
+  if (upstream === "gaming-pc") return { label: "Gaming PC" };
+  if (upstream === "mini-pc") return { label: "Mini PC", hint: "Slower: running on the mini PC" };
+  return null;
+}
 // engine-logic:end
 const engine = { pick: store.get("engineID") || "hub", homeNew: false };
 let engineList = withHubFirst([]);
@@ -425,7 +450,9 @@ const SVG_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const SVG_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>';
 // CSP blocks url() images: inline SVG via a template, like sendIcon() above.
 const svgNode = markup => { const t = document.createElement("template"); t.innerHTML = markup; return t.content.firstElementChild; };
-function engineRow(getNew, setNew, lockedEngine) {
+function engineRow(getNew, setNew, lockedEngine, chat) {
+  const local = lockedEngine ? (!!chat && !!chat.localOnly) || isLocal(lockedEngine, engineList)
+    : isLocal(engine.pick, engineList);
   const parts = [];
   if (lockedEngine) {
     const name = sessionLabel(lockedEngine, engineList);
@@ -434,11 +461,12 @@ function engineRow(getNew, setNew, lockedEngine) {
   } else {
     const warn = sendChoice(engine.pick, engineList).blocked;
     const options = engineList.some(o => o.id === engine.pick) ? engineList
-      : engineList.concat([{ id: engine.pick, label: engine.pick + " unavailable", available: false }]);
+      : engineList.concat([{ id: engine.pick, label: engine.pick, available: false }]);
     const sel = h("select", { "aria-label": "Engine", class: warn ? "warn" : null, title: warn || null,
       onchange: () => { engine.pick = sel.value; store.set("engineID", sel.value); renderEngineRows(); } },
-      options.map(o => h("option", { value: o.id, disabled: o.available ? null : true, selected: o.id === engine.pick ? true : null },
-        !o.available && o.reason ? o.label + " (" + o.reason + ")" : o.label)));
+      options.map(o => h("option", { value: o.id, disabled: o.available ? null : true, selected: o.id === engine.pick ? true : null,
+        title: !o.available && o.reason ? o.reason : null },
+        optionLabel(o))));
     parts.push(h("span", { class: "sel-wrap" }, sel, svgNode(SVG_CHEVRON)));
   }
   const on = !!getNew();
@@ -446,6 +474,10 @@ function engineRow(getNew, setNew, lockedEngine) {
     title: "Starts a separate session for your next message, then turns off",
     onclick: () => { setNew(!getNew()); renderEngineRows(); } },
     svgNode(on ? SVG_CHECK : SVG_PLUS), "New session", on ? h("b", null, "On") : null));
+  if (local) {
+    parts.push(h("div", { class: "muted engine-note", role: "note" },
+      "Local only. Nothing leaves your devices."));
+  }
   return parts;
 }
 function renderHomeEngine() {
@@ -664,10 +696,12 @@ function renderHome() {
 const SEND_SVG = $("#home-send").innerHTML;
 function sendIcon() { const s = h("span"); s.innerHTML = SEND_SVG; return s.firstElementChild; }
 
+// Local-model errors arrive pre-worded by the router: show them verbatim.
+const RAW_ERR = /^(Local model unavailable:|This chat belongs to|Local model failed:)/;
 async function homeRun(label, work) {
   if (home.sending) return;
   home.sending = true; homeSay(label, null);
-  try { await work(); } catch (e) { home.reply = e.isBlocked ? e.message : "ask failed: " + e.message; home.err = true; }
+  try { await work(); } catch (e) { home.reply = e.isBlocked || RAW_ERR.test(e.message) ? e.message : "ask failed: " + e.message; home.err = true; }
   home.sending = false; renderHome();
 }
 function ask(text) {   // full brain via /siri/hey, like the phone's mic + typed row
@@ -720,7 +754,7 @@ function homeSend() {
   const text = homeText.value.trim();
   if (homeFiles.length) return sendWithFiles(text);
   if (!text) return;
-  return text.startsWith("?") ? quickAsk(text) : ask(text);
+  return usesQuickAsk(text, engine.pick, engineList) ? quickAsk(text) : ask(text);
 }
 enterSends(homeText, homeSend);
 $("#home-send").addEventListener("click", homeSend);
@@ -937,7 +971,7 @@ function cardExtras(s, compact) {
         e.stopPropagation();
         if (!sends) {
           const prefix = need.kind === "approve" ? "Revise: " : need.kind === "checklist" ? "Test note: " : "";
-          return openChat(s.session_id, displayTask(s), prefix, s.engine);
+          return openChat(s.session_id, displayTask(s), prefix, s.engine, s);
         }
         row.querySelectorAll("button").forEach(x => x.disabled = true);
         b.replaceChildren(h("span", { class: "spin" }), " ", label);
@@ -1024,17 +1058,17 @@ function renderRecap() {
     if (!bullets.length) body.append(h("div", { class: "muted", style: "font-size:15px" }, s.summary || "No recap yet."));
     bullets.forEach(b => body.append(h("div", { class: "bul" + (b.startsWith("Needs you") ? " need" : "") }, b)));
     if (hasCard(s.card)) body.append(h("div", { class: "gap" }), cardExtras(s, false));
-    body.append(h("button", { class: "big-btn", onclick: () => openChat(s.session_id, displayTask(s), "", s.engine) }, "Open chat"));
+    body.append(h("button", { class: "big-btn", onclick: () => openChat(s.session_id, displayTask(s), "", s.engine, s) }, "Open chat"));
   }
   const scroll = $(".pb", p) ? $(".pb", p).scrollTop : 0;
   p.replaceChildren(h("div", { class: "ph" }, h("div", { class: "tt" }, h("div", null, "Recap"), h("small", null, panel.sid)),
     h("button", { class: "close", onclick: closePanel }, "Close")), body);
   body.scrollTop = scroll;
 }
-function openChat(sid, title, draft = "", engine) {
+function openChat(sid, title, draft = "", engine, meta) {
   if (sid && !SID_RE.test(sid)) return;
   if (panel.chat) panel.chat.close();
-  Object.assign(panel, { kind: "chat", sid: sid || null, chat: new Chat(sid || null, title || "New chat", engine) });
+  Object.assign(panel, { kind: "chat", sid: sid || null, chat: new Chat(sid || null, title || "New chat", engine, meta) });
   $("#panel").classList.add("on");
   panel.chat.mount($("#panel"), draft);
   renderBoard();
@@ -1066,11 +1100,12 @@ class ChipMachine {
   }
 }
 class Chat {
-  constructor(sid, title, engine) {
+  constructor(sid, title, engine, meta) {
     Object.assign(this, { sid, title, lines: [], options: [], sending: false, canRetry: false, threadId: newThread(),
       pendingMsg: null, failed: null, lastSeq: null, seen: new Set(), echoed: [], turnActive: false,
       chips: new ChipMachine(), connected: false, abort: null, loop: null, closed: false,
-      sessionEngine: engine || "claude", newSession: false });
+      sessionEngine: engine || "claude", newSession: false,
+      localOnly: !!(meta && meta.local_only) });
   }
   mount(el, draft) {
     this.el = el;
@@ -1113,7 +1148,10 @@ class Chat {
         line.text ? h("div", { class: "ln-owner" }, line.text) : null);
       line.chipEl = h("span", { class: "ln-chip", hidden: !line.chip }, (line.chip || "").replace(/_/g, " "));
       el.append(h("div", null, line.chipEl));
-    } else if (line.role === "jarvis") el = md(line.text);
+    } else if (line.role === "jarvis") {
+      const up = upstreamNote(line.upstream);
+      el = up ? h("div", null, md(line.text), h("div", { class: "muted", style: "margin-top:4px" }, up.label + (up.hint ? " · " + up.hint : ""))) : md(line.text);
+    }
     else el = h("div", { class: line.role === "status" ? "ln-status" : "ln-error" }, line.text);
     const atBottom = this.body.scrollHeight - this.body.scrollTop - this.body.clientHeight < 80;
     this.linesEl.append(el);
@@ -1133,7 +1171,7 @@ class Chat {
     if (!this.engineEl) return;
     // locked like ios: a bound chat's engine is that session's, no picker
     const locked = (this.sid && !this.newSession) ? (this.sessionEngine || "claude") : null;
-    this.engineEl.replaceChildren(...engineRow(() => this.newSession, v => { this.newSession = v; }, locked));
+    this.engineEl.replaceChildren(...engineRow(() => this.newSession, v => { this.newSession = v; }, locked, this));
   }
   // "New session" on a bound chat: drop the binding, next send starts a fresh thread.
   detach() {
@@ -1184,7 +1222,7 @@ class Chat {
     } catch (e) {
       this.turnActive = false;
       this.failed = { text, files, line }; this.canRetry = true;
-      this.add("error", e.isBlocked ? e.message : "send failed: " + e.message);
+      this.add("error", e.isBlocked || RAW_ERR.test(e.message) ? e.message : "send failed: " + e.message);
       this.renderEngine();
     }
     this.sending = false; this.renderControls();
@@ -1263,14 +1301,15 @@ class Chat {
     if (seq != null) { if (this.seen.has(seq)) return; this.seen.add(seq); this.lastSeq = Math.max(this.lastSeq ?? seq, seq); }
     const type = ev.type, text = typeof ev.text === "string" ? ev.text : "";
     if (type !== "needs_input") this.options = [];
-    if (type === "text") { if (text && !this.shown(text)) this.add("jarvis", text); }
+    const ups = typeof ev.upstream === "string" ? ev.upstream : null;
+    if (type === "text") { if (text && !this.shown(text)) this.add("jarvis", text, ups ? { upstream: ups } : {}); }
     else if (type === "status") { if (text) this.add("status", text); }
     else if (type === "needs_input") {
       const prompt = ev.prompt || text;
       if (prompt && !this.shown(prompt)) this.add("jarvis", prompt);
       this.options = Array.isArray(ev.options) ? ev.options : [];
     } else if (type === "error") { this.turnActive = false; this.add("error", text || "session error"); this.echoed = []; }
-    else if (type === "done") { this.turnActive = false; if (text && !this.shown(text)) this.add("jarvis", text); this.echoed = []; }
+    else if (type === "done") { this.turnActive = false; if (text && !this.shown(text)) this.add("jarvis", text, ups ? { upstream: ups } : {}); this.echoed = []; }
     const chipEv = { text: "activity", status: "activity", needs_input: "needs_input", done: "done", error: "error" }[type];
     if (chipEv) for (const [line, chip] of this.chips.apply(chipEv)) this.setChip(line, chip);
     this.renderControls();

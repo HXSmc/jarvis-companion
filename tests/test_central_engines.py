@@ -27,16 +27,16 @@ def _stub_engines(monkeypatch: pytest.MonkeyPatch, data):
 ENGINES = {"engines": [
     {"id": "glm-4", "label": "GLM", "kind": "cloud", "available": True, "default": True,
      "reason": None, "base_url": "http://router.internal", "key_env": "SECRET_NAME",
-     "model": "secret-model"},
+     "model": "secret-model", "local_only": False},
     {"id": "codex", "label": "Codex", "kind": "cli", "available": False, "default": False,
-     "reason": "not installed", "junk": 1},
+     "reason": "not installed", "junk": 1, "local_only": True},
     "not-a-dict",
 ]}
 ALLOWED = {"engines": [
     {"id": "glm-4", "label": "GLM", "kind": "cloud", "available": True, "default": True,
-     "reason": None},
+     "reason": None, "local_only": False},
     {"id": "codex", "label": "Codex", "kind": "cli", "available": False, "default": False,
-     "reason": "not installed"},
+     "reason": "not installed", "local_only": True},
 ]}
 
 

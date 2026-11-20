@@ -227,6 +227,11 @@ def _owner_session(s: dict) -> bool:
     )
 
 
+# C12: a local-only chat's note never carries its title, prompt or summary.
+_LOCAL_TITLE = "Local chat"
+_LOCAL_NEEDS = "A local-only chat needs you. Open the Jarvis app."
+
+
 def crossroads(prev: dict[str, tuple], sessions: list[dict], now: float | None = None) -> list[tuple[str, str, str, str]]:
     """Pure transition check -> [(kind, title, text, session_id)]; updates `prev`.
 
@@ -258,14 +263,24 @@ def crossroads(prev: dict[str, tuple], sessions: list[dict], now: float | None =
         title = str(s.get("title") or "Jarvis session")
         summary = str(s.get("summary") or "").strip()
         if _owner_session(s):
+            local = s.get("local_only") is True
             if health == "waiting" and before[1] != "waiting":
-                ask = str(s.get("needs_prompt") or "").strip()  # the router's own pending question
-                out.append(("crossroads", f"Needs your decision: {title}", ask or summary or "It is waiting for your answer.", sid))
+                if local:  # C12: fixed wording only — no needs_prompt, no title
+                    out.append(("crossroads", _LOCAL_TITLE, _LOCAL_NEEDS, sid))
+                else:
+                    ask = str(s.get("needs_prompt") or "").strip()  # the router's own pending question
+                    out.append(("crossroads", f"Needs your decision: {title}", ask or summary or "It is waiting for your answer.", sid))
             elif health == "attention" and before[1] != "attention":
-                reason = str(s.get("attention_reason") or "").strip()
-                out.append(("attention", f"Needs attention: {title}", reason or summary or "It looks stuck.", sid))
+                if local:  # C12: no attention_reason, no title
+                    out.append(("attention", _LOCAL_TITLE, _LOCAL_NEEDS, sid))
+                else:
+                    reason = str(s.get("attention_reason") or "").strip()
+                    out.append(("attention", f"Needs attention: {title}", reason or summary or "It looks stuck.", sid))
             elif health == "failed" and before[1] != "failed":
-                out.append(("failed", f"Failed: {title}", summary or "It stopped with an error.", sid))
+                if local:  # C12: no summary, no title
+                    out.append(("failed", _LOCAL_TITLE, _LOCAL_NEEDS, sid))
+                else:
+                    out.append(("failed", f"Failed: {title}", summary or "It stopped with an error.", sid))
             elif state == "done" and before[0] != "done" and s.get("engine") == "glm":
                 out.append(("done", f"Done: {title}", summary or "Finished. Open the chat to see the result.", sid))
         elif before[0] == "running" and state == "idle" and before[2] is not None and now - before[2] >= DONE_MIN_RUN_SECONDS:
@@ -279,6 +294,7 @@ def crossroads(prev: dict[str, tuple], sessions: list[dict], now: float | None =
 
 _card_needs_seen: deque[tuple] = deque(maxlen=200)
 _titles: dict[str, str] = {}  # session id -> title, from the watcher's polls
+_local_sessions: set[str] = set()  # C12: local-only session ids, same source
 _deliveries: set[asyncio.Task] = set()  # strong refs: asyncio keeps only weak ones
 
 
@@ -319,6 +335,9 @@ def on_card_need(session_id: str, need: dict) -> None:
     if key in _card_needs_seen:
         return
     _card_needs_seen.append(key)
+    if session_id in _local_sessions:  # C12: fixed wording only — never the card's question
+        spawn_deliver("card", _LOCAL_TITLE, _LOCAL_NEEDS, session_id)
+        return
     title = f"Needs you: {_titles.get(session_id) or 'a Jarvis session'}"
     text = str(need.get("question") or "").strip() or "It is waiting for your answer."
     spawn_deliver("card", title, text, session_id)
@@ -346,6 +365,13 @@ async def crossroads_watcher() -> None:
                 rows = [s for s in data if isinstance(s, dict)]
                 _titles.update({s["session_id"]: str(s["title"]) for s in rows
                                 if isinstance(s.get("session_id"), str) and s.get("title")})
+                for s in rows:  # C12: keep the local-only set next to _titles
+                    sid = s.get("session_id")
+                    if isinstance(sid, str):
+                        if s.get("local_only") is True:
+                            _local_sessions.add(sid)
+                        else:
+                            _local_sessions.discard(sid)
                 for kind, title, text, sid in crossroads(prev, rows):
                     if kind == "crossroads" and _card_need_open(sid):
                         continue  # the card's own ask was the note
