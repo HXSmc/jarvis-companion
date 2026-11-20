@@ -145,7 +145,7 @@ def _day_at(ws: list[str], i: int) -> int:
     if not 1 <= v <= 31:
         return 0
     if ws[i] in ("twenty", "thirty"):  # r3: only the words join a unit, never digits "20"/"30"
-        for j in (i - 1, i + 1):
+        for j in (i + 1,):  # r3b: forward only — a name's "one" before the tens is not a unit
             if 0 <= j < len(ws) and _UNIT.get(ws[j], 0):
                 return v + _UNIT[ws[j]]
     u = _UNIT.get(ws[i], 0)  # r2: "twenty first" said with the unit word next to the month
@@ -171,7 +171,7 @@ def _spoken_date(ws: list[str]) -> tuple[str, frozenset[int]]:
                     if day:
                         drop = {i, j}
                         if ws[j] in ("twenty", "thirty"):  # the unit word of "twenty first"
-                            drop |= {k for k in (j - 1, j + 1)
+                            drop |= {k for k in (j + 1,)
                                      if 0 <= k < len(ws) and _UNIT.get(ws[k], 0)}
                         elif _UNIT.get(ws[j], 0) and j and ws[j - 1] in ("twenty", "thirty"):
                             drop.add(j - 1)  # r2: the tens word of "twenty first of november"
