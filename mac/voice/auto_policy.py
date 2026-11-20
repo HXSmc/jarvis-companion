@@ -148,6 +148,8 @@ SYSTEM_BIN = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
 # Agent instruction files: Claude Code (and glm-code) loads CLAUDE.md / CLAUDE.local.md from its folder
 # up to /, agy and other agents AGENTS.md / GEMINI.md, as trusted instructions. Case-folded (APFS).
 AGENT_NOTES = frozenset({"claude.md", "claude.local.md", "agents.md", "gemini.md"})
+TOO_LONG = "too long to confirm out loud; split it into smaller steps"  # jauto3: agent_policy._confirm_bash's long-summary Deny text
+LONG_URL_MAX = 2000  # jauto3: longest command a long web-link open may be
 
 _NAME_RE = re.compile(r"[A-Za-z0-9._+-]{1,32}")
 _PS_ENV_RE = re.compile(r"-?[A-Za-z]*[eE][A-Za-z]*")  # ps e / ps -E / ps auxe: may print environments
@@ -703,6 +705,33 @@ def gate(*, barge: bool, gate_ok: bool) -> tuple[str, str]:
     if not gate_ok:
         return "asked", "followup"
     return "auto", "ok"
+
+
+def long_url_open(command, ctx: agent_policy.Ctx, *, tainted: bool, barge: bool,
+                  gate_ok: bool) -> str | None:
+    """jauto3 (owner 2A): a lone `open` of 1-4 http(s) links that would run auto on this turn; the exact
+    command to run, else None. The overlay upgrades agent_policy's long-summary Deny with it."""
+    try:
+        argvs = _parts(command)
+        if argvs is None or len(argvs) != 1 or argvs[0][0] != "open":
+            return None
+        parsed = _open_args(argvs[0][1:])
+        if parsed is None:
+            return None
+        app, ops = parsed
+        if app is not None and ("/" in app or not app.isascii()
+                                or app.casefold().removesuffix(".app") not in OPEN_APPS):
+            return None
+        if not 1 <= len(ops) <= 4 or not all(
+                _is_url(op) and (u := urllib.parse.urlsplit(op)).scheme in ("http", "https") and u.netloc
+                for op in ops):
+            return None
+        exact = shlex.join(argvs[0])
+        if len(command) > LONG_URL_MAX or len(exact) > LONG_URL_MAX:
+            return None
+    except Exception:  # steps 1-5 fail closed
+        return None
+    return exact if verdict(exact, ctx, tainted=tainted, barge=barge, gate_ok=gate_ok) == ("auto", "ok") else None
 
 
 # --- the owner's switch: one 0600 JSON file in the support dir ---

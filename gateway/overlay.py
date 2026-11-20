@@ -47,8 +47,8 @@ from pydantic import BaseModel, Field
 from common import facts, hud, svgsafe
 from gateway import repos as repo_rules  # jfollow11c: the same secret-name rule as the repo routes
 from mac.voice import (acks, agent, agent_policy, auto_policy, geo, gitdiff, ground, intents, lean,
-                       intent_pick, local_llm, media_lookup, memory, models3d, nearby, places,
-                       workspaces, youtube)
+                       intent_pick, local_llm, media_lookup, memory, models3d, nearby, note_find,
+                       places, workspaces, youtube)
 
 logger = logging.getLogger(__name__)
 
@@ -632,6 +632,9 @@ _tainted: set[str] = set()
 # a command that is not a plain look-up asks first. The agent side of the mark lives on the session.
 _auto_tainted: set[str] = set()
 _marked_sessions: dict[str, object] = {}  # conv_id -> its agent session that took in untrusted text
+# jauto3 round 1 (S1): convs whose context took in host session titles (H1 leaves them out of _auto_tainted).
+# Only the long-URL upgrade reads it: a title must not steer a 2000-char auto open.
+_titles_seen: set[str] = set()
 # Round 1: convs whose running turn got a reply from the web-tool pool (a fetched page may echo in it).
 # The reply reaches a later agent prompt as history, so the conv is marked when that turn's history is
 # stored, not before: an agent the same turn hands over to never sees this reply.
@@ -822,6 +825,7 @@ def _forget(conv_id: str) -> None:
     _idle_gone.pop(conv_id, None)
     _tainted.discard(conv_id)
     _auto_tainted.discard(conv_id)
+    _titles_seen.discard(conv_id)
     _marked_sessions.pop(conv_id, None)
     _web_replied.discard(conv_id)
     _last_route.pop(conv_id, None)
@@ -1511,6 +1515,7 @@ def _mark_session_rows(conv_id: str, rows: list[dict]) -> None:
     """Session rows reached the conversation: titles taint the pool choice; doing text also marks
     auto (H1 exempts titles only: host agents write doing text)."""
     _tainted.add(conv_id)
+    _titles_seen.add(conv_id)  # jauto3 round 1 (S1)
     if any(r["doing"] or r.get("recap") for r in rows):
         _auto_tainted.add(conv_id)
 
@@ -1865,6 +1870,7 @@ async def _session_started(conv_id: str, sid: str, raw_title: object, deps: Over
         while len(_voice_started_words) > 64:
             _voice_started_words.pop(next(iter(_voice_started_words)))
     _tainted.add(conv_id)  # the host's title is untrusted text going into _history
+    _titles_seen.add(conv_id)  # jauto3 round 1 (S1)
     title = " ".join(str(raw_title or "").split())[:60]
     if _echoes_prompt(title, prompt):  # no title yet: never speak the prompt back as one
         title = ""
@@ -2481,6 +2487,7 @@ async def _session_rows(action: str, conv_id: str, deps: OverlayDeps, said: list
             reason = "unreachable" if st == 0 else f"http_{st}"
         else:  # host titles reach speech and _history from here: the conv leaves the tool pool
             _tainted.add(conv_id)
+            _titles_seen.add(conv_id)  # jauto3 round 1 (S1)
     if rows is None:
         async for ev in _session_failed(action, reason, deps, said, on_step):
             yield ev
@@ -3132,6 +3139,7 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             return
     failed: list[str] = []  # reason class set by _answer_turn when the answer step failed
     private_turn = False  # jfollow10b: a geo turn stores no words in _history or rows
+    link_turn = False  # jauto3 round 1 (S3): a typed query/long link: no full URL in rows or _history
     place_turn = False  # jfollow10f: a place turn: the same, with its own history note
     sessions_turn = False  # this turn answered a sessions question (S2 deadline at the end)
     try:
@@ -3140,8 +3148,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         place_names = (await asyncio.to_thread(places.names)
                        if "forget" in body.text.lower() or intents.PLACE_CUE_RE.search(body.text) else ())
         model_names = await asyncio.to_thread(_model_names, body.text)
+        try:  # jauto3: the vault walk is bounded like a policy check; stuck or failing = today's routing
+            note_names = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                _POLICY_POOL, _note_names, body.text), POLICY_CHECK_S)
+        except Exception:  # jauto3 round 2 (R2-3c): any failure, not only a timeout, = today's routing
+            note_names = ()
         word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names,
-                             model_names=model_names)
+                             model_names=model_names, note_names=note_names)
         intent, picked = await _pick_intent(body, raw_text, word, joined=joined,
                                             pick_open=pick is not None or owner_answer_due or offer is not None,
                                             deps=deps, on_step=on_step)
@@ -3224,6 +3237,16 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             place_turn = intent.kind == "place"
             if on_step:  # (d) the turn's words never stay in a row: transcribed/continued rewritten
                 on_step("private", tag=f"[geo {intent.kind}]")
+        note_hits: list[str] = []
+        if intent.kind == "note_open":  # round 1 (C1/C2): parse's own result (shared cache), never on the loop
+            words, literal = intent.arg, intent.sub == "literal"
+            try:
+                note_hits = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                    _POLICY_POOL, lambda: note_find.find(note_names, words, literal=literal)), POLICY_CHECK_S)
+            except Exception:  # stuck or failing: today's route below
+                note_hits = []
+            if not note_hits:  # round 1 (U1): no note after all -> the agent's notes search, as before jauto3
+                intent = intents.Intent("agent", intents._clean(body.text), "notes")
         if on_step and (intent.kind in GEO_KINDS or intent.kind == "place"):
             on_step("intent", kind=intent.kind)  # no arg: it holds place words
         elif on_step:
@@ -3232,12 +3255,16 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                           f" words={len(sess_ask.words.split())}"
                           + (f" answer={sess_ask.answer}" if sess_ask.action == "answer" else ""))
                 on_step("intent", kind=f"session_{sess_ask.action}", detail=detail)
+            elif intent.kind == "note_open":  # jauto3: a vault name never reaches a row
+                on_step("intent", kind=intent.kind, detail=f"hits={len(note_hits)} name_len={len(intent.arg)}")
             else:
-                on_step("intent", kind=intent.kind, arg=intent.arg)
+                on_step("intent", kind=intent.kind,
+                        arg=intents.site_row_arg(intent.arg) if intent.kind == "open_site" else intent.arg)
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         # the switch's own line is the answer: no ack before it (acks.py gains phrase keys only)
         ack_phrase_key = (None if intent.kind in ("auto_mode", *GEO_KINDS, "video_ask", "video_watch", "draw",
+                                                  "note_open",  # jauto3: its own line is the whole speech
                                                   *MODEL_KINDS)
                           else acks.ack_key(intent.kind, intent.sub))
         # A notes search with no vault set would start the file agent in some repo: say it is unset.
@@ -3530,7 +3557,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             if intent.kind == "open_app":
                 kwargs["apps"] = apps
             opened = await asyncio.to_thread(opener, intent.arg, **kwargs)
-            shown = (opened or intent.arg)[:60]
+            if intent.kind == "open_site" and intents.site_row_arg(intent.arg) != intent.arg:
+                link_turn = True  # jauto3 round 1 (S3): a query string may carry a token
+                if on_step:
+                    on_step("private", tag="[open link]")
+            # jauto3 round 2 (R2-2): a refused typed query/long link never speaks or stores its URL
+            shown = (opened or (intents.site_row_arg(intent.arg) if link_turn else intent.arg))[:60]
             line = f"Opening {shown}." if opened else f"I couldn't find {shown}."
             if not opened and intent.kind == "open_app":
                 tie = intents.app_candidates(intent.arg, apps)
@@ -3539,6 +3571,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             async for ev in _speak(line, deps):
                 yield ev
             said.append(line if line.startswith("Did you") else shown)
+
+        elif intent.kind == "note_open":  # jauto3 (owner 3A): the owner named a note; vault names stay on this Mac
+            line, said_line = await _note_open(note_hits, intent.arg, deps)
+            async for ev in _speak(line, deps):
+                yield {**ev, "private": True, "row_tag": "[note line]"} if ev.get("type") in ("say", "audio") else ev
+            said.append(said_line)
 
         elif intent.kind == "look":
             # A visual verb with no UI noun ("highlight the last debugging session"): ground
@@ -4047,7 +4085,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
     # (e) a geo turn's words, places and stop names never reach a later prompt
     history.append(("(place question asked)", "") if place_turn and body.conv_id in _place_offer
                    else ("(place answer shown)", "") if place_turn
-                   else ("(route/transit answer shown)", "") if private_turn else (body.text, " ".join(said)))
+                   else ("(route/transit answer shown)", "") if private_turn
+                   else ("(link opened)", " ".join(said)) if link_turn else (body.text, " ".join(said)))
     if body.conv_id in _web_replied:  # this history may echo a fetched page: later agent turns see it
         _web_replied.discard(body.conv_id)
         _auto_tainted.add(body.conv_id)
@@ -5618,8 +5657,23 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         if how == "auto":
                             decision, auto_run = agent_policy.Allow(decision.updated_input), True
                     elif isinstance(decision, agent_policy.Deny):
-                        _cmd_row(on_step, auto_policy.cmd_name(command), "refused",
-                                 agent_policy.reason_code(decision.reason))
+                        upgraded = None
+                        if (decision.reason == auto_policy.TOO_LONG  # jauto3 (owner 2A): a long web-link open runs only on a clean turn
+                                and run.conv_id not in _titles_seen):  # round 1 (S1): never after host session titles
+                            tainted = _session_marked(run.session) or run.conv_id in _auto_tainted
+                            try:
+                                upgraded = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                                    _POLICY_POOL, lambda: auto_policy.long_url_open(
+                                        command, run.ctx, tainted=tainted, barge=run.barge, gate_ok=run.gate_ok)),
+                                    POLICY_CHECK_S)
+                            except Exception:  # timeout or any error: fail closed, the Deny stands
+                                upgraded = None
+                        if upgraded is not None:
+                            decision, auto_run = agent_policy.Allow({**tool_input, "command": upgraded}), True
+                            _cmd_row(on_step, auto_policy.cmd_name(upgraded), "auto", "ok")
+                        else:
+                            _cmd_row(on_step, auto_policy.cmd_name(command), "refused",
+                                     agent_policy.reason_code(decision.reason))
                 elif name in agent_policy._WRITE_TOOLS and isinstance(decision, agent_policy.Confirm):
                     # jfollow11a: a new file in the owner's own folders runs auto; same order and limits
                     path = decision.updated_input.get("notebook_path" if name == "NotebookEdit" else "file_path")
@@ -6601,6 +6655,71 @@ def _model_names(text: str) -> tuple[str, ...]:
     return models3d.known_names(_vault()) if _MODEL_SHOW_HINT.search(text) else ()
 
 
+# jauto3: vault note paths for the note rule, only when the words could be a note ask
+# (the walk is bounded, symlink-free, skips Secrets and dot folders).
+_NOTE_HINT = re.compile(r"\bopen\b.*\b(?:note|notes|node|nodes|no|not)\b", re.I)
+_COUNT_WORDS = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight", 9: "Nine"}
+
+
+def _note_names(text: str) -> tuple[str, ...]:
+    names = note_find.scan(_vault()) if _NOTE_HINT.search(text) else ()
+    if names:
+        intents._note_intent(text, names)  # round 1 (C1): warms find()'s cache here, so parse's call is a hit
+    return names
+
+
+def _note_path(rel: str) -> str | None:
+    """The vault note's real path, or None: it must stay inside the vault, be a plain .md file and
+    pass the auto policy again (jauto3: the list was collected earlier; the file could have moved)."""
+    vault = _vault()
+    if not vault:
+        return None
+    root = os.path.realpath(vault)
+    path = os.path.realpath(os.path.join(vault, rel))
+    if not path.startswith(root + os.sep) or not path.casefold().endswith(".md") or not os.path.isfile(path):
+        return None
+    return path if auto_policy.classify(shlex.join(["open", "-a", "Obsidian", path]),
+                                         agent_policy.Ctx(vault=vault)) == ("auto", "ok") else None
+
+
+async def _note_open(hits: list[str], name: str, deps: OverlayDeps) -> tuple[str, str]:
+    """jauto3 (owner 3A): the owner named a note; vault names stay on this Mac. `hits` is never empty
+    (round 1 U1: no match goes to the agent route before this)."""
+    if len(hits) > 1:  # round 1 (U2): no pending choice, so a hint, not a question
+        rels = sorted(hits)
+        names = [note_find.speak_name(r) for r in rels]
+        if len(set(names)) < len(names):  # jauto3 round 2 (R2-1): a name heard twice picks nothing
+            names = [note_find.speak_name(r, keep_digits=True) if names.count(n) > 1 else n
+                     for r, n in zip(rels, names)]
+        collide = [names.count(n) > 1 for n in names]
+        for i, n in enumerate(names):  # still colliding: same stem, different folder
+            if collide[i]:
+                parent = rels[i].rsplit("/", 1)[0] if "/" in rels[i] else ""
+                folder = " ".join(parent.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").split()) \
+                    or "the vault top folder"
+                names[i] = f"{n} in {folder}"
+        collide = [names.count(n) > 1 for n in names]  # jauto3 round 3 (R3-2): X/B/N and Y/B/N still both say "in B"
+        for i, n in enumerate(names):
+            if collide[i] and "/" in rels[i]:
+                two = " ".join(" ".join(p.replace("-", " ").replace("_", " ") for p in
+                                        rels[i].rsplit("/", 1)[0].split("/")[-2:]).split())
+                names[i] = f"{n.rsplit(' in ', 1)[0]} in {two}"
+        names = sorted(names)
+        count = _COUNT_WORDS.get(len(names), str(len(names)))
+        shown = (f"{', '.join(names[:-1])} and {names[-1]}" if len(names) <= 3
+                 else f"{', '.join(names[:3])} and {len(names) - 3} more")
+        return f"{count} notes match: {shown}. Say more of the name.", "I listed matching notes."
+    try:  # the policy walk can hang like the others: same pool, same limit, fail closed
+        path = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+            _POLICY_POOL, _note_path, hits[0]), POLICY_CHECK_S)
+    except Exception:
+        path = None
+    if path is None:
+        return "I can't open that note.", "I couldn't open that note."
+    await asyncio.to_thread(deps.run, ["open", "-a", "Obsidian", path], check=False)
+    return f"Opening {note_find.speak_name(hits[0])}.", "I opened a note."
+
+
 async def _push_spoken(text: str, deps: OverlayDeps) -> None:
     """A templated line pushed outside a turn: its audio when there is a voice, else the say text.
     The app drops a pushed `say` while the service has a voice (Mac live run: a silent ready line)."""
@@ -6813,8 +6932,9 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
                 first_audio_ms = ms
             if kind in ("say", "audio") and event["text"] != last_text:
                 last_text = event["text"]  # a say line and its audio are one spoken line
-                spoke = debug_log.add(rec, "spoke", text="[geo line]" if event.get("private") else last_text, ms=ms,
-                                      audio_ms=ms if kind == "audio" else None)
+                spoke = debug_log.add(rec, "spoke",
+                                      text=event.get("row_tag", "[geo line]") if event.get("private") else last_text,
+                                      ms=ms, audio_ms=ms if kind == "audio" else None)
             elif kind == "audio" and spoke is not None:
                 debug_log.update(spoke, audio_ms=ms)
             elif kind == "card":

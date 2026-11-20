@@ -52,7 +52,7 @@ ENUM_SLOTS = {
 WORD_ONLY = frozenset({
     "auto_mode", "session", "memory", "workspace", "vault_secrets", "open_app", "open_site", "card_size",
     "card_help", "hide", "show", "aside", "restore", "clock", "hunk", "git_diff", "ground", "look",
-    "place_save", "place_forget", "media", "model_show", "model_list", "new_topic",
+    "place_save", "place_forget", "media", "model_show", "model_list", "new_topic", "note_open",  # jauto3
 })
 # jfollow11z R2: word kinds whose rule is an anchored whole-request form (every eval and owner row checked):
 # the turn skips the pick model for them.
