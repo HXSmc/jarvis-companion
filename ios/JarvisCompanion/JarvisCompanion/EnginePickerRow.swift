@@ -13,6 +13,9 @@ struct EngineOption: Codable, Identifiable, Equatable {
     let reason: String?
     /// A local-only engine: its chats never reach any other model.
     var localOnly = false
+    /// The gateway sent `local_only` at all (false for an older gateway). When it did,
+    /// that value alone decides what the picker CLAIMS; see `claimsLocalOnly`.
+    var hasLocalOnlyKey = true
 
     enum CodingKeys: String, CodingKey {
         case id, label, kind, available, reason
@@ -30,23 +33,29 @@ struct EngineOption: Codable, Identifiable, Equatable {
         label.replacingOccurrences(of: #"\s*·\s*local only"#, with: "", options: [.regularExpression, .caseInsensitive])
     }
 
-    /// THE local test, for display and sending alike. Fails closed: an older gateway
-    /// without `local_only` still counts an engine as local by its kind or label.
-    var isLocalOption: Bool {
-        localOnly || kind == "local" || label.range(of: "local only", options: .caseInsensitive) != nil
+    private var looksLocal: Bool {
+        kind == "local" || label.range(of: "local only", options: .caseInsensitive) != nil
     }
+
+    /// The SEND test (engine id on every message, no quick-ask). Fails closed: any hint
+    /// of local counts, even against an explicit `local_only: false`.
+    var isLocalOption: Bool { localOnly || looksLocal }
+
+    /// The DISPLAY test ("Local only, nothing leaves your devices"): only claimed when
+    /// the gateway says so; kind and label stand in only when it sent no `local_only`.
+    var claimsLocalOnly: Bool { hasLocalOnlyKey ? localOnly : looksLocal }
 
     /// What the picker shows (desktop optionLabel): a usable local engine always says
     /// "Local only", once; a down one drops it (the menu subtitle gives the reason).
     var displayLabel: String {
         if !available { return baseLabel }
-        if isLocalOption && label.range(of: "local only", options: .caseInsensitive) == nil { return label + " · Local only" }
+        if claimsLocalOnly && label.range(of: "local only", options: .caseInsensitive) == nil { return label + " · Local only" }
         return label
     }
 
     /// VoiceOver value for a local engine; plain label otherwise.
     var spokenLabel: String {
-        isLocalOption ? "\(baseLabel), local only, nothing leaves your devices" : label
+        claimsLocalOnly ? "\(baseLabel), local only, nothing leaves your devices" : label
     }
 }
 
@@ -62,6 +71,19 @@ extension EngineOption {
         isDefault = try c.decode(Bool.self, forKey: .isDefault)
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         localOnly = try c.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
+        hasLocalOnlyKey = c.contains(.localOnly)
+    }
+
+    /// Written by hand so the cache keeps "no key" apart from `local_only: false`.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(label, forKey: .label)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(available, forKey: .available)
+        try c.encode(isDefault, forKey: .isDefault)
+        try c.encodeIfPresent(reason, forKey: .reason)
+        if hasLocalOnlyKey { try c.encode(localOnly, forKey: .localOnly) }
     }
 }
 
@@ -265,7 +287,7 @@ struct EnginePickerRow: View {
     private var localOption: EngineOption? {
         if warning != nil || lockedLabel != nil { return nil }
         let id = lockedEngine ?? engineID
-        if let option = store.engines.first(where: { $0.id == id && $0.isLocalOption && $0.available }) { return option }
+        if let option = store.engines.first(where: { $0.id == id && $0.claimsLocalOnly && $0.available }) { return option }
         // never a local chip for a cloud engine, whatever the caller says
         guard lockedLocalOnly, let locked = lockedEngine, !EngineStore.isKnownCloud(locked) else { return nil }
         return EngineOption(id: locked, label: EngineStore.label(forSession: locked), kind: "local",
@@ -302,7 +324,7 @@ struct EnginePickerRow: View {
     /// every other option keeps the automatic one (title, subtitle, checkmark).
     @ViewBuilder
     private func menuItem(_ option: EngineOption) -> some View {
-        if option.isLocalOption {
+        if option.claimsLocalOnly {
             let selected = option.id == engineID ? ", selected" : ""
             let down = option.available ? "" : ", unavailable" + (subtitle(for: option).map { ": \($0)" } ?? "")
             menuButton(option).accessibilityLabel(option.spokenLabel + selected + down)
@@ -318,7 +340,7 @@ struct EnginePickerRow: View {
             // A menu item shows its first Text as the title, the second as the subtitle.
             if option.id == engineID {
                 Label(option.displayLabel, systemImage: "checkmark")
-            } else if option.isLocalOption && option.available {
+            } else if option.claimsLocalOnly && option.available {
                 Label(option.displayLabel, systemImage: "lock.shield")
             } else {
                 Text(option.displayLabel)

@@ -824,8 +824,14 @@ final class ChatModel: ObservableObject {
     private(set) var threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
     private var pendingMsgID: String?
     /// `route` is the engine choice made when the owner sent it (nil = not made, the
-    /// send was blocked): Retry reuses it and never re-reads the picker.
-    private var failed: (text: String, files: [ChatAttachment], ownerIndex: Int, route: Route?)?
+    /// send was blocked): Retry reuses it and never re-reads the picker. `pick` is the
+    /// picker id at the moment a send was refused: Retry refuses again if it moved.
+    private var failed: (text: String, files: [ChatAttachment], ownerIndex: Int, route: Route?, pick: String?)?
+    /// The running row lookup (one at a time; cancelled by a detach or close()).
+    private var lookupTask: Task<Void, Never>?
+    private var lookupRunning = false
+    /// Wait before the one re-check of a row the list does not have yet (a new chat).
+    static var lookupRecheckNanos: UInt64 = 1_000_000_000
 
     /// One message's engine, fixed synchronously at send time. `pick` is the picker id
     /// it came from (nil when the thread named it), so success resets only that pick.
@@ -875,17 +881,35 @@ final class ChatModel: ObservableObject {
         engineUnknown ? (lookupFailed ? "Engine unknown" : "Checking engine…") : nil
     }
 
+    static let notListedNote = "This chat is not in the session list, so the app cannot tell which engine it uses. "
+        + "Turn on New session to continue in a fresh chat, or tap Check engine again."
+
+    /// Starts the row lookup unless one is already running ("Check engine again").
+    func checkEngine() {
+        guard engineUnknown, !lookupRunning else { return }
+        lookupTask = Task { await resolveEngine() }
+    }
+
     /// Looks up the row of a session opened without its engine. Until it is known,
-    /// and when the lookup fails, sends stay blocked.
+    /// and when the lookup fails, sends stay blocked (never a guess, never Hub).
     func resolveEngine() async {
-        guard engineUnknown, let sid = sessionID else { return }
+        guard engineUnknown, !lookupRunning, let sid = sessionID else { return }
+        lookupRunning = true
+        defer { lookupRunning = false }
         lookupFailed = false
+        // a detach, close() or newer lookup while we waited: this answer is stale
+        var stillWanted: Bool { !Task.isCancelled && sessionID == sid && engineUnknown }
         do {
-            let data = try await Central.data(Central.request("/central/sessions"))
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            guard let row = try decoder.decode([CentralSession].self, from: data).first(where: { $0.sessionId == sid }) else {
-                throw CentralError("this session is not in the list")
+            var row = try await Self.listedRow(sid)
+            if row == nil, stillWanted {  // listed fine but not there: a new chat may lag
+                try await Task.sleep(nanoseconds: Self.lookupRecheckNanos)
+                if stillWanted { row = try await Self.listedRow(sid) }
+            }
+            guard stillWanted else { return }
+            guard let row = row else {
+                lookupFailed = true
+                lines.append(ChatLine(role: .error, text: Self.notListedNote))
+                return
             }
             if row.localOnly == true || EngineStore.isLocal(row.engine) {
                 guard let engine = row.engine else { throw CentralError("local chat with no engine id") }
@@ -893,19 +917,33 @@ final class ChatModel: ObservableObject {
             }
             sessionEngine = row.engine ?? "claude"
             engineUnknown = false
-        } catch is CancellationError {
-            return
         } catch {
+            guard stillWanted else { return }
             lookupFailed = true
             lines.append(ChatLine(role: .error, text: "Could not check this chat's engine: \(error.localizedDescription). Nothing was sent."))
         }
+    }
+
+    /// One row of GET /central/sessions (nil = not listed). Rows that do not decode
+    /// are skipped, so one bad row never blocks the lookup.
+    private static func listedRow(_ sid: String) async throws -> CentralSession? {
+        struct Lossy: Decodable {
+            let row: CentralSession?
+            init(from decoder: Decoder) throws { row = try? CentralSession(from: decoder) }
+        }
+        let data = try await Central.data(Central.request("/central/sessions"))
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode([Lossy].self, from: data).lazy.compactMap(\.row).first { $0.sessionId == sid }
     }
 
     /// The engine for the next message, fixed now (before any upload or await).
     private func route() -> (route: Route?, blocked: String?) {
         if let block = sendBlock { return (nil, block) }
         if engineUnknown {
-            return (nil, lookupFailed ? "This chat's engine is unknown. Tap Check engine again." : "Still checking this chat's engine.")
+            return (nil, lookupFailed
+                ? "This chat's engine is unknown. Turn on New session to continue in a fresh chat, or tap Check engine again."
+                : "Still checking this chat's engine.")
         }
         if let local = localEngine { return (Route(engine: local, pick: nil), nil) }
         if sessionID != nil { return (Route(engine: nil, pick: nil), nil) }  // a bound cloud session names none
@@ -944,6 +982,8 @@ final class ChatModel: ObservableObject {
             streamTask?.cancel()
             streamTask = nil
             streamConnected = false
+            lookupTask?.cancel()
+            lookupTask = nil
             sessionID = nil
             sessionEngine = nil
             localEngine = nil
@@ -980,6 +1020,12 @@ final class ChatModel: ObservableObject {
     func retry() {
         guard let failed = failed, !isSending else { return }
         if let block = sendBlock { return refuse(block, text: failed.text, files: failed.files, ownerIndex: failed.ownerIndex) }
+        let pickNow = UserDefaults.standard.string(forKey: "engineID") ?? EngineOption.hub.id
+        if failed.route == nil, usesPicker, let refusedPick = failed.pick, refusedPick != pickNow {
+            // the owner sent this with another pick: never resend it on the new one silently
+            return refuse("The engine changed. Send again to use \(EngineStore.label(forSession: pickNow)).",
+                          text: failed.text, files: failed.files, ownerIndex: failed.ownerIndex)
+        }
         let chosen: (route: Route?, blocked: String?) = failed.route.map { ($0, nil) } ?? route()
         guard let fixed = chosen.route else {
             return refuse(chosen.blocked ?? "", text: failed.text, files: failed.files, ownerIndex: failed.ownerIndex)
@@ -989,10 +1035,16 @@ final class ChatModel: ObservableObject {
 
     /// A send that may not go out: an error line and Retry, nothing uploaded or posted.
     private func refuse(_ reason: String, text: String, files: [ChatAttachment], ownerIndex: Int) {
-        failed = (text: text, files: files, ownerIndex: ownerIndex, route: nil)
+        let pick = UserDefaults.standard.string(forKey: "engineID") ?? EngineOption.hub.id
+        failed = (text: text, files: files, ownerIndex: ownerIndex, route: nil, pick: pick)
         canRetry = true
         lines.append(ChatLine(role: .error, text: EngineStore.errorText(reason, prefix: "send failed: ")))
         Haptics.error()
+    }
+
+    /// The next message's engine would come from the picker (an unbound, unmarked thread).
+    private var usesPicker: Bool {
+        sendBlock == nil && !engineUnknown && localEngine == nil && sessionID == nil
     }
 
     private func deliver(_ text: String, files: [ChatAttachment], ownerIndex: Int, midTurn: Bool, route: Route) {
@@ -1031,15 +1083,15 @@ final class ChatModel: ObservableObject {
                     ))
                     apply(route: obj, ownerIndex: ownerIndex)
                     newSession = false
-                    // engine pick is one-shot too; a closed sheet leaves the picker alone
-                    if !closed { EngineStore.resetToDefault(ifStill: route.pick) }
+                    // engine pick is one-shot too (also when the sheet closed mid-send)
+                    EngineStore.resetToDefault(ifStill: route.pick)
                 }
                 pendingMsgID = nil
                 Haptics.success()
                 wakeStream()
             } catch {
                 turnActive = false
-                failed = (text: text, files: files, ownerIndex: ownerIndex, route: route)
+                failed = (text: text, files: files, ownerIndex: ownerIndex, route: route, pick: route.pick)
                 canRetry = true
                 let message = error.localizedDescription
                 // not this engine's chat: unlock the picker, keep the server's words, resend nothing
@@ -1098,7 +1150,7 @@ final class ChatModel: ObservableObject {
     func open() {
         closed = false
         startStream()
-        if engineUnknown { Task { await resolveEngine() } }
+        checkEngine()
     }
 
     func startStream() {
@@ -1151,6 +1203,8 @@ final class ChatModel: ObservableObject {
 
     func close() {
         closed = true
+        lookupTask?.cancel()
+        lookupTask = nil
         streamTask?.cancel()
         streamTask = nil
         streamConnected = false
@@ -1330,7 +1384,7 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.lookupFailed {
-                Button { Task { await model.resolveEngine() } } label: { pill("Check engine again") }
+                Button { model.checkEngine() } label: { pill("Check engine again") }
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !model.attachments.isEmpty {

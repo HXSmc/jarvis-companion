@@ -228,6 +228,96 @@ final class EnginePickerSnapshotTests: XCTestCase {
         unknown.close()
     }
 
+    /// R1: a lookup answer that lands after a New-session detach changes nothing.
+    func testLateLookupAfterDetachIsIgnored() async throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "hub")
+        StubGateway.respond = { path, _ in
+            if path == "/central/sessions" {
+                Thread.sleep(forTimeInterval: 0.4)  // still in flight when the owner detaches
+                return (200, [["session_id": "s9", "engine": "qwen-local", "local_only": true]], nil)
+            }
+            return path == "/chat" ? (200, ["action": "started", "session_id": "h1", "engine": "claude", "reply": "ok"], nil)
+                : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: "s9", title: "Local chat")
+        let lookup = Task { await model.resolveEngine() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        model.newSession = true
+        model.send("fresh chat")
+        try await settle(model)
+        await lookup.value
+        XCTAssertEqual(model.sessionID, "h1")
+        XCTAssertNil(model.localEngine)
+        XCTAssertEqual(model.lockedEngine, "claude")
+        XCTAssertFalse(model.lookupFailed)
+        XCTAssertNil(StubGateway.recorded().first?.body["engine"])
+        model.close()
+    }
+
+    /// R2: a refused send is never resent on a pick that moved since.
+    func testRetryOfRefusedSendAfterPickChangePostsNothing() async throws {
+        try useStubGateway(list: [.hub, Self.localDown], pick: "qwen-local")
+        let model = ChatModel(sessionID: nil, title: "New chat")
+        model.send("hello")
+        try await settle(model)
+        UserDefaults.standard.set("hub", forKey: "engineID")
+        model.retry()
+        try await settle(model)
+        XCTAssertTrue(StubGateway.recorded().isEmpty)
+        XCTAssertTrue(model.lines.last?.text.contains("The engine changed. Send again to use Hub.") == true)
+        model.close()
+    }
+
+    /// R3: an explicit `local_only: false` means no "Local only" claim on screen; with the
+    /// key missing, a "Local only" label still counts as local for sending.
+    func testLocalClaimFollowsTheKey() throws {
+        let explicitNo = #"[{"id":"q","label":"Qwen 27B","kind":"local","available":true,"default":false,"local_only":false}]"#
+        let missing = #"[{"id":"q","label":"Qwen 27B · Local only","kind":"worker","available":true,"default":false}]"#
+        let no = try XCTUnwrap(JSONDecoder().decode([EngineOption].self, from: Data(explicitNo.utf8)).first)
+        XCTAssertFalse(no.claimsLocalOnly)
+        XCTAssertEqual(no.displayLabel, "Qwen 27B")
+        XCTAssertEqual(no.spokenLabel, "Qwen 27B")
+        XCTAssertTrue(no.isLocalOption)  // sending stays fail closed
+        let old = try XCTUnwrap(JSONDecoder().decode([EngineOption].self, from: Data(missing.utf8)).first)
+        XCTAssertFalse(old.localOnly)
+        XCTAssertTrue(old.claimsLocalOnly)
+        // the cache keeps "no key" apart from false
+        let cached = try JSONDecoder().decode([EngineOption].self, from: JSONEncoder().encode([old]))
+        XCTAssertEqual(cached, [old])
+        try useStubGateway(list: [.hub, old], pick: "q")
+        XCTAssertTrue(EngineStore.isLocal("q"))
+        XCTAssertFalse(EngineStore.usesQuickAsk("?weather"))
+    }
+
+    /// R4: a session the list does not have stays unsendable (no guess), says the way out,
+    /// and New session then sends a fresh chat with the live pick.
+    func testUnlistedSessionBlocksUntilNewSession() async throws {
+        try useStubGateway(list: [.hub, Self.glm], pick: "glm")
+        let savedDelay = ChatModel.lookupRecheckNanos
+        ChatModel.lookupRecheckNanos = 10_000_000
+        addTeardownBlock { ChatModel.lookupRecheckNanos = savedDelay }
+        StubGateway.respond = { path, _ in
+            if path == "/central/sessions" { return (200, [["session_id": "other"], ["bad": 1]], nil) }  // bad row skipped
+            return path == "/chat" ? (200, ["action": "started", "session_id": "n1", "reply": "ok"], nil) : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: "gone", title: "Chat")
+        await model.resolveEngine()
+        XCTAssertTrue(model.lookupFailed)
+        XCTAssertEqual(model.lockedLabel, "Engine unknown")
+        XCTAssertEqual(model.lines.last?.text, ChatModel.notListedNote)
+        model.send("hello")
+        try await settle(model)
+        XCTAssertTrue(StubGateway.recorded().isEmpty)
+        model.newSession = true
+        XCTAssertNil(model.lockedEngine)  // the picker is live again
+        model.send("hello again")
+        try await settle(model)
+        XCTAssertEqual(StubGateway.recorded().map(\.path), ["/chat"])
+        XCTAssertEqual(StubGateway.recorded().first?.body["engine"] as? String, "glm")
+        XCTAssertNotEqual(StubGateway.recorded().first?.body["thread_id"] as? String, nil)
+        model.close()
+    }
+
     /// BINDING 1: the local engine id goes out on every message (first send, follow-ups
     /// on /chat and on the bound session, Retry), whatever the picker says afterwards.
     func testLocalChatNamesEngineOnEveryMessage() async throws {
