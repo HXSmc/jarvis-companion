@@ -20,7 +20,9 @@ FILES_MAX = 20000
 CACHE_S = 30.0
 STOP = frozenset({"the", "a", "an", "my", "of", "and", "in", "on", "to", "for", "from",
                   "note", "notes", "node", "nodes", "no", "not", "folder", "file", "md",
-                  "open", "please"})
+                  "open", "please", "latest", "last", "newest", "recent", "yesterday", "today"})
+# jauto3b: recency words are never note names; about and called stay query words (B2)
+# jauto3b r1: "most" and "wrote" left STOP too (_RECENCY_RE still guards the recency asks)
 _EXCLUDED = frozenset(d.casefold() for d in VAULT_EXCLUDED_DIRS)
 _cache: dict[str, tuple[float, tuple[str, ...]]] = {}
 

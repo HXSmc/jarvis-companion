@@ -49,6 +49,55 @@ def vault(tmp_path):
     return v
 
 
+def test_recency_asks_keep_agent_route(vault):
+    """jauto3b: "latest" must not loosely match a "latent" note; recency asks reach the agent."""
+    (vault / "Research").mkdir()
+    (vault / "Research" / "latent-space-models.md").write_text("x")
+    (vault / "Research" / "daily-2026-11-19.md").write_text("x")
+    names = note_find.scan(str(vault))
+    for text in ("open the latest note", "open my last note", "open the most recent note",
+                 "open the newest note", "open the note I wrote yesterday"):
+        assert intents.parse(text, apps=A, note_names=names) == intents.Intent("agent", text, "notes"), text
+    got = intents.parse("open the note latent spaces", apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg, literal=True) == ["Research/latent-space-models.md"]
+    assert note_find.find(names, "latest") == []
+
+
+# --- jauto3b: recency and filler asks reach the agent notes route (B1), "about"/"called" query (B2) --
+
+
+def test_jauto3b_recency_and_filler_routes(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "Research").mkdir(parents=True)
+    (vault / "Research" / "latent-space-models.md").write_text("x")
+    (vault / "Daily").mkdir()
+    (vault / "Daily" / "2026-11-19.md").write_text("x")
+    (vault / "pricing-ideas.md").write_text("x")
+    names = note_find.scan(str(vault))
+    asks = ("open the latest note", "open my last note", "open the most recent note",
+            "open the newest note", "open the note I wrote yesterday", "open the note I wrote today",
+            "open the note about pricing", "open yesterday's note")
+    for text in asks:
+        assert intents.parse(text, apps=A, note_names=names) == intents.Intent("agent", text, "notes"), text
+        assert intents.parse(text, apps=A, note_names=None) == intents.Intent("agent", text, "notes"), text
+    assert intents.parse("open the note latent spaces", apps=A, note_names=names).kind == "note_open"
+    assert intents.parse("open notes", apps=A, note_names=names).kind == "open_app"
+    assert intents.parse("open safari", apps=A, note_names=names).kind == "open_app"
+    assert intents.parse("open the latest note in Secrets", apps=A, note_names=names).kind \
+        not in ("open_app", "note_open")
+
+
+def test_most_and_wrote_left_stop(tmp_path):
+    """jauto3b r1: 'most' and 'wrote' left STOP; the recency asks still reach the agent."""
+    vault = tmp_path / "vault"
+    (vault / "Archive").mkdir(parents=True)
+    (vault / "Archive" / "most-wanted.md").write_text("x")
+    names = note_find.scan(str(vault))
+    for text in ("open the most recent note", "open the note I wrote yesterday"):
+        assert intents.parse(text, apps=A, note_names=names) == intents.Intent("agent", text, "notes"), text
+
+
 # --- criterion 6: a typed query/hash URL opens, a spoken-looking one still goes to the agent --------
 
 

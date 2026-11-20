@@ -578,6 +578,9 @@ _NOTE_FRONT_RE = re.compile(r"^open (?:(?:the|my) )?(?P<w>notes?|nodes?|no|not) 
 _NOTE_TAIL_RE = re.compile(r"^open (?:(?:the|my) )?(?P<name>.+?) (?P<w>note|notes|node)$")
 
 
+_RECENCY_RE = re.compile(r"\b(?:latest|last|newest|recent|yesterday|today)\b")
+
+
 def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     """A spoken "open the note <name>" that matches a real vault note; else None."""
     if not note_names:
@@ -586,6 +589,8 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
     if not n.startswith("open "):
         return None
     if re.search(r"\bsecrets?\b", n):  # jauto3: the Secrets refusal keeps priority
+        return None
+    if _RECENCY_RE.search(n):  # jauto3b: "open the latest note" is an agent ask, never a loose name match
         return None
     m = _NOTE_FRONT_RE.match(n) or _NOTE_TAIL_RE.match(n)
     if not m:
@@ -799,6 +804,12 @@ def parse(text: str, apps: dict[str, str] | None = None,
             if re.search(r"\bsecrets\b", low):  # "open Secrets/x.md": the Secrets refusal, never an agent hunt
                 return Intent("vault_secrets")
             return Intent("agent", t, "notes" if _NOTE_WORD_RE.search(low) else _agent_sub(low))
+        # jauto3b: "open the latest note" misses _doc_target, and a dead app-miss line helps
+        # nobody; the agent can find it by date. Never a new open_app or note_open match.
+        if _RECENCY_RE.search(low) and _NOTE_WORD_RE.search(low):
+            if re.search(r"\bsecrets?\b", low):  # the Secrets refusal outranks the agent hunt here too
+                return Intent("vault_secrets")
+            return Intent("agent", t, "notes")
         return Intent("open_app", target)
     if is_stop_family(text):  # last: every fixed phrase ("stop clear" = clear) wins over it
         return Intent("stop")
