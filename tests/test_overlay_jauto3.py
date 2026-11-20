@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -844,7 +845,7 @@ def test_jauto3c_r3c_bare_unit_after_the_month_is_only_a_fallback(tmp_path):
 
 
 def test_jauto3c_date_table(tmp_path):
-    """Every probe from the jauto3c round 0..3d reviews on one vault: dates before and after
+    """Every probe from the jauto3c round 0..3f reviews on one vault: dates before and after
     the name, digits, ordinals, word days, twenty/thirty forms, wrong dates keep the tie,
     and the name-word notes (march budget, second draft, january, first principles, second
     brain) stay unchanged."""
@@ -856,7 +857,8 @@ def test_jauto3c_date_table(tmp_path):
         "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md",
         "Plans/march-budget.md", "Plans/april-budget.md", "Drafts/first-draft.md",
         "january.md", "first-principles.md", "second-brain.md", "may-ideas.md",
-        "top-three.md", "five-whys.md"]
+        "top-three.md", "five-whys.md", "weekly-review-five-questions.md",
+        "one-on-one-2026-11-03.md"]
     for rel in rels:
         p = vault / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -935,6 +937,9 @@ def test_jauto3c_date_table(tmp_path):
         ("weekly one on one december two", W("12-02")),
         ("two december one on one weekly", W("12-02")),
         ("weekly one on one november two", ALL_W),  # no 11-02 note: the full tie is kept
+        # round 3f: the rows above now run with weekly-review-five-questions.md and
+        # one-on-one-2026-11-03.md in the vault — the day reading whose leftover words fit
+        # one note wins, so a note sharing the meeting word cannot steal the said day
         # rounds 0/1: name words alone stay name tokens
         ("march budget", "Plans/march-budget.md"),
         ("first principles", "first-principles.md"),
@@ -947,5 +952,33 @@ def test_jauto3c_date_table(tmp_path):
     assert note_find.find(names, "january", literal=True) == ["january.md"]
     for text in ("open the march budget notes", "open the january note",
                  "open the note weekly one on one november three",
+                 "open the note one on one november three",
                  "open the second brain notes"):
         assert intents.parse(text, apps=A, note_names=names).kind == "note_open", text
+
+
+# --- jauto3c round 3f ---
+
+
+def test_jauto3c_r3f_fuzz_said_day_never_opens_another_day(tmp_path):
+    """Deterministic fuzz: dated weekly-one-on-one notes plus number-word distractors; the
+    ask is the name and a said unit day in either word order. A single result is only ever
+    the note of the day said — a tie or the right note, never a different date."""
+    rng = random.Random(20261120)
+    days = (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5),
+            ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9))
+    months = (("november", 11), ("december", 12))
+    rels = [f"Meetings/weekly-one-on-one-2026-{m:02d}-{d:02d}.md"  # 11-04 and 12-07 missing
+            for m in (11, 12) for d in range(1, 10) if (m, d) not in ((11, 4), (12, 7))] + [
+        "top-three.md", "five-whys.md", "Notes/two-pager-2026-11-18.md",
+        "one-on-one-2026-11-03.md", "weekly-review-five-questions.md"]
+    names = _vault(tmp_path, *rels)
+    for _ in range(300):
+        dw, dn = rng.choice(days)
+        mw, mn = rng.choice(months)
+        name = rng.choice(("weekly one on one", "one on one weekly"))
+        ask = rng.choice((f"{name} {mw} {dw}", f"{dw} {mw} {name}"))
+        got = note_find.find(names, ask)
+        if len(got) == 1:
+            digits = "".join(c for c in got[0].rsplit("/", 1)[-1] if c.isdigit())
+            assert digits.endswith(f"{mn:02d}{dn:02d}"), ask
