@@ -33,17 +33,33 @@ class FakeProc:
     def __init__(self, out: bytes = b"blocked (game-mode on)", rc: int = 0) -> None:
         self._out = out
         self.returncode = rc
+        self.killed = False
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._out, b""
 
+    def kill(self) -> None:
+        self.killed = True
 
-def _stub_exec(calls: list, out: bytes = b"ok", rc: int = 0, hang: bool = False):
+
+class HangingProc(FakeProc):
+    """Spawns fine, then hangs in communicate() — the second timeout path."""
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+
+def _stub_exec(calls: list, out: bytes = b"ok", rc: int = 0,
+               hang: str = "", procs: list | None = None) -> object:
     async def fake_exec(*argv, **kwargs):
         calls.append(list(argv))
-        if hang:
-            await asyncio.Event().wait()  # wait_for cancels this — the timeout path
-        return FakeProc(out, rc)
+        if hang == "spawn":
+            await asyncio.Event().wait()  # wait_for cancels this — the spawn-timeout path
+        proc = HangingProc(out, rc) if hang == "run" else FakeProc(out, rc)
+        if procs is not None:
+            procs.append(proc)
+        return proc
 
     return fake_exec
 
@@ -87,7 +103,8 @@ def test_allowlisted_id_runs_exact_constant_argv(monkeypatch: pytest.MonkeyPatch
     assert resp.status_code == 200
     assert resp.json() == {"id": "winpc.gaming_mode_on", "ok": True, "output": "game mode ON"}
     assert calls == [
-        ["ssh", "-o", f"ConnectTimeout={devices.CONNECT_TIMEOUT_S}", "-o", "BatchMode=yes",
+        ["ssh", "-o", f"ConnectTimeout={devices.CONNECT_TIMEOUT_S}",
+         "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-o", "BatchMode=yes",
          "winpc", "C:\\Users\\i0562\\llm-switch\\bin\\game-mode.cmd on"]
     ]
 
@@ -100,12 +117,23 @@ def test_remote_failure_reports_ok_false(monkeypatch: pytest.MonkeyPatch, device
     assert resp.json()["output"] == "refused"
 
 
-def test_timeout_returns_504(monkeypatch: pytest.MonkeyPatch, devices_app, stubbed_token) -> None:
-    monkeypatch.setattr(devices, "_exec", _stub_exec([], hang=True))
+def test_timeout_returns_504_spawn(monkeypatch: pytest.MonkeyPatch, devices_app, stubbed_token) -> None:
+    monkeypatch.setattr(devices, "_exec", _stub_exec([], hang="spawn"))
     monkeypatch.setattr(devices, "RUN_TIMEOUT_S", 0.05)
     resp = _post_action(devices_app, TOKEN, {"id": "winpc.gaming_mode_status"})
     assert resp.status_code == 504
     assert "timed out" in resp.json()["detail"]
+
+
+def test_timeout_returns_504_and_kills_hung_ssh(monkeypatch: pytest.MonkeyPatch, devices_app, stubbed_token) -> None:
+    """ssh spawns but the remote command hangs: 504 AND the process is killed."""
+    procs: list = []
+    monkeypatch.setattr(devices, "_exec", _stub_exec([], hang="run", procs=procs))
+    monkeypatch.setattr(devices, "RUN_TIMEOUT_S", 0.05)
+    resp = _post_action(devices_app, TOKEN, {"id": "winpc.gaming_mode_status"})
+    assert resp.status_code == 504
+    assert "timed out" in resp.json()["detail"]
+    assert procs and procs[0].killed
 
 
 def test_endpoint_requires_bearer(devices_app) -> None:
@@ -129,6 +157,10 @@ def test_no_destructive_actions_in_allowlist() -> None:
     ("gaming mode status", "winpc.gaming_mode_status"),
     ("is gaming mode on?", "winpc.gaming_mode_status"),
     ("can you turn on gaming mode", "winpc.gaming_mode_on"),
+    ("turn gaming mode on", "winpc.gaming_mode_on"),
+    ("gaming mode on", "winpc.gaming_mode_on"),
+    ("gaming mode off please", "winpc.gaming_mode_off"),
+    ("turn on game mode", "winpc.gaming_mode_on"),
 ])
 def test_device_request_matches(text: str, expected: str) -> None:
     assert intents.device_request(text) == intents.Intent("device", expected)

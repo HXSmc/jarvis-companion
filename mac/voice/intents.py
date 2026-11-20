@@ -23,7 +23,7 @@ from mac.voice.auto_policy import OPEN_DOCS
 
 @dataclass
 class Intent:
-    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic | note_open  # jauto3
+    kind: str  # open_app | open_site | clear | clock | ground | look | git_diff | hunk | agent | answer | stop | card_size | card_remove | sessions | session | memory | workspace | geo_map | geo_roads | transit_next | transit_status | transit_journey | place_save | place_forget | video_ask | video_watch | draw | model_create | model_list | model_show | place | repo | new_topic | note_open | device  # jauto3; sshd: allowlisted device action
     arg: str = ""
     sub: str = ""  # agent only: mail | calendar | notes | gh | git | code; git_diff: auto | merge
 
@@ -604,9 +604,10 @@ def _note_intent(text: str, note_names: tuple[str, ...]) -> Intent | None:
 # intent arg is only a constant action id from gateway.devices.ACTIONS — the
 # utterance itself never reaches the ssh command (see gateway/devices.py).
 _DEVICE_GAMING_RE = re.compile(
-    r"\b(?:turn\s+)?(?P<v>on|off)\s+gaming[-\s]?mode\b"
-    r"|\bgaming[-\s]?mode\s+(?:status|state|on\s+or\s+off)\b"
-    r"|\bis\s+gaming[-\s]?mode\s+(?:on|off)\b"
+    r"\b(?:turn\s+)?(?P<v>on|off)\s+gam(?:e|ing)[-\s]?mode\b"          # "turn on gaming mode"
+    r"|\b(?:turn\s+)?gam(?:e|ing)[-\s]?mode\s+(?P<v2>on|off)\b"        # "gaming mode on"
+    r"|\bgam(?:e|ing)[-\s]?mode\s+(?:status|state|on\s+or\s+off)\b"    # "gaming mode status"
+    r"|\bis\s+gam(?:e|ing)[-\s]?mode\s+(?:on|off)\b"                   # "is gaming mode on?"
 )
 
 
@@ -619,7 +620,7 @@ def device_request(text: str) -> Intent | None:
     m = _DEVICE_GAMING_RE.search(low)
     if not m:
         return None
-    v = m.group("v")
+    v = m.group("v") or m.group("v2")
     return Intent("device", "winpc.gaming_mode_status" if not v else f"winpc.gaming_mode_{v}")
 
 

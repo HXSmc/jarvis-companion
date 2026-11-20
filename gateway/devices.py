@@ -16,6 +16,7 @@ the caller's ~/.ssh/config (existing keys), same as `ssh winpc` at a terminal.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -65,17 +66,23 @@ async def run_action(action_id: str) -> dict:
     argv = [
         "ssh",
         "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=3",
         "-o", "BatchMode=yes",
         entry["alias"],
         entry["command"],
     ]
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.wait_for(
             _exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT),
             timeout=RUN_TIMEOUT_S,
         )
-        out, _ = await proc.communicate()
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT_S)
     except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):  # spawn-timeout: proc is None
+            if proc is not None:                       # run-timeout: kill the hung ssh
+                proc.kill()
         raise HTTPException(status_code=504, detail=f"device action timed out: {action_id}")
     except OSError:
         logger.warning("devices: ssh failed to start for %s", action_id, exc_info=True)

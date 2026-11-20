@@ -3382,14 +3382,15 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         elif intent.kind == "device":
             # sshd: allowlisted ssh action (gateway/devices.py). The intent arg is a
             # constant action id — never utterance text — so the command is fixed.
-            label = devices.ACTIONS.get(intent.arg, {}).get("label", intent.arg)
+            label = devices.ACTIONS.get(intent.arg, {}).get("label") or "device action"
             try:
                 result = await devices.run_action(intent.arg)
             except HTTPException as exc:
                 line = f"PC {label} failed: {exc.detail}"
             else:
                 if result["ok"] and result["output"]:
-                    line = f"PC {result['output']}"  # game-mode.cmd's own line is spoken as-is
+                    # game-mode.cmd's own line is spoken as-is, capped for speech
+                    line = f"PC {result['output'][:300]}"
                 elif result["ok"]:
                     line = f"PC {label}."
                 else:
