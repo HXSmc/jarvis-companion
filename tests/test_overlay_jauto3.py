@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -657,3 +658,361 @@ def test_round3_digit_tie_cached_apart():
 def test_round3_folder_tie_names_two_folders():
     assert _tie_line(["X/B/Meeting.md", "Y/B/Meeting.md"]) == \
         "Two notes match: Meeting in X B and Meeting in Y B. Say more of the name."
+
+
+# --- jauto3c: a date said in words picks the note ---------------------------------------------------
+
+
+N7 = "Ideas/saudi-whale-ideas-2026-11-07.md"
+N18 = "Ideas/saudi-whale-ideas-2026-11-18.md"
+
+
+@pytest.fixture
+def whale_vault(tmp_path):
+    v = tmp_path / "vault"
+    (v / "Ideas").mkdir(parents=True)
+    (v / "Ideas" / "saudi-whale-ideas-2026-11-07.md").write_text("x")
+    (v / "Ideas" / "saudi-whale-ideas-2026-11-18.md").write_text("x")
+    return v
+
+
+@pytest.mark.parametrize("ask", [
+    "saudi whale ideas november 18th",
+    "saudi whale ideas 18th of november",
+    "saudi whale ideas the eighteenth of november",
+    "saudi whale ideas nov 18",
+    "saudi whale ideas november eighteen",
+    "saudi whale ideas november 18 2026",
+])
+def test_jauto3c_spoken_date_picks_the_note(ask, whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, ask) == [N18], ask
+
+
+def test_jauto3c_day_first_spoken_date_picks_the_other_note(whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, "saudi whale ideas 7th november") == [N7]
+
+
+def test_jauto3c_no_such_date_keeps_the_tie(whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, "saudi whale ideas december 3rd") == [N7, N18]
+    assert note_find.find(names, "saudi whale ideas") == [N7, N18]
+
+
+def test_jauto3c_parse_and_find_pick_one(whale_vault):
+    text = "open the note saudi whale ideas november 18th"
+    names = note_find.scan(str(whale_vault))
+    got = intents.parse(text, apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg, literal=got.sub == "literal") == [N18]
+
+
+def test_jauto3c_digits_still_narrow(whale_vault):
+    names = note_find.scan(str(whale_vault))
+    assert note_find.find(names, "saudi whale ideas 2026 11 18") == [N18]
+    assert note_find.find(names, "saudi whale ideas 1118") == [N18]
+
+
+def test_jauto3c_may_alone_stays_a_name_word(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "may-ideas.md").write_text("x")
+    names = note_find.scan(str(vault))
+    assert note_find.find(names, "may ideas") == ["may-ideas.md"]  # no day beside "may"
+
+
+# --- jauto3c round 1: date words leave the query only when they form a spoken date ---
+
+
+def _vault(tmp_path, *rels):
+    v = tmp_path / "vault"
+    for rel in rels:
+        p = v / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    return note_find.scan(str(v))
+
+
+def test_jauto3c_r1_month_word_is_a_name_without_a_day(tmp_path):
+    names = _vault(tmp_path, "Plans/march-budget.md", "Plans/april-budget.md")
+    assert note_find.find(names, "march budget") == ["Plans/march-budget.md"]
+    got = intents.parse("open the march budget notes", apps=A, note_names=names)
+    assert got.kind == "note_open"  # base behavior, not open_app
+
+
+def test_jauto3c_r1_ordinal_word_is_not_a_mishear_match(tmp_path):
+    names = _vault(tmp_path, "Drafts/first-draft.md")
+    assert note_find.find(names, "second draft") == []  # base behavior: no fuzzy cross-match
+
+
+def test_jauto3c_r1_month_named_note_opens(tmp_path):
+    names = _vault(tmp_path, "january.md")
+    got = intents.parse("open the january note", apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg, literal=got.sub == "literal") == ["january.md"]
+
+
+def test_jauto3c_r1_number_word_names_still_match(tmp_path):
+    names = _vault(tmp_path, "first-principles.md", "second-brain.md")
+    assert note_find.find(names, "first principles") == ["first-principles.md"]
+    got = intents.parse("open the second brain notes", apps=A, note_names=names)
+    assert got.kind == "note_open"
+    assert note_find.find(names, got.arg) == ["second-brain.md"]
+
+
+# --- jauto3c round 2 ---
+
+
+def test_jauto3c_r2_tens_before_the_month(tmp_path):
+    names = _vault(tmp_path, *[f"Meetings/team-standup-2026-{md}.md"
+                               for md in ("11-01", "11-21", "12-01", "12-31")])
+    for ask, want in (
+        ("team standup the twenty first of november", "Meetings/team-standup-2026-11-21.md"),
+        ("team standup twenty-first of november", "Meetings/team-standup-2026-11-21.md"),
+        ("team standup the thirty first of december", "Meetings/team-standup-2026-12-31.md"),
+        ("team standup november twenty first", "Meetings/team-standup-2026-11-21.md"),
+        ("team standup the first of november", "Meetings/team-standup-2026-11-01.md"),
+        ("team standup twenty one november", "Meetings/team-standup-2026-11-21.md"),
+    ):
+        assert note_find.find(names, ask) == [want], ask
+
+
+# --- jauto3c round 3 ---
+
+
+def test_jauto3c_r3_digits_never_join_a_unit_word(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-11-20.md",
+                   "Meetings/weekly-one-on-one-2026-11-21.md")
+    for ask in ("weekly one on one 20th of november", "weekly one on one 20 november",
+                "november 20 one on one weekly", "weekly one on one november 20th"):
+        assert note_find.find(names, ask) == ["Meetings/weekly-one-on-one-2026-11-20.md"], ask
+    assert note_find.find(names, "weekly one on one the twenty first of november") \
+        == ["Meetings/weekly-one-on-one-2026-11-21.md"]
+
+
+def test_jauto3c_r3_thirty_digits_stay_the_said_day(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-12-30.md",
+                   "Meetings/weekly-one-on-one-2026-12-31.md")
+    assert note_find.find(names, "weekly one on one 30th of december") \
+        == ["Meetings/weekly-one-on-one-2026-12-30.md"]
+
+
+# --- jauto3c round 3b ---
+
+
+def test_jauto3c_r3b_a_name_one_never_joins_the_tens(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-11-20.md",
+                   "Meetings/weekly-one-on-one-2026-11-21.md")
+    for ask in ("weekly one on one twenty november", "weekly one on one twenty of november",
+                "one on one twenty november weekly"):
+        assert note_find.find(names, ask) == ["Meetings/weekly-one-on-one-2026-11-20.md"], ask
+
+
+def test_jauto3c_r3b_a_name_one_never_joins_thirty(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-12-30.md",
+                   "Meetings/weekly-one-on-one-2026-12-31.md")
+    assert note_find.find(names, "weekly one on one thirty december") \
+        == ["Meetings/weekly-one-on-one-2026-12-30.md"]
+
+
+# --- jauto3c round 3c ---
+
+
+def test_jauto3c_r3c_bare_unit_after_the_month_is_only_a_fallback(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-11-01.md",
+                   "Meetings/weekly-one-on-one-2026-11-20.md",
+                   "Meetings/weekly-one-on-one-2026-11-21.md",
+                   "Meetings/weekly-one-on-one-2026-12-01.md",
+                   "Meetings/weekly-one-on-one-2026-12-30.md",
+                   "Notes/two-pager-2026-11-18.md",
+                   "Notes/two-pager-2026-11-19.md")
+    for ask, want in (
+        ("20th of november one on one weekly", "Meetings/weekly-one-on-one-2026-11-20.md"),
+        ("20 november one on one weekly", "Meetings/weekly-one-on-one-2026-11-20.md"),
+        ("twenty november one on one weekly", "Meetings/weekly-one-on-one-2026-11-20.md"),
+        ("twenty first of november one on one weekly",
+         "Meetings/weekly-one-on-one-2026-11-21.md"),
+        ("thirty december one on one weekly", "Meetings/weekly-one-on-one-2026-12-30.md"),
+        ("weekly one on one november", "Meetings/weekly-one-on-one-2026-11-01.md"),
+        ("18 november two pager", "Notes/two-pager-2026-11-18.md"),
+        ("two pager november 19th", "Notes/two-pager-2026-11-19.md"),
+    ):
+        assert note_find.find(names, ask) == [want], ask
+
+
+# --- jauto3c date table ---
+
+
+def test_jauto3c_date_table(tmp_path):
+    """Every probe from the jauto3c round 0..3g reviews on one vault: dates before and after
+    the name, digits, ordinals, word days, twenty/thirty forms, wrong dates keep the tie,
+    and the name-word notes (march budget, second draft, january, first principles, second
+    brain) stay unchanged."""
+    vault = tmp_path / "vault"
+    rels = [f"Meetings/weekly-one-on-one-2026-{md}.md" for md in
+            ("11-01", "11-03", "11-05", "11-09", "11-20", "11-21",
+             "12-01", "12-02", "12-05", "12-30", "12-31")] + [
+        "Notes/two-pager-2026-11-18.md", "Notes/two-pager-2026-11-19.md",
+        "Notes/second-brain-dump-2026-11-02.md", "Notes/second-brain-dump-2026-11-09.md",
+        "Reviews/third-quarter-review-2026-10-03.md", "Reviews/third-quarter-review-2026-10-07.md",
+        "Drafts/first-draft-review-2026-12-01.md", "Drafts/first-draft-review-2026-12-08.md",
+        "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md",
+        "Plans/march-budget.md", "Plans/april-budget.md", "Drafts/first-draft.md",
+        "january.md", "first-principles.md", "second-brain.md", "may-ideas.md",
+        "top-three.md", "five-whys.md", "weekly-review-five-questions.md",
+        "one-on-one-2026-11-03.md"]
+    for rel in rels:
+        p = vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    names = note_find.scan(str(vault))
+    W = lambda md: f"Meetings/weekly-one-on-one-2026-{md}.md"  # noqa: E731
+    T = lambda md: f"Notes/two-pager-2026-{md}.md"  # noqa: E731
+    SB = lambda md: f"Notes/second-brain-dump-2026-{md}.md"  # noqa: E731
+    TQ = lambda md: f"Reviews/third-quarter-review-2026-{md}.md"  # noqa: E731
+    FD = lambda md: f"Drafts/first-draft-review-2026-{md}.md"  # noqa: E731
+    S7, S18 = "Ideas/saudi-whale-ideas-2026-11-07.md", "Ideas/saudi-whale-ideas-2026-11-18.md"
+    TIE = [S7, S18]
+    ALL_W = [W(md) for md in ("11-01", "11-03", "11-05", "11-09", "11-20", "11-21",
+                              "12-01", "12-02", "12-05", "12-30", "12-31")]
+    rows = [
+        # round 0: the 11-18 family and the 11-07 family
+        ("saudi whale ideas november 18th", S18),
+        ("saudi whale ideas the 18th of november", S18),
+        ("saudi whale ideas nov 18", S18),
+        ("saudi whale ideas november the eighteenth", S18),
+        ("saudi whale ideas 18 november", S18),
+        ("saudi whale ideas november eighteen", S18),
+        ("saudi whale ideas november 18 2026", S18),
+        ("saudi whale ideas on november 18th please", S18),
+        ("saudi whale ideas 2026 11 18", S18),
+        ("saudi whale ideas 1118", S18),
+        ("saudi whale ideas 7th november", S7),
+        ("saudi whale ideas november 7", S7),
+        ("saudi whale ideas nov 07", S7),
+        ("saudi whale ideas the seventh of november", S7),
+        # round 0: a wrong or partial date keeps the tie (also the bogus days of round 2/3c)
+        ("saudi whale ideas december 3rd", TIE),
+        ("saudi whale ideas november 1st", TIE),
+        ("saudi whale ideas november twenty first", TIE),
+        ("saudi whale ideas november", TIE),
+        ("saudi whale ideas february 30", TIE),
+        ("saudi whale ideas the thirty second of december", TIE),
+        # round 2: a tens+unit day before or after the month
+        ("weekly one on one the twenty first of november", W("11-21")),
+        ("weekly one on one twenty-first of november", W("11-21")),
+        ("weekly one on one the thirty first of december", W("12-31")),
+        ("weekly one on one november twenty first", W("11-21")),
+        ("weekly one on one the first of november", W("11-01")),
+        ("weekly one on one twenty one november", W("11-21")),
+        ("weekly one on one december first", W("12-01")),
+        ("weekly one on one december thirty first", W("12-31")),
+        ("weekly one on one the thirty-first december", W("12-31")),
+        ("weekly one on one 2026 the twenty first of november", W("11-21")),
+        # round 3: digits never join a unit word; the words twenty/thirty keep the said day
+        ("weekly one on one 20th of november", W("11-20")),
+        ("weekly one on one 20 november", W("11-20")),
+        ("november 20 one on one weekly", W("11-20")),
+        ("weekly one on one november 20th", W("11-20")),
+        ("weekly one on one the twenty first of november", W("11-21")),
+        ("weekly one on one 30th of december", W("12-30")),
+        # round 3b: a name's "one" never joins the tens word
+        ("weekly one on one twenty november", W("11-20")),
+        ("weekly one on one twenty of november", W("11-20")),
+        ("one on one twenty november weekly", W("11-20")),
+        ("weekly one on one thirty december", W("12-30")),
+        # round 3c: a bare unit after the month is only a fallback; a day before the month wins
+        ("20th of november one on one weekly", W("11-20")),
+        ("20 november one on one weekly", W("11-20")),
+        ("twenty november one on one weekly", W("11-20")),
+        ("twenty first of november one on one weekly", W("11-21")),
+        ("thirty december one on one weekly", W("12-30")),
+        ("weekly one on one november", W("11-01")),
+        ("18 november two pager", T("11-18")),
+        ("two pager november 19th", T("11-19")),
+        # round 3d: a unit word that is part of a note name is not the day
+        ("weekly one on one november three", W("11-03")),
+        ("weekly one on one november five", W("11-05")),
+        ("weekly one on one november nine", W("11-09")),
+        ("weekly one on one december five", W("12-05")),
+        ("three november one on one weekly", W("11-03")),
+        ("five december one on one weekly", W("12-05")),
+        # round 3e: name words come only from notes sharing a non-date word with the ask, so
+        # top-three/five-whys/two-pager never turn the said day into a name word
+        ("weekly one on one december two", W("12-02")),
+        ("two december one on one weekly", W("12-02")),
+        ("weekly one on one november two", ALL_W),  # no 11-02 note: the full tie is kept
+        # round 3f: the rows above now run with weekly-review-five-questions.md and
+        # one-on-one-2026-11-03.md in the vault — the day reading whose leftover words fit
+        # one note wins, so a note sharing the meeting word cannot steal the said day
+        # round 3g: the fit test is the finder's loose match, so a misheard or extra name
+        # word still lets the said day win
+        ("weakly one on one november three", W("11-03")),
+        ("meeting weekly one on one december five", W("12-05")),
+        ("team weekly one on one november three", W("11-03")),
+        ("sara weekly one on one november five", W("11-05")),
+        # round 4: an ordinal unit word right after the month is only a fallback day too, so
+        # a day said before the month beats an ordinal-led name ("second brain dump", ...)
+        ("9 november second brain dump", SB("11-09")),
+        ("7th october third quarter review", TQ("10-07")),
+        ("8th december first draft review", FD("12-08")),
+        ("the ninth of november second brain dump", SB("11-09")),
+        ("second brain dump november second", SB("11-02")),
+        ("november ninth second brain dump", SB("11-09")),
+        ("december first draft review", FD("12-01")),  # no day said: the ordinal stays the day
+        # rounds 0/1: name words alone stay name tokens
+        ("march budget", "Plans/march-budget.md"),
+        ("first principles", "first-principles.md"),
+        ("second brain", [SB("11-02"), SB("11-09"), "second-brain.md"]),  # r4: dump notes tie
+        ("may ideas", "may-ideas.md"),
+        ("second draft", []),
+    ]
+    for ask, want in rows:
+        assert note_find.find(names, ask) == ([want] if isinstance(want, str) else want), ask
+    assert note_find.find(names, "january", literal=True) == ["january.md"]
+    for text in ("open the march budget notes", "open the january note",
+                 "open the note weekly one on one november three",
+                 "open the note one on one november three",
+                 "open the second brain notes"):
+        assert intents.parse(text, apps=A, note_names=names).kind == "note_open", text
+
+
+# --- jauto3c round 3f ---
+
+
+def test_jauto3c_r3f_fuzz_said_day_never_opens_another_day(tmp_path):
+    """Deterministic fuzz: dated weekly-one-on-one notes plus number-word distractors; the
+    ask is the name and a said unit/ordinal day in either word order, with r3g misheard name
+    words and extra words before or after the name. r4 adds ordinal-led names ("second brain
+    dump", ...). A single result is only ever the note of the day said — a tie or the right
+    note, never a different date."""
+    rng = random.Random(20261120)
+    days = (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5),
+            ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9),
+            ("first", 1), ("second", 2), ("third", 3), ("fourth", 4), ("fifth", 5),
+            ("sixth", 6), ("seventh", 7), ("eighth", 8), ("ninth", 9))
+    months = (("november", 11), ("december", 12))
+    rels = [f"Meetings/weekly-one-on-one-2026-{m:02d}-{d:02d}.md"  # 11-04 and 12-07 missing
+            for m in (11, 12) for d in range(1, 10) if (m, d) not in ((11, 4), (12, 7))] + [
+        f"Notes/{stem}-2026-{m:02d}-{d:02d}.md"  # r4: ordinal-led names, same missing days
+        for stem in ("second-brain-dump", "first-draft-review", "third-quarter-review")
+        for m in (11, 12) for d in range(1, 10) if (m, d) not in ((11, 4), (12, 7))] + [
+        "top-three.md", "five-whys.md", "Notes/two-pager-2026-11-18.md",
+        "one-on-one-2026-11-03.md", "weekly-review-five-questions.md"]
+    names = _vault(tmp_path, *rels)
+    for _ in range(300):
+        dw, dn = rng.choice(days)
+        mw, mn = rng.choice(months)
+        name = rng.choice(("weekly one on one", "one on one weekly", "second brain dump",
+                           "first draft review", "third quarter review"))
+        if rng.random() < 0.3:  # r3g: a misheard name word fits no note exactly
+            name = name.replace("weekly", rng.choice(("weakly", "weakest", "wicked")))
+        if rng.random() < 0.3:  # r3g: an extra word before or after the name
+            name = rng.choice((rng.choice(("team", "meeting", "sara")) + " " + name,
+                               name + " " + rng.choice(("team", "sara", "review"))))
+        ask = rng.choice((f"{name} {mw} {dw}", f"{dw} {mw} {name}"))
+        got = note_find.find(names, ask)
+        if len(got) == 1:
+            digits = "".join(c for c in got[0].rsplit("/", 1)[-1] if c.isdigit())
+            assert digits.endswith(f"{mn:02d}{dn:02d}"), ask

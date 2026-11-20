@@ -120,17 +120,124 @@ def _prepared(names: tuple[str, ...]) -> dict:
     return _index
 
 
+# jauto3c: a date said in words ("november 18th", "the eighteenth of november", "nov 18")
+_MONTHS = {"january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+           "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+           "august": 8, "aug": 8, "september": 9, "sep": 9, "october": 10, "oct": 10,
+           "november": 11, "nov": 11, "december": 12, "dec": 12}
+_UNIT = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+         "eight": 8, "nine": 9, "first": 1, "second": 2, "third": 3, "fourth": 4,
+         "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9}
+_DAY_WORDS = {**_UNIT, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+              "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+              "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+              "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
+              "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17,
+              "eighteenth": 18, "nineteenth": 19, "twentieth": 20, "thirtieth": 30}
+_DAY_NUM_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?")  # "18", "3rd"
+_BARE_UNIT = frozenset(_UNIT)  # r4: also "first".."ninth" — an ordinal may be the name, not the day
+
+
+def _day_at(ws: list[str], i: int) -> int:
+    """The day spoken at ws[i] (digits, "18th", a number/ordinal word; a tens word and a
+    unit word combine either way round), 0 when ws[i] is no day."""
+    m = _DAY_NUM_RE.fullmatch(ws[i])
+    v = int(m[1]) if m else _DAY_WORDS.get(ws[i], 0)
+    if not 1 <= v <= 31:
+        return 0
+    if ws[i] in ("twenty", "thirty"):  # r3: only the words join a unit, never digits "20"/"30"
+        for j in (i + 1,):  # r3b: forward only — a name's "one" before the tens is not a unit
+            if 0 <= j < len(ws) and _UNIT.get(ws[j], 0):
+                return v + _UNIT[ws[j]]
+    u = _UNIT.get(ws[i], 0)  # r2: "twenty first" said with the unit word next to the month
+    if u and i and ws[i - 1] in ("twenty", "thirty"):
+        return _DAY_WORDS[ws[i - 1]] + u
+    return v
+
+
+def _misses(left_a: set[str], left_b: set[str], notes: tuple[frozenset[str], ...]) \
+        -> tuple[int, int]:
+    """For each day reading, the fewest leftover words that one note still misses: only
+    notes sharing an exact word with the leftovers are checked (find() matches fuzzily, so
+    each leftover word counts as covered by the finder's loose _match)."""
+    cand = [n for n in notes if n & (left_a | left_b)]
+    local = frozenset().union(*cand) if cand else frozenset()
+    near = {w: {t for t in local if _match(w, t)} for w in left_a | left_b}
+    out = []
+    for left in (left_a, left_b):
+        out.append(min((sum(1 for w in left if not near[w] & n) for n in cand),
+                       default=len(left)))
+    return out[0], out[1]
+
+
+def _spoken_date(ws: list[str], notes: tuple[frozenset[str], ...] = ()) \
+        -> tuple[str, frozenset[int]]:
+    """MMDD for a month plus a day said anywhere in the words (before or after the month,
+    "of"/"the" allowed; a said 4-digit year in front), with the indices that formed it;
+    ("", frozenset()) when no month+day was said. jauto3c r1: only these words leave the
+    query — a lone "march" or "second" is a name token, as on ci-ipa. r3c: a bare unit word
+    ("one".."nine", r4 also "first".."ninth") after the month is only a fallback; a day said
+    before the month wins.
+    r3g: with bare units on both sides of the month, each reading's leftover ask words are
+    counted loosely against one note — the reading with fewer uncovered words wins, else the
+    day said before the month wins."""
+    year = next((w for w in ws if len(w) == 4 and w.isdigit() and 1500 < int(w) < 2200), "")
+    fallback: tuple[str, frozenset[int]] = ("", frozenset())
+    for i, w in enumerate(ws):
+        if w in _MONTHS:
+            fb_w = ""
+            for step in (1, -1):
+                j = i + step
+                while 0 <= j < len(ws) and ws[j] in ("of", "the"):
+                    j += step
+                if 0 <= j < len(ws):
+                    day = _day_at(ws, j)
+                    if day:
+                        drop = {i, j}
+                        if ws[j] in ("twenty", "thirty"):  # the unit word of "twenty first"
+                            drop |= {k for k in (j + 1,)
+                                     if 0 <= k < len(ws) and _UNIT.get(ws[k], 0)}
+                        elif _UNIT.get(ws[j], 0) and j and ws[j - 1] in ("twenty", "thirty"):
+                            drop.add(j - 1)  # r2: the tens word of "twenty first of november"
+                        found = f"{year}{_MONTHS[w]:02d}{day:02d}", frozenset(drop)
+                        if step == 1 and ws[j] in _BARE_UNIT:
+                            # r3c/r4: a bare unit/ordinal word after the month may be the name,
+                            # not the day — keep it only when no day is said before the month
+                            fallback = found
+                            fb_w = ws[j]
+                            continue
+                        if step == -1 and fb_w and ws[j] in _BARE_UNIT:
+                            # r3g: bare units on both sides — the reading whose leftover ask
+                            # words one note misses least wins; a tie keeps the day said
+                            # before the month
+                            left_a = set(tokens(" ".join(x for k, x in enumerate(ws)
+                                                         if k not in drop)))
+                            left_b = set(tokens(" ".join(x for k, x in enumerate(ws)
+                                                         if k not in fallback[1])))
+                            miss_a, miss_b = _misses(left_a, left_b, notes) \
+                                if len(left_a) <= 12 else (0, 0)
+                            if miss_b < miss_a:
+                                continue
+                        return found
+    return fallback
+
+
 def find(names: tuple[str, ...], words: str, *, literal: bool = False) -> list[str]:
     """Note paths a spoken name means: query tokens must hit the stem (or the folder words);
     the best hit count wins, all ties are kept. [] = no note matches."""
-    q = tokens(words)
+    ws = [w for w in re.split(r"[^a-z0-9]+", words.lower()) if w]
+    index = _prepared(names)
+    # jauto3c r1: date words leave the query only when they formed a spoken date; with no
+    # month+day the tokens are exactly tokens(words), as on ci-ipa.
+    spoken, drop = _spoken_date(ws, tuple(e for _, _, e in index["notes"]))
+    q = tokens(" ".join(w for i, w in enumerate(ws) if i not in drop))
     if not q:
         return []
     # jauto3 round 2 (R2-3a): the cost is |q| x |vocab|; cap the ask so it cannot tie a pool worker
     seen: set[str] = set()
     q = [w for w in q if not (w in seen or seen.add(w))][:12]
-    index = _prepared(names)
-    digits = "".join(c for c in words if c.isdigit())  # jauto3 round 3 (R3-1): date words tie-break
+    # jauto3 round 3 (R3-1) + jauto3c: a spoken month+day is the tie-break, else the raw digits
+    digits = spoken or "".join(c for c in words if c.isdigit())
     key = (tuple(q), literal, digits)
     hit = index["found"].get(key)  # jauto3 round 2 (R2-3b): one read, no check-then-index race with clear()
     if hit is not None:
