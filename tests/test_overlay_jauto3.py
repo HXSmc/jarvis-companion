@@ -775,3 +775,23 @@ def test_jauto3c_r2_tens_before_the_month(tmp_path):
         ("team standup twenty one november", "Meetings/team-standup-2026-11-21.md"),
     ):
         assert note_find.find(names, ask) == [want], ask
+
+
+# --- jauto3c round 3 ---
+
+
+def test_jauto3c_r3_digits_never_join_a_unit_word(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-11-20.md",
+                   "Meetings/weekly-one-on-one-2026-11-21.md")
+    for ask in ("weekly one on one 20th of november", "weekly one on one 20 november",
+                "november 20 one on one weekly", "weekly one on one november 20th"):
+        assert note_find.find(names, ask) == ["Meetings/weekly-one-on-one-2026-11-20.md"], ask
+    assert note_find.find(names, "weekly one on one the twenty first of november") \
+        == ["Meetings/weekly-one-on-one-2026-11-21.md"]
+
+
+def test_jauto3c_r3_thirty_digits_stay_the_said_day(tmp_path):
+    names = _vault(tmp_path, "Meetings/weekly-one-on-one-2026-12-30.md",
+                   "Meetings/weekly-one-on-one-2026-12-31.md")
+    assert note_find.find(names, "weekly one on one 30th of december") \
+        == ["Meetings/weekly-one-on-one-2026-12-30.md"]

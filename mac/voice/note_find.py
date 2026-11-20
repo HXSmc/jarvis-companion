@@ -144,7 +144,7 @@ def _day_at(ws: list[str], i: int) -> int:
     v = int(m[1]) if m else _DAY_WORDS.get(ws[i], 0)
     if not 1 <= v <= 31:
         return 0
-    if v in (20, 30):  # "twenty first", "twenty-first"
+    if ws[i] in ("twenty", "thirty"):  # r3: only the words join a unit, never digits "20"/"30"
         for j in (i - 1, i + 1):
             if 0 <= j < len(ws) and _UNIT.get(ws[j], 0):
                 return v + _UNIT[ws[j]]
