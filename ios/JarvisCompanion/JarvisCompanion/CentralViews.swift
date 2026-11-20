@@ -812,10 +812,27 @@ final class ChatModel: ObservableObject {
     /// Retry) whatever the picker says, never left to the gateway's memory. Cleared
     /// only when "New session" detaches onto a fresh thread.
     @Published private(set) var localEngine: String?
+    /// Opened on a session whose engine we were not told (notification, floor, inbox):
+    /// no send until the row is looked up, so a local chat never goes out unnamed.
+    @Published private(set) var engineUnknown = false
+    @Published private(set) var lookupFailed = false
+    /// Why this thread takes no more sends (the server contradicted a local chat).
+    @Published private(set) var sendBlock: String?
+    /// The server said this thread belongs to another engine (409): the picker unlocks.
+    @Published private(set) var wrongChat = false
 
     private(set) var threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
     private var pendingMsgID: String?
-    private var failed: (text: String, files: [ChatAttachment], ownerIndex: Int)?
+    /// `route` is the engine choice made when the owner sent it (nil = not made, the
+    /// send was blocked): Retry reuses it and never re-reads the picker.
+    private var failed: (text: String, files: [ChatAttachment], ownerIndex: Int, route: Route?)?
+
+    /// One message's engine, fixed synchronously at send time. `pick` is the picker id
+    /// it came from (nil when the thread named it), so success resets only that pick.
+    private struct Route {
+        let engine: String?
+        let pick: String?
+    }
     /// Highest seq seen; nil until the first event (seq 0 is a real event).
     private var lastSeq: Int?
     /// Seq of every rendered event: a replay (fresh open of an old session, a
@@ -843,6 +860,62 @@ final class ChatModel: ObservableObject {
         self.title = title
         self.sessionEngine = engine
         self.localEngine = (localOnly || EngineStore.isLocal(engine)) ? engine : nil
+        self.engineUnknown = sessionID != nil && engine == nil
+    }
+
+    /// What the engine row is locked to (nil = the picker is live).
+    var lockedEngine: String? {
+        if newSession || (wrongChat && sessionID == nil) { return nil }
+        if engineUnknown { return "" }  // shown as `lockedLabel`
+        if sessionID == nil { return localEngine }
+        return sessionEngine ?? localEngine ?? "claude"
+    }
+
+    var lockedLabel: String? {
+        engineUnknown ? (lookupFailed ? "Engine unknown" : "Checking engine…") : nil
+    }
+
+    /// Looks up the row of a session opened without its engine. Until it is known,
+    /// and when the lookup fails, sends stay blocked.
+    func resolveEngine() async {
+        guard engineUnknown, let sid = sessionID else { return }
+        lookupFailed = false
+        do {
+            let data = try await Central.data(Central.request("/central/sessions"))
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            guard let row = try decoder.decode([CentralSession].self, from: data).first(where: { $0.sessionId == sid }) else {
+                throw CentralError("this session is not in the list")
+            }
+            if row.localOnly == true || EngineStore.isLocal(row.engine) {
+                guard let engine = row.engine else { throw CentralError("local chat with no engine id") }
+                localEngine = engine
+            }
+            sessionEngine = row.engine ?? "claude"
+            engineUnknown = false
+        } catch is CancellationError {
+            return
+        } catch {
+            lookupFailed = true
+            lines.append(ChatLine(role: .error, text: "Could not check this chat's engine: \(error.localizedDescription). Nothing was sent."))
+        }
+    }
+
+    /// The engine for the next message, fixed now (before any upload or await).
+    private func route() -> (route: Route?, blocked: String?) {
+        if let block = sendBlock { return (nil, block) }
+        if engineUnknown {
+            return (nil, lookupFailed ? "This chat's engine is unknown. Tap Check engine again." : "Still checking this chat's engine.")
+        }
+        if let local = localEngine { return (Route(engine: local, pick: nil), nil) }
+        if sessionID != nil { return (Route(engine: nil, pick: nil), nil) }  // a bound cloud session names none
+        let pick = UserDefaults.standard.string(forKey: "engineID") ?? EngineOption.hub.id
+        // a picked engine that is down never silently becomes Hub
+        let choice = EngineStore.sendChoice()
+        if let blocked = choice.blocked { return (nil, blocked) }
+        // set now: a failed or timed-out send, and every later message, stay local
+        if EngineStore.isLocal(choice.engine) { localEngine = choice.engine }
+        return (Route(engine: choice.engine, pick: pick), nil)
     }
 
     func addAttachment(_ file: ChatAttachment) {
@@ -864,7 +937,8 @@ final class ChatModel: ObservableObject {
     func send(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty, !isSending else { return }
-        if newSession, sessionID != nil || localEngine != nil {
+        if newSession, sessionID != nil || localEngine != nil || sendBlock != nil || wrongChat {
+            let hadSession = sessionID != nil
             // Detach onto a fresh thread: the old session keeps running on the
             // server and stays in the Sessions list; its lines stay above a divider.
             streamTask?.cancel()
@@ -873,13 +947,17 @@ final class ChatModel: ObservableObject {
             sessionID = nil
             sessionEngine = nil
             localEngine = nil
+            engineUnknown = false
+            lookupFailed = false
+            sendBlock = nil
+            wrongChat = false
             lastSeq = nil
             seenSeqs = []
             echoed = []
             chips = ChatChipMachine()
             turnActive = false
             options = []
-            lines.append(ChatLine(role: .status, text: "New session. The previous one stays in Sessions."))
+            if hadSession { lines.append(ChatLine(role: .status, text: "New session. The previous one stays in Sessions.")) }
             threadID = "app-" + String(UUID().uuidString.prefix(8)).lowercased()
             title = "New chat"
         }
@@ -890,16 +968,34 @@ final class ChatModel: ObservableObject {
         // Read before deliver flips it: true means a turn is already running,
         // so this message queues behind it (skip-counted dones).
         let midTurn = turnActive
-        deliver(text, files: files, ownerIndex: lines.count - 1, midTurn: midTurn)
+        let chosen = route()
+        guard let fixed = chosen.route else {
+            return refuse(chosen.blocked ?? "", text: text, files: files, ownerIndex: lines.count - 1)
+        }
+        deliver(text, files: files, ownerIndex: lines.count - 1, midTurn: midTurn, route: fixed)
     }
 
-    /// Resend the failed message with the SAME msg_id (files already uploaded are not sent again).
+    /// Resend the failed message with the SAME msg_id and the SAME engine choice
+    /// (files already uploaded are not sent again).
     func retry() {
         guard let failed = failed, !isSending else { return }
-        deliver(failed.text, files: failed.files, ownerIndex: failed.ownerIndex, midTurn: false)
+        if let block = sendBlock { return refuse(block, text: failed.text, files: failed.files, ownerIndex: failed.ownerIndex) }
+        let chosen: (route: Route?, blocked: String?) = failed.route.map { ($0, nil) } ?? route()
+        guard let fixed = chosen.route else {
+            return refuse(chosen.blocked ?? "", text: failed.text, files: failed.files, ownerIndex: failed.ownerIndex)
+        }
+        deliver(failed.text, files: failed.files, ownerIndex: failed.ownerIndex, midTurn: false, route: fixed)
     }
 
-    private func deliver(_ text: String, files: [ChatAttachment], ownerIndex: Int, midTurn: Bool) {
+    /// A send that may not go out: an error line and Retry, nothing uploaded or posted.
+    private func refuse(_ reason: String, text: String, files: [ChatAttachment], ownerIndex: Int) {
+        failed = (text: text, files: files, ownerIndex: ownerIndex, route: nil)
+        canRetry = true
+        lines.append(ChatLine(role: .error, text: EngineStore.errorText(reason, prefix: "send failed: ")))
+        Haptics.error()
+    }
+
+    private func deliver(_ text: String, files: [ChatAttachment], ownerIndex: Int, midTurn: Bool, route: Route) {
         guard let msgID = pendingMsgID else { return }
         failed = nil
         canRetry = false
@@ -917,7 +1013,7 @@ final class ChatModel: ObservableObject {
                 var body: [String: Any] = ["msg_id": msgID, "text": text]
                 let ids = files.compactMap(\.uploadedID)
                 if !ids.isEmpty { body["attachments"] = ids }
-                if let local = localEngine { body["engine"] = local }
+                if let engine = route.engine { body["engine"] = engine }
                 if let sid = sessionID {
                     let obj = try await Central.json(Central.request(
                         "/central/sessions/\(sid)/message", method: "POST", json: body
@@ -929,33 +1025,29 @@ final class ChatModel: ObservableObject {
                     )
                 } else {
                     body["thread_id"] = threadID
-                    if localEngine == nil {
-                        // a picked engine that is down never silently becomes Hub
-                        let choice = EngineStore.sendChoice()
-                        if let blocked = choice.blocked { throw CentralError(blocked) }
-                        if let engine = choice.engine {
-                            body["engine"] = engine
-                            // before the POST: a failed or timed-out send stays local for Retry
-                            if EngineStore.isLocal(engine) { localEngine = engine }
-                        }
-                    }
                     if newSession { body["new_session"] = true }
                     let obj = try await Central.json(Central.request(
                         "/chat", method: "POST", json: body, timeout: 45
                     ))
                     apply(route: obj, ownerIndex: ownerIndex)
                     newSession = false
-                    EngineStore.resetToDefault()  // engine pick is one-shot too
+                    // engine pick is one-shot too; a closed sheet leaves the picker alone
+                    if !closed { EngineStore.resetToDefault(ifStill: route.pick) }
                 }
                 pendingMsgID = nil
                 Haptics.success()
                 wakeStream()
             } catch {
                 turnActive = false
-                failed = (text: text, files: files, ownerIndex: ownerIndex)
+                failed = (text: text, files: files, ownerIndex: ownerIndex, route: route)
                 canRetry = true
-                lines.append(ChatLine(role: .error,
-                                      text: EngineStore.errorText(error.localizedDescription, prefix: "send failed: ")))
+                let message = error.localizedDescription
+                // not this engine's chat: unlock the picker, keep the server's words, resend nothing
+                if message.hasPrefix("This chat belongs to") && sessionID == nil {
+                    wrongChat = true
+                    localEngine = nil
+                }
+                lines.append(ChatLine(role: .error, text: EngineStore.errorText(message, prefix: "send failed: ")))
                 Haptics.error()
             }
         }
@@ -967,9 +1059,19 @@ final class ChatModel: ObservableObject {
         if let sid = obj["session_id"] as? String, !sid.isEmpty { sessionID = sid }
         if let title = obj["title"] as? String, !title.isEmpty { self.title = title }
         let upstream = obj["upstream"] as? String
-        if let engine = obj["engine"] as? String {
+        let engine = obj["engine"] as? String
+        let contradicted = localEngine != nil && EngineStore.isKnownCloud(engine)
+        if contradicted {
+            // fail closed: the server put a local chat on a cloud engine; no more sends here
+            sendBlock = "This chat was not answered by the local model. Start a new session."
+            localEngine = nil
+        }
+        defer { if contradicted { lines.append(ChatLine(role: .error, text: sendBlock ?? "")) } }
+        if let engine = engine {
             sessionEngine = engine
-            if localEngine == nil, upstream != nil || EngineStore.isLocal(engine) { localEngine = engine }
+            // `upstream` proves local only for an engine that is not a known cloud one
+            if localEngine == nil, sendBlock == nil, !EngineStore.isKnownCloud(engine),
+               upstream != nil || EngineStore.isLocal(engine) { localEngine = engine }
         } else if let local = localEngine {
             sessionEngine = local  // the locked chip never says Hub on a local chat
         }
@@ -996,6 +1098,7 @@ final class ChatModel: ObservableObject {
     func open() {
         closed = false
         startStream()
+        if engineUnknown { Task { await resolveEngine() } }
     }
 
     func startStream() {
@@ -1116,7 +1219,7 @@ final class ChatModel: ObservableObject {
         let upstream = event["upstream"] as? String
         switch type {
         case "text":
-            if !text.isEmpty, !alreadyShown(text) { lines.append(ChatLine(role: .jarvis, text: text, upstream: upstream)) }
+            showReply(text, upstream: upstream)
         case "status":
             if !text.isEmpty { lines.append(ChatLine(role: .status, text: text)) }
         case "needs_input":
@@ -1131,7 +1234,7 @@ final class ChatModel: ObservableObject {
             echoed = []
         case "done":
             turnActive = false
-            if !text.isEmpty, !alreadyShown(text) { lines.append(ChatLine(role: .jarvis, text: text, upstream: upstream)) }
+            showReply(text, upstream: upstream)
             echoed = []
         default:
             break
@@ -1151,6 +1254,17 @@ final class ChatModel: ObservableObject {
             for change in chips.apply(chipEvent) {
                 lines[change.lineIndex].chip = change.chip
             }
+        }
+    }
+
+    /// A reply line; if /chat already showed it, the stream's `upstream` still tags that line.
+    private func showReply(_ text: String, upstream: String?) {
+        guard !text.isEmpty else { return }
+        if !alreadyShown(text) {
+            lines.append(ChatLine(role: .jarvis, text: text, upstream: upstream))
+        } else if let upstream = upstream,
+                  let index = lines.lastIndex(where: { $0.role == .jarvis && $0.text == text && $0.upstream == nil }) {
+            lines[index].upstream = upstream
         }
     }
 
@@ -1215,6 +1329,10 @@ struct ChatView: View {
                     .disabled(model.isSending)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if model.lookupFailed {
+                Button { Task { await model.resolveEngine() } } label: { pill("Check engine again") }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if !model.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -1225,12 +1343,12 @@ struct ChatView: View {
                 }
             }
             inputRow
-            // a local chat stays locked to its engine even before the router bound a session
+            // a local chat stays locked to its engine even before the router bound a session;
+            // no pick changes while a send is on its way
             EnginePickerRow(engineID: $engineID, newSession: $model.newSession,
-                            lockedEngine: model.newSession ? nil
-                                : model.sessionID == nil ? model.localEngine
-                                : (model.sessionEngine ?? model.localEngine ?? "claude"),
-                            lockedLocalOnly: model.localEngine != nil)
+                            lockedEngine: model.lockedEngine,
+                            lockedLocalOnly: model.localEngine != nil, lockedLabel: model.lockedLabel)
+                .disabled(model.isSending)
         }
         .padding(16)
         .background(Color.jarvisBackground.ignoresSafeArea())

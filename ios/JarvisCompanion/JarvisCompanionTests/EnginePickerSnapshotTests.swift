@@ -109,6 +109,14 @@ final class EnginePickerSnapshotTests: XCTestCase {
         XCTAssertFalse(EngineStore.usesQuickAsk("?weather"))
         UserDefaults.standard.set("gone", forKey: "engineID")  // unlisted: never the cloud /ask
         XCTAssertFalse(EngineStore.usesQuickAsk("?weather"))
+        // S4: a gateway without `local_only` still counts a "Local only" label as local
+        let unflagged = EngineOption(id: "qwen-local", label: "Qwen 27B · Local only", kind: "worker", available: true,
+                                     isDefault: false, reason: nil)
+        try useStubGateway(list: [.hub, unflagged], pick: "qwen-local")
+        XCTAssertFalse(EngineStore.usesQuickAsk("?weather"))
+        XCTAssertTrue(EngineStore.isLocal("qwen-local"))
+        XCTAssertFalse(EngineStore.isKnownCloud("qwen-local"))
+        XCTAssertTrue(EngineStore.isKnownCloud("claude"))
     }
 
     func testRawLocalErrorsShownVerbatim() {
@@ -129,6 +137,95 @@ final class EnginePickerSnapshotTests: XCTestCase {
         XCTAssertTrue(model.lines.last?.text.contains("Qwen 27B · Local only unavailable: gaming PC asleep") == true)
         XCTAssertEqual(UserDefaults.standard.string(forKey: "engineID"), "qwen-local")
         model.close()
+        // positive control: the stub does intercept, so the zero above is real
+        UserDefaults.standard.set("hub", forKey: "engineID")
+        let hub = ChatModel(sessionID: nil, title: "New chat")
+        hub.send("hello")
+        try await settle(hub)
+        XCTAssertEqual(StubGateway.recorded().map(\.path), ["/chat"])
+        XCTAssertNil(StubGateway.recorded().first?.body["engine"])
+        hub.close()
+    }
+
+    /// S1: the engine is fixed when the owner sends. A pick reset during the upload (another
+    /// send succeeding) and a Retry after a failed upload both still name the local engine.
+    func testLocalEngineFixedBeforeUpload() async throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "qwen-local")
+        StubGateway.respond = { path, count in
+            if path == "/central/attachments" {
+                UserDefaults.standard.set("hub", forKey: "engineID")  // another send reset the pick
+                return count == 1 ? (500, nil, nil) : (200, ["id": "f1"], nil)
+            }
+            return path == "/chat" ? (200, ["action": "answered", "reply": "ok"], nil) : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: nil, title: "New chat")
+        model.addAttachment(ChatAttachment(name: "a.txt", mimeType: "text/plain", data: Data("x".utf8)))
+        model.send("with a file")
+        try await settle(model)
+        XCTAssertTrue(model.canRetry)  // upload 1 failed, nothing posted to /chat
+        XCTAssertEqual(StubGateway.recorded().map(\.path), ["/central/attachments"])
+        model.retry()
+        try await settle(model)
+        let chat = StubGateway.recorded().filter { $0.path == "/chat" }
+        XCTAssertEqual(chat.count, 1)
+        XCTAssertEqual(chat.first?.body["engine"] as? String, "qwen-local")
+        model.close()
+    }
+
+    /// S2: a local chat whose reply names a cloud engine fails closed: error line, no more sends.
+    func testCloudReplyOnLocalChatBlocksSends() async throws {
+        try useStubGateway(list: [.hub, Self.local], pick: "qwen-local")
+        StubGateway.respond = { path, _ in
+            path == "/chat" ? (200, ["action": "answered", "reply": "hi", "engine": "claude", "upstream": "mini-pc"], nil)
+                : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: nil, title: "New chat")
+        model.send("first")
+        try await settle(model)
+        XCTAssertEqual(model.lines.last?.role, .error)
+        XCTAssertNil(model.localEngine)
+        model.send("second")
+        try await settle(model)
+        XCTAssertEqual(StubGateway.recorded().count, 1)
+        XCTAssertEqual(model.lines.last?.role, .error)
+        model.close()
+    }
+
+    /// S3: a chat opened on a session with no engine posts nothing until the row is known;
+    /// a local row then makes every follow-up name its engine and the chip local.
+    func testChatOpenedWithoutEngineLooksUpRow() async throws {
+        try useStubGateway(list: [.hub, Self.glm], pick: "hub")
+        StubGateway.respond = { path, _ in
+            if path == "/central/sessions" {
+                return (200, [["session_id": "s9", "engine": "qwen-local", "local_only": true, "upstream": "gaming-pc"]], nil)
+            }
+            return path.hasSuffix("/message") ? (200, ["action": "delivered"], nil) : (404, nil, nil)
+        }
+        let model = ChatModel(sessionID: "s9", title: "Local chat")
+        XCTAssertEqual(model.lockedLabel, "Checking engine…")
+        model.send("too early")
+        try await settle(model)
+        XCTAssertTrue(StubGateway.recorded().isEmpty)
+        await model.resolveEngine()
+        XCTAssertNil(model.lockedLabel)
+        XCTAssertEqual(model.localEngine, "qwen-local")
+        XCTAssertEqual(model.lockedEngine, "qwen-local")
+        model.retry()
+        try await settle(model)
+        XCTAssertEqual(StubGateway.recorded().map(\.path), ["/central/sessions/s9/message"])
+        XCTAssertEqual(StubGateway.recorded().first?.body["engine"] as? String, "qwen-local")
+        model.close()
+
+        // a failed lookup keeps sends blocked
+        StubGateway.respond = { _, _ in (500, nil, nil) }
+        let unknown = ChatModel(sessionID: "s10", title: "Chat")
+        await unknown.resolveEngine()
+        XCTAssertTrue(unknown.lookupFailed)
+        XCTAssertEqual(unknown.lockedLabel, "Engine unknown")
+        unknown.send("hello")
+        try await settle(unknown)
+        XCTAssertEqual(StubGateway.recorded().count, 1)
+        unknown.close()
     }
 
     /// BINDING 1: the local engine id goes out on every message (first send, follow-ups
@@ -196,6 +293,8 @@ final class EnginePickerSnapshotTests: XCTestCase {
                 XCTAssertTrue(model.lines.last?.text.hasPrefix("send failed: ") == true)
             }
             XCTAssertTrue(model.canRetry)
+            // S5: "belongs to another engine" unlocks the picker; nothing is picked or resent for the owner
+            XCTAssertEqual(model.lockedEngine, status == 409 ? nil : "qwen-local", "status \(status)")
             // even if the owner moves the picker, Retry of this local message stays local
             UserDefaults.standard.set("hub", forKey: "engineID")
             model.retry()
@@ -214,7 +313,6 @@ final class EnginePickerSnapshotTests: XCTestCase {
         model.send("one")
         XCTAssertTrue(model.isSending)
         model.send("two")
-        model.retry()
         try await settle(model)
         XCTAssertEqual(model.lines.filter { $0.role == .owner }.map(\.text), ["one"])
         XCTAssertEqual(StubGateway.recorded().count, 1)
@@ -301,7 +399,7 @@ final class StubGateway: URLProtocol {
     private static let lock = NSLock()
     private static var requests: [(method: String, path: String, body: [String: Any])] = []
     /// (path, how many requests that path has had) -> status + JSON body, or a transport error.
-    static var respond: (String, Int) -> (Int, [String: Any]?, URLError?) = { _, _ in (404, nil, nil) }
+    static var respond: (String, Int) -> (Int, Any?, URLError?) = { _, _ in (404, nil, nil) }
 
     static func reset() {
         lock.lock(); defer { lock.unlock() }
