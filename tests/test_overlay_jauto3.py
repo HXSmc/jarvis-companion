@@ -198,3 +198,255 @@ def test_word_only_has_note_open():
                  "import mac.voice.note_find, mac.voice.intents"):  # no import cycle either way
         r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True)
         assert r.returncode == 0, r.stderr.decode()
+
+
+# --- gateway wiring: the hunks above through the real utterance pipeline ------------------
+
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+
+from gateway import overlay  # noqa: E402
+from mac.voice import agent_policy, auto_policy  # noqa: E402
+from test_overlay_agent import (  # noqa: F401,E402
+    Clock, FakeAgent, client, reset, result, setup)
+from test_overlay_jauto import H, ctx, v, _deep, _switch_off  # noqa: F401,E402
+from test_overlay_jfollow10a import (  # noqa: F401,E402
+    LOUD, QUIET, RUN_LINE, _confirm_card, _rows, _steps, auto_on, bash, fresh_auto_state, run_agent)
+from test_overlay_openapp import run_turn  # noqa: E402
+from test_overlay_service import says, turn  # noqa: F401,E402
+
+LONG = "open https://example.com/" + "/".join(["section-name"] * 13)  # 193 chars, no & or ?
+
+
+# --- criterion 1: the helper upgrade itself ------------------------------------------------
+
+
+def test_long_url_helper(H, ctx, auto_on):
+    cmd = "open https://example.com/a/" + "b" * 150
+    assert auto_policy.long_url_open(cmd, ctx, tainted=False, barge=False, gate_ok=True) == cmd
+    assert auto_policy.long_url_open(cmd, ctx, tainted=True, barge=False, gate_ok=True) is None
+    assert auto_policy.long_url_open(cmd, ctx, tainted=False, barge=True, gate_ok=True) is None
+    assert auto_policy.long_url_open(cmd, ctx, tainted=False, barge=False, gate_ok=False) is None
+    _switch_off()
+    assert auto_policy.long_url_open(cmd, ctx, tainted=False, barge=False, gate_ok=True) is None
+    for bad in ("open https://example.com/" + "c" * 1977,  # one char over LONG_URL_MAX
+                f"open https://e.com/x {H}/Documents/a.md",  # a path operand beside the link
+                "open -a Terminal https://e.com/x",  # not an openable app
+                "open -a ſafari https://e.com/x",  # non-ascii lookalike app name
+                "open ftp://e.com/x",
+                "open file:///etc/passwd",
+                "open 'https://e.com/?a=1&b=2'",  # & is a shell metachar
+                "open https://e.com/x && open https://e.com/y",  # two commands
+                "/usr/bin/open https://e.com/x"):  # not the bare open builtin
+        assert auto_policy.long_url_open(bad, ctx, tainted=False, barge=False, gate_ok=True) is None, bad
+    assert auto_policy.TOO_LONG == agent_policy.decide("Bash", {"command": cmd}, ctx).reason
+
+
+# --- criterion 2: a long web-link open runs auto on a clean turn --------------------------
+
+
+def test_gateway_long_url_auto_on_clean_turn(client, auto_on):
+    pool, events = run_agent(client, bash(LONG), conv_id="j3a")
+    assert pool.made[0].responses[0]["behavior"] == "allow"
+    assert pool.made[0].responses[0]["updatedInput"]["command"] == LONG
+    assert _rows() == ["cmd=open decision=auto reason=ok"]
+    assert not _confirm_card(events)
+    assert not any(t.endswith("Shall I?") for t in says(events))
+    assert says(events).count(RUN_LINE) == 1
+
+
+# --- criterion 3: the same open is denied on every unsafe turn ---------------------------
+
+
+@pytest.mark.parametrize("mode", ["marked", "auto_tainted", "barge", "followup", "off", "timeout"])
+def test_gateway_long_url_denied_when_unsafe(mode, client, auto_on, monkeypatch):
+    doc = Path.home() / "Documents" / "a.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text("x")
+    conv, extra = "j3d", {}
+    if mode == "auto_tainted":
+        overlay._auto_tainted.add(conv)
+    elif mode == "barge":
+        extra = dict(followup=True, barge_in=True, levels=LOUD, conf=0.9)
+    elif mode == "followup":
+        extra = dict(followup=True, levels=QUIET, conf=0.9)
+    elif mode == "off":
+        _switch_off()
+    elif mode == "timeout":  # the policy walk stuck: the Deny stands
+        monkeypatch.setattr(overlay, "POLICY_CHECK_S", 0.2)
+        monkeypatch.setattr(auto_policy, "long_url_open", lambda *a, **k: time.sleep(0.5) or LONG)
+    if mode in ("barge", "followup"):
+        (Path.home() / "Desktop" / "ObsidianVault").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("OVERLAY_VAULT", str(Path.home() / "Desktop" / "ObsidianVault"))
+    make = bash(f"cat {doc}", LONG) if mode == "marked" else bash(LONG)
+    if mode in ("barge", "followup"):
+        extra["text"] = "what is in my notes about the deadline"
+    pool, events = run_agent(client, make, conv_id=conv, **extra)
+    responses = pool.made[0].responses
+    assert any(r["behavior"] == "deny"
+               and r["message"] == "too long to confirm out loud; split it into smaller steps"
+               for r in responses)
+    assert not any(r["behavior"] == "allow" and r.get("updatedInput", {}).get("command") == LONG
+                   for r in responses)
+    assert _rows()[-1] == "cmd=open decision=refused reason=form"
+    assert not _confirm_card(events)
+
+
+# --- criterion 4: the other long-command rules are unchanged ------------------------------
+
+
+def test_long_rules_unchanged(client, auto_on, monkeypatch):
+    home = Path.home()
+    docs = home / "Documents"
+    docs.mkdir(parents=True, exist_ok=True)
+    files = [docs / f"private-file-number-{i:02d}.txt" for i in range(12)]
+    for f in files:
+        f.write_text("x")
+    (home / "Public").mkdir(exist_ok=True)
+    for command in ("cp " + " ".join(str(f) for f in files) + f" {home / 'Public'}",
+                    "mv " + " ".join(str(f) for f in files) + f" {home / 'Public'}"):
+        assert len(command) > 120
+        _, events = run_agent(client, bash(command), conv_id="j4a")
+        assert _rows()[-1] == "cmd=cp decision=refused reason=form" if command.startswith("cp") \
+            else _rows()[-1] == "cmd=mv decision=refused reason=form"
+        assert not _confirm_card(events)
+    deep = docs / ("folder-with-a-long-name/" * 6) / "n.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("x")
+    assert len(f"open {deep}") > 120
+    monkeypatch.setenv("OVERLAY_VAULT", str(home / "Desktop" / "ObsidianVault"))
+    _, events = run_agent(client, bash(f"open {deep}"), text="what is in my notes about the deadline",
+                          conv_id="j4b", followup=True, barge_in=True, levels=LOUD, conf=0.9)
+    assert _confirm_card(events)
+    assert _rows()[-1] == "cmd=open decision=asked reason=barge"
+    _, events = run_agent(client, bash(f"cat {docs / 'private-file-number-00.txt'}",
+                                       "open https://example.com"), conv_id="j4c")
+    assert _rows()[-1] == "cmd=open decision=asked reason=untrusted"
+
+
+# --- criterion 7: typed query and long URLs open through the site opener ------------------
+
+
+def test_gateway_typed_query_url(client):
+    ran, events = run_turn(client, "open https://example.com/search?q=a&b=c", [])
+    assert ran == [["open", "https://example.com/search?q=a&b=c"]]
+    assert says(events) == ["Opening the link on example.com."]
+    assert _steps("intent")[-1]["arg"] == "example.com"  # jauto3: the row keeps only the host
+    long_path = "https://example.com/" + "a" * 80
+    ran, events = run_turn(client, "open " + long_path, [])
+    assert ran == [["open", long_path]]
+    assert says(events) == ["Opening the link on example.com."]
+    assert _steps("intent")[-1]["arg"] == "example.com"
+    ran, events = run_turn(client, "open https://example.com", [])
+    assert ran == [["open", "https://example.com"]]
+    assert says(events) == ["Opening https://example.com."]
+    assert _steps("intent")[-1]["arg"] == "example.com"  # today's form; Q3 host-only starts at queries
+    ran, events = run_turn(client, "open github.com/docs", [])
+    assert ran == [["open", "https://github.com/docs"]]
+    assert _steps("intent")[-1]["arg"] == "github.com/docs"
+
+
+# --- criterion 12 (overlay part): the vault scan only runs for note words ------------------
+
+
+def test_overlay_note_names_gate(vault, monkeypatch):
+    monkeypatch.delenv("OVERLAY_VAULT", raising=False)
+    assert overlay._note_names("open the note x") == ()
+    monkeypatch.setenv("OVERLAY_VAULT", str(vault / "missing"))
+    assert overlay._note_names("open the note x") == ()
+    monkeypatch.setenv("OVERLAY_VAULT", str(vault))
+    assert overlay._note_names("what time is it") == ()
+    assert overlay._note_names("Open the No x") != ()
+
+
+def _note_client(client, monkeypatch):
+    vault = Path.home() / "Desktop" / "J3Vault"
+    (vault / "Brain" / "Research").mkdir(parents=True)
+    (vault / "Brain" / "Research" / "llm-switch-local-vs-agents-benchmark-2026-11-18.md").write_text("x")
+    (vault / "Brain" / "Research" / "llm-local-models.md").write_text("x")
+    monkeypatch.setenv("OVERLAY_VAULT", str(vault))
+    ran: list = []
+    clock = Clock()
+    pool, _deps = setup(clock, lambda: FakeAgent(clock, script=[result({"say": "Done."})]),
+                        run=lambda argv, **k: ran.append(list(argv)), apps={})
+    return vault, ran, pool
+
+
+# --- criterion 13: the spoken note name opens the note in Obsidian ------------------------
+
+
+def test_gateway_note_open(client, monkeypatch):
+    vault, ran, pool = _note_client(client, monkeypatch)
+    events = turn(client, "Open the No LLM Switch localal versus agents", conv_id="j3n")
+    assert ran == [["open", "-a", "Obsidian", os.path.realpath(vault / BENCH)]]
+    assert says(events) == ["Opening llm switch local vs agents benchmark 2026 11 18."]
+    assert not _confirm_card(events)
+    assert pool.made == []  # the note never reaches the agent
+    assert _steps("intent")[-1]["kind"] == "note_open"
+    assert _steps("intent_pick")[-1]["detail"].endswith("reason=word_only")
+
+
+# --- criterion 14: misses and ties speak their fixed lines --------------------------------
+
+
+def test_gateway_note_lines(client, monkeypatch):
+    vault, ran, pool = _note_client(client, monkeypatch)
+    events = turn(client, "open the note banana bread", conv_id="j3m1")
+    assert says(events) == ["I couldn't find a note called banana bread."]
+    assert ran == []
+    events = turn(client, "open the llm note", conv_id="j3m2")
+    lines = says(events)
+    assert len(lines) == 1 and lines[0].startswith("Which note: ")
+    assert "llm local models" in lines[0] and "llm switch local vs agents benchmark 2026 11 18" in lines[0]
+    assert ran == []
+    recipes = Path.home() / "Desktop" / "J3Recipes"
+    recipes.mkdir(parents=True)
+    for name in ("soup", "cake", "bread", "salad", "pie"):
+        (recipes / f"recipe-{name}.md").write_text("x")
+    monkeypatch.setenv("OVERLAY_VAULT", str(recipes))
+    events = turn(client, "open the note recipe", conv_id="j3r")
+    assert says(events) == ["Which note: recipe bread, recipe cake, recipe pie or one of 2 more?"]
+    assert ran == []
+    bad = Path.home() / "Desktop" / "J3Bad"
+    bad.mkdir(parents=True)
+    (bad / "bad-exec.md").write_text("x")
+    (bad / "bad-exec.md").chmod(0o755)  # executable: never auto-opened
+    (bad / "alias-memo.md").write_bytes(b"book\0\0\0\0mark")  # alias file: runs code by bytes
+    monkeypatch.setenv("OVERLAY_VAULT", str(bad))
+    for text, conv in (("open the note bad exec", "j3b1"), ("open the note alias memo", "j3b2")):
+        events = turn(client, text, conv_id=conv)
+        assert says(events) == ["I can't open that note."]
+        assert ran == []
+
+
+# --- criterion 15: note names never leave this Mac in a row or a log ----------------------
+
+
+def test_note_names_stay_local(client, monkeypatch):
+    vault, ran, pool = _note_client(client, monkeypatch)
+    turn(client, "open the llm note", conv_id="j3p")
+    events = turn(client, "open the llm switch note", conv_id="j3p")
+    assert ran == [["open", "-a", "Obsidian", os.path.realpath(vault / BENCH)]]
+    assert pool.made == []
+    assert says(events) == ["Opening llm switch local vs agents benchmark 2026 11 18."]
+    turns = overlay.debug_log.snapshot()["turns"][:2]  # newest first; these are the only two
+    leaks = ("benchmark", "local-models", "llm-switch", "Brain/Research", "llm local models")
+    for t in turns:
+        for step in t["steps"]:
+            if step.get("step") == "transcribed":
+                continue
+            dumped = json.dumps(step)
+            for leak in leaks:
+                assert leak not in dumped, (leak, dumped)
+            if step.get("step") == "spoke":
+                assert step["text"] == "[note line]"
+    for row in _steps("intent"):
+        assert "arg" not in row
+        assert re.fullmatch(r"hits=\d+ name_len=\d+", row["detail"])
+    for row in _steps("intent_pick"):
+        assert row["detail"].endswith("reason=word_only")
+    hist = list(overlay._history["j3p"])
+    assert hist[-1] == ("open the llm switch note", "I opened a note.")
+    assert hist[-2][1] == "I listed matching notes."

@@ -47,8 +47,8 @@ from pydantic import BaseModel, Field
 from common import facts, hud, svgsafe
 from gateway import repos as repo_rules  # jfollow11c: the same secret-name rule as the repo routes
 from mac.voice import (acks, agent, agent_policy, auto_policy, geo, gitdiff, ground, intents, lean,
-                       intent_pick, local_llm, media_lookup, memory, models3d, nearby, places,
-                       workspaces, youtube)
+                       intent_pick, local_llm, media_lookup, memory, models3d, nearby, note_find,
+                       places, workspaces, youtube)
 
 logger = logging.getLogger(__name__)
 
@@ -3140,8 +3140,13 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
         place_names = (await asyncio.to_thread(places.names)
                        if "forget" in body.text.lower() or intents.PLACE_CUE_RE.search(body.text) else ())
         model_names = await asyncio.to_thread(_model_names, body.text)
+        try:  # jauto3: the vault walk is bounded like a policy check; stuck or failing = today's routing
+            note_names = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                _POLICY_POOL, _note_names, body.text), POLICY_CHECK_S)
+        except (asyncio.TimeoutError, OSError):
+            note_names = ()
         word = intents.parse(body.text, apps=apps, workspace_names=ws_names, place_names=place_names,
-                             model_names=model_names)
+                             model_names=model_names, note_names=note_names)
         intent, picked = await _pick_intent(body, raw_text, word, joined=joined,
                                             pick_open=pick is not None or owner_answer_due or offer is not None,
                                             deps=deps, on_step=on_step)
@@ -3224,6 +3229,8 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             place_turn = intent.kind == "place"
             if on_step:  # (d) the turn's words never stay in a row: transcribed/continued rewritten
                 on_step("private", tag=f"[geo {intent.kind}]")
+        note_hits = (note_find.find(note_names, intent.arg, literal=intent.sub == "literal")
+                     if intent.kind == "note_open" else [])
         if on_step and (intent.kind in GEO_KINDS or intent.kind == "place"):
             on_step("intent", kind=intent.kind)  # no arg: it holds place words
         elif on_step:
@@ -3232,12 +3239,16 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
                           f" words={len(sess_ask.words.split())}"
                           + (f" answer={sess_ask.answer}" if sess_ask.action == "answer" else ""))
                 on_step("intent", kind=f"session_{sess_ask.action}", detail=detail)
+            elif intent.kind == "note_open":  # jauto3: a vault name never reaches a row
+                on_step("intent", kind=intent.kind, detail=f"hits={len(note_hits)} name_len={len(intent.arg)}")
             else:
-                on_step("intent", kind=intent.kind, arg=intent.arg)
+                on_step("intent", kind=intent.kind,
+                        arg=intents.site_row_arg(intent.arg) if intent.kind == "open_site" else intent.arg)
         # B4: the ack comes from ACK_POLICY (acks.ack_key); the answer/generic keys draw a line
         # from the thinking pool. No ack when the turn's first speech is its own line.
         # the switch's own line is the answer: no ack before it (acks.py gains phrase keys only)
         ack_phrase_key = (None if intent.kind in ("auto_mode", *GEO_KINDS, "video_ask", "video_watch", "draw",
+                                                  "note_open",  # jauto3: its own line is the whole speech
                                                   *MODEL_KINDS)
                           else acks.ack_key(intent.kind, intent.sub))
         # A notes search with no vault set would start the file agent in some repo: say it is unset.
@@ -3539,6 +3550,12 @@ async def _run_turn(body: TurnBody, deps: OverlayDeps,
             async for ev in _speak(line, deps):
                 yield ev
             said.append(line if line.startswith("Did you") else shown)
+
+        elif intent.kind == "note_open":  # jauto3 (owner 3A): the owner named a note; vault names stay on this Mac
+            line, said_line = await _note_open(note_hits, intent.arg, deps)
+            async for ev in _speak(line, deps):
+                yield {**ev, "private": True, "row_tag": "[note line]"} if ev.get("type") in ("say", "audio") else ev
+            said.append(said_line)
 
         elif intent.kind == "look":
             # A visual verb with no UI noun ("highlight the last debugging session"): ground
@@ -5618,8 +5635,22 @@ async def _agent_stream(run: AgentRun, deps: OverlayDeps, metrics: dict, said: l
                         if how == "auto":
                             decision, auto_run = agent_policy.Allow(decision.updated_input), True
                     elif isinstance(decision, agent_policy.Deny):
-                        _cmd_row(on_step, auto_policy.cmd_name(command), "refused",
-                                 agent_policy.reason_code(decision.reason))
+                        upgraded = None
+                        if decision.reason == auto_policy.TOO_LONG:  # jauto3 (owner 2A): a long web-link open runs only on a clean turn
+                            tainted = _session_marked(run.session) or run.conv_id in _auto_tainted
+                            try:
+                                upgraded = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                                    _POLICY_POOL, lambda: auto_policy.long_url_open(
+                                        command, run.ctx, tainted=tainted, barge=run.barge, gate_ok=run.gate_ok)),
+                                    POLICY_CHECK_S)
+                            except Exception:  # timeout or any error: fail closed, the Deny stands
+                                upgraded = None
+                        if upgraded is not None:
+                            decision, auto_run = agent_policy.Allow({**tool_input, "command": upgraded}), True
+                            _cmd_row(on_step, auto_policy.cmd_name(upgraded), "auto", "ok")
+                        else:
+                            _cmd_row(on_step, auto_policy.cmd_name(command), "refused",
+                                     agent_policy.reason_code(decision.reason))
                 elif name in agent_policy._WRITE_TOOLS and isinstance(decision, agent_policy.Confirm):
                     # jfollow11a: a new file in the owner's own folders runs auto; same order and limits
                     path = decision.updated_input.get("notebook_path" if name == "NotebookEdit" else "file_path")
@@ -6601,6 +6632,53 @@ def _model_names(text: str) -> tuple[str, ...]:
     return models3d.known_names(_vault()) if _MODEL_SHOW_HINT.search(text) else ()
 
 
+# jauto3: vault note paths for the note rule, only when the words could be a note ask
+# (the walk is bounded, symlink-free, skips Secrets and dot folders).
+_NOTE_HINT = re.compile(r"\bopen\b.*\b(?:note|notes|node|nodes|no|not)\b", re.I)
+
+
+def _note_names(text: str) -> tuple[str, ...]:
+    return note_find.scan(_vault()) if _NOTE_HINT.search(text) else ()
+
+
+def _note_path(rel: str) -> str | None:
+    """The vault note's real path, or None: it must stay inside the vault, be a plain .md file and
+    pass the auto policy again (jauto3: the list was collected earlier; the file could have moved)."""
+    vault = _vault()
+    if not vault:
+        return None
+    root = os.path.realpath(vault)
+    path = os.path.realpath(os.path.join(vault, rel))
+    if not path.startswith(root + os.sep) or not path.casefold().endswith(".md") or not os.path.isfile(path):
+        return None
+    return path if auto_policy.classify(shlex.join(["open", "-a", "Obsidian", path]),
+                                         agent_policy.Ctx(vault=vault)) == ("auto", "ok") else None
+
+
+async def _note_open(hits: list[str], name: str, deps: OverlayDeps) -> tuple[str, str]:
+    """jauto3 (owner 3A): the owner named a note; vault names stay on this Mac."""
+    if not hits:
+        return f"I couldn't find a note called {name[:60]}.", "I couldn't find that note."
+    if len(hits) > 1:
+        names = sorted(note_find.speak_name(r) for r in hits)
+        if len(names) == 2:
+            line = f"Which note: {names[0]} or {names[1]}?"
+        elif len(names) == 3:
+            line = f"Which note: {names[0]}, {names[1]} or {names[2]}?"
+        else:
+            line = f"Which note: {names[0]}, {names[1]}, {names[2]} or one of {len(names) - 3} more?"
+        return line, "I listed matching notes."
+    try:  # the policy walk can hang like the others: same pool, same limit, fail closed
+        path = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+            _POLICY_POOL, _note_path, hits[0]), POLICY_CHECK_S)
+    except Exception:
+        path = None
+    if path is None:
+        return "I can't open that note.", "I couldn't open that note."
+    await asyncio.to_thread(deps.run, ["open", "-a", "Obsidian", path], check=False)
+    return f"Opening {note_find.speak_name(hits[0])}.", "I opened a note."
+
+
 async def _push_spoken(text: str, deps: OverlayDeps) -> None:
     """A templated line pushed outside a turn: its audio when there is a voice, else the say text.
     The app drops a pushed `say` while the service has a voice (Mac live run: a silent ready line)."""
@@ -6813,8 +6891,9 @@ async def post_utterance(body: TurnBody) -> StreamingResponse:
                 first_audio_ms = ms
             if kind in ("say", "audio") and event["text"] != last_text:
                 last_text = event["text"]  # a say line and its audio are one spoken line
-                spoke = debug_log.add(rec, "spoke", text="[geo line]" if event.get("private") else last_text, ms=ms,
-                                      audio_ms=ms if kind == "audio" else None)
+                spoke = debug_log.add(rec, "spoke",
+                                      text=event.get("row_tag", "[geo line]") if event.get("private") else last_text,
+                                      ms=ms, audio_ms=ms if kind == "audio" else None)
             elif kind == "audio" and spoke is not None:
                 debug_log.update(spoke, audio_ms=ms)
             elif kind == "card":
