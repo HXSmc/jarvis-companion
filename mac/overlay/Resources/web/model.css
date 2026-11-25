@@ -57,7 +57,7 @@ body {
   -webkit-user-drag: none;
 }
 
-#preview[hidden], #hint[hidden], #reset[hidden], #status[hidden] {
+#preview[hidden], #hint[hidden], #play[hidden], #reset[hidden], #status[hidden] {
   display: none;
 }
 
@@ -85,7 +85,7 @@ body {
   color: var(--ink-soft);
 }
 
-#reset {
+#play, #reset {
   margin-left: auto;
   min-height: 44px;
   padding: 4px 12px;
@@ -98,26 +98,34 @@ body {
   transition: background-color 120ms ease-out;
 }
 
-#reset:hover {
+#play {
+  min-width: 72px; /* wider than "Pause" plus padding (about 60px here), so the label flip never resizes it */
+}
+
+#play:not([hidden]) + #reset {
+  margin-left: 0; /* Play's own auto margin carries both buttons to the right edge */
+}
+
+#play:hover, #reset:hover {
   background: var(--hover);
 }
 
-#reset:active {
+#play:active, #reset:active {
   background: var(--press);
 }
 
-#reset:disabled {
+#play:disabled, #reset:disabled {
   opacity: 0.4;
   cursor: default;
 }
 
-#reset:focus-visible {
+#play:focus-visible, #reset:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #reset {
+  #play, #reset {
     transition: none;
   }
 }
