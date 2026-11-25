@@ -161,13 +161,13 @@ def test_page_plays_clip(tmp_path):
     attrs, text = _play_button(dom)
     assert "hidden" not in attrs
     assert text == "Pause"
-    assert 'aria-pressed="true"' in attrs
+    assert "aria-pressed" not in attrs  # round 1 (ui/ux): the flipping label alone carries the state
 
     still = _run_page(tmp_path / "reduced", two_clips, flags=["--force-prefers-reduced-motion"], dump=True)
     assert 'data-anim="paused"' in still, still[:600]
     attrs, text = _play_button(still)
     assert text == "Play"
-    assert 'aria-pressed="false"' in attrs
+    assert "aria-pressed" not in attrs
 
     static = _run_page(tmp_path / "static", _cube_glb(), dump=True)
     assert 'data-anim="none"' in static, static[:600]

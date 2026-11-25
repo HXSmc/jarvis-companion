@@ -105,7 +105,9 @@ function frame(scene, object, camera, controls, light, box = new THREE.Box3().se
 
 // The camera has to frame the space every pose of every clip reaches, not just the loaded
 // pose: sample the longest clip at 8 even times (both ends) and union the boxes. The final
-// setTime(0) leaves the nodes on the t=0 pose, the one a paused page shows.
+// setTime(0) leaves the nodes on the t=0 pose, the one a paused page shows. The floor then sits at
+// the lowest point of the whole motion on purpose: that is where a dropped or bouncing object lands,
+// so a raised first pose reads as mid-air with its shadow below, not as an object sunk into the floor.
 function wholeClipBox(mixer, clips, object) {
   const box = new THREE.Box3();
   const longest = Math.max(...clips.map((clip) => clip.duration));
@@ -217,8 +219,7 @@ async function showModel() {
     let last = 0;
     const sync = () => {
       stage.dataset.anim = playing ? "playing" : "paused";
-      playButton.textContent = playing ? "Pause" : "Play";
-      playButton.setAttribute("aria-pressed", playing ? "true" : "false");
+      playButton.textContent = playing ? "Pause" : "Play"; // the label is the state: no aria-pressed too
     };
     const tick = () => {
       if (!playing || document.hidden) {
@@ -260,7 +261,11 @@ async function showModel() {
     });
     stage.setAttribute("aria-label", `${stage.getAttribute("aria-label")} Space to play or pause.`);
     playButton.hidden = false;
-    setPlaying(!matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+    reduce.addEventListener("change", () => {
+      if (reduce.matches) setPlaying(false); // turned on while the card is open: stop the motion
+    });
+    setPlaying(!reduce.matches);
   } else {
     stage.dataset.anim = "none";
   }
