@@ -56,7 +56,8 @@ if "/usr/bin/ffmpeg" in argv:  # the second unit: the real encoder, argv fixed a
 glb = b"glTF" + struct.pack("<II", 2, 20) + b"\0" * 8
 png = b"\x89PNG\r\n\x1a\n" + b"\0" * 24
 if mode in ("ok", "ffmpeg_fail", "timeout", "oom-kill", "badmagic", "nopng",
-            "fs_link", "fs_hard", "fs_gap", "fs_extra", "fs_many", "fs_big", "fs_badmagic", "fs_dirlink"):
+            "fs_link", "fs_hard", "fs_gap", "fs_extra", "fs_many", "fs_big", "fs_badmagic", "fs_dirlink",
+            "mp4link"):
     fr = os.path.join(job, "frames")
     os.makedirs(fr, exist_ok=True)
     for i in range(1, 25):
@@ -79,6 +80,8 @@ elif mode == "fs_big":  # a frame over the 2 MB cap, PNG magic intact
         f.write(b"\x89PNG\r\n\x1a\n" + b"\0" * (3 * 1024 * 1024))
 elif mode == "fs_badmagic":  # a frame that is not a PNG
     open(os.path.join(job, "frames", "f_0002.png"), "wb").write(b"JUNKJUNKJUNK")
+elif mode == "mp4link":  # the job leaves object.mp4 as a link to the canary
+    os.symlink(os.environ["STUB_SECRET"], os.path.join(job, "object.mp4"))
 elif mode == "fs_dirlink":  # the frames dir itself is a link to a dir holding a link to the canary
     os.rename(os.path.join(job, "frames"), job + "-frames-target")
     os.link(os.environ["STUB_SECRET"], os.path.join(job + "-frames-target", "canary-copy"))
@@ -212,6 +215,12 @@ def test_wrapper_frames_refused(abox):
         assert len(calls(abox)) == before + 1, (mode, calls(abox)[before:])  # the ffmpeg unit never ran
         assert "SECRET" not in out and "canary" not in out
         assert not (d / "frames").exists(), mode
+    # the job left object.mp4 as a link: no encode, the link goes, the canary is untouched
+    d = job(abox, "mp4link")
+    before = len(calls(abox))
+    code, out, _err = run(abox, str(d), STUB_MODE="mp4link")
+    assert code == 0 and json.loads(out)["mp4"] == "bad_mp4", out
+    assert len(calls(abox)) == before + 1 and not (d / "object.mp4").is_symlink() and not (d / "frames").exists()
     assert hashlib.sha256(abox["secret"].read_bytes()).hexdigest() == sha
 
 

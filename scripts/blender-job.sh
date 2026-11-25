@@ -135,7 +135,9 @@ if [ -e "$JOB/frames" ] || [ -L "$JOB/frames" ]; then
       fi
     done
   fi
-  if [ -z "$MP4" ] && [ ! -x "$FFMPEG" ]; then
+  if [ -z "$MP4" ] && { [ -e "$JOB/object.mp4" ] || [ -L "$JOB/object.mp4" ]; }; then
+    MP4="bad_mp4"  # the job left an object.mp4 (a link ffmpeg would write through): never encode onto it
+  elif [ -z "$MP4" ] && [ ! -x "$FFMPEG" ]; then
     MP4="no_ffmpeg"
   elif [ -z "$MP4" ]; then
     OUT2=$(sudo -n systemd-run --uid="$USER_NAME" --gid="$USER_NAME" --wait --pipe --collect \
