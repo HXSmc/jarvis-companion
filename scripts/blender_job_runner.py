@@ -144,11 +144,16 @@ def main() -> None:
     except Exception:  # noqa: BLE001 - no preview: the GLB still exports, the wrapper says no_png
         traceback.print_exc()
     if clip:  # one PNG per frame; the wrapper's second sandbox unit turns them into the mp4
-        frames_dir = os.path.join(job, "frames")
-        os.makedirs(frames_dir, exist_ok=True)
-        for i in range(scene.frame_start, scene.frame_end + 1):
-            scene.render.filepath = os.path.join(frames_dir, "f_%04d.png" % i)
-            bpy.ops.render.render(write_still=True)
+        try:
+            frames_dir = os.path.join(job, "frames")
+            os.makedirs(frames_dir, exist_ok=True)
+            for i in range(scene.frame_start, scene.frame_end + 1):
+                scene.frame_set(i)  # without it every frame file shows the preview's pose
+                scene.render.filepath = os.path.join(frames_dir, "f_%04d.png" % i)
+                bpy.ops.render.render(write_still=True)
+            scene.frame_set(scene.frame_start)
+        except Exception:  # noqa: BLE001 - a frame failure costs only the mp4 (the wrapper says bad_frames)
+            traceback.print_exc()
     kwargs = dict(filepath=os.path.join(job, "object.glb"), export_format="GLB",
                   export_draco_mesh_compression_enable=False, export_apply=True,
                   export_cameras=False, export_lights=False, export_yup=True)

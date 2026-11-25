@@ -126,8 +126,8 @@ def test_runner_animated_with_fake_bpy(tmp_path):
     scene.rigidbody_world = None
     scene.objects = [_mesh_obj(animation_data=SimpleNamespace(action=object()))]
     rendered = []
-    bpy.ops.render.render.side_effect = \
-        lambda write_still=False: rendered.append((bpy.context.scene.render.filepath, write_still))
+    bpy.ops.render.render.side_effect = lambda write_still=False: rendered.append(
+        (bpy.context.scene.render.filepath, write_still, scene.frame_set.call_args))
     assert _run_runner(d, bpy) == 0
     assert scene.frame_end == scene.frame_start + 239
     assert scene.render.fps == 24 and scene.render.fps_base == 1.0
@@ -136,9 +136,10 @@ def test_runner_animated_with_fake_bpy(tmp_path):
         export_apply=True, export_cameras=False, export_lights=False, export_yup=True,
         export_animations=True, export_frame_range=True, export_force_sampling=True,
         export_animation_mode="ACTIONS")
-    assert rendered[0] == (str(d / "preview.png"), True)
+    assert rendered[0][:2] == (str(d / "preview.png"), True)
     assert [r[0] for r in rendered[1:]] == [str(d / "frames" / f"f_{i:04d}.png") for i in range(1, 241)]
     assert all(r[1] is True for r in rendered[1:])
+    assert [r[2] for r in rendered[1:]] == [mock.call(i) for i in range(1, 241)]  # each frame file shows its frame
     # 33 ACTIVE bodies: refused before any render or export
     d = tmp_path / "toomany"
     d.mkdir()
@@ -404,6 +405,9 @@ def test_real_blender_jobs(tmp_path):
             continue
         n = len(list(frames.glob("f_*.png")))
         assert 2 <= n <= 240, (name, n)
+        Image = pytest.importorskip("PIL.Image")  # pixels, not bytes: Blender stamps frame metadata in each PNG
+        first, mid = (Image.open(frames / f).convert("RGB").tobytes() for f in ("f_0001.png", "f_0024.png"))
+        assert first != mid, name  # each frame file shows its own pose
         argv = ["/usr/bin/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist",
                 "file", "-f", "image2", "-framerate", "24", "-start_number", "1", "-i", f"{frames}/f_%04d.png",
                 "-frames:v", str(n), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
