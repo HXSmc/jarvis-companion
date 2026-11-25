@@ -115,6 +115,8 @@ def test_animated_glb_caps(tmp_path):
             "bad_anim")
     refuses(mutated("strchan", lambda d: d["animations"][0].update(channels=["translation"])), "bad_anim")
     refuses(mutated("out50k", lambda d: d["accessors"][1].update(count=50001)), "bad_anim")
+    refuses(mutated("inneg", lambda d: d["accessors"][0].update(count=-1)), "bad_anim")  # round 1 (glm-cross)
+    refuses(mutated("outneg", lambda d: d["accessors"][1].update(count=-1)), "bad_anim")
 
     def drop_bounds(d: dict) -> None:
         d["accessors"][0].pop("min")
@@ -154,6 +156,8 @@ def test_motion_prompt():
         assert models3d.blender_job_prompt(slug, desc) == want, desc
 
     assert models3d.motion("a spinning top") == "keyframe"
+    # round 1 (code): static names match whole words, plural too
+    assert models3d.motion("a rolling pine cone") == "keyframe" and models3d.motion("a set of rolling pins") == "none"
 
     assert models3d.STATIC_NOUNS == ("rolling pin", "crash helmet", "jump rope", "rocking chair",
                                      "wave pool", "spinning wheel")

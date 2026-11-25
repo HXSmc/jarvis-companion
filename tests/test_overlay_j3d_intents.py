@@ -23,11 +23,19 @@ NEGATIVE_KINDS = {"draw a bouncing ball": "draw", "drop a pin on the map": "answ
                   "show me a picture of a bouncing ball": "answer", "stop the animation": "answer",
                   "make a note": "answer", "animate": "answer", "what time is it": "clock",
                   "make a rolling pin": "answer", "make a spinning wheel": "answer",
-                  "throw a party on the roof": "answer"}
+                  "throw a party on the roof": "answer",
+                  # round 1 (ux): non-3D drops and non-motion adjectives keep their e2011a4 kinds
+                  "drop a song into the playlist": "answer", "drop a screenshot into the chat": "answer",
+                  "drop a beat on the track": "answer", "drop an email into the inbox": "agent",
+                  "drop a bomb on the city": "answer", "drop a tab into the folder": "answer",
+                  "create a moving average chart": "answer", "make a moving checklist": "answer",
+                  "make a rolling release plan": "answer", "animate a photo": "answer",
+                  "make a moving company logo": "answer", "make a falling leaves wallpaper": "answer"}
 MOTION_WORDS = ("make a bouncing ball", "can you make me a spinning top",
                 "please create an animated windmill", "animate a paper plane",
                 "could you animate the test mug", "drop five boxes on a table",
-                "drop a ball onto the floor", "make a 3D model of a bouncing ball, call it bouncy")
+                "drop a ball onto the floor", "make a 3D model of a bouncing ball, call it bouncy",
+                "drop three marbles into a bowl", "drop five boxes on a wooden table, call it stack")
 
 
 # --- criterion 14: the phrases and the kinds they must keep ----------------------------------------
@@ -48,6 +56,9 @@ def test_animated_create_phrases():
     assert (a.kind, a.arg) == ("model_create", "bouncing ball")
     a = p("make a 3D model of a bouncing ball, call it bouncy", apps={})
     assert (a.kind, a.sub) == ("model_create", "bouncy")
+    a = p("drop five boxes on a wooden table, call it stack", apps={})  # an adjective before the place
+    assert (a.kind, a.arg, a.sub) == ("model_create", "drop five boxes on a wooden table", "stack")
+    assert p("drop three marbles into a bowl", apps={}).kind == "model_create"
     # non-3D things ("gif", "chart") never start a job
     for words in ("make an animated gif", "animate the chart"):
         assert p(words, apps={}).kind == "answer", words

@@ -99,8 +99,8 @@ def motion(desc: str) -> str:
     """The description's motion class: "physics", "keyframe" or "none" — a closed set, never text
     from the description (the job prompt prints `Motion: <class>`)."""
     text = clean_desc(desc).lower()
-    for noun in STATIC_NOUNS:
-        text = text.replace(noun, " ")
+    for noun in STATIC_NOUNS:  # whole words (plural too): "a rolling pine cone" still rolls
+        text = re.sub(r"\b" + noun + r"s?\b", " ", text)
     if re.search(r"\bstatic\b", text):  # a static spinning top does not spin
         text = text.replace("spinning top", " ")
     for kind in ("physics", "keyframe"):
@@ -320,7 +320,7 @@ def _check_glb(fd: int, size: int) -> None:
                 raise ModelError("bad_anim", 422)
             acc = accessors[src]  # the keyframe times: SCALAR floats, 0 <= t <= 10.05 s
             count = acc.get("count") if isinstance(acc, dict) else None
-            if type(count) is not int or count > ANIM_KEYS_MAX \
+            if type(count) is not int or not 1 <= count <= ANIM_KEYS_MAX \
                     or acc.get("type") != "SCALAR" or acc.get("componentType") != 5126:
                 raise ModelError("bad_anim", 422)
             for key in ("min", "max"):
@@ -332,7 +332,7 @@ def _check_glb(fd: int, size: int) -> None:
                     raise ModelError("bad_anim", 422)
             out = accessors[dst]  # the keyframe values: only the element count is capped
             count = out.get("count") if isinstance(out, dict) else None
-            if type(count) is not int or count > ANIM_OUTPUT_MAX:
+            if type(count) is not int or not 1 <= count <= ANIM_OUTPUT_MAX:
                 raise ModelError("bad_anim", 422)
         for channel in channels:
             if not isinstance(channel, dict):
