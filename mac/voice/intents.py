@@ -519,6 +519,18 @@ _3D = r"(?:3d|3-d|3 d|three d|three-d)"
 _MODEL_CREATE_RE = re.compile(r"(?:(?:can|could|would) you )?(?:please )?"
                               r"(?:create|make|model|build|design|generate|render) (?:me )?(?:a |an )?" + _3D
                               + r"(?: (?:object|model|thing))?(?P<rest>(?:[:, ].*)?)")
+_MODEL_POLITE = r"(?:(?:can|could|would) you )?(?:please )?"  # the create/show polite prefix; :165 _POLITE is the yes/no tail
+_NOT_3D = (r"(?!(?:gif|gifs|video|videos|movie|film|clip|slideshow|presentation|slides|chart|graph|meme|"
+           r"sticker|emoji|logo|banner|text|story|reel)\b)")  # things that are not a 3D object
+_ANIM_MAKE_RE = re.compile(_MODEL_POLITE + r"(?:create|make|build|design|generate|render) (?:me )?(?:a |an )?"
+                           r"(?!(?:rolling pin|spinning wheel)\b)"  # static names that start with a motion word
+                           r"(?P<rest>(?:animated|moving|bouncing|spinning|rotating|rolling|swinging|falling|"
+                           r"tumbling) " + _NOT_3D + r".+)")
+_ANIMATE_RE = re.compile(_MODEL_POLITE + r"animate (?:me )?(?:a|an|the) " + _NOT_3D + r"(?P<rest>.+)")
+_DROP_RE = re.compile(_MODEL_POLITE + r"(?P<rest>drop (?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20) "
+                      r"(?!(?:pin|pins|marker|markers|note|notes|line|lines|message|messages|call|calls|link|links|"
+                      r"hint|hints|comment|comments|file|files|photo|photos|reminder|reminders)\b)"
+                      r"[a-z]+ (?:on|onto|into) (?:a|an|the) .+)")
 _MODEL_NAME_RE = re.compile(r"(?P<desc>.*?)(?:(?:^| ?,? )(?:and )?(?:call(?:ed)? it|called|named) (?P<name>.+))?")
 _MODEL_LIST_RE = re.compile(r"(?:what " + _3D + r" (?:objects|models) (?:do i have|have i got|are there|have you made)"
                             r"|(?:list|show)(?: me)? (?:my |the )?" + _3D + r" (?:objects|models))")
@@ -540,6 +552,24 @@ def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None
         name = ((parts["name"] or "") if parts else "").strip(" ,:")
         desc = desc or name  # "create a 3D object called test mug": the name is all we have
         return Intent("model_create", desc, name) if desc else Intent("model_create", "", "ask")
+    m = _ANIM_MAKE_RE.fullmatch(low)  # j3d: spoken animated/physics creates (A), animate (B), drop (C)
+    if m:
+        parts = _MODEL_NAME_RE.fullmatch(m["rest"])
+        desc = parts["desc"].strip(" ,:")
+        name = (parts["name"] or "").strip(" ,:")
+        return Intent("model_create", desc, name)
+    m = _ANIMATE_RE.fullmatch(low)
+    if m:
+        parts = _MODEL_NAME_RE.fullmatch(m["rest"])
+        desc = parts["desc"].strip(" ,:")
+        name = (parts["name"] or "").strip(" ,:")
+        return Intent("model_create", "animated " + desc, name)
+    m = _DROP_RE.fullmatch(low)
+    if m:
+        parts = _MODEL_NAME_RE.fullmatch(m["rest"])
+        desc = parts["desc"].strip(" ,:")
+        name = (parts["name"] or "").strip(" ,:")
+        return Intent("model_create", desc, name)
     if _MODEL_LIST_RE.fullmatch(low.replace(",", "")):
         return Intent("model_list")
     m = _MODEL_SHOW_RE.fullmatch(low)
