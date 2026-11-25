@@ -2,6 +2,8 @@
 // object.glb (checked natively and by the gateway); three.js parses it here with a manager that
 // refuses every URL that is not a blob:/data: of the file itself. view "preview": the ready card's
 // picture. Text goes in with textContent only; any failure is one plain line, never a crash.
+// A GLB with clips plays them (j3d-anim): Play/Pause or Space toggles, reduced motion starts
+// paused, and the camera frames the box the whole motion sweeps, not just the first pose.
 import * as THREE from "./vendor/three/build/three.module.min.js";
 import { GLTFLoader } from "./vendor/three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "./vendor/three/examples/jsm/controls/OrbitControls.js";
@@ -15,6 +17,7 @@ const status = document.getElementById("status");
 const preview = document.getElementById("preview");
 const hint = document.getElementById("hint");
 const resetButton = document.getElementById("reset");
+const playButton = document.getElementById("play");
 let refused = 0;
 let pinged = false;
 
@@ -64,8 +67,7 @@ function parse(buffer) {
   return new Promise((resolve, reject) => new GLTFLoader(manager).parse(buffer, "", resolve, reject));
 }
 
-function frame(scene, object, camera, controls, light) {
-  const box = new THREE.Box3().setFromObject(object);
+function frame(scene, object, camera, controls, light, box = new THREE.Box3().setFromObject(object)) {
   if (box.isEmpty()) throw new Error("empty");
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const radius = Math.max(sphere.radius, 1e-3);
@@ -101,6 +103,23 @@ function frame(scene, object, camera, controls, light) {
   cam.updateProjectionMatrix();
 }
 
+// The camera has to frame the space every pose of every clip reaches, not just the loaded
+// pose: sample the longest clip at 8 even times (both ends) and union the boxes. The final
+// setTime(0) leaves the nodes on the t=0 pose, the one a paused page shows. The floor then sits at
+// the lowest point of the whole motion on purpose: that is where a dropped or bouncing object lands,
+// so a raised first pose reads as mid-air with its shadow below, not as an object sunk into the floor.
+function wholeClipBox(mixer, clips, object) {
+  const box = new THREE.Box3();
+  const longest = Math.max(...clips.map((clip) => clip.duration));
+  for (let i = 0; i <= 7; i++) {
+    mixer.setTime((longest * i) / 7);
+    object.updateMatrixWorld(true);
+    box.union(new THREE.Box3().setFromObject(object));
+  }
+  mixer.setTime(0);
+  return box;
+}
+
 async function showModel() {
   let buffer;
   try {
@@ -131,13 +150,18 @@ async function showModel() {
     if (node.isMesh) node.castShadow = true;
   });
   scene.add(gltf.scene);
+  const clips = gltf.animations || [];
+  const mixer = clips.length > 0 ? new THREE.AnimationMixer(gltf.scene) : null;
+  if (mixer) {
+    for (const clip of clips) mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+  }
 
   stage.prepend(renderer.domElement);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = false;
   controls.screenSpacePanning = true;
   try {
-    frame(scene, gltf.scene, camera, controls, light);
+    frame(scene, gltf.scene, camera, controls, light, mixer ? wholeClipBox(mixer, clips, gltf.scene) : undefined);
   } catch {
     renderer.domElement.remove();
     return fail("parse");
@@ -184,6 +208,67 @@ async function showModel() {
     controls.reset();
     render();
   });
+
+  // Clip playback (j3d-anim): one rAF chain, alive only while playing and the tab visible; the
+  // dt cap stops a hidden tab's time jump from teleporting the pose. Reduced motion starts
+  // paused at t=0. A static GLB shows no button, no loop, today's behaviour untouched.
+  stage.dataset.clips = String(clips.length);
+  if (mixer) {
+    let playing = false;
+    let raf = 0;
+    let last = 0;
+    const sync = () => {
+      stage.dataset.anim = playing ? "playing" : "paused";
+      playButton.textContent = playing ? "Pause" : "Play"; // the label is the state: no aria-pressed too
+    };
+    const tick = () => {
+      if (!playing || document.hidden) {
+        raf = 0;
+        return;
+      }
+      const now = performance.now();
+      mixer.update(Math.min((now - last) / 1000, 0.1));
+      last = now;
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(tick);
+    };
+    const setPlaying = (value) => {
+      playing = value;
+      if (value) {
+        last = performance.now();
+        if (!raf) raf = requestAnimationFrame(tick);
+      } else if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      sync();
+    };
+    const toggle = () => setPlaying(!playing);
+    playButton.addEventListener("click", toggle);
+    stage.addEventListener("keydown", (e) => {
+      if (e.code !== "Space") return;
+      e.preventDefault();
+      if (!e.repeat) toggle();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      } else if (playing && !raf) {
+        last = performance.now();
+        raf = requestAnimationFrame(tick);
+      }
+    });
+    stage.setAttribute("aria-label", `${stage.getAttribute("aria-label")} Space to play or pause.`);
+    playButton.hidden = false;
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+    reduce.addEventListener("change", () => {
+      if (reduce.matches) setPlaying(false); // turned on while the card is open: stop the motion
+    });
+    setPlaying(!reduce.matches);
+  } else {
+    stage.dataset.anim = "none";
+  }
   resetButton.hidden = false;
   status.hidden = true;
   ping("none");
