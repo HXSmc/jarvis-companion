@@ -9,8 +9,13 @@
 # /tmp, no new privileges, no capabilities, 4 GB, 64 tasks, 120 s. PrivateUsers=yes hides every other
 # process of the same uid (no /proc/<pid>/root way into the real home); an empty read-only /run cuts the
 # host's unix sockets (docker, tailscale, snapd, system D-Bus).
-# Prints one JSON line: {"ok":true,"glb_bytes":N,"png_bytes":N,"ms":N} (exit 0) or
-# {"ok":false,"reason":"<code>"} (exit 2 = refused before Blender ran, 1 = Blender or output failed).
+# An animated job also leaves frames/ (f_0001.png..f_NNNN.png). After the GLB and PNG checks pass,
+# a second root-made sandbox unit (the same props minus the two BindReadOnlyPaths, 60 s) runs the
+# fixed /usr/bin/ffmpeg on them into object.mp4. Frames never outlive the run, and an mp4 failure
+# never fails the job.
+# Prints one JSON line: {"ok":true,"glb_bytes":N,"png_bytes":N,"ms":N} (exit 0), with "mp4_bytes":N
+# or "mp4":"<reason>" (bad_frames|no_ffmpeg|ffmpeg_failed|timeout|mp4_too_big|bad_mp4) appended when
+# frames existed, or {"ok":false,"reason":"<code>"} (exit 2 = refused before Blender ran, 1 = failed).
 set -u
 
 refuse() { printf '{"ok":false,"reason":"%s"}\n' "$1"; exit 2; }
@@ -43,7 +48,7 @@ SCRIPT="$JOB/object.py"
 [ ! -L "$SCRIPT" ] || refuse symlink
 [ -f "$SCRIPT" ] || refuse no_script
 [ "$(stat -c %s -- "$SCRIPT")" -le 262144 ] || refuse script_too_big
-for f in object.glb preview.png; do
+for f in object.glb preview.png object.mp4 frames; do
   { [ -e "$JOB/$f" ] || [ -L "$JOB/$f" ]; } && refuse stale_output
 done
 
@@ -59,6 +64,18 @@ OUT=$(sudo -n systemd-run --uid="$USER_NAME" --gid="$USER_NAME" --wait --pipe --
   </dev/null 2>&1)
 RC=$?
 MS=$(( $(date +%s%3N) - START ))
+
+# The sandbox has ended: frames never outlive the run, on every exit path from here on. A link is
+# removed as a link (never through it); a dir loses its entries without following links, then goes.
+drop_frames() {
+  if [ -L "$JOB/frames" ]; then
+    rm -f -- "$JOB/frames"
+  elif [ -d "$JOB/frames" ]; then
+    find "$JOB/frames" -mindepth 1 -delete 2>/dev/null
+    rmdir -- "$JOB/frames" 2>/dev/null
+  fi
+}
+trap drop_frames EXIT
 
 # The sandbox has ended. The job could have left a link named blender.log: remove it, never write through it.
 LOG="$JOB/blender.log"
@@ -91,4 +108,77 @@ check "$GLB" no_glb 52428800 glb_too_big
 check "$PNG" no_png 5242880 png_too_big
 [ "$(od -An -tx1 -N8 -- "$PNG" | tr -d ' \n')" = "89504e470d0a1a0a" ] || failed bad_png
 
-printf '{"ok":true,"glb_bytes":%s,"png_bytes":%s,"ms":%s}\n' "$(stat -c %s -- "$GLB")" "$(stat -c %s -- "$PNG")" "$MS"
+# The mp4 step: only when the job left frames, and its failure never fails the job ("ok":true stays).
+FFMPEG=/usr/bin/ffmpeg  # fixed: not looked up on PATH, no env override
+MP4=""
+MP4_BYTES=""
+if [ -e "$JOB/frames" ] || [ -L "$JOB/frames" ]; then
+  # frames must be a real dir of ours holding only f_0001.png..f_NNNN.png (2..240): the entry count
+  # equals N and every checked name exists, so together nothing else can be in there.
+  if [ -L "$JOB/frames" ] || [ ! -d "$JOB/frames" ] \
+     || [ "$(stat -c %u -- "$JOB/frames")" != "$(id -u)" ]; then
+    MP4="bad_frames"
+  else
+    N=$(( $(find "$JOB/frames" -mindepth 1 -maxdepth 1 -printf x 2>/dev/null | wc -c) ))
+    if [ "$N" -lt 2 ] || [ "$N" -gt 240 ]; then
+      MP4="bad_frames"
+    fi
+  fi
+  if [ -z "$MP4" ]; then
+    for i in $(seq 1 "$N"); do
+      FR="$JOB/frames/$(printf 'f_%04d.png' "$i")"
+      if [ -L "$FR" ] || [ ! -f "$FR" ] || [ "$(stat -c %h -- "$FR")" != "1" ] \
+         || [ "$(stat -c %u -- "$FR")" != "$(id -u)" ] || [ "$(stat -c %s -- "$FR")" -gt 2097152 ] \
+         || [ "$(od -An -tx1 -N8 -- "$FR" | tr -d ' \n')" != "89504e470d0a1a0a" ]; then
+        MP4="bad_frames"
+        break
+      fi
+    done
+  fi
+  if [ -z "$MP4" ] && [ ! -x "$FFMPEG" ]; then
+    MP4="no_ffmpeg"
+  elif [ -z "$MP4" ]; then
+    OUT2=$(sudo -n systemd-run --uid="$USER_NAME" --gid="$USER_NAME" --wait --pipe --collect \
+      -p PrivateNetwork=yes -p ProtectHome=tmpfs -p ProtectSystem=strict \
+      -p BindPaths="$JOB" \
+      -p PrivateTmp=yes -p NoNewPrivileges=yes -p MemoryMax=4G -p TasksMax=64 -p RuntimeMaxSec=60 \
+      -p CapabilityBoundingSet= -p RestrictAddressFamilies=AF_UNIX \
+      -p PrivateUsers=yes -p TemporaryFileSystem=/run:ro \
+      "$FFMPEG" -nostdin -hide_banner -loglevel error -protocol_whitelist file \
+      -f image2 -framerate 24 -start_number 1 -i "$JOB/frames/f_%04d.png" -frames:v "$N" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -movflags +faststart -an -n \
+      "$JOB/object.mp4" \
+      </dev/null 2>&1)
+    RC2=$?
+    if [ "$RC2" -ne 0 ]; then
+      case "$OUT2" in
+        *"Finished with result: timeout"*) MP4="timeout" ;;
+        *) MP4="ffmpeg_failed" ;;
+      esac
+    elif [ -L "$JOB/object.mp4" ] || [ ! -f "$JOB/object.mp4" ] \
+         || [ "$(stat -c %h -- "$JOB/object.mp4")" != "1" ] \
+         || [ "$(stat -c %u -- "$JOB/object.mp4")" != "$(id -u)" ]; then
+      MP4="bad_mp4"
+    elif [ "$(stat -c %s -- "$JOB/object.mp4")" -gt 20971520 ]; then
+      MP4="mp4_too_big"
+    elif [ "$(od -An -tc -j4 -N4 -- "$JOB/object.mp4" | tr -d ' \n')" != "ftyp" ]; then
+      MP4="bad_mp4"
+    else
+      MP4_BYTES=$(stat -c %s -- "$JOB/object.mp4")
+    fi
+  fi
+  if [ -n "$MP4" ]; then  # a failed encode that left a file: remove it (rm -f on a link removes the link)
+    rm -f -- "$JOB/object.mp4"
+  fi
+fi
+
+if [ -n "$MP4_BYTES" ]; then
+  printf '{"ok":true,"glb_bytes":%s,"png_bytes":%s,"ms":%s,"mp4_bytes":%s}\n' \
+    "$(stat -c %s -- "$GLB")" "$(stat -c %s -- "$PNG")" "$MS" "$MP4_BYTES"
+elif [ -n "$MP4" ]; then
+  printf '{"ok":true,"glb_bytes":%s,"png_bytes":%s,"ms":%s,"mp4":"%s"}\n' \
+    "$(stat -c %s -- "$GLB")" "$(stat -c %s -- "$PNG")" "$MS" "$MP4"
+else
+  printf '{"ok":true,"glb_bytes":%s,"png_bytes":%s,"ms":%s}\n' \
+    "$(stat -c %s -- "$GLB")" "$(stat -c %s -- "$PNG")" "$MS"
+fi
