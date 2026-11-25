@@ -552,24 +552,12 @@ def model_request(text: str, model_names: tuple[str, ...] = ()) -> Intent | None
         name = ((parts["name"] or "") if parts else "").strip(" ,:")
         desc = desc or name  # "create a 3D object called test mug": the name is all we have
         return Intent("model_create", desc, name) if desc else Intent("model_create", "", "ask")
-    m = _ANIM_MAKE_RE.fullmatch(low)  # j3d: spoken animated/physics creates (A), animate (B), drop (C)
-    if m:
-        parts = _MODEL_NAME_RE.fullmatch(m["rest"])
-        desc = parts["desc"].strip(" ,:")
-        name = (parts["name"] or "").strip(" ,:")
-        return Intent("model_create", desc, name)
-    m = _ANIMATE_RE.fullmatch(low)
-    if m:
-        parts = _MODEL_NAME_RE.fullmatch(m["rest"])
-        desc = parts["desc"].strip(" ,:")
-        name = (parts["name"] or "").strip(" ,:")
-        return Intent("model_create", "animated " + desc, name)
-    m = _DROP_RE.fullmatch(low)
-    if m:
-        parts = _MODEL_NAME_RE.fullmatch(m["rest"])
-        desc = parts["desc"].strip(" ,:")
-        name = (parts["name"] or "").strip(" ,:")
-        return Intent("model_create", desc, name)
+    # j3d: spoken animated/physics creates (A), "animate a ..." (B), "drop five boxes on a table" (C)
+    for pattern, prefix in ((_ANIM_MAKE_RE, ""), (_ANIMATE_RE, "animated "), (_DROP_RE, "")):
+        m = pattern.fullmatch(low)
+        if m:
+            parts = _MODEL_NAME_RE.fullmatch(m["rest"])
+            return Intent("model_create", prefix + parts["desc"].strip(" ,:"), (parts["name"] or "").strip(" ,:"))
     if _MODEL_LIST_RE.fullmatch(low.replace(",", "")):
         return Intent("model_list")
     m = _MODEL_SHOW_RE.fullmatch(low)

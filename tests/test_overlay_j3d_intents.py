@@ -12,7 +12,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import httpx  # noqa: E402
-import pytest  # noqa: E402
 
 from gateway import overlay  # noqa: E402
 from mac.voice import acks, intents, models3d  # noqa: E402
@@ -57,8 +56,6 @@ def test_animated_create_phrases():
 
 
 def test_animated_phrases_have_motion():
-    if not hasattr(models3d, "motion"):  # the builder deletes this line when H1 lands
-        pytest.skip("models3d.motion lands with H1")
     for words in MOTION_WORDS:
         arg = intents.parse(words, apps={}).arg
         assert models3d.motion(arg) != "none", words
