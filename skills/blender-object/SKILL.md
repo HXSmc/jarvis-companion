@@ -39,7 +39,7 @@ A `Motion: keyframe` line in the prompt means keyframe the motion; `Motion: phys
 
 `Motion: physics`:
 - `bpy.ops.rigidbody.world_add()` inside `temp_override(scene=…)`, then `bpy.ops.rigidbody.object_add(type="ACTIVE"|"PASSIVE")` per object inside `temp_override(object=o, active_object=o, selected_objects=[o])`. Check each returns `{'FINISHED'}`.
-- At most 32 active bodies.
+- At most 32 active bodies, and at least one: with only PASSIVE bodies nothing moves and the mp4 is a still.
 - Never bake the physics and never call `bake_to_keyframes`: the wrapper bakes it after your script.
 
 ## Never

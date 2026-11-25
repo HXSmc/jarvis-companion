@@ -51,13 +51,16 @@ def frame_png():
 if "/usr/bin/ffmpeg" in argv:  # the second unit: the real encoder, argv fixed after the executable
     if mode == "ffmpeg_fail":
         sys.exit(1)
+    if mode == "ffmpeg_swap":  # a decoder bug turned hostile: swap the checked GLB for a link
+        os.unlink(os.path.join(argv[argv.index("-i") + 1].rsplit("/frames/", 1)[0], "object.glb"))
+        os.symlink(os.environ["STUB_SECRET"], os.path.join(argv[argv.index("-i") + 1].rsplit("/frames/", 1)[0], "object.glb"))
     os.execv("/usr/bin/ffmpeg", ["/usr/bin/ffmpeg"] + argv[argv.index("/usr/bin/ffmpeg") + 1:])
 
 glb = b"glTF" + struct.pack("<II", 2, 20) + b"\0" * 8
 png = b"\x89PNG\r\n\x1a\n" + b"\0" * 24
 if mode in ("ok", "ffmpeg_fail", "timeout", "oom-kill", "badmagic", "nopng",
             "fs_link", "fs_hard", "fs_gap", "fs_extra", "fs_many", "fs_big", "fs_badmagic", "fs_dirlink",
-            "mp4link"):
+            "mp4link", "fr_locked", "mp4out", "ffmpeg_swap"):
     fr = os.path.join(job, "frames")
     os.makedirs(fr, exist_ok=True)
     for i in range(1, 25):
@@ -80,6 +83,15 @@ elif mode == "fs_big":  # a frame over the 2 MB cap, PNG magic intact
         f.write(b"\x89PNG\r\n\x1a\n" + b"\0" * (3 * 1024 * 1024))
 elif mode == "fs_badmagic":  # a frame that is not a PNG
     open(os.path.join(job, "frames", "f_0002.png"), "wb").write(b"JUNKJUNKJUNK")
+elif mode == "fr_locked":  # a nested dir the wrapper cannot list (mode 000), not empty
+    os.makedirs(os.path.join(job, "frames", "x", "y"))
+    os.chmod(os.path.join(job, "frames", "x"), 0)
+elif mode == "fr_file":  # frames is a plain file
+    open(os.path.join(job, "frames"), "wb").write(b"x")
+elif mode == "fr_fifo":  # frames is a FIFO
+    os.mkfifo(os.path.join(job, "frames"))
+elif mode == "mp4out":  # the job made the encoder's output dir itself
+    os.mkdir(os.path.join(job, "mp4out"))
 elif mode == "mp4link":  # the job leaves object.mp4 as a link to the canary
     os.symlink(os.environ["STUB_SECRET"], os.path.join(job, "object.mp4"))
 elif mode == "fs_dirlink":  # the frames dir itself is a link to a dir holding a link to the canary
@@ -191,21 +203,23 @@ def test_wrapper_ffmpeg_line(abox):
              f"{r}/blender_job_runner.py", "--", str(d)]
     want2 = ["-n", "systemd-run", f"--uid={user}", f"--gid={user}", "--wait", "--pipe", "--collect",
              "-p", "PrivateNetwork=yes", "-p", "ProtectHome=tmpfs", "-p", "ProtectSystem=strict",
-             "-p", f"BindPaths={d}",
+             "-p", f"BindReadOnlyPaths={d}", "-p", f"BindPaths={d}/mp4out",
              "-p", "PrivateTmp=yes", "-p", "NoNewPrivileges=yes", "-p", "MemoryMax=4G", "-p", "TasksMax=64",
              "-p", "RuntimeMaxSec=60", "-p", "CapabilityBoundingSet=", "-p", "RestrictAddressFamilies=AF_UNIX",
              "-p", "PrivateUsers=yes", "-p", "TemporaryFileSystem=/run:ro",
              "/usr/bin/ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file",
              "-f", "image2", "-framerate", "24", "-start_number", "1", "-i", f"{d}/frames/f_%04d.png",
              "-frames:v", "24", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-             "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", "-n", f"{d}/object.mp4"]
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", "-n", f"{d}/mp4out/object.mp4"]
+    assert not (d / "mp4out").exists()
     assert two[0] == want1, two[0]
     assert two[1] == want2, two[1]
 
 
 def test_wrapper_frames_refused(abox):
     sha = hashlib.sha256(abox["secret"].read_bytes()).hexdigest()
-    cases = ["fs_link", "fs_hard", "fs_gap", "fs_extra", "fs_many", "fs_big", "fs_badmagic", "fs_dirlink"]
+    cases = ["fs_link", "fs_hard", "fs_gap", "fs_extra", "fs_many", "fs_big", "fs_badmagic", "fs_dirlink",
+             "fr_locked", "fr_file", "fr_fifo"]
     for i, mode in enumerate(cases):
         d = job(abox, f"fr-{i}")
         before = len(calls(abox))
@@ -215,7 +229,18 @@ def test_wrapper_frames_refused(abox):
         assert (d / "object.glb").exists() and not (d / "object.mp4").exists()
         assert len(calls(abox)) == before + 1, (mode, calls(abox)[before:])  # the ffmpeg unit never ran
         assert "SECRET" not in out and "canary" not in out
-        assert not (d / "frames").exists(), mode
+        assert not os.path.lexists(d / "frames"), mode
+    # the job made mp4out itself: no encode, it goes too
+    d = job(abox, "mp4out")
+    before = len(calls(abox))
+    code, out, _err = run(abox, str(d), STUB_MODE="mp4out")
+    assert code == 0 and json.loads(out)["mp4"] == "bad_mp4", out
+    assert len(calls(abox)) == before + 1 and not os.path.lexists(d / "mp4out")
+    # the encoder swaps object.glb for a link after the first check: the second check refuses the job
+    d = job(abox, "swap")
+    code, out, _err = run(abox, str(d), STUB_MODE="ffmpeg_swap")
+    assert code == 1 and json.loads(out) == {"ok": False, "reason": "symlink"}, out
+    assert "SECRET" not in out and not os.path.lexists(d / "mp4out") and not (d / "frames").exists()
     # the job left object.mp4 as a link: no encode, the link goes, the canary is untouched
     d = job(abox, "mp4link")
     before = len(calls(abox))
@@ -252,6 +277,10 @@ def test_wrapper_mp4_optional(abox):
     (d / "object.mp4").write_bytes(b"ftyp junk")
     code, out, _err = run(abox, str(d), STUB_MODE="ok")
     assert code == 2 and json.loads(out) == {"ok": False, "reason": "stale_output"}
+    d = job(abox, "planted-out")  # and a planted mp4out dir: refused too, and left alone
+    (d / "mp4out").mkdir()
+    code, out, _err = run(abox, str(d), STUB_MODE="ok")
+    assert code == 2 and json.loads(out) == {"ok": False, "reason": "stale_output"} and (d / "mp4out").is_dir()
     # old failure modes with frames: the reason stays and frames never outlive the run
     for mode, reason in (("timeout", "timeout"), ("badmagic", "bad_glb"), ("nopng", "no_png")):
         d = job(abox, f"old-{mode}")
