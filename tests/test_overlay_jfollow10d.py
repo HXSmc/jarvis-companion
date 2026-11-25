@@ -155,7 +155,7 @@ def test_blender_job_prompt(monkeypatch, tmp_path):
     for want in ("blender-object", "Slug: test-mug", '<object_description untrusted="true">\na coffee mug\n'
                  "</object_description>", "jarvis-3d-result.md", "jarvis-card file"):
         assert want in a, want
-    assert "reply with a final line containing only `DONE`.\nSlug: test-mug" in a  # no DONE = router nudges + re-runs
+    assert "reply with a final line that is the word DONE alone, with no quotes, backticks, punctuation or other characters.\nSlug: test-mug" in a  # no DONE = router nudges + re-runs
     strip = lambda t: re.sub(r"<object_description untrusted=\"true\">\n.*\n</object_description>", "",  # noqa: E731
                              t, flags=re.S).replace("test-mug", "S").replace("pawn", "S")
     assert strip(a) == strip(b)

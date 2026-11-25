@@ -973,7 +973,7 @@ def test_watch_job_prompt(monkeypatch, tmp_path):
     assert "https://www.youtube.com/watch?v=aaaaaaaaaaa" in a and "local whisper only" in a
     assert "jarvis-card file jarvis-watch-summary.md" in a
     assert a.replace("aaaaaaaaaaa", "bbbbbbbbbbb") == b
-    assert a.endswith("reply with a final line containing only `DONE`.")  # no DONE = router nudges + re-runs
+    assert a.endswith("reply with a final line that is the word DONE alone, with no quotes, backticks, punctuation or other characters.")  # no DONE = router nudges + re-runs
     for bad in ("../x", "aaaaaaaaaaaa", "aaaaa aaaaa", "javascript:x"):
         with pytest.raises(ValueError):
             overlay.watch_job_prompt(bad)

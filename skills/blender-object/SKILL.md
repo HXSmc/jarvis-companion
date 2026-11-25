@@ -18,8 +18,8 @@ A `Motion: keyframe` line in the prompt means keyframe the motion; `Motion: phys
 6. Write `__JARVIS_VAULT__/3D/<slug>/<slug>.md`: frontmatter `name` (the slug with spaces), `aliases` (a short ASCII list of other names for it), `created` (YYYY-MM-DD), `prompt` (the description), `files` (the three file names, plus `<slug>.mp4` when you copied it), `tool: blender 5.2.3`; body: one line saying what it is, then `![[<slug>.png]]`.
 7. Append `- [[<slug>]] <YYYY-MM-DD>` to `__JARVIS_VAULT__/3D/Index.md` (create it with a first line `# 3D objects` if missing).
 8. Nudge the sync (its file watch can miss an old `3D` folder): `touch "__JARVIS_VAULT__/3D" "__JARVIS_VAULT__/3D/<slug>" "__JARVIS_VAULT__/3D/Index.md"`, `sleep 12`, then run the same `touch` once more. Touch only these three paths.
-9. Write `jarvis-3d-result.md` with exactly two lines: `status: ok` and `slug: <slug>`. Run `jarvis-card file jarvis-3d-result.md`. Delete the job dir. Reply with a final line `DONE`.
-10. Three failed runs: write `status: failed` and `slug: <slug>` instead, run `jarvis-card file jarvis-3d-result.md`, delete the job dir. Reply with a final line `DONE`.
+9. Write `jarvis-3d-result.md` with exactly two lines: `status: ok` and `slug: <slug>`. Run `jarvis-card file jarvis-3d-result.md`. Delete the job dir. Reply with a final line that is the word DONE alone, with no quotes, backticks, punctuation or other characters.
+10. Three failed runs: write `status: failed` and `slug: <slug>` instead, run `jarvis-card file jarvis-3d-result.md`, delete the job dir. Reply with a final line that is the word DONE alone, with no quotes, backticks, punctuation or other characters.
 
 ## object.py rules
 - Start from a factory-reset scene: delete every object, then build. Units are metres (1 unit = 1 m), real-world size.
